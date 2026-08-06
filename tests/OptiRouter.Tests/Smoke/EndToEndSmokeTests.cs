@@ -82,7 +82,7 @@ public class EndToEndSmokeTests : IDisposable
     {
         // Arrange: WireMock 模拟 model-a 返回标准 OpenAI 非流式响应
         _wireMock.Given(Request.Create()
-                .WithPath("/chat/completions")
+                .WithPath("/v1/chat/completions")
                 .UsingPost())
             .RespondWith(Response.Create()
                 .WithStatusCode(200)
@@ -121,7 +121,7 @@ public class EndToEndSmokeTests : IDisposable
         }) + "\n\n";
 
         _wireMock.Given(Request.Create()
-                .WithPath("/chat/completions")
+                .WithPath("/v1/chat/completions")
                 .UsingPost())
             .RespondWith(Response.Create()
                 .WithStatusCode(200)
@@ -177,7 +177,7 @@ public class EndToEndSmokeTests : IDisposable
         // Arrange: WireMock 让 model-a 返回 500，model-b 返回 200
         // 用不同 Authorization header 区分两个模型的请求
         _wireMock.Given(Request.Create()
-                .WithPath("/chat/completions")
+                .WithPath("/v1/chat/completions")
                 .UsingPost()
                 .WithHeader("Authorization", "Bearer test-key-a"))
             .RespondWith(Response.Create()
@@ -186,7 +186,7 @@ public class EndToEndSmokeTests : IDisposable
                 .WithBody("{\"error\":{\"message\":\"model-a boom\"}}"));
 
         _wireMock.Given(Request.Create()
-                .WithPath("/chat/completions")
+                .WithPath("/v1/chat/completions")
                 .UsingPost()
                 .WithHeader("Authorization", "Bearer test-key-b"))
             .RespondWith(Response.Create()

@@ -51,7 +51,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var body = request with { Model = _endpoint.Name, Stream = false };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/chat/completions");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
         httpRequest.Content = new StringContent(json, Encoding.UTF8);
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
@@ -75,7 +75,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var body = request with { Model = _endpoint.Name, Stream = true };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/chat/completions");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
         httpRequest.Content = new StringContent(json, Encoding.UTF8);
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 

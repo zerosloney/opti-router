@@ -37,7 +37,7 @@ public class OpenAICompatibleModelClientTests
     public async Task CompleteAsync_WhenSuccess_ReturnsParsedChatResponse()
     {
         // Arrange
-        var endpoint = CreateEndpoint(name: "gpt-4o");
+        var endpoint = CreateEndpoint(baseUrl: "https://api.openai.com/v1", name: "gpt-4o");
         var responseJson = JsonSerializer.Serialize(new
         {
             id = "chatcmpl-123",
@@ -83,6 +83,7 @@ public class OpenAICompatibleModelClientTests
         Assert.Equal(10, result.Usage.PromptTokens);
         Assert.Equal(5, result.Usage.CompletionTokens);
         Assert.Equal(15, result.Usage.TotalTokens);
+        Assert.Equal("https://api.openai.com/v1/chat/completions", handler.GetLastRequestUri()?.AbsoluteUri);
     }
 
     [Fact]
@@ -185,7 +186,7 @@ public class OpenAICompatibleModelClientTests
     public async Task StreamAsync_WhenSuccess_YieldsCorrectChunks()
     {
         // Arrange
-        var endpoint = CreateEndpoint();
+        var endpoint = CreateEndpoint(baseUrl: "https://api.openai.com/v1");
         var sse = new StringBuilder();
         sse.Append("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\n");
         sse.Append("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" world\"},\"finish_reason\":null}]}\n\n");
@@ -223,6 +224,7 @@ public class OpenAICompatibleModelClientTests
         Assert.Equal(5, chunks[2].Usage!.PromptTokens);
         Assert.Equal(2, chunks[2].Usage!.CompletionTokens);
         Assert.Equal(7, chunks[2].Usage!.TotalTokens);
+        Assert.Equal("https://api.openai.com/v1/chat/completions", handler.GetLastRequestUri()?.AbsoluteUri);
     }
 
     [Fact]
@@ -374,6 +376,11 @@ public class OpenAICompatibleModelClientTests
         public string? GetLastRequestContent()
         {
             return _lastContent;
+        }
+
+        public Uri? GetLastRequestUri()
+        {
+            return _lastRequest?.RequestUri;
         }
     }
 
