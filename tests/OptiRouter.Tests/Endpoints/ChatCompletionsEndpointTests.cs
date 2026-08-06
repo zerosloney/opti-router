@@ -169,6 +169,13 @@ public class ChatCompletionsEndpointTests
         };
     }
 
+    private static async IAsyncEnumerable<ChatStreamChunk> CreateFailingStream([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return await Task.FromException<ChatStreamChunk>(
+            new ModelClientException(HttpStatusCode.ServiceUnavailable, "failed before first chunk"));
+    }
+
     #region Non-streaming tests
 
     [Fact]
@@ -287,6 +294,68 @@ public class ChatCompletionsEndpointTests
         using var doc = JsonDocument.Parse(body);
         Assert.Equal("model-b", doc.RootElement.GetProperty("model").GetString());
         Assert.Equal("From B", doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Post_NonStreaming_RuleClassifierStrongFails_FallsBackToMediumTier()
+    {
+        // Arrange
+        using var factory = new TestWebApplicationFactory();
+        var strongEndpoint = CreateEndpoint("strong-model");
+        strongEndpoint.Tier = ModelTier.Strong;
+        var mediumEndpoint = CreateEndpoint("medium-model");
+        int strongAttempts = 0;
+        int mediumAttempts = 0;
+
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(strongEndpoint);
+                opt.Models.Add(mediumEndpoint);
+                opt.Routing.EnableRuleClassifier = true;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = true;
+            });
+        };
+
+        factory.MockClients["strong-model"] = new MockModelClient(strongEndpoint, (req, ct) =>
+        {
+            strongAttempts++;
+            throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "strong failed");
+        });
+        factory.MockClients["medium-model"] = new MockModelClient(mediumEndpoint, (req, ct) =>
+        {
+            mediumAttempts++;
+            return Task.FromResult(new ChatResponse
+            {
+                Id = "chatcmpl-medium",
+                Model = "medium-model",
+                Choices = new List<ChatChoice>(),
+                Usage = new ChatUsage()
+            });
+        });
+
+        using var client = factory.CreateClient();
+        var request = new ChatRequest
+        {
+            Model = "strong-model",
+            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "public class Example {}" } }
+        };
+        using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+
+        // Act
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("medium-model", doc.RootElement.GetProperty("model").GetString());
+        Assert.Equal(1, strongAttempts);
+        Assert.Equal(1, mediumAttempts);
     }
 
     [Fact]
@@ -511,6 +580,64 @@ public class ChatCompletionsEndpointTests
         Assert.Equal("[DONE]", dataLines[^1]);
         using var errorDoc = JsonDocument.Parse(dataLines[0]);
         Assert.Equal("all model candidates failed", errorDoc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task Post_Streaming_RuleClassifierStrongFailsBeforeFirstChunk_FallsBackToCheapTier()
+    {
+        // Arrange
+        using var factory = new TestWebApplicationFactory();
+        var strongEndpoint = CreateEndpoint("strong-model");
+        strongEndpoint.Tier = ModelTier.Strong;
+        var cheapEndpoint = CreateEndpoint("cheap-model");
+        cheapEndpoint.Tier = ModelTier.Cheap;
+        int strongAttempts = 0;
+        int cheapAttempts = 0;
+
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(strongEndpoint);
+                opt.Models.Add(cheapEndpoint);
+                opt.Routing.EnableRuleClassifier = true;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = true;
+            });
+        };
+
+        factory.MockClients["strong-model"] = new MockModelClient(strongEndpoint, streamFunc: (req, ct) =>
+        {
+            strongAttempts++;
+            return CreateFailingStream(ct);
+        });
+        factory.MockClients["cheap-model"] = new MockModelClient(cheapEndpoint, streamFunc: (req, ct) =>
+        {
+            cheapAttempts++;
+            return CreateStreamChunks("cheap response", ct);
+        });
+
+        using var client = factory.CreateClient();
+        var request = new ChatRequest
+        {
+            Model = "strong-model",
+            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "public class Example {}" } },
+            Stream = true
+        };
+        using var httpContent = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
+
+        // Act
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+        var body = await response.Content.ReadAsStringAsync();
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"delta_content\":\"cheap\"", body);
+        Assert.Equal(1, strongAttempts);
+        Assert.Equal(1, cheapAttempts);
     }
 
     #endregion

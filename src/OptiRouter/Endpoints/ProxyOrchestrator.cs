@@ -68,52 +68,59 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(request);
 
         var options = _options.CurrentValue;
-        var decision = _engine.Decide(request, options);
-
-        if (decision.Candidates.Count == 0)
-        {
-            if (decision.Reason.Contains("reject", StringComparison.OrdinalIgnoreCase))
-                throw new BudgetExhaustedException(decision.Reason);
-            throw new AllCandidatesFailedException(new List<string>());
-        }
-
-        var failedInThisRequest = new List<string>();
+        var failedInThisRequest = new HashSet<string>(StringComparer.Ordinal);
+        var attemptedModels = new List<string>();
         int threshold = options.Routing.FailoverFailureThreshold;
         int cooldown = options.Routing.FailoverCooldownSeconds;
 
-        foreach (var candidate in decision.Candidates)
+        while (true)
         {
-            try
-            {
-                var client = _clientProvider.GetClient(candidate);
-                var response = await client.CompleteAsync(request, ct).ConfigureAwait(false);
+            var decision = _engine.Decide(request, options, failedInThisRequest);
 
-                var cost = CostCalculator.Compute(response.Usage, candidate);
-                _ledger.Record(cost);
-                _healthTracker.RecordSuccess(candidate.Name);
+            if (decision.Candidates.Count == 0)
+            {
+                if (decision.Reason.Contains("reject", StringComparison.OrdinalIgnoreCase))
+                    throw new BudgetExhaustedException(decision.Reason);
+                throw new AllCandidatesFailedException(attemptedModels);
+            }
 
-                return response;
-            }
-            catch (ModelClientException ex)
+            bool attemptedCandidate = false;
+            foreach (var candidate in decision.Candidates)
             {
-                failedInThisRequest.Add(candidate.Name);
-                bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                _logger.LogWarning(ex, "Model {Name} failed (status {Status}), trying next candidate{Tripped}",
-                    candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
-                continue;
+                if (!failedInThisRequest.Add(candidate.Name))
+                    continue;
+
+                attemptedCandidate = true;
+                attemptedModels.Add(candidate.Name);
+                try
+                {
+                    var client = _clientProvider.GetClient(candidate);
+                    var response = await client.CompleteAsync(request, ct).ConfigureAwait(false);
+
+                    var cost = CostCalculator.Compute(response.Usage, candidate);
+                    _ledger.Record(cost);
+                    _healthTracker.RecordSuccess(candidate.Name);
+
+                    return response;
+                }
+                catch (ModelClientException ex)
+                {
+                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                    _logger.LogWarning(ex, "Model {Name} failed (status {Status}), trying next candidate{Tripped}",
+                        candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    // 客户端内部超时，非外部取消，记失败继续。
+                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                    _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
+                        candidate.Name, tripped ? " (circuit tripped)" : "");
+                }
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-            {
-                // 客户端内部超时，非外部取消，记失败继续。
-                failedInThisRequest.Add(candidate.Name);
-                bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
-                    candidate.Name, tripped ? " (circuit tripped)" : "");
-                continue;
-            }
+
+            if (!options.Routing.EnableFailover || !attemptedCandidate)
+                throw new AllCandidatesFailedException(attemptedModels);
         }
-
-        throw new AllCandidatesFailedException(decision.Candidates.Select(c => c.Name).ToList());
     }
 
     /// <summary>
@@ -131,99 +138,111 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(request);
 
         var options = _options.CurrentValue;
-        var decision = _engine.Decide(request, options);
-
-        if (decision.Candidates.Count == 0)
-        {
-            if (decision.Reason.Contains("reject", StringComparison.OrdinalIgnoreCase))
-                throw new BudgetExhaustedException(decision.Reason);
-            throw new AllCandidatesFailedException(new List<string>());
-        }
-
+        var failedInThisRequest = new HashSet<string>(StringComparer.Ordinal);
+        var attemptedModels = new List<string>();
         int threshold = options.Routing.FailoverFailureThreshold;
         int cooldown = options.Routing.FailoverCooldownSeconds;
 
-        foreach (var candidate in decision.Candidates)
+        while (true)
         {
-            var client = _clientProvider.GetClient(candidate);
-            IAsyncEnumerator<ChatStreamChunk>? enumerator = null;
-            ChatStreamChunk firstChunk = default!;
-            ChatUsage? finalUsage = null;
-            Exception? preStreamFailure = null;
+            var decision = _engine.Decide(request, options, failedInThisRequest);
 
-            // Phase 1: 创建 enumerator 并尝试拿到第一个 chunk。
-            // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
-            try
+            if (decision.Candidates.Count == 0)
             {
-                enumerator = client.StreamAsync(request, ct).GetAsyncEnumerator(ct);
-                if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                if (decision.Reason.Contains("reject", StringComparison.OrdinalIgnoreCase))
+                    throw new BudgetExhaustedException(decision.Reason);
+                throw new AllCandidatesFailedException(attemptedModels);
+            }
+
+            bool attemptedCandidate = false;
+            foreach (var candidate in decision.Candidates)
+            {
+                if (!failedInThisRequest.Add(candidate.Name))
+                    continue;
+
+                attemptedCandidate = true;
+                attemptedModels.Add(candidate.Name);
+                var client = _clientProvider.GetClient(candidate);
+                IAsyncEnumerator<ChatStreamChunk>? enumerator = null;
+                ChatStreamChunk firstChunk = default!;
+                ChatUsage? finalUsage = null;
+                Exception? preStreamFailure = null;
+
+                // Phase 1: 创建 enumerator 并尝试拿到第一个 chunk。
+                // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
+                try
                 {
-                    firstChunk = enumerator.Current;
-                    if (firstChunk.Usage is not null)
-                        finalUsage = firstChunk.Usage;
+                    enumerator = client.StreamAsync(request, ct).GetAsyncEnumerator(ct);
+                    if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                    {
+                        firstChunk = enumerator.Current;
+                        if (firstChunk.Usage is not null)
+                            finalUsage = firstChunk.Usage;
+                    }
+                    else
+                    {
+                        // 空流：视为成功但无内容，继续尝试下一个候选。
+                        await enumerator.DisposeAsync().ConfigureAwait(false);
+                        continue;
+                    }
                 }
-                else
+                catch (ModelClientException ex)
                 {
-                    // 空流：视为成功但无内容，继续尝试下一个候选。
-                    await enumerator.DisposeAsync().ConfigureAwait(false);
+                    preStreamFailure = ex;
+                }
+                catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+                {
+                    preStreamFailure = ex;
+                }
+                finally
+                {
+                    if (preStreamFailure is not null && enumerator is not null)
+                    {
+                        await enumerator.DisposeAsync().ConfigureAwait(false);
+                    }
+                }
+
+                if (preStreamFailure is not null)
+                {
+                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                    _logger.LogWarning(preStreamFailure, "Streaming model {Name} failed pre-stream, trying next{Tripped}",
+                        candidate.Name, tripped ? " (circuit tripped)" : "");
                     continue;
                 }
-            }
-            catch (ModelClientException ex)
-            {
-                preStreamFailure = ex;
-            }
-            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
-            {
-                preStreamFailure = ex;
-            }
-            finally
-            {
-                if (preStreamFailure is not null && enumerator is not null)
+
+                ArgumentNullException.ThrowIfNull(enumerator);
+
+                // Phase 2: 首个 chunk 在 try-catch 之外 yield，避免 CS1626。
+                yield return firstChunk;
+
+                // 继续 yield 剩余 chunk。此处只有 finally，无 catch，允许 yield。
+                try
+                {
+                    while (await enumerator!.MoveNextAsync().ConfigureAwait(false))
+                    {
+                        var chunk = enumerator.Current;
+                        if (chunk.Usage is not null)
+                            finalUsage = chunk.Usage;
+                        yield return chunk;
+                    }
+                }
+                finally
                 {
                     await enumerator.DisposeAsync().ConfigureAwait(false);
                 }
-            }
 
-            if (preStreamFailure is not null)
-            {
-                bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                _logger.LogWarning(preStreamFailure, "Streaming model {Name} failed pre-stream, trying next{Tripped}",
-                    candidate.Name, tripped ? " (circuit tripped)" : "");
-                continue;
-            }
-
-            ArgumentNullException.ThrowIfNull(enumerator);
-
-            // Phase 2: 首个 chunk 在 try-catch 之外 yield，避免 CS1626。
-            yield return firstChunk;
-
-            // 继续 yield 剩余 chunk。此处只有 finally，无 catch，允许 yield。
-            try
-            {
-                while (await enumerator!.MoveNextAsync().ConfigureAwait(false))
+                // 流正常结束，记账 + 标记健康。
+                if (finalUsage is not null)
                 {
-                    var chunk = enumerator.Current;
-                    if (chunk.Usage is not null)
-                        finalUsage = chunk.Usage;
-                    yield return chunk;
+                    _ledger.Record(CostCalculator.Compute(finalUsage, candidate));
                 }
-            }
-            finally
-            {
-                await enumerator.DisposeAsync().ConfigureAwait(false);
+                _healthTracker.RecordSuccess(candidate.Name);
+                yield break;
             }
 
-            // 流正常结束，记账 + 标记健康。
-            if (finalUsage is not null)
-            {
-                _ledger.Record(CostCalculator.Compute(finalUsage, candidate));
-            }
-            _healthTracker.RecordSuccess(candidate.Name);
-            yield break;
+            if (!options.Routing.EnableFailover || !attemptedCandidate)
+                throw new AllCandidatesFailedException(attemptedModels);
         }
-
-        throw new AllCandidatesFailedException(decision.Candidates.Select(c => c.Name).ToList());
     }
 
     /// <summary>
