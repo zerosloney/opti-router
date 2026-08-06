@@ -203,4 +203,25 @@ public class RouterEngineTests
 
         Assert.Empty(result.Candidates);
     }
+
+    [Fact]
+    public void Decide_WithTiktokenEstimator_UsesBpeTokenCount()
+    {
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m));
+
+        var engine = new RouterEngine(
+            ledger,
+            new IRouterPolicy[] { new LongInputPolicy() },
+            new TiktokenTokenEstimator());
+
+        // 1000 x 'a'：真实 BPE 为 125 tokens（重复字符被压缩）。
+        var request = TestHelpers.BuildRequest(("user", new string('a', 1000)));
+
+        var result = engine.Decide(request, options);
+
+        // 125 + 3（消息开销）= 128，而非分桶粗估的 253。
+        Assert.Equal(128, result.EstimatedInputTokens);
+    }
 }

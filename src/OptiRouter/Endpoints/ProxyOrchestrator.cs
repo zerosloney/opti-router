@@ -75,6 +75,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         var attemptedModels = new List<string>();
         int threshold = options.Routing.FailoverFailureThreshold;
         int cooldown = options.Routing.FailoverCooldownSeconds;
+        int halfOpenMaxProbes = options.Routing.FailoverHalfOpenMaxProbes;
+        bool failoverEnabled = options.Routing.EnableFailover;
 
         while (true)
         {
@@ -97,8 +99,20 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (!failedInThisRequest.Add(candidate.Name))
                     continue;
 
+                // 断路器放行许可：闭合直接通过；半开占用一个探测槽位；打开或槽位满则跳过本候选。
+                // 仅在启用 failover 时做探测门控，与 FailoverPolicy 的排除语义保持一致。
+                if (failoverEnabled && !_healthTracker.TryBeginProbe(candidate.Name, halfOpenMaxProbes))
+                {
+                    _logger.LogInformation("Model {Name} circuit not ready (cooling or probes busy), skipping", candidate.Name);
+                    continue;
+                }
+
                 attemptedCandidate = true;
                 attemptedModels.Add(candidate.Name);
+
+                // outcomeReported：是否已通过 RecordSuccess/RecordFailure 上报结果。
+                // 未上报就离开本候选（不可重试异常、外部取消等）时，finally 释放探测槽位，避免泄漏。
+                bool outcomeReported = false;
                 try
                 {
                     var client = _clientProvider.GetClient(candidate);
@@ -110,6 +124,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         _ledger.Record(cost, sessionId);
                     }
                     _healthTracker.RecordSuccess(candidate.Name);
+                    outcomeReported = true;
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, response.Usage is not null
@@ -121,12 +136,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 catch (ModelClientException ex) when (IsRetryable(ex))
                 {
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                    outcomeReported = true;
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 }
                 catch (HttpRequestException ex)
                 {
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                    outcomeReported = true;
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -134,12 +151,18 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 {
                     // 客户端内部超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                    outcomeReported = true;
                     _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
+                finally
+                {
+                    if (!outcomeReported)
+                        _healthTracker.ReleaseProbe(candidate.Name);
+                }
             }
 
-            if (!options.Routing.EnableFailover || !attemptedCandidate)
+            if (!failoverEnabled || !attemptedCandidate)
                 throw new AllCandidatesFailedException(attemptedModels);
         }
     }
@@ -164,6 +187,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         var attemptedModels = new List<string>();
         int threshold = options.Routing.FailoverFailureThreshold;
         int cooldown = options.Routing.FailoverCooldownSeconds;
+        int halfOpenMaxProbes = options.Routing.FailoverHalfOpenMaxProbes;
+        bool failoverEnabled = options.Routing.EnableFailover;
 
         while (true)
         {
@@ -186,6 +211,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (!failedInThisRequest.Add(candidate.Name))
                     continue;
 
+                // 断路器放行许可（与非流式一致）：半开占用探测槽位，打开/槽位满则跳过。
+                if (failoverEnabled && !_healthTracker.TryBeginProbe(candidate.Name, halfOpenMaxProbes))
+                {
+                    _logger.LogInformation("Model {Name} circuit not ready (cooling or probes busy), skipping", candidate.Name);
+                    continue;
+                }
+
                 attemptedCandidate = true;
                 attemptedModels.Add(candidate.Name);
                 var client = _clientProvider.GetClient(candidate);
@@ -194,93 +226,136 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 ChatUsage? finalUsage = null;
                 Exception? preStreamFailure = null;
                 bool hasFirstLine = false;
+                // probeResolved：已上报成功/失败结果；streamFaulted：首行后流中途异常中断。
+                // 两者共同保证离开本候选时探测槽位必被结算（上报或释放），不泄漏。
+                bool probeResolved = false;
+                bool streamFaulted = false;
 
-                // Phase 1: 创建 enumerator 并尝试拿到第一行。
-                // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
                 try
                 {
-                    enumerator = client.StreamRawAsync(request, ct).GetAsyncEnumerator(ct);
-                    if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                    // Phase 1: 创建 enumerator 并尝试拿到第一行。
+                    // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
+                    try
                     {
-                        firstLine = enumerator.Current;
-                        if (firstLine.Usage is not null)
-                            finalUsage = firstLine.Usage;
-                        hasFirstLine = true;
+                        enumerator = client.StreamRawAsync(request, ct).GetAsyncEnumerator(ct);
+                        if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                        {
+                            firstLine = enumerator.Current;
+                            if (firstLine.Usage is not null)
+                                finalUsage = firstLine.Usage;
+                            hasFirstLine = true;
+                        }
+                        else
+                        {
+                            // 空流：视为成功但无内容，继续尝试下一个候选。
+                            await enumerator.DisposeAsync().ConfigureAwait(false);
+                            enumerator = null;
+                            // 无健康信号：外层 finally 会释放探测槽位。
+                            continue;
+                        }
                     }
-                    else
+                    catch (ModelClientException ex) when (IsRetryable(ex))
                     {
-                        // 空流：视为成功但无内容，继续尝试下一个候选。
-                        await enumerator.DisposeAsync().ConfigureAwait(false);
-                        enumerator = null;
+                        preStreamFailure = ex;
+                    }
+                    catch (HttpRequestException ex)
+                    {
+                        preStreamFailure = ex;
+                    }
+                    catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+                    {
+                        preStreamFailure = ex;
+                    }
+                    finally
+                    {
+                        if (!hasFirstLine && enumerator is not null)
+                        {
+                            await enumerator.DisposeAsync().ConfigureAwait(false);
+                        }
+                    }
+
+                    if (preStreamFailure is not null)
+                    {
+                        bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                        probeResolved = true;
+                        string failure = preStreamFailure is ModelClientException modelFailure
+                            ? $"status {(int)modelFailure.StatusCode}"
+                            : preStreamFailure.Message;
+                        _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
+                            candidate.Name, failure, tripped ? " (circuit tripped)" : "");
                         continue;
                     }
-                }
-                catch (ModelClientException ex) when (IsRetryable(ex))
-                {
-                    preStreamFailure = ex;
-                }
-                catch (HttpRequestException ex)
-                {
-                    preStreamFailure = ex;
-                }
-                catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
-                {
-                    preStreamFailure = ex;
-                }
-                finally
-                {
-                    if (!hasFirstLine && enumerator is not null)
+
+                    ArgumentNullException.ThrowIfNull(enumerator);
+
+                    // Phase 2: 首行在 try-catch 之外 yield，避免 CS1626。
+                    yield return firstLine;
+
+                    // 继续 yield 剩余行。内层只有 finally，无 catch，允许 yield。
+                    try
+                    {
+                        while (true)
+                        {
+                            bool moved;
+                            try
+                            {
+                                moved = await enumerator!.MoveNextAsync().ConfigureAwait(false);
+                            }
+                            catch
+                            {
+                                // 流中途异常中断（上游断连/超时等）：标记后向外抛出。
+                                streamFaulted = true;
+                                throw;
+                            }
+
+                            if (!moved)
+                                break;
+
+                            var line = enumerator.Current;
+                            if (line.Usage is not null)
+                                finalUsage = line.Usage;
+                            yield return line;
+                        }
+                    }
+                    finally
                     {
                         await enumerator.DisposeAsync().ConfigureAwait(false);
                     }
-                }
 
-                if (preStreamFailure is not null)
-                {
-                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    string failure = preStreamFailure is ModelClientException modelFailure
-                        ? $"status {(int)modelFailure.StatusCode}"
-                        : preStreamFailure.Message;
-                    _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
-                        candidate.Name, failure, tripped ? " (circuit tripped)" : "");
-                    continue;
-                }
-
-                ArgumentNullException.ThrowIfNull(enumerator);
-
-                // Phase 2: 首行在 try-catch 之外 yield，避免 CS1626。
-                yield return firstLine;
-
-                // 继续 yield 剩余行。此处只有 finally，无 catch，允许 yield。
-                try
-                {
-                    while (await enumerator!.MoveNextAsync().ConfigureAwait(false))
+                    // 流正常结束，记账 + 标记健康。
+                    if (finalUsage is not null)
                     {
-                        var line = enumerator.Current;
-                        if (line.Usage is not null)
-                            finalUsage = line.Usage;
-                        yield return line;
+                        _ledger.Record(CostCalculator.Compute(finalUsage, candidate), sessionId);
                     }
+                    _healthTracker.RecordSuccess(candidate.Name);
+                    probeResolved = true;
+                    _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
+                        candidate.Name, finalUsage is not null
+                            ? CostCalculator.Compute(finalUsage, candidate).ToString("F6")
+                            : "unknown");
+                    yield break;
                 }
                 finally
                 {
-                    await enumerator.DisposeAsync().ConfigureAwait(false);
+                    if (!probeResolved)
+                    {
+                        if (streamFaulted)
+                        {
+                            // 中途失败计入断路器统计（与非流式失败同等对待）。
+                            bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                            _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
+                                candidate.Name, tripped ? " (circuit tripped)" : "");
+                        }
+                        else
+                        {
+                            // 无健康信号（不可重试错误、外部取消、空流、客户端提前断开）：仅释放探测槽位。
+                            _healthTracker.ReleaseProbe(candidate.Name);
+                        }
+                    }
                 }
-
-                // 流正常结束，记账 + 标记健康。
-                if (finalUsage is not null)
-                {
-                    _ledger.Record(CostCalculator.Compute(finalUsage, candidate), sessionId);
-                }
-                _healthTracker.RecordSuccess(candidate.Name);
-                _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
-                    candidate.Name, finalUsage is not null
-                        ? CostCalculator.Compute(finalUsage, candidate).ToString("F6")
-                        : "unknown");
-                yield break;
             }
 
-            if (!options.Routing.EnableFailover || !attemptedCandidate)
+            if (!failoverEnabled || !attemptedCandidate)
                 throw new AllCandidatesFailedException(attemptedModels);
         }
     }

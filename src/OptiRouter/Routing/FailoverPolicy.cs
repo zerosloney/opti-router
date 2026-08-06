@@ -26,21 +26,29 @@ public sealed class FailoverPolicy : IRouterPolicy
             return previous with { Reason = $"{previous.Reason}; failover: disabled" };
         }
 
-        // 合并单请求内失败模型与跨请求冷却中的模型。
+        // 合并单请求内失败模型与跨请求熔断打开（冷却中）的模型。
+        // 半开模型不排除：由 ProxyOrchestrator 通过探测槽位限流放行。
         var excluded = new HashSet<string>(context.FailedModels);
         List<string> coolingDown = new();
+        List<string> halfOpen = new();
         foreach (var model in previous.Candidates)
         {
-            if (_healthTracker.IsCoolingDown(model.Name))
+            var state = _healthTracker.GetState(model.Name);
+            if (state == CircuitState.Open)
             {
                 if (excluded.Add(model.Name))
                     coolingDown.Add(model.Name);
+            }
+            else if (state == CircuitState.HalfOpen)
+            {
+                halfOpen.Add(model.Name);
             }
         }
 
         if (excluded.Count == 0)
         {
-            return previous with { Reason = $"{previous.Reason}; failover: no-failed-models" };
+            string halfOpenNote = halfOpen.Count > 0 ? $", half-open probing [{string.Join(", ", halfOpen)}]" : "";
+            return previous with { Reason = $"{previous.Reason}; failover: no-failed-models{halfOpenNote}" };
         }
 
         var remaining = previous.Candidates
@@ -51,9 +59,10 @@ public sealed class FailoverPolicy : IRouterPolicy
         {
             string removed = string.Join(", ", previous.Candidates.Select(m => m.Name).Except(remaining.Select(m => m.Name)));
             string coolingNote = coolingDown.Count > 0 ? $", cooling [{string.Join(", ", coolingDown)}]" : "";
+            string halfOpenNote = halfOpen.Count > 0 ? $", half-open probing [{string.Join(", ", halfOpen)}]" : "";
             string reason = removed.Length > 0
-                ? $"failover: removed failed [{removed}]{coolingNote}, {remaining.Count} remaining"
-                : "failover: no candidates removed";
+                ? $"failover: removed failed [{removed}]{coolingNote}{halfOpenNote}, {remaining.Count} remaining"
+                : $"failover: no candidates removed{coolingNote}{halfOpenNote}";
             return previous with
             {
                 Candidates = remaining,

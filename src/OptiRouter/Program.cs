@@ -48,7 +48,7 @@ builder.Services.AddSingleton<ICostLedgerStore>(sp =>
     return new SqliteCostLedgerStore(storePath);
 });
 
-// t3: 注册成本账本、跨请求模型健康跟踪器（熔断）和路由引擎。
+// t3: 注册成本账本、跨请求模型健康跟踪器（三态断路器）和路由引擎。
 builder.Services.AddSingleton<CostLedger>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
@@ -56,10 +56,23 @@ builder.Services.AddSingleton<CostLedger>(sp =>
     return new CostLedger(store, options.Budget.SessionEvictionHours);
 });
 builder.Services.AddSingleton<ModelHealthTracker>();
+
+// Token 估算器：Tiktoken 模式用 SharpToken 真实 BPE 计数（内置词表、离线可用，异常自动回退分桶粗估）；
+// Bucket 模式用分桶加权粗估。编码名校验由 RouterOptionsValidator 在启动时完成。
+builder.Services.AddSingleton<ITokenEstimator>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    if (options.Routing.TokenEstimation == TokenEstimationMode.Bucket)
+        return new BucketTokenEstimator();
+
+    return new TiktokenTokenEstimator(options.Routing.TiktokenEncoding);
+});
+
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
     var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
+    var tokenEstimator = sp.GetRequiredService<ITokenEstimator>();
     // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入）。
     // 注意：Models 端点配置（BaseUrl/ApiKey/Timeout）按模型名缓存于 ModelClientProvider，
     // 变更需重启进程生效；Routing 开关经 IOptionsMonitor reload 后生效，与此缓存语义解耦。
@@ -70,7 +83,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new BudgetGuardPolicy(ledger),
         new FailoverPolicy(healthTracker)
     };
-    return new RouterEngine(ledger, policies);
+    return new RouterEngine(ledger, policies, tokenEstimator);
 });
 
 // t4: 注册降级重试编排器。

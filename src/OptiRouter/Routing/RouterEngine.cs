@@ -10,14 +10,19 @@ public sealed class RouterEngine
 {
     private readonly CostLedger _ledger;
     private readonly IReadOnlyList<IRouterPolicy> _policies;
+    private readonly ITokenEstimator _tokenEstimator;
 
     /// <summary>
     /// 构造路由引擎。
     /// </summary>
-    public RouterEngine(CostLedger ledger, IEnumerable<IRouterPolicy> policies)
+    /// <param name="ledger">成本账本。</param>
+    /// <param name="policies">策略链，按顺序应用。</param>
+    /// <param name="tokenEstimator">token 估算器；不传则用分桶粗估（保持既有测试行为）。</param>
+    public RouterEngine(CostLedger ledger, IEnumerable<IRouterPolicy> policies, ITokenEstimator? tokenEstimator = null)
     {
         _ledger = ledger ?? throw new ArgumentNullException(nameof(ledger));
         _policies = policies?.ToList() ?? throw new ArgumentNullException(nameof(policies));
+        _tokenEstimator = tokenEstimator ?? new BucketTokenEstimator();
     }
 
     /// <summary>
@@ -26,7 +31,7 @@ public sealed class RouterEngine
     public RouterDecision Decide(ChatRequest request, RouterOptions options, IReadOnlySet<string>? failedModels = null, string? sessionId = null)
     {
         // 1. 估算 token
-        int estTokens = TokenEstimator.Estimate(request);
+        int estTokens = _tokenEstimator.Estimate(request);
 
         // 2. 构造初始 context
         var context = new RouterContext

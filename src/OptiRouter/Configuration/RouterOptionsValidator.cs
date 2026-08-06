@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using OptiRouter.Routing;
 
 namespace OptiRouter.Configuration;
 
@@ -57,6 +58,19 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Budget.SessionEvictionHours < 0)
         {
             return ValidateOptionsResult.Fail("Budget.SessionEvictionHours 不能为负数。");
+        }
+
+        if (options.Routing.FailoverHalfOpenMaxProbes <= 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.FailoverHalfOpenMaxProbes 必须大于 0。");
+        }
+
+        if (options.Routing.TokenEstimation == TokenEstimationMode.Tiktoken
+            && !TiktokenTokenEstimator.IsEncodingAvailable(options.Routing.TiktokenEncoding))
+        {
+            return ValidateOptionsResult.Fail(
+                $"Routing.TiktokenEncoding '{options.Routing.TiktokenEncoding}' 不是可用的 tiktoken 编码。" +
+                "常见取值：o200k_base、cl100k_base。");
         }
 
         return ValidateOptionsResult.Success;

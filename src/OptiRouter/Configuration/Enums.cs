@@ -36,3 +36,20 @@ public enum BudgetExhaustionMode
     /// </summary>
     Reject = 1
 }
+
+/// <summary>
+/// Token 估算模式。
+/// </summary>
+public enum TokenEstimationMode
+{
+    /// <summary>
+    /// 分桶加权粗估（CJK/ASCII/其他按经验系数）。零依赖、极快，误差约 ±15%。
+    /// </summary>
+    Bucket = 0,
+
+    /// <summary>
+    /// 真实 BPE 精确计数（SharpToken 内置词表，离线可用）。
+    /// 计数异常时自动回退到 <see cref="Bucket"/> 粗估，保证路由不被阻塞。
+    /// </summary>
+    Tiktoken = 1
+}

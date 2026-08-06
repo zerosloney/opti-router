@@ -122,4 +122,33 @@ public class FailoverPolicyTests
         Assert.Equal("deepseek-chat", result.Candidates[0].Name);
         Assert.Contains("cooling", result.Reason);
     }
+
+    [Fact]
+    public void Apply_HalfOpenModel_KeptInCandidatesForProbing()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
+
+        // 让 gpt-4o 熔断后冷却到期，进入半开
+        var now = DateTime.UtcNow;
+        var tracker = new ModelHealthTracker(() => now);
+        tracker.RecordFailure("gpt-4o", threshold: 1, cooldownSeconds: 60);
+        Assert.Equal(CircuitState.Open, tracker.GetState("gpt-4o"));
+
+        var policy = NewPolicy(tracker);
+        var candidates = options.Models.Where(m => m.Enabled).ToList();
+
+        // 冷却中：gpt-4o 被排除
+        var cooling = Apply(policy, options, candidates);
+        Assert.Single(cooling.Candidates);
+        Assert.Equal("deepseek-chat", cooling.Candidates[0].Name);
+
+        // 推进时钟越过冷却 → 半开：gpt-4o 应回到候选（供探测），并在 reason 中标注
+        now = now.AddSeconds(61);
+        var halfOpen = Apply(policy, options, candidates);
+        Assert.Equal(2, halfOpen.Candidates.Count);
+        Assert.Contains("half-open probing", halfOpen.Reason);
+        Assert.Contains("gpt-4o", string.Join(",", halfOpen.Candidates.Select(c => c.Name)));
+    }
 }

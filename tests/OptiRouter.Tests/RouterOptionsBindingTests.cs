@@ -32,7 +32,12 @@ public class RouterOptionsBindingTests
             ["OptiRouter:Routing:EnableBudgetGuard"] = "true",
             ["OptiRouter:Routing:EnableFailover"] = "true",
             ["OptiRouter:Routing:LongInputThresholdTokens"] = "32000",
-            ["OptiRouter:Routing:DefaultTier"] = "Medium"
+            ["OptiRouter:Routing:DefaultTier"] = "Medium",
+            ["OptiRouter:Routing:FailoverFailureThreshold"] = "3",
+            ["OptiRouter:Routing:FailoverCooldownSeconds"] = "60",
+            ["OptiRouter:Routing:FailoverHalfOpenMaxProbes"] = "2",
+            ["OptiRouter:Routing:TokenEstimation"] = "Tiktoken",
+            ["OptiRouter:Routing:TiktokenEncoding"] = "o200k_base"
         };
 
         var configuration = new ConfigurationBuilder()
@@ -67,5 +72,10 @@ public class RouterOptionsBindingTests
         Assert.True(options.Value.Routing.EnableFailover);
         Assert.Equal(32000, options.Value.Routing.LongInputThresholdTokens);
         Assert.Equal(ModelTier.Medium, options.Value.Routing.DefaultTier);
+        Assert.Equal(3, options.Value.Routing.FailoverFailureThreshold);
+        Assert.Equal(60, options.Value.Routing.FailoverCooldownSeconds);
+        Assert.Equal(2, options.Value.Routing.FailoverHalfOpenMaxProbes);
+        Assert.Equal(TokenEstimationMode.Tiktoken, options.Value.Routing.TokenEstimation);
+        Assert.Equal("o200k_base", options.Value.Routing.TiktokenEncoding);
     }
 }

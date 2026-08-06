@@ -121,20 +121,23 @@ curl http://localhost:5000/health
 | 字段 | 含义 | 默认 |
 |------|------|------|
 | `EnableRuleClassifier` | 按请求特征推断 Tier | `true` |
-| `EnableTokenEstimator` | 粗估 token 并过滤上下文不足的模型 | `true` |
+| `EnableTokenEstimator` | 估算 token 并过滤上下文不足的模型 | `true` |
 | `EnableBudgetGuard` | 预算耗尽时执行降级/拒绝 | `true` |
 | `EnableFailover` | 候选链顺序尝试，主模型失败自动切下一个 | `true` |
 | `LongInputThresholdTokens` | 超长输入阈值，超过则过滤短上下文模型 | `32000` |
 | `DefaultTier` | 规则分类未命中时的默认分档 | `Medium` |
+| `TokenEstimation` | token 估算模式：`Tiktoken` 真实 BPE 精确计数 / `Bucket` 分桶粗估 | `Tiktoken` |
+| `TiktokenEncoding` | Tiktoken 编码名（仅 `TokenEstimation=Tiktoken` 时生效） | `o200k_base` |
 | `FailoverFailureThreshold` | 触发跨请求熔断的连续失败次数 | `3` |
-| `FailoverCooldownSeconds` | 熔断冷却秒数，到期自动恢复 | `60` |
+| `FailoverCooldownSeconds` | 熔断冷却秒数，到期进入半开探测 | `60` |
+| `FailoverHalfOpenMaxProbes` | 半开态允许的最大并发探测请求数 | `1` |
 
 ## 路由策略说明
 
 1. **规则分级**（`RuleClassifierPolicy`）：按请求特征推断 Tier——代码请求→Strong，单条短问答→Cheap，复杂指令→Strong，其余→`DefaultTier`。
-2. **Token 估算**（`TokenEstimator` + `LongInputPolicy`）：按 rune 分桶加权估算——CJK 按 1.5 字符/token、ASCII 按 4 字符/token、其他按 2.5，每条消息另计固定开销。超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
+2. **Token 估算**（`ITokenEstimator` + `LongInputPolicy`）：默认 `Tiktoken` 模式，用 SharpToken（tiktoken 的 C# 移植，词表内嵌、离线可用）按真实 BPE 精确计数，每条消息另计 3 token 开销，编码由 `TiktokenEncoding` 指定（默认 `o200k_base`）；计数异常时自动回退到分桶粗估。`Bucket` 模式按 rune 分桶加权估算——CJK 按 1.5 字符/token、ASCII 按 4 字符/token、其他按 2.5。超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
 3. **成本预算**（`BudgetGuardPolicy`）：日/会话预算耗尽时，`Degrade` 模式降级到 Cheap tier，`Reject` 模式返回 429。
-4. **失败降级**（`FailoverPolicy` + `ProxyOrchestrator` + `ModelHealthTracker`）：候选链顺序尝试，主模型失败自动切下一个；连续失败达阈值的模型被跨请求熔断冷却，冷却到期自动恢复。
+4. **失败降级**（`FailoverPolicy` + `ProxyOrchestrator` + `ModelHealthTracker`）：候选链顺序尝试，主模型失败自动切下一个；连续失败达阈值的模型触发三态断路器——Closed（正常）→ Open（熔断冷却）→ HalfOpen（冷却到期，最多放行 `FailoverHalfOpenMaxProbes` 个并发探测）；探测成功则闭合恢复，探测失败则重新进入冷却。流式请求的中途失败同样计入熔断。
 
 ## curl 示例
 
@@ -207,7 +210,7 @@ dotnet test OptiRouter.sln -c Release --filter "FullyQualifiedName~EndToEndSmoke
 
 ## 已知限制
 
-- Token 估算为分桶加权粗估（CJK/ASCII/其他按经验系数），非真实 BPE；误差约 ±15%，对路由分级足够。如需精确可接入 tiktoken 系 tokenizer。
-- 跨请求熔断为简单冷却（无 HalfOpen 探测）：连续失败达阈值→冷却→到期直接放行，若仍失败会重新累计。复杂场景可升级为完整断路器。
+- Token 估算默认使用 SharpToken 真实 BPE 精确计数（`TokenEstimation=Tiktoken`），计数异常时回退到分桶粗估；仅当显式配置 `TokenEstimation=Bucket` 或回退触发时才有分桶误差（约 ±15%）。注意 BPE 计数基于配置的编码（默认 `o200k_base`），与上游模型实际分词器可能存在少量偏差。
+- 跨请求熔断为三态断路器（Closed / Open / HalfOpen），半开态按 `FailoverHalfOpenMaxProbes` 限量探测；尚不支持指数退避、半开多次探测成功才闭合等更精细的策略，可按需扩展。
 - **Models 端点配置（BaseUrl/ApiKey/Timeout/Tier）按模型名缓存在 `ModelClientProvider`，变更需重启进程生效**。`Routing` 开关经 `IOptionsMonitor` reload 后可在线生效，与此缓存解耦。如需端点配置热更新，需改造 provider 支持 `OnChange` 触发重建 `HttpClient`。
 - **成本账本持久化**：`Budget.UsePersistentStore=true`（默认）时落 SQLite 文件（`Budget.StorePath`），跨进程重启保留日/会话花费，使预算真正生效。设为 `false` 用内存实现（重启归零，仅适合测试）。
