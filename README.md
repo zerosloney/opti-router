@@ -212,5 +212,5 @@ dotnet test OptiRouter.sln -c Release --filter "FullyQualifiedName~EndToEndSmoke
 
 - Token 估算默认使用 SharpToken 真实 BPE 精确计数（`TokenEstimation=Tiktoken`），计数异常时回退到分桶粗估；仅当显式配置 `TokenEstimation=Bucket` 或回退触发时才有分桶误差（约 ±15%）。注意 BPE 计数基于配置的编码（默认 `o200k_base`），与上游模型实际分词器可能存在少量偏差。
 - 跨请求熔断为三态断路器（Closed / Open / HalfOpen），半开态按 `FailoverHalfOpenMaxProbes` 限量探测；尚不支持指数退避、半开多次探测成功才闭合等更精细的策略，可按需扩展。
-- **Models 端点配置（BaseUrl/ApiKey/Timeout/Tier）按模型名缓存在 `ModelClientProvider`，变更需重启进程生效**。`Routing` 开关经 `IOptionsMonitor` reload 后可在线生效，与此缓存解耦。如需端点配置热更新，需改造 provider 支持 `OnChange` 触发重建 `HttpClient`。
+- **Models 端点配置支持热更新**：连接相关字段（`BaseUrl`/`ApiKey`/`TimeoutSeconds`）变化时，`ModelClientProvider` 经 `IOptionsMonitor.OnChange` 自动重建对应模型的客户端；旧客户端保留宽限期（默认 2 分钟）后释放，不打断在途请求。`Tier`/价格/上下文长度等路由字段每请求读取，变化下次路由即生效。reload 由配置源的变更通知触发（`appsettings.json` 默认 `reloadOnChange` 开启；环境变量源不支持 reload，仍需重启）。
 - **成本账本持久化**：`Budget.UsePersistentStore=true`（默认）时落 SQLite 文件（`Budget.StorePath`），跨进程重启保留日/会话花费，使预算真正生效。设为 `false` 用内存实现（重启归零，仅适合测试）。

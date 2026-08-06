@@ -27,7 +27,11 @@ builder.Services.AddSingleton<IValidateOptions<RouterOptions>, RouterOptionsVali
 builder.Services.AddSingleton<ModelClientFactory>();
 
 // 注册模型客户端提供者（生产实现，按模型名缓存 IModelClient）。
-builder.Services.AddSingleton<IModelClientProvider, ModelClientProvider>();
+// 热更新：内部订阅 IOptionsMonitor.OnChange，BaseUrl/ApiKey/TimeoutSeconds 变化时重建对应客户端，
+// 旧客户端保留一段宽限期后释放，不打断在途请求。
+builder.Services.AddSingleton<IModelClientProvider>(sp => new ModelClientProvider(
+    sp.GetRequiredService<ModelClientFactory>(),
+    sp.GetRequiredService<IOptionsMonitor<RouterOptions>>()));
 
 // 成本账本存储：UsePersistentStore=true 用 SQLite（跨重启保留），否则用内存（重启归零）。
 // SQLite 文件目录在构建时创建，确保单例构造时路径可写。
@@ -73,9 +77,9 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var ledger = sp.GetRequiredService<CostLedger>();
     var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
     var tokenEstimator = sp.GetRequiredService<ITokenEstimator>();
-    // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入）。
-    // 注意：Models 端点配置（BaseUrl/ApiKey/Timeout）按模型名缓存于 ModelClientProvider，
-    // 变更需重启进程生效；Routing 开关经 IOptionsMonitor reload 后生效，与此缓存语义解耦。
+    // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
+    // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
+    // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
     var policies = new List<IRouterPolicy>
     {
         new RuleClassifierPolicy(),
