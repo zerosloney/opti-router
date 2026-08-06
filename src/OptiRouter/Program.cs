@@ -19,27 +19,22 @@ builder.Services.AddSingleton<ModelClientFactory>();
 // 注册模型客户端提供者（生产实现，按模型名缓存 IModelClient）。
 builder.Services.AddSingleton<IModelClientProvider, ModelClientProvider>();
 
-// t3: 注册成本账本和路由引擎。
+// t3: 注册成本账本、跨请求模型健康跟踪器（熔断）和路由引擎。
 builder.Services.AddSingleton<CostLedger>();
+builder.Services.AddSingleton<ModelHealthTracker>();
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
-    var options = sp.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue;
-    var routing = options.Routing;
-    var policies = new List<IRouterPolicy>();
-
-    if (routing.EnableRuleClassifier)
-        policies.Add(new RuleClassifierPolicy());
-
-    if (routing.EnableTokenEstimator)
-        policies.Add(new LongInputPolicy());
-
-    if (routing.EnableBudgetGuard)
-        policies.Add(new BudgetGuardPolicy(ledger));
-
-    if (routing.EnableFailover)
-        policies.Add(new FailoverPolicy());
-
+    var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
+    // 策略链全部注册，每个策略 Apply 内依据当前 RoutingOptions 开关决定是否生效，
+    // 以支持配置热更新（开关切换无需重启）。
+    var policies = new List<IRouterPolicy>
+    {
+        new RuleClassifierPolicy(),
+        new LongInputPolicy(),
+        new BudgetGuardPolicy(ledger),
+        new FailoverPolicy(healthTracker)
+    };
     return new RouterEngine(ledger, policies);
 });
 

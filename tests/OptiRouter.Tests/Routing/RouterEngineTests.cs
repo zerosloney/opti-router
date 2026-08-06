@@ -21,7 +21,7 @@ public class RouterEngineTests
             new RuleClassifierPolicy(),
             new LongInputPolicy(),
             new BudgetGuardPolicy(ledger),
-            new FailoverPolicy()
+            new FailoverPolicy(new ModelHealthTracker())
         });
 
         // Code request triggers Strong tier, ensuring gpt-4o is in candidates.
@@ -52,7 +52,7 @@ public class RouterEngineTests
             new RuleClassifierPolicy(),
             new LongInputPolicy(),
             new BudgetGuardPolicy(ledger),
-            new FailoverPolicy()
+            new FailoverPolicy(new ModelHealthTracker())
         });
 
         var request = TestHelpers.BuildRequest(("user", "hello"));
@@ -78,7 +78,7 @@ public class RouterEngineTests
             new RuleClassifierPolicy(),
             new LongInputPolicy(),
             new BudgetGuardPolicy(ledger),
-            new FailoverPolicy()
+            new FailoverPolicy(new ModelHealthTracker())
         });
 
         // Code request triggers RuleClassifier → Strong tier → only gpt-4o remains.
@@ -106,7 +106,7 @@ public class RouterEngineTests
             new RuleClassifierPolicy(),
             new LongInputPolicy(),
             new BudgetGuardPolicy(ledger),
-            new FailoverPolicy()
+            new FailoverPolicy(new ModelHealthTracker())
         });
 
         var request = TestHelpers.BuildRequest(("user", "```python\ndef foo(): pass\n```"));
@@ -136,7 +136,7 @@ public class RouterEngineTests
             new RuleClassifierPolicy(),
             new LongInputPolicy(),
             new BudgetGuardPolicy(ledger),
-            new FailoverPolicy()
+            new FailoverPolicy(new ModelHealthTracker())
         });
 
         // Long content triggers LongInputPolicy; DefaultTier=Cheap so RuleClassifier keeps cheap candidates.
@@ -194,7 +194,7 @@ public class RouterEngineTests
             new RuleClassifierPolicy(),
             new LongInputPolicy(),
             new BudgetGuardPolicy(ledger),
-            new FailoverPolicy()
+            new FailoverPolicy(new ModelHealthTracker())
         });
 
         var request = TestHelpers.BuildRequest(("user", "hello"));

@@ -31,6 +31,9 @@ public class FailoverPolicyTests
         return policy.Apply(context, decision);
     }
 
+    private static FailoverPolicy NewPolicy(ModelHealthTracker? tracker = null)
+        => new(tracker ?? new ModelHealthTracker());
+
     [Fact]
     public void Apply_NoFailedModels_KeepsCandidatesUnchanged()
     {
@@ -38,7 +41,7 @@ public class FailoverPolicyTests
             ("gpt-4o", ModelTier.Strong, 128000, 5m),
             ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
 
-        var policy = new FailoverPolicy();
+        var policy = NewPolicy();
         var candidates = options.Models.Where(m => m.Enabled).ToList();
         var result = Apply(policy, options, candidates);
 
@@ -53,7 +56,7 @@ public class FailoverPolicyTests
             ("gpt-4o", ModelTier.Strong, 128000, 5m),
             ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
 
-        var policy = new FailoverPolicy();
+        var policy = NewPolicy();
         var candidates = options.Models.Where(m => m.Enabled).ToList();
         var failed = new HashSet<string> { "gpt-4o" };
         var result = Apply(policy, options, candidates, failed);
@@ -71,7 +74,7 @@ public class FailoverPolicyTests
             ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m),
             ("small-model", ModelTier.Cheap, 8000, 0.005m));
 
-        var policy = new FailoverPolicy();
+        var policy = NewPolicy();
         // Only include the two models that will fail in the previous decision
         var candidates = options.Models.Where(m => m.Enabled && m.Name != "small-model").ToList();
         var failed = new HashSet<string> { "gpt-4o", "deepseek-chat" };
@@ -89,7 +92,7 @@ public class FailoverPolicyTests
             ("gpt-4o", ModelTier.Strong, 128000, 5m),
             ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
 
-        var policy = new FailoverPolicy();
+        var policy = NewPolicy();
         options.Routing.EnableFailover = false;
         var candidates = options.Models.Where(m => m.Enabled).ToList();
         var failed = new HashSet<string> { "gpt-4o" };
@@ -97,5 +100,26 @@ public class FailoverPolicyTests
 
         Assert.Equal(2, result.Candidates.Count);
         Assert.Contains("disabled", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_CoolingDownModel_RemovedFromCandidates()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
+
+        // 让 gpt-4o 进入冷却
+        var tracker = new ModelHealthTracker();
+        tracker.RecordFailure("gpt-4o", threshold: 1, cooldownSeconds: 60);
+
+        var policy = NewPolicy(tracker);
+        var candidates = options.Models.Where(m => m.Enabled).ToList();
+        // 无单请求失败，仅跨请求冷却应排除 gpt-4o
+        var result = Apply(policy, options, candidates);
+
+        Assert.Single(result.Candidates);
+        Assert.Equal("deepseek-chat", result.Candidates[0].Name);
+        Assert.Contains("cooling", result.Reason);
     }
 }

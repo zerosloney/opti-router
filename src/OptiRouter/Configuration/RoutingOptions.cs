@@ -34,4 +34,14 @@ public sealed class RoutingOptions
     /// 默认能力分档。无明确信号时选哪档模型。
     /// </summary>
     public ModelTier DefaultTier { get; set; } = ModelTier.Medium;
+
+    /// <summary>
+    /// 触发跨请求熔断的连续失败次数阈值。达到后该模型进入冷却。
+    /// </summary>
+    public int FailoverFailureThreshold { get; set; } = 3;
+
+    /// <summary>
+    /// 熔断冷却时长（秒）。冷却到期后模型自动重新进入候选。
+    /// </summary>
+    public int FailoverCooldownSeconds { get; set; } = 60;
 }

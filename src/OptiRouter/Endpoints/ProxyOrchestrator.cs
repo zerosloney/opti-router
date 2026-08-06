@@ -10,8 +10,7 @@ namespace OptiRouter.Endpoints;
 /// <summary>
 /// 降级重试编排器：按 RouterEngine 给出的候选链顺序尝试，成功即返回，
 /// 全部失败则抛出 <see cref="AllCandidatesFailedException"/>。
-/// 请求内失败记忆：单次请求内顺序尝试候选链即可，不反复 Decide。
-/// TODO: cross-request failure memory via shared state（跨请求失败记忆留作后续优化）。
+/// 跨请求失败记忆：通过 <see cref="ModelHealthTracker"/> 上报成败，连续失败达阈值的模型被熔断冷却。
 /// </summary>
 public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 {
@@ -19,6 +18,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly RouterEngine _engine;
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly CostLedger _ledger;
+    private readonly ModelHealthTracker _healthTracker;
     private readonly ILogger<ProxyOrchestrator> _logger;
     private bool _disposed;
 
@@ -29,24 +29,28 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// <param name="engine">路由引擎。</param>
     /// <param name="options">路由配置热更新监视器。</param>
     /// <param name="ledger">成本账本。</param>
+    /// <param name="healthTracker">跨请求模型健康跟踪器。</param>
     /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
         RouterEngine engine,
         IOptionsMonitor<RouterOptions> options,
         CostLedger ledger,
+        ModelHealthTracker healthTracker,
         ILogger<ProxyOrchestrator> logger)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(ledger);
+        ArgumentNullException.ThrowIfNull(healthTracker);
         ArgumentNullException.ThrowIfNull(logger);
 
         _clientProvider = clientProvider;
         _engine = engine;
         _options = options;
         _ledger = ledger;
+        _healthTracker = healthTracker;
         _logger = logger;
     }
 
@@ -74,6 +78,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         }
 
         var failedInThisRequest = new List<string>();
+        int threshold = options.Routing.FailoverFailureThreshold;
+        int cooldown = options.Routing.FailoverCooldownSeconds;
 
         foreach (var candidate in decision.Candidates)
         {
@@ -84,20 +90,25 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                 var cost = CostCalculator.Compute(response.Usage, candidate);
                 _ledger.Record(cost);
+                _healthTracker.RecordSuccess(candidate.Name);
 
                 return response;
             }
             catch (ModelClientException ex)
             {
                 failedInThisRequest.Add(candidate.Name);
-                _logger.LogWarning(ex, "Model {Name} failed (status {Status}), trying next candidate", candidate.Name, ex.StatusCode);
+                bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                _logger.LogWarning(ex, "Model {Name} failed (status {Status}), trying next candidate{Tripped}",
+                    candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 continue;
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
                 // 客户端内部超时，非外部取消，记失败继续。
                 failedInThisRequest.Add(candidate.Name);
-                _logger.LogWarning("Model {Name} timed out, trying next", candidate.Name);
+                bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
+                    candidate.Name, tripped ? " (circuit tripped)" : "");
                 continue;
             }
         }
@@ -128,6 +139,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 throw new BudgetExhaustedException(decision.Reason);
             throw new AllCandidatesFailedException(new List<string>());
         }
+
+        int threshold = options.Routing.FailoverFailureThreshold;
+        int cooldown = options.Routing.FailoverCooldownSeconds;
 
         foreach (var candidate in decision.Candidates)
         {
@@ -173,7 +187,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             if (preStreamFailure is not null)
             {
-                _logger.LogWarning(preStreamFailure, "Streaming model {Name} failed pre-stream, trying next", candidate.Name);
+                bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                _logger.LogWarning(preStreamFailure, "Streaming model {Name} failed pre-stream, trying next{Tripped}",
+                    candidate.Name, tripped ? " (circuit tripped)" : "");
                 continue;
             }
 
@@ -198,11 +214,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 await enumerator.DisposeAsync().ConfigureAwait(false);
             }
 
-            // 流正常结束，记账。
+            // 流正常结束，记账 + 标记健康。
             if (finalUsage is not null)
             {
                 _ledger.Record(CostCalculator.Compute(finalUsage, candidate));
             }
+            _healthTracker.RecordSuccess(candidate.Name);
             yield break;
         }
 

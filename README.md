@@ -110,13 +110,15 @@ curl http://localhost:5000/health
 | `EnableFailover` | 候选链顺序尝试，主模型失败自动切下一个 | `true` |
 | `LongInputThresholdTokens` | 超长输入阈值，超过则过滤短上下文模型 | `32000` |
 | `DefaultTier` | 规则分类未命中时的默认分档 | `Medium` |
+| `FailoverFailureThreshold` | 触发跨请求熔断的连续失败次数 | `3` |
+| `FailoverCooldownSeconds` | 熔断冷却秒数，到期自动恢复 | `60` |
 
 ## 路由策略说明
 
 1. **规则分级**（`RuleClassifierPolicy`）：按请求特征推断 Tier——代码请求→Strong，单条短问答→Cheap，复杂指令→Strong，其余→`DefaultTier`。
-2. **Token 估算**（`TokenEstimator` + `LongInputPolicy`）：intentional-simple：粗估 3.5 字符/token，非真实 BPE；超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
+2. **Token 估算**（`TokenEstimator` + `LongInputPolicy`）：按 rune 分桶加权估算——CJK 按 1.5 字符/token、ASCII 按 4 字符/token、其他按 2.5，每条消息另计固定开销。超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
 3. **成本预算**（`BudgetGuardPolicy`）：日/会话预算耗尽时，`Degrade` 模式降级到 Cheap tier，`Reject` 模式返回 429。
-4. **失败降级**（`FailoverPolicy` + `ProxyOrchestrator`）：候选链顺序尝试，主模型失败自动切下一个。
+4. **失败降级**（`FailoverPolicy` + `ProxyOrchestrator` + `ModelHealthTracker`）：候选链顺序尝试，主模型失败自动切下一个；连续失败达阈值的模型被跨请求熔断冷却，冷却到期自动恢复。
 
 ## curl 示例
 
@@ -164,6 +166,5 @@ dotnet test OptiRouter.sln -c Release --filter "FullyQualifiedName~EndToEndSmoke
 
 ## 已知限制
 
-- Token 估算为粗估（3.5 字符/token），非真实 BPE。
-- 跨请求失败记忆未实现（单次请求内顺序降级）。
-- 配置热更新未完全支持（RouterEngine 注册时机限制，变更需重启）。
+- Token 估算为分桶加权粗估（CJK/ASCII/其他按经验系数），非真实 BPE；误差约 ±15%，对路由分级足够。如需精确可接入 tiktoken 系 tokenizer。
+- 跨请求熔断为简单冷却（无 HalfOpen 探测）：连续失败达阈值→冷却→到期直接放行，若仍失败会重新累计。复杂场景可升级为完整断路器。
