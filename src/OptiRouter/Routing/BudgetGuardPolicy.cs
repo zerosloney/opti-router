@@ -26,15 +26,22 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
             return previous with { Reason = $"{previous.Reason}; budget-guard: disabled" };
         }
 
-        var (dailySpend, sessionSpend) = _ledger.GetSpend();
+        var (dailySpend, _) = _ledger.GetSpend();
         var budget = context.Options.Budget;
 
         bool dailyExhausted = budget.DailyBudgetUsd > 0 && dailySpend >= budget.DailyBudgetUsd;
-        bool sessionExhausted = budget.SessionBudgetUsd is { } sessionBudget && sessionSpend >= sessionBudget;
+        // 会话预算仅在 X-Session-Id 头存在时启用；缺头时 sessionSpend 记为未超。
+        decimal sessionSpend = context.SessionId is { } sid ? _ledger.GetSessionSpend(sid) : 0m;
+        bool sessionExhausted = context.SessionId is not null
+            && budget.SessionBudgetUsd is { } sessionBudget
+            && sessionSpend >= sessionBudget;
 
         if (!dailyExhausted && !sessionExhausted)
         {
-            string spendInfo = $"budget-guard: daily={dailySpend:F4}/{budget.DailyBudgetUsd:F4}, session={sessionSpend:F4}/{(budget.SessionBudgetUsd?.ToString("F4") ?? "inf")}";
+            string sessionInfo = context.SessionId is not null
+                ? $"session={sessionSpend:F4}/{(budget.SessionBudgetUsd?.ToString("F4") ?? "inf")}"
+                : "session=disabled(no-header)";
+            string spendInfo = $"budget-guard: daily={dailySpend:F4}/{budget.DailyBudgetUsd:F4}, {sessionInfo}";
             return previous with { Reason = $"{previous.Reason}; {spendInfo}" };
         }
 

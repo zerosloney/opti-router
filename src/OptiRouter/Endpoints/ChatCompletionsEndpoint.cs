@@ -1,6 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http;
 using OptiRouter.Clients;
 
@@ -8,16 +7,10 @@ namespace OptiRouter.Endpoints;
 
 /// <summary>
 /// OpenAI 兼容 Chat Completions HTTP 端点。
-/// 暴露 POST /v1/chat/completions，支持非流式与 SSE 流式两种模式。
+/// 暴露 POST /v1/chat/completions，支持非流式与 SSE 流式两种模式，透明透传上游原始响应。
 /// </summary>
 public static class ChatCompletionsEndpoint
 {
-    private static readonly JsonSerializerOptions SseOptions = new()
-    {
-        PropertyNamingPolicy = new JsonSnakeCaseNamingPolicy(),
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-    };
-
     /// <summary>
     /// 将 /v1/chat/completions 端点映射到路由图。
     /// </summary>
@@ -25,7 +18,7 @@ public static class ChatCompletionsEndpoint
     /// <returns>同一个 <paramref name="app"/>，便于链式调用。</returns>
     public static IEndpointRouteBuilder MapChatCompletions(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/v1/chat/completions", async (ChatRequest request, ProxyOrchestrator orchestrator, CancellationToken ct) =>
+        app.MapPost("/v1/chat/completions", async (ChatRequest request, HttpContext httpContext, ProxyOrchestrator orchestrator, CancellationToken ct) =>
         {
             if (TryGetValidationError(request, out var validationError))
             {
@@ -35,12 +28,16 @@ public static class ChatCompletionsEndpoint
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
+            string? sessionId = httpContext.Request.Headers.TryGetValue("X-Session-Id", out var sid) && !string.IsNullOrWhiteSpace(sid)
+                ? sid.ToString()
+                : null;
+
             if (request.Stream)
             {
-                IAsyncEnumerator<ChatStreamChunk>? enumerator = null;
+                IAsyncEnumerator<RawStreamLine>? enumerator = null;
                 try
                 {
-                    enumerator = orchestrator.StreamAsync(request, ct).GetAsyncEnumerator(ct);
+                    enumerator = orchestrator.StreamAsync(request, ct, sessionId).GetAsyncEnumerator(ct);
                     if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
                     {
                         await enumerator.DisposeAsync().ConfigureAwait(false);
@@ -49,18 +46,17 @@ public static class ChatCompletionsEndpoint
                             "text/event-stream");
                     }
 
-                    var firstChunk = enumerator.Current;
+                    var firstLine = enumerator.Current;
                     var streamEnumerator = enumerator;
                     return Results.Stream(async stream =>
                     {
                         try
                         {
-                            await WriteChunkAsync(stream, firstChunk, ct).ConfigureAwait(false);
+                            await WriteLineAsync(stream, firstLine, ct).ConfigureAwait(false);
                             while (await streamEnumerator.MoveNextAsync().ConfigureAwait(false))
                             {
-                                await WriteChunkAsync(stream, streamEnumerator.Current, ct).ConfigureAwait(false);
+                                await WriteLineAsync(stream, streamEnumerator.Current, ct).ConfigureAwait(false);
                             }
-                            await WriteDoneAsync(stream, ct).ConfigureAwait(false);
                         }
                         catch (BudgetExhaustedException)
                         {
@@ -98,8 +94,9 @@ public static class ChatCompletionsEndpoint
 
             try
             {
-                var response = await orchestrator.SendAsync(request, ct).ConfigureAwait(false);
-                return Results.Ok(response);
+                var response = await orchestrator.SendAsync(request, ct, sessionId).ConfigureAwait(false);
+                // 透明透传：直接回传上游原始 JSON，不 re-serialize。
+                return Results.Content(response.Body, "application/json", Encoding.UTF8);
             }
             catch (BudgetExhaustedException ex)
             {
@@ -156,10 +153,12 @@ public static class ChatCompletionsEndpoint
             "text/event-stream");
     }
 
-    private static async Task WriteChunkAsync(Stream stream, ChatStreamChunk chunk, CancellationToken ct)
+    /// <summary>
+    /// 透传原始 SSE data 行。客户端自己负责按 OpenAI 格式发送 [DONE]。
+    /// </summary>
+    private static async Task WriteLineAsync(Stream stream, RawStreamLine line, CancellationToken ct)
     {
-        var json = JsonSerializer.Serialize(chunk, SseOptions);
-        await stream.WriteAsync(Encoding.UTF8.GetBytes($"data: {json}\n\n"), ct).ConfigureAwait(false);
+        await stream.WriteAsync(Encoding.UTF8.GetBytes($"data: {line.Data}\n\n"), ct).ConfigureAwait(false);
     }
 
     private static async Task WriteErrorAsync(Stream stream, string error, CancellationToken ct)

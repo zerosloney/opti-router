@@ -56,13 +56,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
     /// <summary>
     /// 非流式发送请求，按候选链顺序尝试，失败则降级到下一候选。
+    /// 返回上游原始响应字符串（透明透传）。
     /// </summary>
     /// <param name="request">聊天请求。</param>
     /// <param name="ct">取消令牌。</param>
-    /// <returns>完整聊天响应。</returns>
+    /// <param name="sessionId">可选会话 ID，用于按会话记账。</param>
+    /// <returns>原始响应 + token 用量。</returns>
     /// <exception cref="BudgetExhaustedException">预算耗尽且模式为 Reject。</exception>
     /// <exception cref="AllCandidatesFailedException">所有候选均失败。</exception>
-    public async Task<ChatResponse> SendAsync(ChatRequest request, CancellationToken ct)
+    public async Task<RawChatResponse> SendAsync(ChatRequest request, CancellationToken ct, string? sessionId = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
@@ -75,7 +77,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         while (true)
         {
-            var decision = _engine.Decide(request, options, failedInThisRequest);
+            var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
 
             if (decision.Candidates.Count == 0)
             {
@@ -95,10 +97,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 try
                 {
                     var client = _clientProvider.GetClient(candidate);
-                    var response = await client.CompleteAsync(request, ct).ConfigureAwait(false);
+                    var response = await client.CompleteRawAsync(request, ct).ConfigureAwait(false);
 
-                    var cost = CostCalculator.Compute(response.Usage, candidate);
-                    _ledger.Record(cost);
+                    if (response.Usage is not null)
+                    {
+                        var cost = CostCalculator.Compute(response.Usage, candidate);
+                        _ledger.Record(cost, sessionId);
+                    }
                     _healthTracker.RecordSuccess(candidate.Name);
 
                     return response;
@@ -131,14 +136,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
     /// <summary>
     /// 流式发送请求，按候选链顺序尝试。首个 chunk 开始 yield 后若失败，
-    /// 无法再切换模型，直接向上抛出异常。
+    /// 无法再切换模型，直接向上抛出异常。透传上游原始 SSE data 行。
     /// </summary>
     /// <param name="request">聊天请求。</param>
     /// <param name="ct">取消令牌。</param>
-    /// <returns>响应块异步枚举。</returns>
+    /// <param name="sessionId">可选会话 ID，用于按会话记账。</param>
+    /// <returns>原始 SSE 行异步枚举。</returns>
     /// <exception cref="BudgetExhaustedException">预算耗尽且模式为 Reject。</exception>
     /// <exception cref="AllCandidatesFailedException">所有候选在首 chunk 前均失败。</exception>
-    public async IAsyncEnumerable<ChatStreamChunk> StreamAsync(ChatRequest request, [EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<RawStreamLine> StreamAsync(ChatRequest request, [EnumeratorCancellation] CancellationToken ct, string? sessionId = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
@@ -151,7 +157,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         while (true)
         {
-            var decision = _engine.Decide(request, options, failedInThisRequest);
+            var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
 
             if (decision.Candidates.Count == 0)
             {
@@ -169,23 +175,23 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 attemptedCandidate = true;
                 attemptedModels.Add(candidate.Name);
                 var client = _clientProvider.GetClient(candidate);
-                IAsyncEnumerator<ChatStreamChunk>? enumerator = null;
-                ChatStreamChunk firstChunk = default!;
+                IAsyncEnumerator<RawStreamLine>? enumerator = null;
+                RawStreamLine firstLine = default!;
                 ChatUsage? finalUsage = null;
                 Exception? preStreamFailure = null;
-                bool hasFirstChunk = false;
+                bool hasFirstLine = false;
 
-                // Phase 1: 创建 enumerator 并尝试拿到第一个 chunk。
+                // Phase 1: 创建 enumerator 并尝试拿到第一行。
                 // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
                 try
                 {
-                    enumerator = client.StreamAsync(request, ct).GetAsyncEnumerator(ct);
+                    enumerator = client.StreamRawAsync(request, ct).GetAsyncEnumerator(ct);
                     if (await enumerator.MoveNextAsync().ConfigureAwait(false))
                     {
-                        firstChunk = enumerator.Current;
-                        if (firstChunk.Usage is not null)
-                            finalUsage = firstChunk.Usage;
-                        hasFirstChunk = true;
+                        firstLine = enumerator.Current;
+                        if (firstLine.Usage is not null)
+                            finalUsage = firstLine.Usage;
+                        hasFirstLine = true;
                     }
                     else
                     {
@@ -209,7 +215,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 finally
                 {
-                    if (!hasFirstChunk && enumerator is not null)
+                    if (!hasFirstLine && enumerator is not null)
                     {
                         await enumerator.DisposeAsync().ConfigureAwait(false);
                     }
@@ -228,18 +234,18 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                 ArgumentNullException.ThrowIfNull(enumerator);
 
-                // Phase 2: 首个 chunk 在 try-catch 之外 yield，避免 CS1626。
-                yield return firstChunk;
+                // Phase 2: 首行在 try-catch 之外 yield，避免 CS1626。
+                yield return firstLine;
 
-                // 继续 yield 剩余 chunk。此处只有 finally，无 catch，允许 yield。
+                // 继续 yield 剩余行。此处只有 finally，无 catch，允许 yield。
                 try
                 {
                     while (await enumerator!.MoveNextAsync().ConfigureAwait(false))
                     {
-                        var chunk = enumerator.Current;
-                        if (chunk.Usage is not null)
-                            finalUsage = chunk.Usage;
-                        yield return chunk;
+                        var line = enumerator.Current;
+                        if (line.Usage is not null)
+                            finalUsage = line.Usage;
+                        yield return line;
                     }
                 }
                 finally
@@ -250,7 +256,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 // 流正常结束，记账 + 标记健康。
                 if (finalUsage is not null)
                 {
-                    _ledger.Record(CostCalculator.Compute(finalUsage, candidate));
+                    _ledger.Record(CostCalculator.Compute(finalUsage, candidate), sessionId);
                 }
                 _healthTracker.RecordSuccess(candidate.Name);
                 yield break;

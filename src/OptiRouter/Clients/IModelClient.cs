@@ -38,4 +38,22 @@ public interface IModelClient
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>健康结果。</returns>
     Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 非流式调用，返回原始响应字符串（透明透传，保留上游全部字段）。
+    /// </summary>
+    /// <param name="request">请求体，Model 会被强制覆盖为端点配置的模型名。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>原始响应 + 从中提取的 token 用量。</returns>
+    /// <exception cref="ModelClientException">非 2xx 响应时抛出。</exception>
+    Task<RawChatResponse> CompleteRawAsync(ChatRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 流式调用，逐行返回原始 SSE data 内容（透明透传，保留上游全部字段）。
+    /// </summary>
+    /// <param name="request">请求体，Model 会被强制覆盖。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>原始 SSE 行异步枚举；最后一行为 <c>[DONE]</c>。</returns>
+    /// <exception cref="ModelClientException">非 2xx 响应时抛出。</exception>
+    IAsyncEnumerable<RawStreamLine> StreamRawAsync(ChatRequest request, CancellationToken cancellationToken = default);
 }

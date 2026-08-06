@@ -342,6 +342,129 @@ public class OpenAICompatibleModelClientTests
 
     #endregion
 
+    #region CompleteRawAsync / StreamRawAsync tests
+
+    [Fact]
+    public async Task CompleteRawAsync_WhenSuccess_ReturnsOriginalBodyAndExtractsUsage()
+    {
+        // Arrange: 含上游自定义字段 logprobs，透传后应原样保留
+        var endpoint = CreateEndpoint(baseUrl: "https://api.openai.com/v1", name: "gpt-4o");
+        var responseJson = "{\"id\":\"chatcmpl-x\",\"model\":\"gpt-4o\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8,\"total_tokens\":20},\"logprobs\":{\"tokens\":[\"a\"]}}";
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        var request = new ChatRequest
+        {
+            Model = "ignored",
+            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "Hi" } },
+            Stream = false
+        };
+
+        // Act
+        var result = await client.CompleteRawAsync(request);
+
+        // Assert: 原始 body 原样返回（含 logprobs 自定义字段）
+        Assert.Equal(responseJson, result.Body);
+        Assert.NotNull(result.Usage);
+        Assert.Equal(12, result.Usage!.PromptTokens);
+        Assert.Equal(8, result.Usage!.CompletionTokens);
+        Assert.Equal(20, result.Usage!.TotalTokens);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_ForcesModelToEndpointName()
+    {
+        var endpoint = CreateEndpoint(name: "forced-model");
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        await client.CompleteRawAsync(new ChatRequest { Model = "whatever", Messages = new List<ChatMessage>() });
+
+        var sentBody = handler.GetLastRequestContent();
+        Assert.NotNull(sentBody);
+        using var doc = JsonDocument.Parse(sentBody);
+        Assert.Equal("forced-model", doc.RootElement.GetProperty("model").GetString()!);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_WhenNoUsage_ReturnsNullUsage()
+    {
+        var endpoint = CreateEndpoint();
+        // 上游未返回 usage 字段
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"id\":\"x\",\"model\":\"gpt-4o\",\"choices\":[]}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        var result = await client.CompleteRawAsync(new ChatRequest { Model = "gpt-4o", Messages = new List<ChatMessage>() });
+
+        Assert.Null(result.Usage);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_WhenNon2xx_ThrowsModelClientException()
+    {
+        var endpoint = CreateEndpoint();
+        var response = new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = new StringContent("{\"error\":\"boom\"}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(
+            async () => await client.CompleteRawAsync(new ChatRequest { Model = "gpt-4o", Messages = new List<ChatMessage>() }));
+        Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_WhenSuccess_YieldsOriginalDataLines()
+    {
+        var endpoint = CreateEndpoint(baseUrl: "https://api.openai.com/v1");
+        // 上游 SSE 含自定义字段，透传应原样保留
+        var sse = new StringBuilder();
+        sse.Append("data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"logprobs\":{\"x\":1}}]}\n\n");
+        sse.Append("data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n");
+        sse.Append("data: [DONE]\n\n");
+
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(sse.ToString(), Encoding.UTF8, "text/event-stream")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        var lines = new List<RawStreamLine>();
+        await foreach (var line in client.StreamRawAsync(new ChatRequest { Model = "gpt-4o", Messages = new List<ChatMessage>(), Stream = true }))
+        {
+            lines.Add(line);
+        }
+
+        // 两个 data 行 + [DONE]
+        Assert.Equal(3, lines.Count);
+        // 第一行原样保留含 logprobs
+        Assert.Contains("\"logprobs\":{\"x\":1}", lines[0].Data);
+        Assert.Null(lines[0].Usage);
+        // 第二行提取 usage
+        Assert.NotNull(lines[1].Usage);
+        Assert.Equal(4, lines[1].Usage!.TotalTokens);
+        // DONE 标记原样
+        Assert.Equal("[DONE]", lines[2].Data);
+        Assert.Null(lines[2].Usage);
+    }
+
+    #endregion
+
     #region Helpers
 
     /// <summary>

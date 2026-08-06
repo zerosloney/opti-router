@@ -157,3 +157,17 @@ internal sealed record RawStreamChoice(
 internal sealed record RawStreamDelta(
     string? Content,
     string? Role);
+
+/// <summary>
+/// 非流式原始响应：上游返回的原始 JSON 字符串 + 从中提取的 token 用量（供记账）。
+/// </summary>
+/// <param name="Body">上游原始 JSON 字符串，原样回传客户端。</param>
+/// <param name="Usage">从 Body 提取的 token 用量；上游未返回时为 null。</param>
+public sealed record RawChatResponse(string Body, ChatUsage? Usage);
+
+/// <summary>
+/// 流式原始响应行：单条 SSE <c>data:</c> 后的原始内容 + 从中提取的 token 用量。
+/// </summary>
+/// <param name="Data">原始 data 内容（JSON 或 <c>[DONE]</c>）。</param>
+/// <param name="Usage">从 Data 提取的 token 用量；该行未携带或非 JSON 时为 null。</param>
+public sealed record RawStreamLine(string Data, ChatUsage? Usage);

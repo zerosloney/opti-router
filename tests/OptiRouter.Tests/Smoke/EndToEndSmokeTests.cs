@@ -164,7 +164,7 @@ public class EndToEndSmokeTests : IDisposable
 
         using var firstDoc = JsonDocument.Parse(dataLines[0]);
         Assert.Equal("chatcmpl-wm", firstDoc.RootElement.GetProperty("id").GetString());
-        Assert.Equal("Hello", firstDoc.RootElement.GetProperty("delta_content").GetString());
+        Assert.Equal("Hello", firstDoc.RootElement.GetProperty("choices")[0].GetProperty("delta").GetProperty("content").GetString());
 
         // 流式最后一块带 usage，记账后 ledger 应 > 0
         var ledger = factory.Services.GetRequiredService<CostLedger>();

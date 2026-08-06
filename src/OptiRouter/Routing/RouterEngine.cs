@@ -23,7 +23,7 @@ public sealed class RouterEngine
     /// <summary>
     /// 决策：给定请求和配置，返回候选模型链。
     /// </summary>
-    public RouterDecision Decide(ChatRequest request, RouterOptions options, IReadOnlySet<string>? failedModels = null)
+    public RouterDecision Decide(ChatRequest request, RouterOptions options, IReadOnlySet<string>? failedModels = null, string? sessionId = null)
     {
         // 1. 估算 token
         int estTokens = TokenEstimator.Estimate(request);
@@ -35,7 +35,8 @@ public sealed class RouterEngine
             AllModels = options.Models.Where(m => m.Enabled).ToList(),
             Options = options,
             EstimatedInputTokens = estTokens,
-            FailedModels = failedModels ?? new HashSet<string>()
+            FailedModels = failedModels ?? new HashSet<string>(),
+            SessionId = sessionId
         };
 
         // 3. 初始决策：所有 enabled 模型按 tier 升序（Strong 优先）作为候选

@@ -123,6 +123,7 @@ coverage*.info
 *.coveragexml
 
 # Others
+.zcode/
 *.dbmdl
 *.dbproj.schemaview
 *.pfx

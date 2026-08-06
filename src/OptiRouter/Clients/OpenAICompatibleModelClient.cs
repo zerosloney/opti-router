@@ -178,4 +178,101 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             return new ModelHealthResult(false, (int)sw.Elapsed.TotalMilliseconds, ex.Message);
         }
     }
+
+    /// <inheritdoc />
+    public async Task<RawChatResponse> CompleteRawAsync(ChatRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var body = request with { Model = _endpoint.Name, Stream = false };
+        var json = JsonSerializer.Serialize(body, _serializeOptions);
+
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
+        httpRequest.Content = new StringContent(json, Encoding.UTF8);
+        httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+        using var response = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new ModelClientException(response.StatusCode, responseBody);
+        }
+
+        return new RawChatResponse(responseBody, TryExtractUsage(responseBody));
+    }
+
+    /// <inheritdoc />
+    public async IAsyncEnumerable<RawStreamLine> StreamRawAsync(ChatRequest request, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var body = request with { Model = _endpoint.Name, Stream = true };
+        var json = JsonSerializer.Serialize(body, _serializeOptions);
+
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
+        httpRequest.Content = new StringContent(json, Encoding.UTF8);
+        httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+
+        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            throw new ModelClientException(response.StatusCode, errorBody);
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        using var reader = new System.IO.StreamReader(stream);
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+
+            if (line is null)
+                yield break;
+
+            if (line.Length == 0)
+                continue;
+
+            if (!line.StartsWith("data: ", StringComparison.Ordinal))
+                continue;
+
+            var data = line.Substring("data: ".Length).Trim();
+
+            if (data == "[DONE]")
+            {
+                yield return new RawStreamLine("[DONE]", null);
+                yield break;
+            }
+
+            yield return new RawStreamLine(data, TryExtractUsage(data));
+        }
+    }
+
+    /// <summary>
+    /// 从 OpenAI 兼容 JSON 中提取 token 用量（usage.prompt_tokens 等）。
+    /// 字段缺失或非 JSON 时返回 null。
+    /// </summary>
+    private static ChatUsage? TryExtractUsage(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("usage", out var usage)) return null;
+
+            int prompt = usage.TryGetProperty("prompt_tokens", out var p) && p.TryGetInt32(out int pv) ? pv : 0;
+            int completion = usage.TryGetProperty("completion_tokens", out var c) && c.TryGetInt32(out int cv) ? cv : 0;
+            int total = usage.TryGetProperty("total_tokens", out var t) && t.TryGetInt32(out int tv) ? tv : prompt + completion;
+            return new ChatUsage { PromptTokens = prompt, CompletionTokens = completion, TotalTokens = total };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 }

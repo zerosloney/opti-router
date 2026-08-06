@@ -10,7 +10,8 @@ public class BudgetGuardPolicyTests
     private static RouterDecision Apply(
         BudgetGuardPolicy policy,
         RouterOptions options,
-        IReadOnlyList<ModelEndpointOptions> candidates)
+        IReadOnlyList<ModelEndpointOptions> candidates,
+        string? sessionId = null)
     {
         var context = new RouterContext
         {
@@ -18,7 +19,8 @@ public class BudgetGuardPolicyTests
             AllModels = options.Models.Where(m => m.Enabled).ToList(),
             Options = options,
             EstimatedInputTokens = 0,
-            FailedModels = new HashSet<string>()
+            FailedModels = new HashSet<string>(),
+            SessionId = sessionId
         };
         var decision = new RouterDecision
         {
@@ -94,12 +96,31 @@ public class BudgetGuardPolicyTests
         options.Budget.DailyBudgetUsd = 100m; // not exhausted
         options.Budget.SessionBudgetUsd = 0.5m;
         options.Budget.EnforceOnExhausted = BudgetExhaustionMode.Degrade;
-        ledger.Record(0.8m); // exceeds session budget
+        ledger.Record(0.8m, "session-1"); // exceeds session budget for session-1
 
         var policy = new BudgetGuardPolicy(ledger);
-        var result = Apply(policy, options, options.Models.Where(m => m.Enabled).ToList());
+        var result = Apply(policy, options, options.Models.Where(m => m.Enabled).ToList(), sessionId: "session-1");
 
         Assert.Single(result.Candidates);
         Assert.Equal("deepseek-chat", result.Candidates[0].Name);
+    }
+
+    [Fact]
+    public void Apply_SessionBudget_NoSessionIdHeader_SkipsSessionCheck()
+    {
+        // 缺 X-Session-Id 头时，即使配置了会话预算也不启用——仅日预算生效。
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m));
+        options.Budget.DailyBudgetUsd = 100m; // not exhausted
+        options.Budget.SessionBudgetUsd = 0.5m; // configured but should be skipped
+        options.Budget.EnforceOnExhausted = BudgetExhaustionMode.Reject;
+
+        var policy = new BudgetGuardPolicy(ledger);
+        // sessionId 为 null，会话预算跳过
+        var result = Apply(policy, options, options.Models.Where(m => m.Enabled).ToList(), sessionId: null);
+
+        Assert.NotEmpty(result.Candidates);
+        Assert.Contains("session=disabled(no-header)", result.Reason);
     }
 }

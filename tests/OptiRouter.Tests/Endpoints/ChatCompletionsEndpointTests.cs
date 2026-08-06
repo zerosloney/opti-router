@@ -15,12 +15,12 @@ using Xunit;
 namespace OptiRouter.Tests.Endpoints;
 
 /// <summary>
-/// 测试用 IModelClient 实现，可根据配置返回成功响应、抛异常或产出流式块。
+/// 测试用 IModelClient 实现，可返回原始响应、抛异常或产出原始流式行。
 /// </summary>
 internal sealed class MockModelClient : IModelClient
 {
-    private readonly Func<ChatRequest, CancellationToken, Task<ChatResponse>>? _completeFunc;
-    private readonly Func<ChatRequest, CancellationToken, IAsyncEnumerable<ChatStreamChunk>>? _streamFunc;
+    private readonly Func<ChatRequest, CancellationToken, Task<RawChatResponse>>? _completeRawFunc;
+    private readonly Func<ChatRequest, CancellationToken, IAsyncEnumerable<RawStreamLine>>? _streamRawFunc;
 
     /// <inheritdoc />
     public ModelEndpointOptions Endpoint { get; }
@@ -29,34 +29,42 @@ internal sealed class MockModelClient : IModelClient
     /// 初始化 mock 客户端。
     /// </summary>
     /// <param name="endpoint">关联的端点配置。</param>
-    /// <param name="completeFunc">非流式回调，为 null 时调用会抛出 NotImplementedException。</param>
-    /// <param name="streamFunc">流式回调，为 null 时调用会抛出 NotImplementedException。</param>
+    /// <param name="completeRawFunc">非流式原始回调，为 null 时调用会抛出 NotImplementedException。</param>
+    /// <param name="streamRawFunc">流式原始回调，为 null 时调用会抛出 NotImplementedException。</param>
     public MockModelClient(
         ModelEndpointOptions endpoint,
-        Func<ChatRequest, CancellationToken, Task<ChatResponse>>? completeFunc = null,
-        Func<ChatRequest, CancellationToken, IAsyncEnumerable<ChatStreamChunk>>? streamFunc = null)
+        Func<ChatRequest, CancellationToken, Task<RawChatResponse>>? completeRawFunc = null,
+        Func<ChatRequest, CancellationToken, IAsyncEnumerable<RawStreamLine>>? streamRawFunc = null)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         Endpoint = endpoint;
-        _completeFunc = completeFunc;
-        _streamFunc = streamFunc;
+        _completeRawFunc = completeRawFunc;
+        _streamRawFunc = streamRawFunc;
     }
 
     /// <inheritdoc />
-    public Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken = default)
+    public Task<RawChatResponse> CompleteRawAsync(ChatRequest request, CancellationToken cancellationToken = default)
     {
-        if (_completeFunc == null)
-            throw new NotImplementedException($"CompleteAsync is not set up for model '{Endpoint.Name}'.");
-        return _completeFunc(request, cancellationToken);
+        if (_completeRawFunc == null)
+            throw new NotImplementedException($"CompleteRawAsync is not set up for model '{Endpoint.Name}'.");
+        return _completeRawFunc(request, cancellationToken);
     }
 
     /// <inheritdoc />
-    public IAsyncEnumerable<ChatStreamChunk> StreamAsync(ChatRequest request, CancellationToken cancellationToken = default)
+    public IAsyncEnumerable<RawStreamLine> StreamRawAsync(ChatRequest request, CancellationToken cancellationToken = default)
     {
-        if (_streamFunc == null)
-            throw new NotImplementedException($"StreamAsync is not set up for model '{Endpoint.Name}'.");
-        return _streamFunc(request, cancellationToken);
+        if (_streamRawFunc == null)
+            throw new NotImplementedException($"StreamRawAsync is not set up for model '{Endpoint.Name}'.");
+        return _streamRawFunc(request, cancellationToken);
     }
+
+    /// <inheritdoc />
+    public Task<Clients.ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken = default)
+        => throw new NotImplementedException("Legacy CompleteAsync not used; use CompleteRawAsync.");
+
+    /// <inheritdoc />
+    public IAsyncEnumerable<Clients.ChatStreamChunk> StreamAsync(ChatRequest request, CancellationToken cancellationToken = default)
+        => throw new NotImplementedException("Legacy StreamAsync not used; use StreamRawAsync.");
 
     /// <inheritdoc />
     public Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default)
@@ -167,36 +175,32 @@ public class ChatCompletionsEndpointTests
         };
     }
 
-    private static async IAsyncEnumerable<ChatStreamChunk> CreateStreamChunks(string text, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    private static async IAsyncEnumerable<RawStreamLine> CreateStreamChunks(string text, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         var words = text.Split(' ');
         for (var i = 0; i < words.Length; i++)
         {
             ct.ThrowIfCancellationRequested();
-            yield return new ChatStreamChunk
-            {
-                Id = "chatcmpl-1",
-                DeltaContent = i == 0 ? words[i] : " " + words[i]
-            };
+            var delta = i == 0 ? words[i] : " " + words[i];
+            yield return new RawStreamLine(
+                $"{{\"id\":\"chatcmpl-1\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"{delta}\"}}}}]}}",
+                null);
             await Task.Yield();
         }
 
-        yield return new ChatStreamChunk
-        {
-            Id = "chatcmpl-1",
-            DeltaContent = null,
-            FinishReason = "stop",
-            Usage = new ChatUsage { PromptTokens = 5, CompletionTokens = 2, TotalTokens = 7 }
-        };
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}",
+            new ChatUsage { PromptTokens = 5, CompletionTokens = 2, TotalTokens = 7 });
+        yield return new RawStreamLine("[DONE]", null);
     }
 
-    private static async IAsyncEnumerable<ChatStreamChunk> CreateFailingStream(
+    private static async IAsyncEnumerable<RawStreamLine> CreateFailingStream(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default,
         HttpStatusCode statusCode = HttpStatusCode.ServiceUnavailable,
         string responseBody = "failed before first chunk")
     {
         ct.ThrowIfCancellationRequested();
-        yield return await Task.FromException<ChatStreamChunk>(
+        yield return await Task.FromException<RawStreamLine>(
             new ModelClientException(statusCode, responseBody));
     }
 
@@ -219,13 +223,9 @@ public class ChatCompletionsEndpointTests
         factory.MockClients["model-a"] = new MockModelClient(endpoint, (req, ct) =>
         {
             onUpstream?.Invoke();
-            return Task.FromResult(new ChatResponse
-            {
-                Id = "chatcmpl-security",
-                Model = "model-a",
-                Choices = new List<ChatChoice>(),
-                Usage = new ChatUsage()
-            });
+            return Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-security\",\"model\":\"model-a\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
+                new ChatUsage()));
         });
         return factory;
     }
@@ -353,22 +353,9 @@ public class ChatCompletionsEndpointTests
         var endpoint = CreateEndpoint("model-a");
         factory.MockClients["model-a"] = new MockModelClient(endpoint, (req, ct) =>
         {
-            var response = new ChatResponse
-            {
-                Id = "chatcmpl-1",
-                Model = "model-a",
-                Choices = new List<ChatChoice>
-                {
-                    new ChatChoice
-                    {
-                        Index = 0,
-                        Message = new ChatMessage { Role = "assistant", Content = "Hello!" },
-                        FinishReason = "stop"
-                    }
-                },
-                Usage = new ChatUsage { PromptTokens = 10, CompletionTokens = 5, TotalTokens = 15 }
-            };
-            return Task.FromResult(response);
+            return Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-1\",\"model\":\"model-a\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Hello!\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}",
+                new ChatUsage { PromptTokens = 10, CompletionTokens = 5, TotalTokens = 15 }));
         });
 
         using var client = factory.CreateClient();
@@ -419,7 +406,9 @@ public class ChatCompletionsEndpointTests
         factory.MockClients["model-a"] = new MockModelClient(endpoint, (req, ct) =>
         {
             attempts++;
-            return Task.FromResult(new ChatResponse());
+            return Task.FromResult(new RawChatResponse(
+                "{\"id\":\"\",\"model\":\"\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
+                new ChatUsage()));
         });
 
         var validRequest = BuildRequest("model-a");
@@ -479,21 +468,9 @@ public class ChatCompletionsEndpointTests
 
         factory.MockClients["model-b"] = new MockModelClient(endpointB, (req, ct) =>
         {
-            return Task.FromResult(new ChatResponse
-            {
-                Id = "chatcmpl-b",
-                Model = "model-b",
-                Choices = new List<ChatChoice>
-                {
-                    new ChatChoice
-                    {
-                        Index = 0,
-                        Message = new ChatMessage { Role = "assistant", Content = "From B" },
-                        FinishReason = "stop"
-                    }
-                },
-                Usage = new ChatUsage { PromptTokens = 5, CompletionTokens = 3, TotalTokens = 8 }
-            });
+            return Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-b\",\"model\":\"model-b\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"From B\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}",
+                new ChatUsage { PromptTokens = 5, CompletionTokens = 3, TotalTokens = 8 }));
         });
 
         using var client = factory.CreateClient();
@@ -545,13 +522,9 @@ public class ChatCompletionsEndpointTests
         factory.MockClients["medium-model"] = new MockModelClient(mediumEndpoint, (req, ct) =>
         {
             mediumAttempts++;
-            return Task.FromResult(new ChatResponse
-            {
-                Id = "chatcmpl-medium",
-                Model = "medium-model",
-                Choices = new List<ChatChoice>(),
-                Usage = new ChatUsage()
-            });
+            return Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-medium\",\"model\":\"medium-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
+                new ChatUsage()));
         });
 
         using var client = factory.CreateClient();
@@ -602,7 +575,9 @@ public class ChatCompletionsEndpointTests
         factory.MockClients["model-b"] = new MockModelClient(endpointB, (req, ct) =>
         {
             fallbackAttempts++;
-            return Task.FromResult(new ChatResponse());
+            return Task.FromResult(new RawChatResponse(
+                "{\"id\":\"\",\"model\":\"\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
+                new ChatUsage()));
         });
 
         using var client = factory.CreateClient();
@@ -683,13 +658,9 @@ public class ChatCompletionsEndpointTests
 
         var endpoint = CreateEndpoint("strong-model");
         factory.MockClients["strong-model"] = new MockModelClient(endpoint, (req, ct) =>
-            Task.FromResult(new ChatResponse
-            {
-                Id = "chatcmpl-1",
-                Model = "strong-model",
-                Choices = new List<ChatChoice>(),
-                Usage = new ChatUsage()
-            }));
+            Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-1\",\"model\":\"strong-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
+                new ChatUsage())));
 
         // Pre-fill ledger to exceed budget.
         var ledger = factory.Services.GetRequiredService<CostLedger>();
@@ -732,7 +703,7 @@ public class ChatCompletionsEndpointTests
         };
 
         var endpoint = CreateEndpoint("model-a");
-        factory.MockClients["model-a"] = new MockModelClient(endpoint, streamFunc: (req, ct) => CreateStreamChunks("hello world", ct));
+        factory.MockClients["model-a"] = new MockModelClient(endpoint, streamRawFunc: (req, ct) => CreateStreamChunks("hello world", ct));
 
         using var client = factory.CreateClient();
         var request = BuildRequest("model-a", stream: true);
@@ -768,10 +739,10 @@ public class ChatCompletionsEndpointTests
         Assert.Equal("[DONE]", dataLines[^1]);
 
         using var firstDoc = JsonDocument.Parse(dataLines[0]);
-        Assert.Equal("hello", firstDoc.RootElement.GetProperty("delta_content").GetString());
+        Assert.Equal("hello", firstDoc.RootElement.GetProperty("choices")[0].GetProperty("delta").GetProperty("content").GetString());
 
         using var lastDoc = JsonDocument.Parse(dataLines[^2]);
-        Assert.Equal("stop", lastDoc.RootElement.GetProperty("finish_reason").GetString());
+        Assert.Equal("stop", lastDoc.RootElement.GetProperty("choices")[0].GetProperty("finish_reason").GetString());
         Assert.Equal(7, lastDoc.RootElement.GetProperty("usage").GetProperty("total_tokens").GetInt32());
 
         var ledger = factory.Services.GetRequiredService<CostLedger>();
@@ -800,9 +771,9 @@ public class ChatCompletionsEndpointTests
         var endpointA = CreateEndpoint("model-a");
         var endpointB = CreateEndpoint("model-b");
 
-        factory.MockClients["model-a"] = new MockModelClient(endpointA, streamFunc: (req, ct) =>
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, streamRawFunc: (req, ct) =>
             throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "model-a failed"));
-        factory.MockClients["model-b"] = new MockModelClient(endpointB, streamFunc: (req, ct) =>
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, streamRawFunc: (req, ct) =>
             throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "model-b failed"));
 
         using var client = factory.CreateClient();
@@ -868,12 +839,12 @@ public class ChatCompletionsEndpointTests
             });
         };
 
-        factory.MockClients["strong-model"] = new MockModelClient(strongEndpoint, streamFunc: (req, ct) =>
+        factory.MockClients["strong-model"] = new MockModelClient(strongEndpoint, streamRawFunc: (req, ct) =>
         {
             strongAttempts++;
             return CreateFailingStream(ct);
         });
-        factory.MockClients["cheap-model"] = new MockModelClient(cheapEndpoint, streamFunc: (req, ct) =>
+        factory.MockClients["cheap-model"] = new MockModelClient(cheapEndpoint, streamRawFunc: (req, ct) =>
         {
             cheapAttempts++;
             return CreateStreamChunks("cheap response", ct);
@@ -895,7 +866,7 @@ public class ChatCompletionsEndpointTests
 
         // Assert
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        Assert.Contains("\"delta_content\":\"cheap\"", body);
+        Assert.Contains("\"content\":\"cheap\"", body);
         Assert.Equal(1, strongAttempts);
         Assert.Equal(1, cheapAttempts);
     }
@@ -923,9 +894,9 @@ public class ChatCompletionsEndpointTests
         var endpointA = CreateEndpoint("model-a");
         var endpointB = CreateEndpoint("model-b");
         int fallbackAttempts = 0;
-        factory.MockClients["model-a"] = new MockModelClient(endpointA, streamFunc: (req, ct) =>
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, streamRawFunc: (req, ct) =>
             CreateFailingStream(ct, HttpStatusCode.UnprocessableEntity, "sensitive upstream body"));
-        factory.MockClients["model-b"] = new MockModelClient(endpointB, streamFunc: (req, ct) =>
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, streamRawFunc: (req, ct) =>
         {
             fallbackAttempts++;
             return CreateStreamChunks("unexpected fallback", ct);
@@ -990,28 +961,14 @@ public class ChatCompletionsEndpointTests
         var cheapEndpoint = CreateEndpoint("cheap-model");
 
         factory.MockClients["strong-model"] = new MockModelClient(strongEndpoint, (req, ct) =>
-            Task.FromResult(new ChatResponse
-            {
-                Id = "chatcmpl-strong",
-                Model = "strong-model",
-                Choices = new List<ChatChoice>
-                {
-                    new ChatChoice { Index = 0, Message = new ChatMessage { Role = "assistant", Content = "Strong" }, FinishReason = "stop" }
-                },
-                Usage = new ChatUsage { PromptTokens = 10, CompletionTokens = 5, TotalTokens = 15 }
-            }));
+            Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-strong\",\"model\":\"strong-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Strong\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}",
+                new ChatUsage { PromptTokens = 10, CompletionTokens = 5, TotalTokens = 15 })));
 
         factory.MockClients["cheap-model"] = new MockModelClient(cheapEndpoint, (req, ct) =>
-            Task.FromResult(new ChatResponse
-            {
-                Id = "chatcmpl-cheap",
-                Model = "cheap-model",
-                Choices = new List<ChatChoice>
-                {
-                    new ChatChoice { Index = 0, Message = new ChatMessage { Role = "assistant", Content = "Cheap" }, FinishReason = "stop" }
-                },
-                Usage = new ChatUsage { PromptTokens = 5, CompletionTokens = 3, TotalTokens = 8 }
-            }));
+            Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-cheap\",\"model\":\"cheap-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"Cheap\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}",
+                new ChatUsage { PromptTokens = 5, CompletionTokens = 3, TotalTokens = 8 })));
 
         // Pre-fill ledger to exceed budget.
         var ledger = factory.Services.GetRequiredService<CostLedger>();

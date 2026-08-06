@@ -32,4 +32,9 @@ public sealed record RouterContext
     /// 最近失败的模型名集合。
     /// </summary>
     public IReadOnlySet<string> FailedModels { get; init; } = new HashSet<string>();
+
+    /// <summary>
+    /// 可选会话 ID（来自 X-Session-Id 头）。null 表示无会话，会话预算不生效。
+    /// </summary>
+    public string? SessionId { get; init; }
 }
