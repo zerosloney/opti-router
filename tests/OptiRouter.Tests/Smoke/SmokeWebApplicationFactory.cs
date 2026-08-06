@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -12,14 +13,25 @@ namespace OptiRouter.Tests.Smoke;
 /// </summary>
 internal sealed class SmokeWebApplicationFactory : WebApplicationFactory<Program>
 {
+    private const string TestProxyApiKey = "test-proxy-key";
+
     /// <summary>
     /// 额外的测试服务配置回调。
     /// </summary>
     public Action<IServiceCollection>? ConfigureTestServicesAction { get; set; }
 
+    public new HttpClient CreateClient()
+    {
+        var client = base.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TestProxyApiKey);
+        return client;
+    }
+
     /// <inheritdoc />
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        builder.UseSetting("OptiRouter:ProxyApiKey", TestProxyApiKey);
+        builder.UseSetting("OptiRouter:RequestsPerMinute", "60");
         builder.ConfigureServices(services =>
         {
             // 不覆盖 IModelClientProvider，让 Program.cs 中注册的真实 ModelClientProvider 生效，

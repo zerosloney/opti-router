@@ -52,11 +52,15 @@ dotnet build OptiRouter.sln -c Release
 
 ```bash
 # Windows PowerShell
+$env:OptiRouter__ProxyApiKey = "your-proxy-api-key"
 $env:OptiRouter__Models__0__ApiKey = "sk-..."
 
 # Linux / macOS
+export OptiRouter__ProxyApiKey="your-proxy-api-key"
 export OptiRouter__Models__0__ApiKey="sk-..."
 ```
+
+`ProxyApiKey` 为空时，所有 `/v1/*` 请求都会被拒绝。
 
 ### 运行
 
@@ -72,9 +76,18 @@ dotnet run --project src/OptiRouter
 curl http://localhost:5000/health
 ```
 
+`/health` 无需 API Key，且不受请求限流影响。
+
 ## 配置说明
 
 `appsettings.json` 中 `OptiRouter` 节点各字段含义：
+
+### 入站安全
+
+| 字段 | 含义 | 默认 |
+|------|------|------|
+| `ProxyApiKey` | 调用 `/v1/*` 时使用的 Bearer API Key；为空时拒绝访问 | 空 |
+| `RequestsPerMinute` | 每个来源 IP 的固定窗口每分钟请求上限 | `60` |
 
 ### Models[]（模型端点列表）
 
@@ -126,6 +139,7 @@ curl http://localhost:5000/health
 
 ```bash
 curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Authorization: Bearer your-proxy-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "auto",
@@ -138,6 +152,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 ```bash
 curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Authorization: Bearer your-proxy-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "auto",

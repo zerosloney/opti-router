@@ -95,6 +95,8 @@ internal sealed class TestModelClientProvider : IModelClientProvider
 /// </summary>
 internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
 {
+    public const string TestProxyApiKey = "test-proxy-key";
+
     /// <summary>
     /// 模型名到 mock 客户端的映射。
     /// </summary>
@@ -105,9 +107,28 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
     /// </summary>
     public Action<IServiceCollection>? ConfigureTestServicesAction { get; set; }
 
+    public string ProxyApiKey { get; set; } = TestProxyApiKey;
+
+    public int RequestsPerMinute { get; set; } = 60;
+
+    public new HttpClient CreateClient()
+    {
+        return CreateClient(TestProxyApiKey);
+    }
+
+    public HttpClient CreateClient(string? apiKey)
+    {
+        var client = base.CreateClient();
+        if (apiKey is not null)
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        return client;
+    }
+
     /// <inheritdoc />
     protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
     {
+        builder.UseSetting("OptiRouter:ProxyApiKey", ProxyApiKey);
+        builder.UseSetting("OptiRouter:RequestsPerMinute", RequestsPerMinute.ToString());
         builder.ConfigureServices(services =>
         {
             services.AddSingleton<IModelClientProvider>(new TestModelClientProvider(MockClients));
@@ -178,6 +199,136 @@ public class ChatCompletionsEndpointTests
         yield return await Task.FromException<ChatStreamChunk>(
             new ModelClientException(statusCode, responseBody));
     }
+
+    private static TestWebApplicationFactory CreateSecurityFactory(Action? onUpstream = null)
+    {
+        var factory = new TestWebApplicationFactory();
+        var endpoint = CreateEndpoint("model-a");
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(endpoint);
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+        factory.MockClients["model-a"] = new MockModelClient(endpoint, (req, ct) =>
+        {
+            onUpstream?.Invoke();
+            return Task.FromResult(new ChatResponse
+            {
+                Id = "chatcmpl-security",
+                Model = "model-a",
+                Choices = new List<ChatChoice>(),
+                Usage = new ChatUsage()
+            });
+        });
+        return factory;
+    }
+
+    #region Security tests
+
+    [Theory]
+    [InlineData(TestWebApplicationFactory.TestProxyApiKey, null)]
+    [InlineData(TestWebApplicationFactory.TestProxyApiKey, "wrong-key")]
+    [InlineData("", TestWebApplicationFactory.TestProxyApiKey)]
+    public async Task Post_UnauthorizedOrUnconfigured_Returns401BeforeCallingUpstream(
+        string configuredKey,
+        string? providedKey)
+    {
+        // Arrange
+        int attempts = 0;
+        using var factory = CreateSecurityFactory(() => attempts++);
+        factory.ProxyApiKey = configuredKey;
+        using var client = factory.CreateClient(providedKey);
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+
+        // Act
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal(0, attempts);
+    }
+
+    [Fact]
+    public async Task Post_CorrectProxyApiKey_ReachesEndpoint()
+    {
+        // Arrange
+        int attempts = 0;
+        using var factory = CreateSecurityFactory(() => attempts++);
+        using var client = factory.CreateClient(TestWebApplicationFactory.TestProxyApiKey);
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+
+        // Act
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public async Task Post_OverLimit_Returns429AndAuthenticationRunsFirst()
+    {
+        // Arrange
+        int attempts = 0;
+        using var factory = CreateSecurityFactory(() => attempts++);
+        factory.RequestsPerMinute = 1;
+        using var unauthorizedClient = factory.CreateClient("wrong-key");
+        using var authorizedClient = factory.CreateClient(TestWebApplicationFactory.TestProxyApiKey);
+
+        // Act
+        using var unauthorizedContent = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        var unauthorized = await unauthorizedClient.PostAsync("/v1/chat/completions", unauthorizedContent);
+        using var firstContent = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        var first = await authorizedClient.PostAsync("/v1/chat/completions", firstContent);
+        using var secondContent = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        var second = await authorizedClient.PostAsync("/v1/chat/completions", secondContent);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthorized.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public async Task Health_WithoutKey_IsPublicAndUnlimited()
+    {
+        // Arrange
+        using var factory = CreateSecurityFactory();
+        factory.RequestsPerMinute = 1;
+        using var client = factory.CreateClient(apiKey: null);
+
+        // Act
+        var first = await client.GetAsync("/health");
+        var second = await client.GetAsync("/health");
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+    }
+
+    [Fact]
+    public void InvalidRequestsPerMinute_FailsStartup()
+    {
+        // Arrange
+        using var factory = CreateSecurityFactory();
+        factory.RequestsPerMinute = 0;
+
+        // Act
+        var exception = Assert.Throws<InvalidOperationException>(() => factory.CreateClient());
+
+        // Assert
+        Assert.Contains("OptiRouter:RequestsPerMinute must be greater than zero.", exception.ToString());
+    }
+
+    #endregion
 
     #region Non-streaming tests
 

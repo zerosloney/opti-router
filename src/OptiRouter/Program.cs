@@ -1,3 +1,8 @@
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
@@ -41,7 +46,57 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
 // t4: 注册降级重试编排器。
 builder.Services.AddSingleton<ProxyOrchestrator>();
 
+int requestsPerMinute = builder.Configuration.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? 60;
+if (requestsPerMinute <= 0)
+    throw new InvalidOperationException("OptiRouter:RequestsPerMinute must be greater than zero.");
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
+    {
+        if (!context.Request.Path.StartsWithSegments("/v1"))
+            return RateLimitPartition.GetNoLimiter("public");
+
+        string sourceIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(sourceIp, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = requestsPerMinute,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        });
+    });
+});
+
 var app = builder.Build();
+
+app.Use(async (context, next) =>
+{
+    if (!context.Request.Path.StartsWithSegments("/v1"))
+    {
+        await next(context).ConfigureAwait(false);
+        return;
+    }
+
+    string? configuredKey = app.Configuration["OptiRouter:ProxyApiKey"];
+    string? providedKey = null;
+    if (AuthenticationHeaderValue.TryParse(context.Request.Headers.Authorization, out var authorization)
+        && authorization.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase))
+    {
+        providedKey = authorization.Parameter;
+    }
+
+    if (!IsValidApiKey(configuredKey, providedKey))
+    {
+        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        return;
+    }
+
+    await next(context).ConfigureAwait(false);
+});
+
+app.UseRateLimiter();
 
 app.MapGet("/health", () => "ok");
 
@@ -49,3 +104,13 @@ app.MapGet("/health", () => "ok");
 app.MapChatCompletions();
 
 app.Run();
+
+static bool IsValidApiKey(string? configuredKey, string? providedKey)
+{
+    if (string.IsNullOrWhiteSpace(configuredKey) || string.IsNullOrEmpty(providedKey))
+        return false;
+
+    byte[] configuredHash = SHA256.HashData(Encoding.UTF8.GetBytes(configuredKey));
+    byte[] providedHash = SHA256.HashData(Encoding.UTF8.GetBytes(providedKey));
+    return CryptographicOperations.FixedTimeEquals(configuredHash, providedHash);
+}
