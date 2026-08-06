@@ -169,11 +169,14 @@ public class ChatCompletionsEndpointTests
         };
     }
 
-    private static async IAsyncEnumerable<ChatStreamChunk> CreateFailingStream([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    private static async IAsyncEnumerable<ChatStreamChunk> CreateFailingStream(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default,
+        HttpStatusCode statusCode = HttpStatusCode.ServiceUnavailable,
+        string responseBody = "failed before first chunk")
     {
         ct.ThrowIfCancellationRequested();
         yield return await Task.FromException<ChatStreamChunk>(
-            new ModelClientException(HttpStatusCode.ServiceUnavailable, "failed before first chunk"));
+            new ModelClientException(statusCode, responseBody));
     }
 
     #region Non-streaming tests
@@ -236,8 +239,66 @@ public class ChatCompletionsEndpointTests
         Assert.True(ledger.GetSpend().Session > 0, "Expected cost to be recorded after successful request.");
     }
 
-    [Fact]
-    public async Task Post_NonStreaming_PrimaryFails_FallsBackToNextCandidate()
+    [Theory]
+    [InlineData("messages")]
+    [InlineData("role")]
+    [InlineData("content-null")]
+    [InlineData("temperature-low")]
+    [InlineData("temperature-high")]
+    [InlineData("max-tokens")]
+    public async Task Post_InvalidRequest_Returns400BeforeCallingUpstream(string invalidField)
+    {
+        // Arrange
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        int attempts = 0;
+        var endpoint = CreateEndpoint("model-a");
+        factory.MockClients["model-a"] = new MockModelClient(endpoint, (req, ct) =>
+        {
+            attempts++;
+            return Task.FromResult(new ChatResponse());
+        });
+
+        var validRequest = BuildRequest("model-a");
+        var request = invalidField switch
+        {
+            "messages" => validRequest with { Messages = new List<ChatMessage>() },
+            "role" => validRequest with { Messages = new List<ChatMessage> { new ChatMessage { Role = " " } } },
+            "content-null" => validRequest with { Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = null! } } },
+            "temperature-low" => validRequest with { Temperature = -0.1 },
+            "temperature-high" => validRequest with { Temperature = 2.1 },
+            "max-tokens" => validRequest with { MaxTokens = 0 },
+            _ => throw new ArgumentOutOfRangeException(nameof(invalidField))
+        };
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+
+        // Act
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal(0, attempts);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(HttpStatusCode.RequestTimeout)]
+    [InlineData(HttpStatusCode.TooManyRequests)]
+    public async Task Post_NonStreaming_RetryableFailure_FallsBackToNextCandidate(HttpStatusCode? statusCode)
     {
         // Arrange
         using var factory = new TestWebApplicationFactory();
@@ -259,7 +320,11 @@ public class ChatCompletionsEndpointTests
         var endpointB = CreateEndpoint("model-b");
 
         factory.MockClients["model-a"] = new MockModelClient(endpointA, (req, ct) =>
-            throw new ModelClientException(HttpStatusCode.BadRequest, "model-a failed"));
+        {
+            if (statusCode is not null)
+                throw new ModelClientException(statusCode.Value, "model-a failed");
+            throw new HttpRequestException("model-a network failed");
+        });
 
         factory.MockClients["model-b"] = new MockModelClient(endpointB, (req, ct) =>
         {
@@ -356,6 +421,50 @@ public class ChatCompletionsEndpointTests
         Assert.Equal("medium-model", doc.RootElement.GetProperty("model").GetString());
         Assert.Equal(1, strongAttempts);
         Assert.Equal(1, mediumAttempts);
+    }
+
+    [Fact]
+    public async Task Post_NonStreaming_Upstream4xx_ReturnsSameStatusWithoutFailoverOrResponseBody()
+    {
+        // Arrange
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Models.Add(CreateEndpoint("model-b"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = true;
+                opt.Routing.FailoverFailureThreshold = 1;
+            });
+        };
+
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        int fallbackAttempts = 0;
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, (req, ct) =>
+            throw new ModelClientException(HttpStatusCode.UnprocessableEntity, "sensitive upstream body"));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, (req, ct) =>
+        {
+            fallbackAttempts++;
+            return Task.FromResult(new ChatResponse());
+        });
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+
+        // Act
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Equal(0, fallbackAttempts);
+        Assert.DoesNotContain("sensitive upstream body", await response.Content.ReadAsStringAsync());
+        Assert.False(factory.Services.GetRequiredService<ModelHealthTracker>().IsCoolingDown("model-a"));
     }
 
     [Fact]
@@ -541,9 +650,9 @@ public class ChatCompletionsEndpointTests
         var endpointB = CreateEndpoint("model-b");
 
         factory.MockClients["model-a"] = new MockModelClient(endpointA, streamFunc: (req, ct) =>
-            throw new ModelClientException(HttpStatusCode.BadRequest, "model-a failed"));
+            throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "model-a failed"));
         factory.MockClients["model-b"] = new MockModelClient(endpointB, streamFunc: (req, ct) =>
-            throw new ModelClientException(HttpStatusCode.BadRequest, "model-b failed"));
+            throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "model-b failed"));
 
         using var client = factory.CreateClient();
         var request = BuildRequest("model-a", stream: true);
@@ -638,6 +747,51 @@ public class ChatCompletionsEndpointTests
         Assert.Contains("\"delta_content\":\"cheap\"", body);
         Assert.Equal(1, strongAttempts);
         Assert.Equal(1, cheapAttempts);
+    }
+
+    [Fact]
+    public async Task Post_Streaming_Upstream4xxBeforeFirstChunk_ReturnsSameStatusWithoutFailoverOrResponseBody()
+    {
+        // Arrange
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Models.Add(CreateEndpoint("model-b"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = true;
+                opt.Routing.FailoverFailureThreshold = 1;
+            });
+        };
+
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        int fallbackAttempts = 0;
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, streamFunc: (req, ct) =>
+            CreateFailingStream(ct, HttpStatusCode.UnprocessableEntity, "sensitive upstream body"));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, streamFunc: (req, ct) =>
+        {
+            fallbackAttempts++;
+            return CreateStreamChunks("unexpected fallback", ct);
+        });
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("model-a", stream: true);
+        using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+
+        // Act
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+        Assert.Equal(0, fallbackAttempts);
+        Assert.DoesNotContain("sensitive upstream body", await response.Content.ReadAsStringAsync());
+        Assert.False(factory.Services.GetRequiredService<ModelHealthTracker>().IsCoolingDown("model-a"));
     }
 
     #endregion

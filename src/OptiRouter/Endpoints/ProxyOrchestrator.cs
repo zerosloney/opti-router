@@ -103,11 +103,17 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                     return response;
                 }
-                catch (ModelClientException ex)
+                catch (ModelClientException ex) when (IsRetryable(ex))
                 {
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _logger.LogWarning(ex, "Model {Name} failed (status {Status}), trying next candidate{Tripped}",
+                    _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
+                }
+                catch (HttpRequestException ex)
+                {
+                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                    _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
+                        candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
@@ -167,6 +173,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 ChatStreamChunk firstChunk = default!;
                 ChatUsage? finalUsage = null;
                 Exception? preStreamFailure = null;
+                bool hasFirstChunk = false;
 
                 // Phase 1: 创建 enumerator 并尝试拿到第一个 chunk。
                 // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
@@ -178,15 +185,21 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         firstChunk = enumerator.Current;
                         if (firstChunk.Usage is not null)
                             finalUsage = firstChunk.Usage;
+                        hasFirstChunk = true;
                     }
                     else
                     {
                         // 空流：视为成功但无内容，继续尝试下一个候选。
                         await enumerator.DisposeAsync().ConfigureAwait(false);
+                        enumerator = null;
                         continue;
                     }
                 }
-                catch (ModelClientException ex)
+                catch (ModelClientException ex) when (IsRetryable(ex))
+                {
+                    preStreamFailure = ex;
+                }
+                catch (HttpRequestException ex)
                 {
                     preStreamFailure = ex;
                 }
@@ -196,7 +209,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 finally
                 {
-                    if (preStreamFailure is not null && enumerator is not null)
+                    if (!hasFirstChunk && enumerator is not null)
                     {
                         await enumerator.DisposeAsync().ConfigureAwait(false);
                     }
@@ -205,8 +218,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (preStreamFailure is not null)
                 {
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _logger.LogWarning(preStreamFailure, "Streaming model {Name} failed pre-stream, trying next{Tripped}",
-                        candidate.Name, tripped ? " (circuit tripped)" : "");
+                    string failure = preStreamFailure is ModelClientException modelFailure
+                        ? $"status {(int)modelFailure.StatusCode}"
+                        : preStreamFailure.Message;
+                    _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
+                        candidate.Name, failure, tripped ? " (circuit tripped)" : "");
                     continue;
                 }
 
@@ -266,5 +282,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         if (_clientProvider is IAsyncDisposable ad) await ad.DisposeAsync().ConfigureAwait(false);
         else if (_clientProvider is IDisposable d) d.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    private static bool IsRetryable(ModelClientException exception)
+    {
+        int statusCode = (int)exception.StatusCode;
+        return statusCode is 408 or 429 or >= 500 and <= 599;
     }
 }
