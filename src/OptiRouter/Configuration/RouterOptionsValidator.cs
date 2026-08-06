@@ -49,6 +49,16 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.LongInputThresholdTokens 必须大于 0。");
         }
 
+        if (options.Budget.UsePersistentStore && string.IsNullOrWhiteSpace(options.Budget.StorePath))
+        {
+            return ValidateOptionsResult.Fail("Budget.StorePath 不能为空（当 UsePersistentStore 为 true 时）。");
+        }
+
+        if (options.Budget.SessionEvictionHours < 0)
+        {
+            return ValidateOptionsResult.Fail("Budget.SessionEvictionHours 不能为负数。");
+        }
+
         return ValidateOptionsResult.Success;
     }
 }

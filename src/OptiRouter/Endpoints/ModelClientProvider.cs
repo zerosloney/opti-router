@@ -7,8 +7,9 @@ namespace OptiRouter.Endpoints;
 
 /// <summary>
 /// 生产环境 <see cref="IModelClientProvider"/> 实现，按模型名缓存客户端实例。
-/// intentional-simple：每模型缓存一个 IModelClient 实例，生命周期与 provider 同；
-/// 配置热更新场景需额外处理（此处 MVP 不做，配置变更需重启）。
+/// intentional-simple：每模型缓存一个 IModelClient 实例，生命周期与 provider 同。
+/// 配置在启动时 bind 一次；Models 端点（BaseUrl/ApiKey/Timeout/Tier）变更需重启进程生效。
+/// Routing 开关经 IOptionsMonitor（ProxyOrchestrator 注入）可在 reload 后生效，与此缓存语义解耦。
 /// </summary>
 public sealed class ModelClientProvider : IModelClientProvider, IDisposable
 {

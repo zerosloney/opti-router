@@ -3,11 +3,16 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
+using OptiRouter.Health;
 using OptiRouter.Routing;
+
+// 初始化 SQLitePCLRaw 原生库（使用 bundle_e_sqlite3）。必须在使用 Microsoft.Data.Sqlite 前调用一次。
+SQLitePCL.Batteries_V2.Init();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -24,15 +29,40 @@ builder.Services.AddSingleton<ModelClientFactory>();
 // 注册模型客户端提供者（生产实现，按模型名缓存 IModelClient）。
 builder.Services.AddSingleton<IModelClientProvider, ModelClientProvider>();
 
+// 成本账本存储：UsePersistentStore=true 用 SQLite（跨重启保留），否则用内存（重启归零）。
+// SQLite 文件目录在构建时创建，确保单例构造时路径可写。
+builder.Services.AddSingleton<ICostLedgerStore>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    if (!options.Budget.UsePersistentStore)
+    {
+        return new InMemoryCostLedgerStore();
+    }
+
+    string storePath = options.Budget.StorePath;
+    string? dir = Path.GetDirectoryName(storePath);
+    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+    {
+        Directory.CreateDirectory(dir);
+    }
+    return new SqliteCostLedgerStore(storePath);
+});
+
 // t3: 注册成本账本、跨请求模型健康跟踪器（熔断）和路由引擎。
-builder.Services.AddSingleton<CostLedger>();
+builder.Services.AddSingleton<CostLedger>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    var store = sp.GetRequiredService<ICostLedgerStore>();
+    return new CostLedger(store, options.Budget.SessionEvictionHours);
+});
 builder.Services.AddSingleton<ModelHealthTracker>();
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
     var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
-    // 策略链全部注册，每个策略 Apply 内依据当前 RoutingOptions 开关决定是否生效，
-    // 以支持配置热更新（开关切换无需重启）。
+    // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入）。
+    // 注意：Models 端点配置（BaseUrl/ApiKey/Timeout）按模型名缓存于 ModelClientProvider，
+    // 变更需重启进程生效；Routing 开关经 IOptionsMonitor reload 后生效，与此缓存语义解耦。
     var policies = new List<IRouterPolicy>
     {
         new RuleClassifierPolicy(),
@@ -45,6 +75,10 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
 
 // t4: 注册降级重试编排器。
 builder.Services.AddSingleton<ProxyOrchestrator>();
+
+// 健康检查：验证内部依赖（成本账本 store 连接正常）。
+builder.Services.AddHealthChecks()
+    .AddCheck<CostLedgerHealthCheck>("cost-ledger", failureStatus: HealthStatus.Unhealthy);
 
 int requestsPerMinute = builder.Configuration.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? 60;
 if (requestsPerMinute <= 0)
@@ -98,7 +132,21 @@ app.Use(async (context, next) =>
 
 app.UseRateLimiter();
 
-app.MapGet("/health", () => "ok");
+// 健康检查端点，无需 API Key，不受限流影响（非 /v1/* 路径）。
+app.MapHealthChecks("/health");
+
+// 生产环境 HTTPS 检查。
+if (builder.Environment.IsProduction())
+{
+    string? urls = app.Configuration["ASPNETCORE_URLS"];
+    bool hasHttps = urls is not null && urls.Contains("https://", StringComparison.OrdinalIgnoreCase);
+    if (!hasHttps)
+    {
+        app.Logger.LogWarning(
+            "Production environment without HTTPS. ProxyApiKey will transit in plaintext. " +
+            "Configure ASPNETCORE_URLS with https:// or terminate TLS at a reverse proxy.");
+    }
+}
 
 // t4: 暴露 OpenAI 兼容 Chat Completions 端点。
 app.MapChatCompletions();

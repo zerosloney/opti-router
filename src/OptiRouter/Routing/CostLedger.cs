@@ -1,18 +1,48 @@
-using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace OptiRouter.Routing;
 
 /// <summary>
-/// 内存成本账本，线程安全。支持日预算（全局）与会话预算（按 X-Session-Id 隔离）。
+/// 成本账本，线程安全。支持日预算（全局）与会话预算（按 X-Session-Id 隔离）。
+/// 实际状态委托 <see cref="ICostLedgerStore"/> 持久化；内存实现用于测试，SQLite 实现用于生产。
+/// 会话账户按 sessionEvictionHours 懒淘汰，防止无界增长。
 /// </summary>
 public sealed class CostLedger
 {
-    private readonly object _lock = new();
-    private decimal _dailySpend;
-    private decimal _sessionSpend;
-    private DateTime _dailyResetDate = DateTime.UtcNow.Date;
-    // 会话维度花费隔离：sessionId -> spend。
-    private readonly ConcurrentDictionary<string, decimal> _sessionSpends = new();
+    private readonly ICostLedgerStore _store;
+    private readonly object _resetLock = new();
+    private DateTime _lastDailyDate = DateTime.UtcNow.Date;
+    private readonly TimeSpan? _sessionEvictionAge;
+    private readonly TimeSpan _evictionCheckInterval;
+    private DateTime _lastEvictionCheck = DateTime.UtcNow;
+    private readonly bool _evictionEnabled;
+
+    /// <summary>
+    /// 用指定存储初始化。不传则用内存存储（保持 <c>new CostLedger()</c> 现有测试零改动）。
+    /// </summary>
+    /// <param name="store">持久化存储；为 null 时回退到 <see cref="InMemoryCostLedgerStore"/>。</param>
+    /// <param name="sessionEvictionHours">会话淘汰年龄（小时），超过此时长无活动的会话被清理。
+    /// 为 null 时禁用淘汰（测试默认行为）。生产建议 24。</param>
+    /// <param name="evictionCheckIntervalMinutes">淘汰检查间隔分钟，默认 60。</param>
+    public CostLedger(
+        ICostLedgerStore? store = null,
+        int? sessionEvictionHours = null,
+        int evictionCheckIntervalMinutes = 60)
+    {
+        _store = store ?? new InMemoryCostLedgerStore();
+        _sessionEvictionAge = sessionEvictionHours is { } h && h > 0
+            ? TimeSpan.FromHours(h)
+            : null;
+        _evictionCheckInterval = TimeSpan.FromMinutes(
+            evictionCheckIntervalMinutes > 0 ? evictionCheckIntervalMinutes : 60);
+        _evictionEnabled = _sessionEvictionAge is not null;
+
+        if (_evictionEnabled)
+        {
+            // 启动时清理上次运行残留的过期会话。
+            TryEvictStaleSessions(force: true);
+        }
+    }
 
     /// <summary>
     /// 记录一笔成本。sessionId 非空时同时累加到该会话账户。
@@ -21,29 +51,24 @@ public sealed class CostLedger
     /// <param name="sessionId">可选会话 ID。null 或空时仅记日预算。</param>
     public void Record(decimal cost, string? sessionId = null)
     {
-        lock (_lock)
-        {
-            ResetDailyIfNewDay();
-            _dailySpend += cost;
-            _sessionSpend += cost;
-        }
+        ResetDailyIfNewDay();
+        _store.AddDaily(DateTime.UtcNow, cost);
+        _store.AddTotal(cost);
 
         if (!string.IsNullOrEmpty(sessionId))
         {
-            _sessionSpends.AddOrUpdate(sessionId, cost, (_, acc) => acc + cost);
+            _store.AddSession(sessionId, cost);
+            TryEvictStaleSessions();
         }
     }
 
     /// <summary>
-    /// 获取日花费和全局会话花费（所有请求聚合）。
+    /// 获取日花费和全局累计花费（自首次启动以来所有请求，不随日 reset 清零）。
     /// </summary>
     public (decimal Daily, decimal Session) GetSpend()
     {
-        lock (_lock)
-        {
-            ResetDailyIfNewDay();
-            return (_dailySpend, _sessionSpend);
-        }
+        ResetDailyIfNewDay();
+        return (_store.GetDaily(DateTime.UtcNow), _store.GetTotal());
     }
 
     /// <summary>
@@ -51,11 +76,8 @@ public sealed class CostLedger
     /// </summary>
     public decimal GetDailySpend()
     {
-        lock (_lock)
-        {
-            ResetDailyIfNewDay();
-            return _dailySpend;
-        }
+        ResetDailyIfNewDay();
+        return _store.GetDaily(DateTime.UtcNow);
     }
 
     /// <summary>
@@ -63,18 +85,15 @@ public sealed class CostLedger
     /// </summary>
     public decimal GetSessionSpend(string sessionId)
     {
-        return _sessionSpends.TryGetValue(sessionId, out decimal spend) ? spend : 0m;
+        return _store.GetSession(sessionId);
     }
 
     /// <summary>
-    /// 重置全局会话花费（不重置日花费和按会话账户）。
+    /// 重置全局累计花费（不重置日花费和按会话账户）。
     /// </summary>
     public void ResetSession()
     {
-        lock (_lock)
-        {
-            _sessionSpend = 0;
-        }
+        _store.ResetTotal();
     }
 
     /// <summary>
@@ -82,28 +101,54 @@ public sealed class CostLedger
     /// </summary>
     public void ResetSession(string sessionId)
     {
-        _sessionSpends.TryRemove(sessionId, out _);
+        _store.ResetSession(sessionId);
     }
 
     /// <summary>
-    /// 重置日花费和全局会话花费（不清理按会话账户，需单独调用 <see cref="ResetSession(string)"/>）。
+    /// 重置全部记录（日 + 所有会话）。
     /// </summary>
     public void ResetAll()
     {
-        lock (_lock)
+        lock (_resetLock)
         {
-            _dailySpend = 0;
-            _sessionSpend = 0;
-            _dailyResetDate = DateTime.UtcNow.Date;
+            _store.ClearAll();
+            _lastDailyDate = DateTime.UtcNow.Date;
         }
     }
 
     private void ResetDailyIfNewDay()
     {
-        if (DateTime.UtcNow.Date > _dailyResetDate)
+        DateTime today = DateTime.UtcNow.Date;
+        // 快路径：同日不进 lock。
+        if (today == _lastDailyDate) return;
+
+        lock (_resetLock)
         {
-            _dailySpend = 0;
-            _dailyResetDate = DateTime.UtcNow.Date;
+            if (today == _lastDailyDate) return;
+            _store.ResetDaily();
+            _lastDailyDate = today;
         }
+    }
+
+    private void TryEvictStaleSessions(bool force = false)
+    {
+        if (!_evictionEnabled) return;
+
+        DateTime now = DateTime.UtcNow;
+        if (!force && now - _lastEvictionCheck < _evictionCheckInterval)
+            return;
+
+        // intentional-simple: 每次检查的时间窗口内只淘汰一次，避免多线程重复。
+        // 淘汰发生在 Record 调用路径上，无需独立定时器。
+        lock (_resetLock)
+        {
+            if (!force && now - _lastEvictionCheck < _evictionCheckInterval)
+                return;
+            _lastEvictionCheck = now;
+        }
+
+        Debug.Assert(_sessionEvictionAge is not null);
+        DateTime cutoff = now - _sessionEvictionAge!.Value;
+        _store.EvictSessionsBefore(cutoff);
     }
 }

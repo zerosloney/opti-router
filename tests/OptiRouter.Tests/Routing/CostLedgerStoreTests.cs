@@ -1,0 +1,234 @@
+using OptiRouter.Routing;
+using Xunit;
+
+namespace OptiRouter.Tests.Routing;
+
+/// <summary>
+/// 成本账本存储契约测试：对内存与 SQLite 两种实现跑同一套断言，
+/// 确保两者行为一致。SQLite 额外测持久化与并发。
+/// </summary>
+public class CostLedgerStoreTests
+{
+    /// <summary>
+    /// 返回被测 store 工厂列表。每个工厂返回一个独立、初始干净的 store 实例。
+    /// </summary>
+    public static IEnumerable<object[]> StoreFactories()
+    {
+        yield return new object[] { (Func<ICostLedgerStore>)(static () => new InMemoryCostLedgerStore()) };
+        // SQLite 用临时文件，每次新建独立 DB。
+        yield return new object[] { (Func<ICostLedgerStore>)(() => new SqliteCostLedgerStore(TempDbPath())) };
+    }
+
+    private static string TempDbPath()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "optirouter-tests-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, "test-budget.db");
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void AddDaily_AccumulatesAtomically(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow;
+
+        Assert.Equal(1.5m, store.AddDaily(today, 1.5m));
+        Assert.Equal(2.5m, store.AddDaily(today, 1.0m));
+        Assert.Equal(2.5m, store.GetDaily(today));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void AddSession_AccumulatesAtomically(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+
+        Assert.Equal(0.8m, store.AddSession("s1", 0.8m));
+        Assert.Equal(1.3m, store.AddSession("s1", 0.5m));
+        Assert.Equal(1.3m, store.GetSession("s1"));
+        Assert.Equal(0m, store.GetSession("s2"));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void AddTotal_AccumulatesAcrossResets(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+
+        Assert.Equal(2.0m, store.AddTotal(2.0m));
+        store.ResetDaily();
+        // total 不受 daily reset 影响
+        Assert.Equal(2.0m, store.GetTotal());
+        Assert.Equal(3.5m, store.AddTotal(1.5m));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetDaily_NonExistentDate_ReturnsZero(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        Assert.Equal(0m, store.GetDaily(DateTime.UtcNow));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void ResetDaily_ClearsAllDays(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow;
+        store.AddDaily(today, 5.0m);
+        Assert.Equal(5.0m, store.GetDaily(today));
+
+        store.ResetDaily();
+        Assert.Equal(0m, store.GetDaily(today));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void ResetSession_ClearsSpecificSessionOnly(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        store.AddSession("s1", 1.0m);
+        store.AddSession("s2", 2.0m);
+
+        store.ResetSession("s1");
+        Assert.Equal(0m, store.GetSession("s1"));
+        Assert.Equal(2.0m, store.GetSession("s2"));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void ClearAll_WipesEverything(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow;
+        store.AddDaily(today, 1.0m);
+        store.AddSession("s1", 2.0m);
+        store.AddTotal(3.0m);
+
+        store.ClearAll();
+        Assert.Equal(0m, store.GetDaily(today));
+        Assert.Equal(0m, store.GetSession("s1"));
+        Assert.Equal(0m, store.GetTotal());
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void AddDaily_DifferentDates_Isolated(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow.Date;
+        var yesterday = today.AddDays(-1);
+
+        store.AddDaily(today, 10m);
+        store.AddDaily(yesterday, 20m);
+
+        Assert.Equal(10m, store.GetDaily(today));
+        Assert.Equal(20m, store.GetDaily(yesterday));
+    }
+
+[Theory]
+    [MemberData(nameof(StoreFactories))]
+    public async Task ConcurrentAdds_AccumulateCorrectly(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow;
+        int threads = 10;
+        decimal perThread = 0.1m;
+
+        var tasks = Enumerable.Range(0, threads)
+            .Select(_ => Task.Run(() => store.AddDaily(today, perThread)))
+            .ToArray();
+        await Task.WhenAll(tasks);
+
+        Assert.Equal(threads * perThread, store.GetDaily(today));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void EvictSessionsBefore_RemovesStale(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+
+        // 写入 s1，等 10ms，写入 s2，等 10ms，写入 s3
+        store.AddSession("s1", 1.0m);
+        Thread.Sleep(10);
+        var between = DateTime.UtcNow;
+        store.AddSession("s2", 2.0m);
+        Thread.Sleep(10);
+        store.AddSession("s3", 3.0m);
+
+        // 淘汰 s1（s1 在 between 之前写入）
+        int removed = store.EvictSessionsBefore(between);
+        Assert.Equal(1, removed);
+        Assert.Equal(0m, store.GetSession("s1"));
+        Assert.Equal(2.0m, store.GetSession("s2"));
+        Assert.Equal(3.0m, store.GetSession("s3"));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void EvictSessionsBefore_KeepsRecent(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var now = DateTime.UtcNow;
+
+        store.AddSession("recent", 5.0m);
+        // 淘汰早于 now-1h 的，recent 在 now 写入，应保留
+        int removed = store.EvictSessionsBefore(now.AddHours(-1));
+        Assert.Equal(0, removed);
+        Assert.Equal(5.0m, store.GetSession("recent"));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void EvictSessionsBefore_NoSessions_ReturnsZero(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        int removed = store.EvictSessionsBefore(DateTime.UtcNow);
+        Assert.Equal(0, removed);
+    }
+
+    // ---- SQLite 专属：持久化跨实例 ----
+
+    [Fact]
+    public void Sqlite_PersistsAcrossInstances()
+    {
+        string path = TempDbPath();
+        try
+        {
+            using (var a = new SqliteCostLedgerStore(path))
+            {
+                var today = DateTime.UtcNow;
+                a.AddDaily(today, 1.5m);
+                a.AddSession("s1", 2.0m);
+                a.AddTotal(3.0m);
+            }
+
+            // 新实例打开同一文件，应读到旧数据
+            using var b = new SqliteCostLedgerStore(path);
+            Assert.Equal(1.5m, b.GetDaily(DateTime.UtcNow));
+            Assert.Equal(2.0m, b.GetSession("s1"));
+            Assert.Equal(3.0m, b.GetTotal());
+        }
+        finally
+        {
+            CleanupDb(path);
+        }
+    }
+
+    private static void CleanupDb(string path)
+    {
+        try
+        {
+            if (File.Exists(path)) File.Delete(path);
+            if (File.Exists(path + "-wal")) File.Delete(path + "-wal");
+            if (File.Exists(path + "-shm")) File.Delete(path + "-shm");
+            string? dir = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+        catch { /* 测试清理容忍失败 */ }
+    }
+}

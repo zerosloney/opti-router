@@ -27,7 +27,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// </summary>
     /// <param name="clientProvider">模型客户端提供者。</param>
     /// <param name="engine">路由引擎。</param>
-    /// <param name="options">路由配置热更新监视器。</param>
+    /// <param name="options">路由配置监视器。Routing 开关经 reload 可生效；
+    /// 但 Models 端点（BaseUrl/ApiKey/Timeout）按模型名缓存在 ModelClientProvider，变更需重启进程。</param>
     /// <param name="ledger">成本账本。</param>
     /// <param name="healthTracker">跨请求模型健康跟踪器。</param>
     /// <param name="logger">日志记录器。</param>
@@ -79,6 +80,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         {
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
 
+            if (_logger.IsEnabled(LogLevel.Debug))
+                _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
+                    decision.Reason, string.Join(", ", decision.Candidates.Select(c => c.Name)));
+
             if (decision.Candidates.Count == 0)
             {
                 if (decision.Reason.Contains("reject", StringComparison.OrdinalIgnoreCase))
@@ -105,6 +110,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         _ledger.Record(cost, sessionId);
                     }
                     _healthTracker.RecordSuccess(candidate.Name);
+
+                    _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
+                        candidate.Name, response.Usage is not null
+                            ? CostCalculator.Compute(response.Usage, candidate).ToString("F6")
+                            : "unknown");
 
                     return response;
                 }
@@ -158,6 +168,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         while (true)
         {
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
+
+            if (_logger.IsEnabled(LogLevel.Debug))
+                _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
+                    decision.Reason, string.Join(", ", decision.Candidates.Select(c => c.Name)));
 
             if (decision.Candidates.Count == 0)
             {
@@ -259,6 +273,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _ledger.Record(CostCalculator.Compute(finalUsage, candidate), sessionId);
                 }
                 _healthTracker.RecordSuccess(candidate.Name);
+                _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
+                    candidate.Name, finalUsage is not null
+                        ? CostCalculator.Compute(finalUsage, candidate).ToString("F6")
+                        : "unknown");
                 yield break;
             }
 

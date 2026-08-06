@@ -122,6 +122,12 @@ coverage*.info
 *.coverage
 *.coveragexml
 
+# Runtime data (SQLite cost ledger 等)
+data/
+*.db
+*.db-shm
+*.db-wal
+
 # Others
 .zcode/
 *.dbmdl

@@ -137,6 +137,8 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
     {
         builder.UseSetting("OptiRouter:ProxyApiKey", ProxyApiKey);
         builder.UseSetting("OptiRouter:RequestsPerMinute", RequestsPerMinute.ToString());
+        // 测试用内存账本，避免写真实 SQLite 文件与跨测试状态残留。
+        builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
         builder.ConfigureServices(services =>
         {
             services.AddSingleton<IModelClientProvider>(new TestModelClientProvider(MockClients));

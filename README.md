@@ -112,6 +112,9 @@ curl http://localhost:5000/health
 | `DailyBudgetUsd` | 日预算（美元） | `10.0` |
 | `SessionBudgetUsd` | 会话预算（美元），null 表示不限 | `null` |
 | `EnforceOnExhausted` | 耗尽行为：`Degrade` 降级 / `Reject` 拒绝 | `Degrade` |
+| `UsePersistentStore` | 是否持久化成本账本到 SQLite（跨重启保留） | `true` |
+| `StorePath` | SQLite 账本文件路径，仅 `UsePersistentStore=true` 时生效 | `data/optirouter-budget.db` |
+| `SessionEvictionHours` | 会话账户淘汰年龄（小时）；超过此时间无活动的会话自动清理，防止内存泄漏 | `24` |
 
 ### Routing（路由策略）
 
@@ -179,7 +182,32 @@ dotnet test OptiRouter.sln -c Release
 dotnet test OptiRouter.sln -c Release --filter "FullyQualifiedName~EndToEndSmokeTests"
 ```
 
+## 部署
+
+### HTTPS 要求
+
+生产环境**必须**使用 HTTPS 终结 API Key 传输。两种方式：
+
+1. **Kestrel 直接 TLS 终结**（推荐单实例）：
+   ```bash
+   export ASPNETCORE_URLS="https://+:443;http://+:80"
+   ```
+   需配置 Kestrel 证书（可通过 `appsettings.json` 或环境变量）。
+
+2. **反向代理 TLS 终结**（推荐多实例）：
+   - 在 Nginx / Caddy / Azure App Service 层终结 HTTPS
+   - 设置 `X-Forwarded-Proto` 头
+   - 应用监听 `http://localhost:5000`
+
+启动时若 `ASPNETCORE_URLS` 不含 `https://`，会在日志中输出警告。
+
+### 成本账本数据
+
+默认 `data/optirouter-budget.db`（SQLite）。目录不存在自动创建。该文件累加所有请求的成本数据，建议纳入备份/监控范围。
+
 ## 已知限制
 
 - Token 估算为分桶加权粗估（CJK/ASCII/其他按经验系数），非真实 BPE；误差约 ±15%，对路由分级足够。如需精确可接入 tiktoken 系 tokenizer。
 - 跨请求熔断为简单冷却（无 HalfOpen 探测）：连续失败达阈值→冷却→到期直接放行，若仍失败会重新累计。复杂场景可升级为完整断路器。
+- **Models 端点配置（BaseUrl/ApiKey/Timeout/Tier）按模型名缓存在 `ModelClientProvider`，变更需重启进程生效**。`Routing` 开关经 `IOptionsMonitor` reload 后可在线生效，与此缓存解耦。如需端点配置热更新，需改造 provider 支持 `OnChange` 触发重建 `HttpClient`。
+- **成本账本持久化**：`Budget.UsePersistentStore=true`（默认）时落 SQLite 文件（`Budget.StorePath`），跨进程重启保留日/会话花费，使预算真正生效。设为 `false` 用内存实现（重启归零，仅适合测试）。
