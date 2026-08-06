@@ -1,0 +1,38 @@
+namespace OptiRouter.Configuration;
+
+/// <summary>
+/// 模型能力分档，用于路由时的能力匹配与降级策略。
+/// </summary>
+public enum ModelTier
+{
+    /// <summary>
+    /// 最强能力档，通常价格最高、上下文最长。
+    /// </summary>
+    Strong = 0,
+
+    /// <summary>
+    /// 中等能力档，平衡性能与成本。
+    /// </summary>
+    Medium = 1,
+
+    /// <summary>
+    /// 低成本档，适合简单任务或预算紧张场景。
+    /// </summary>
+    Cheap = 2
+}
+
+/// <summary>
+/// 预算耗尽后的行为模式。
+/// </summary>
+public enum BudgetExhaustionMode
+{
+    /// <summary>
+    /// 降级到更便宜的模型继续服务。
+    /// </summary>
+    Degrade = 0,
+
+    /// <summary>
+    /// 直接拒绝请求。
+    /// </summary>
+    Reject = 1
+}
