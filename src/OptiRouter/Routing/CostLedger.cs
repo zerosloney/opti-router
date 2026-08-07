@@ -7,7 +7,7 @@ namespace OptiRouter.Routing;
 /// 实际状态委托 <see cref="ICostLedgerStore"/> 持久化；内存实现用于测试，SQLite 实现用于生产。
 /// 会话账户按 sessionEvictionHours 懒淘汰，防止无界增长。
 /// </summary>
-public sealed class CostLedger
+public class CostLedger
 {
     private readonly ICostLedgerStore _store;
     private readonly object _resetLock = new();
@@ -66,7 +66,7 @@ public sealed class CostLedger
     /// 获取日花费和全局累计花费（自首次启动以来所有请求，不随日 reset 清零）。
     /// </summary>
     /// <returns><c>Daily</c> 为当日 UTC 花费；<c>Total</c> 为进程首次启动以来所有请求的累计花费。</returns>
-    public (decimal Daily, decimal Total) GetSpend()
+    public virtual (decimal Daily, decimal Total) GetSpend()
     {
         ResetDailyIfNewDay();
         return (_store.GetDaily(DateTime.UtcNow), _store.GetTotal());
@@ -79,6 +79,14 @@ public sealed class CostLedger
     {
         ResetDailyIfNewDay();
         return _store.GetDaily(DateTime.UtcNow);
+    }
+
+    /// <summary>
+    /// 将当前日花费快照到历史归档（供趋势分析）。
+    /// </summary>
+    public void SnapshotDaily()
+    {
+        _store.SnapshotDaily(DateTime.UtcNow);
     }
 
     /// <summary>
@@ -120,12 +128,14 @@ public sealed class CostLedger
     private void ResetDailyIfNewDay()
     {
         DateTime today = DateTime.UtcNow.Date;
-        // 快路径：同日不进 lock。
+        // Fast path: same day, no lock needed.
         if (today == _lastDailyDate) return;
 
         lock (_resetLock)
         {
             if (today == _lastDailyDate) return;
+            // Archive current daily spend before clearing.
+            _store.SnapshotDaily(_lastDailyDate);
             _store.ResetDaily();
             _lastDailyDate = today;
         }

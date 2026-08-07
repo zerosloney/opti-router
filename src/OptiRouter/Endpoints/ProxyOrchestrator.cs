@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -20,6 +21,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly CostLedger _ledger;
     private readonly ModelHealthTracker _healthTracker;
     private readonly ILogger<ProxyOrchestrator> _logger;
+    private readonly IRequestAuditStore _auditStore;
     private bool _disposed;
 
     /// <summary>
@@ -31,6 +33,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// 但 Models 端点（BaseUrl/ApiKey/Timeout）按模型名缓存在 ModelClientProvider，变更需重启进程。</param>
     /// <param name="ledger">成本账本。</param>
     /// <param name="healthTracker">跨请求模型健康跟踪器。</param>
+    /// <param name="auditStore">请求审计存储。</param>
     /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
@@ -38,6 +41,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         IOptionsMonitor<RouterOptions> options,
         CostLedger ledger,
         ModelHealthTracker healthTracker,
+        IRequestAuditStore auditStore,
         ILogger<ProxyOrchestrator> logger)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
@@ -45,6 +49,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(ledger);
         ArgumentNullException.ThrowIfNull(healthTracker);
+        ArgumentNullException.ThrowIfNull(auditStore);
         ArgumentNullException.ThrowIfNull(logger);
 
         _clientProvider = clientProvider;
@@ -52,6 +57,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _options = options;
         _ledger = ledger;
         _healthTracker = healthTracker;
+        _auditStore = auditStore;
         _logger = logger;
     }
 
@@ -86,6 +92,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         while (true)
         {
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
+            int estimatedTokens = decision.EstimatedInputTokens;
 
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
@@ -118,15 +125,22 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 // outcomeReported：是否已通过 RecordSuccess/RecordFailure 上报结果。
                 // 未上报就离开本候选（不可重试异常、外部取消等）时，finally 释放探测槽位，避免泄漏。
                 bool outcomeReported = false;
+                var attemptSw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
                     var client = _clientProvider.GetClient(candidate);
                     var response = await client.CompleteRawAsync(request, ct).ConfigureAwait(false);
+                    attemptSw.Stop();
 
                     if (response.Usage is not null)
                     {
                         var cost = CostCalculator.Compute(response.Usage, candidate);
                         _ledger.Record(cost, sessionId);
+                        RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false);
+                    }
+                    else
+                    {
+                        RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false);
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     outcomeReported = true;
@@ -140,32 +154,38 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 catch (ModelClientException ex) when (IsRetryable(ex))
                 {
+                    attemptSw.Stop();
                     lastModelName = candidate.Name;
                     lastStatusCode = (int)ex.StatusCode;
                     lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
+                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false);
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 }
                 catch (HttpRequestException ex)
                 {
+                    attemptSw.Stop();
                     lastModelName = candidate.Name;
                     lastStatusCode = 503;
                     lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
+                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
+                    attemptSw.Stop();
                     lastModelName = candidate.Name;
                     lastStatusCode = 408;
                     lastErrorMessage = "Request timed out inside the proxy.";
                     // 客户端内部超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
+                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "timeout", false);
                     _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -251,6 +271,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 // 两者共同保证离开本候选时探测槽位必被结算（上报或释放），不泄漏。
                 bool probeResolved = false;
                 bool streamFaulted = false;
+                var attemptSw = System.Diagnostics.Stopwatch.StartNew();
 
                 try
                 {
@@ -306,11 +327,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                     if (preStreamFailure is not null)
                     {
+                        attemptSw.Stop();
                         bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                         probeResolved = true;
                         string failure = preStreamFailure is ModelClientException modelFailure
                             ? $"status {(int)modelFailure.StatusCode}"
                             : preStreamFailure.Message;
+                        RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
+                            attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
                         continue;
@@ -370,6 +394,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     probeResolved = true;
+                    attemptSw.Stop();
+                    RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
+                        finalUsage is not null ? CostCalculator.Compute(finalUsage, candidate) : 0m,
+                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, finalUsage is not null
                             ? CostCalculator.Compute(finalUsage, candidate).ToString("F6")
@@ -383,7 +411,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         if (streamFaulted)
                         {
                             // 中途失败计入断路器统计（与非流式失败同等对待）。
+                            attemptSw.Stop();
                             bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                            RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
+                                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true);
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                                 candidate.Name, tripped ? " (circuit tripped)" : "");
                         }
@@ -428,5 +459,41 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     {
         int statusCode = (int)exception.StatusCode;
         return statusCode is 408 or 429 or >= 500 and <= 599;
+    }
+
+    private void RecordAudit(
+        string? requestId,
+        string model,
+        int estimatedTokens,
+        ChatUsage? usage,
+        decimal cost,
+        long latencyMs,
+        string? sessionId,
+        string routingReason,
+        bool success,
+        string? errorMessage,
+        bool isStreaming)
+    {
+        try
+        {
+            _auditStore.Append(new RequestAuditRecord(
+                Timestamp: DateTime.UtcNow,
+                RequestId: requestId,
+                Model: model,
+                EstimatedInputTokens: estimatedTokens,
+                PromptTokens: usage?.PromptTokens ?? 0,
+                CompletionTokens: usage?.CompletionTokens ?? 0,
+                Cost: cost,
+                LatencyMs: latencyMs,
+                SessionId: sessionId,
+                RoutingReason: routingReason,
+                Success: success,
+                ErrorMessage: errorMessage,
+                IsStreaming: isStreaming));
+        }
+        catch
+        {
+            // Audit recording must not break the request path.
+        }
     }
 }

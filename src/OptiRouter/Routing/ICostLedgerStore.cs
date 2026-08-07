@@ -46,7 +46,20 @@ public interface ICostLedgerStore : ICircuitStateStore, IDisposable
     decimal GetDaily(DateTime utcDate);
 
     /// <summary>
-    /// 读取指定会话的累计花费，不存在则 0。
+    /// 读取最近 N 天的日花费历史（含今天），按日期升序排列。
+    /// </summary>
+    /// <param name="days">回溯天数。</param>
+    /// <returns>(日期, 花费) 列表，日期升序。</returns>
+    IReadOnlyList<(DateTime Date, decimal Amount)> GetDailyHistory(int days);
+
+    /// <summary>
+    /// 将当前日花费快照到历史归档。
+    /// </summary>
+    /// <param name="utcDate">快照日期。</param>
+    void SnapshotDaily(DateTime utcDate);
+
+    /// <summary>
+    /// 读取指定会话的累计花费，会话不存在时返回 0。
     /// </summary>
     decimal GetSession(string sessionId);
 

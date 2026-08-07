@@ -58,6 +58,13 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         Execute("INSERT OR IGNORE INTO total_spend (id, amount) VALUES (1, 0);");
 
         Execute("""
+            CREATE TABLE IF NOT EXISTS daily_spend_history (
+                date TEXT PRIMARY KEY,
+                amount REAL NOT NULL DEFAULT 0
+            );
+            """);
+
+        Execute("""
             CREATE TABLE IF NOT EXISTS model_circuits (
                 model_name TEXT PRIMARY KEY,
                 state TEXT NOT NULL,
@@ -199,7 +206,74 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_lock)
         {
+            // Archive today's daily spend before clearing.
+            string todayKey = FormatDate(DateTime.UtcNow);
+            Execute($"""
+                INSERT INTO daily_spend_history (date, amount)
+                SELECT date, amount FROM daily_spend WHERE date = '{todayKey}'
+                ON CONFLICT(date) DO UPDATE SET amount = excluded.amount;
+                """);
             Execute("DELETE FROM daily_spend;");
+        }
+    }
+
+    /// <inheritdoc />
+    public void SnapshotDaily(DateTime utcDate)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_lock)
+        {
+            string todayKey = FormatDate(utcDate);
+            // Only snapshot if there's actual spend for today.
+            using var checkCmd = _connection.CreateCommand();
+            checkCmd.CommandText = "SELECT amount FROM daily_spend WHERE date = @date;";
+            checkCmd.Parameters.AddWithValue("@date", todayKey);
+            var result = checkCmd.ExecuteScalar();
+            if (result is null || result == DBNull.Value) return;
+
+            decimal amount = ToDecimal(result);
+            if (amount == 0m) return;
+
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO daily_spend_history (date, amount)
+                VALUES (@date, @amount)
+                ON CONFLICT(date) DO UPDATE SET amount = excluded.amount;
+                """;
+            cmd.Parameters.AddWithValue("@date", todayKey);
+            cmd.Parameters.AddWithValue("@amount", (double)amount);
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<(DateTime Date, decimal Amount)> GetDailyHistory(int days)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (days <= 0) return Array.Empty<(DateTime, decimal)>();
+
+        lock (_lock)
+        {
+            var result = new List<(DateTime, decimal)>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT date, amount FROM daily_spend_history
+                WHERE date >= @cutoff
+                ORDER BY date ASC;
+                """;
+            string cutoff = FormatDate(DateTime.UtcNow.AddDays(-days));
+            cmd.Parameters.AddWithValue("@cutoff", cutoff);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                string dateStr = reader.GetString(0);
+                if (DateTime.TryParseExact(dateStr, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date))
+                {
+                    result.Add((date, ToDecimal(reader.GetValue(1))));
+                }
+            }
+            return result;
         }
     }
 

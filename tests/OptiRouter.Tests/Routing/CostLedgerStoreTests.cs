@@ -218,6 +218,129 @@ public class CostLedgerStoreTests
         }
     }
 
+    // ---- Daily History ----
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void SnapshotDaily_ArchivesCurrentSpend(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow.Date;
+        store.AddDaily(today, 5.0m);
+        Assert.Equal(5.0m, store.GetDaily(today));
+
+        store.SnapshotDaily(today);
+        var history = store.GetDailyHistory(1);
+        Assert.Single(history);
+        Assert.Equal(today, history[0].Date);
+        Assert.Equal(5.0m, history[0].Amount);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void SnapshotDaily_ZeroSpend_NoEntry(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow.Date;
+        // No spend added — snapshot should produce no history entry.
+        store.SnapshotDaily(today);
+        Assert.Empty(store.GetDailyHistory(1));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetDailyHistory_ReturnsMultipleDays(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow.Date;
+        var yesterday = today.AddDays(-1);
+        var twoDaysAgo = today.AddDays(-2);
+
+        store.AddDaily(twoDaysAgo, 3.0m);
+        store.AddDaily(yesterday, 2.0m);
+        store.AddDaily(today, 1.0m);
+
+        // Snapshot each day.
+        store.SnapshotDaily(twoDaysAgo);
+        store.SnapshotDaily(yesterday);
+        store.SnapshotDaily(today);
+
+        var history = store.GetDailyHistory(3);
+        Assert.Equal(3, history.Count);
+        Assert.Equal(twoDaysAgo, history[0].Date);
+        Assert.Equal(3.0m, history[0].Amount);
+        Assert.Equal(yesterday, history[1].Date);
+        Assert.Equal(today, history[2].Date);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetDailyHistory_RespectsDaysLimit(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow.Date;
+        var fiveDaysAgo = today.AddDays(-5);
+
+        store.AddDaily(fiveDaysAgo, 10m);
+        store.SnapshotDaily(fiveDaysAgo);
+
+        // Request only 3 days back.
+        var history = store.GetDailyHistory(3);
+        Assert.Empty(history); // 5 days ago is outside the 3-day window.
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetDailyHistory_ZeroDays_ReturnsEmpty(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        Assert.Empty(store.GetDailyHistory(0));
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void ResetDaily_ArchivesBeforeClearing(Func<ICostLedgerStore> factory)
+    {
+        using var store = factory();
+        var today = DateTime.UtcNow.Date;
+        store.AddDaily(today, 7.0m);
+
+        store.SnapshotDaily(today);
+        store.ResetDaily();
+
+        // Daily should be cleared, but history should retain the snapshot.
+        Assert.Equal(0m, store.GetDaily(today));
+        var history = store.GetDailyHistory(1);
+        Assert.Single(history);
+        Assert.Equal(7.0m, history[0].Amount);
+    }
+
+    // ---- SQLite 专属：daily_spend_history 持久化跨实例 ----
+
+    [Fact]
+    public void Sqlite_DailyHistoryPersistsAcrossInstances()
+    {
+        string path = TempDbPath();
+        try
+        {
+            var today = DateTime.UtcNow.Date;
+            using (var a = new SqliteCostLedgerStore(path))
+            {
+                a.AddDaily(today, 6.0m);
+                a.SnapshotDaily(today);
+            }
+
+            using var b = new SqliteCostLedgerStore(path);
+                var history = b.GetDailyHistory(1);
+                Assert.Single(history);
+                Assert.Equal(6.0m, history[0].Amount);
+        }
+        finally
+        {
+            CleanupDb(path);
+        }
+    }
+
     private static void CleanupDb(string path)
     {
         try

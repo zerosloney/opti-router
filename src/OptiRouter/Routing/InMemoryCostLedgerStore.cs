@@ -9,6 +9,7 @@ public sealed class InMemoryCostLedgerStore : ICostLedgerStore
 {
     private readonly object _lock = new();
     private readonly Dictionary<DateTime, decimal> _daily = new();
+    private readonly List<(DateTime Date, decimal Amount)> _dailyHistory = new();
     private readonly Dictionary<string, (decimal Amount, DateTime LastSeen)> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)> _circuits = new(StringComparer.Ordinal);
     private decimal _total;
@@ -106,6 +107,36 @@ public sealed class InMemoryCostLedgerStore : ICostLedgerStore
         lock (_lock)
         {
             _daily.Clear();
+        }
+    }
+
+    /// <inheritdoc />
+    public void SnapshotDaily(DateTime utcDate)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_lock)
+        {
+            if (_daily.TryGetValue(utcDate.Date, out var amount) && amount > 0)
+            {
+                _dailyHistory.Add((utcDate.Date, amount));
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<(DateTime Date, decimal Amount)> GetDailyHistory(int days)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (days <= 0) return Array.Empty<(DateTime, decimal)>();
+
+        lock (_lock)
+        {
+            var cutoff = DateTime.UtcNow.Date.AddDays(-days);
+            var filtered = _dailyHistory
+                .Where(h => h.Date >= cutoff)
+                .OrderBy(h => h.Date)
+                .ToList();
+            return filtered;
         }
     }
 

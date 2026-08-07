@@ -57,6 +57,24 @@ builder.Services.AddSingleton<ICostLedgerStore>(sp =>
     return new SqliteCostLedgerStore(storePath);
 });
 
+// 请求审计存储：与成本账本共享同一持久化策略（SQLite 或内存）。
+builder.Services.AddSingleton<IRequestAuditStore>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    if (!options.Budget.UsePersistentStore)
+    {
+        return new InMemoryRequestAuditStore();
+    }
+
+    string storePath = options.Budget.StorePath;
+    string? dir = Path.GetDirectoryName(storePath);
+    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+    {
+        Directory.CreateDirectory(dir);
+    }
+    return new SqliteRequestAuditStore(storePath);
+});
+
 // t3: 注册成本账本、跨请求模型健康跟踪器（三态断路器）和路由引擎。
 builder.Services.AddSingleton<CostLedger>(sp =>
 {
@@ -68,6 +86,16 @@ builder.Services.AddSingleton<ModelHealthTracker>(sp =>
 {
     var store = sp.GetRequiredService<ICostLedgerStore>();
     return new ModelHealthTracker(store);
+});
+
+// 告警引擎：检查预算、断路器、失败率等条件。
+builder.Services.AddSingleton<AlertEngine>(sp =>
+{
+    var ledger = sp.GetRequiredService<CostLedger>();
+    var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
+    var auditStore = sp.GetRequiredService<IRequestAuditStore>();
+    var routerOptions = sp.GetRequiredService<IOptionsMonitor<RouterOptions>>();
+    return new AlertEngine(ledger, healthTracker, auditStore, routerOptions);
 });
 
 // Token 估算器：Tiktoken 模式用 SharpToken 真实 BPE 计数（内置词表、离线可用，异常自动回退分桶粗估）；

@@ -1,0 +1,41 @@
+using OptiRouter.Configuration;
+
+namespace OptiRouter.Routing;
+
+/// <summary>
+/// 请求审计记录存储抽象。
+/// </summary>
+public interface IRequestAuditStore : IDisposable
+{
+    /// <summary>
+    /// 追加一条审计记录。
+    /// </summary>
+    void Append(RequestAuditRecord record);
+
+    /// <summary>
+    /// 读取最近的审计记录（按时间倒序）。
+    /// </summary>
+    /// <param name="limit">最大返回条数。</param>
+    IReadOnlyList<RequestAuditRecord> GetRecent(int limit);
+
+    /// <summary>
+    /// 按模型名筛选最近的审计记录。
+    /// </summary>
+    /// <param name="modelName">模型名。</param>
+    /// <param name="limit">最大返回条数。</param>
+    IReadOnlyList<RequestAuditRecord> GetByModel(string modelName, int limit);
+
+    /// <summary>
+    /// 按时间范围分页查询审计记录（按时间倒序）。
+    /// </summary>
+    /// <param name="from">起始 UTC 时间（含）。</param>
+    /// <param name="to">结束 UTC 时间（含）。</param>
+    /// <param name="limit">本页条数。</param>
+    /// <param name="offset">跳过条数。</param>
+    (IReadOnlyList<RequestAuditRecord> Items, int TotalCount) GetByTimeRange(DateTime from, DateTime to, int limit, int offset);
+
+    /// <summary>
+    /// 淘汰早于指定时间的审计记录，返回实际淘汰条数。
+    /// </summary>
+    int EvictBefore(DateTime cutoff);
+}
