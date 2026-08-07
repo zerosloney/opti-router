@@ -65,7 +65,8 @@ public sealed class CostLedger
     /// <summary>
     /// 获取日花费和全局累计花费（自首次启动以来所有请求，不随日 reset 清零）。
     /// </summary>
-    public (decimal Daily, decimal Session) GetSpend()
+    /// <returns><c>Daily</c> 为当日 UTC 花费；<c>Total</c> 为进程首次启动以来所有请求的累计花费。</returns>
+    public (decimal Daily, decimal Total) GetSpend()
     {
         ResetDailyIfNewDay();
         return (_store.GetDaily(DateTime.UtcNow), _store.GetTotal());

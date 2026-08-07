@@ -65,6 +65,16 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FailoverHalfOpenMaxProbes 必须大于 0。");
         }
 
+        if (options.Routing.FailoverHalfOpenRequiredSuccesses <= 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.FailoverHalfOpenRequiredSuccesses 必须大于 0。");
+        }
+
+        if (options.Routing.HealthProbeIntervalSeconds <= 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.HealthProbeIntervalSeconds 必须大于 0。");
+        }
+
         if (options.Routing.TokenEstimation == TokenEstimationMode.Tiktoken
             && !TiktokenTokenEstimator.IsEncodingAvailable(options.Routing.TiktokenEncoding))
         {

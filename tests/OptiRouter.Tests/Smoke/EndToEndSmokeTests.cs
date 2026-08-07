@@ -41,7 +41,7 @@ public class EndToEndSmokeTests : IDisposable
         return new ChatRequest
         {
             Model = model,
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "Hi" } },
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = stream
         };
     }
@@ -106,7 +106,7 @@ public class EndToEndSmokeTests : IDisposable
         Assert.Equal("Hello from WireMock", doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
 
         var ledger = factory.Services.GetRequiredService<CostLedger>();
-        Assert.True(ledger.GetSpend().Session > 0, "Expected cost to be recorded after successful request.");
+        Assert.True(ledger.GetSpend().Total > 0, "Expected cost to be recorded after successful request.");
     }
 
     [Fact]
@@ -159,6 +159,10 @@ public class EndToEndSmokeTests : IDisposable
             dataLines.Add(data);
         }
 
+        // Drain the rest of the stream to ensure server finishes the handler
+        while (await reader.ReadLineAsync() != null) { }
+        await Task.Delay(150);
+
         Assert.NotEmpty(dataLines);
         Assert.Equal("[DONE]", dataLines[^1]);
 
@@ -168,7 +172,7 @@ public class EndToEndSmokeTests : IDisposable
 
         // 流式最后一块带 usage，记账后 ledger 应 > 0
         var ledger = factory.Services.GetRequiredService<CostLedger>();
-        Assert.True(ledger.GetSpend().Session > 0, "Expected streaming cost to be recorded from final chunk usage.");
+        Assert.True(ledger.GetSpend().Total > 0, "Expected streaming cost to be recorded from final chunk usage.");
     }
 
     [Fact]

@@ -51,6 +51,7 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
             return previous with
             {
                 Candidates = Array.Empty<ModelEndpointOptions>(),
+                BudgetExhausted = true,
                 Reason = $"{previous.Reason}; budget-guard: budget exhausted, reject (daily={dailySpend:F4}, session={sessionSpend:F4})"
             };
         }

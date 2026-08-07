@@ -51,19 +51,20 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
 
         foreach (var msg in request.Messages ?? Enumerable.Empty<Clients.ChatMessage>())
         {
-            if (msg.Role.Equals("system", StringComparison.OrdinalIgnoreCase) && msg.Content.Length > 2000)
+            var text = msg.GetText();
+            if (msg.Role.Equals("system", StringComparison.OrdinalIgnoreCase) && text.Length > 2000)
             {
                 hasLongSystemPrompt = true;
             }
 
-            if (ContainsCodeIndicators(msg.Content))
+            if (ContainsCodeIndicators(text))
             {
                 hasCode = true;
             }
         }
 
         bool isSingleShortMessage = totalMessageCount == 1
-            && (request.Messages?.FirstOrDefault()?.Content.Length ?? 0) < 100
+            && (request.Messages?.FirstOrDefault()?.GetText().Length ?? 0) < 100
             && !hasCode;
 
         if (hasCode)

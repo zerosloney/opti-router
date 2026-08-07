@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace OptiRouter.Clients;
@@ -5,6 +6,10 @@ namespace OptiRouter.Clients;
 /// <summary>
 /// OpenAI Chat Completions 请求。
 /// </summary>
+/// <remarks>
+/// 未知字段（top_p / tools / tool_choice / response_format / stop / seed / n / logit_bias / user 等）
+/// 经 <see cref="ExtensionData"/> 原样透传上游，保证 tool-use 等高级能力不被丢弃。
+/// </remarks>
 public sealed record ChatRequest
 {
     /// <summary>
@@ -31,11 +36,24 @@ public sealed record ChatRequest
     /// 最大生成 token 数。
     /// </summary>
     public int? MaxTokens { get; init; }
+
+    /// <summary>
+    /// 未知字段原样透传。键名为上游原始 property name（不经过 naming policy 转换），
+    /// 序列化时原样写回，避免破坏上游契约（如 function calling 的 tool_calls 结构）。
+    /// </summary>
+    [JsonExtensionData]
+    public IDictionary<string, JsonElement>? ExtensionData { get; init; }
 }
 
 /// <summary>
 /// 单条对话消息。
 /// </summary>
+/// <remarks>
+/// <see cref="Content"/> 为 <see cref="JsonElement"/> 以同时支持纯文本（string）
+/// 与多模态数组（vision 的 <c>[{type:"text"...},{type:"image_url"...}]</c>）。
+/// 序列化时原样写回，上游收到完整结构。
+/// 路由策略/估算器只需文本时调 <see cref="GetText"/> 抽取文本部分。
+/// </remarks>
 public sealed record ChatMessage
 {
     /// <summary>
@@ -44,9 +62,55 @@ public sealed record ChatMessage
     public string Role { get; init; } = string.Empty;
 
     /// <summary>
-    /// 消息内容。
+    /// 消息内容。纯文本时为 string kind，多模态时为 array kind；未提供时为 null（序列化时跳过）。
+    /// 用 <see cref="JsonElement"/>? 而非裸 <see cref="JsonElement"/>，避免默认值（Undefined）无法序列化。
     /// </summary>
-    public string Content { get; init; } = string.Empty;
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public JsonElement? Content { get; init; }
+
+    /// <summary>
+    /// 从纯文本构造。覆盖最常见的字符串 content 场景，简化调用方。
+    /// </summary>
+    public static ChatMessage FromText(string role, string content)
+        => new()
+        {
+            Role = role,
+            Content = JsonSerializer.SerializeToElement(content)
+        };
+
+    /// <summary>
+    /// 抽取 content 的文本部分用于路由判定与 token 估算。
+    /// 纯文本直接返回；多模态数组拼接所有 type=="text" 的 text 字段；其他情况返回空串。
+    /// </summary>
+    public string GetText()
+    {
+        if (Content is not { } el) return string.Empty;
+        if (el.ValueKind == JsonValueKind.Undefined || el.ValueKind == JsonValueKind.Null)
+            return string.Empty;
+
+        if (el.ValueKind == JsonValueKind.String)
+            return el.GetString() ?? string.Empty;
+
+        if (el.ValueKind == JsonValueKind.Array)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var item in el.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object
+                    && item.TryGetProperty("type", out var typeEl)
+                    && typeEl.ValueKind == JsonValueKind.String
+                    && typeEl.ValueEquals("text")
+                    && item.TryGetProperty("text", out var textEl)
+                    && textEl.ValueKind == JsonValueKind.String)
+                {
+                    sb.Append(textEl.GetString());
+                }
+            }
+            return sb.ToString();
+        }
+
+        return string.Empty;
+    }
 }
 
 /// <summary>

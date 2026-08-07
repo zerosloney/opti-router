@@ -37,10 +37,11 @@ public static class TokenEstimator
 
         foreach (var msg in request.Messages)
         {
-            if (string.IsNullOrEmpty(msg.Content)) continue;
+            var text = msg.GetText();
+            if (string.IsNullOrEmpty(text)) continue;
             messageCount++;
 
-            foreach (var rune in msg.Content.EnumerateRunes())
+            foreach (var rune in text.EnumerateRunes())
             {
                 int code = rune.Value;
                 if (IsCjk(code)) cjkChars++;

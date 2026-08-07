@@ -10,6 +10,7 @@ public sealed class InMemoryCostLedgerStore : ICostLedgerStore
     private readonly object _lock = new();
     private readonly Dictionary<DateTime, decimal> _daily = new();
     private readonly Dictionary<string, (decimal Amount, DateTime LastSeen)> _sessions = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)> _circuits = new(StringComparer.Ordinal);
     private decimal _total;
     private bool _disposed;
 
@@ -142,6 +143,28 @@ public sealed class InMemoryCostLedgerStore : ICostLedgerStore
             _daily.Clear();
             _sessions.Clear();
             _total = 0m;
+        }
+    }
+
+    /// <inheritdoc />
+    public void SaveCircuitState(string modelName, CircuitState state, int failureCount, DateTime cooldownUntil)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrEmpty(modelName);
+
+        lock (_lock)
+        {
+            _circuits[modelName] = (state, failureCount, cooldownUntil);
+        }
+    }
+
+    /// <inheritdoc />
+    public Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)> LoadCircuitStates()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        lock (_lock)
+        {
+            return new Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)>(_circuits, StringComparer.Ordinal);
         }
     }
 

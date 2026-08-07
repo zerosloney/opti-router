@@ -86,8 +86,11 @@ curl http://localhost:5000/health
 
 | 字段 | 含义 | 默认 |
 |------|------|------|
-| `ProxyApiKey` | 调用 `/v1/*` 时使用的 Bearer API Key；为空时拒绝访问 | 空 |
-| `RequestsPerMinute` | 每个来源 IP 的固定窗口每分钟请求上限 | `60` |
+| `ProxyApiKey` | 调用 `/v1/*` 与 `/dashboard`、`/api/dashboard/*` 时使用的 Bearer API Key；为空时拒绝访问 | 空 |
+| `RequestsPerMinute` | 每个分区（Session > IP > Auth）的固定窗口每分钟请求上限 | `60` |
+| `MaxConcurrentRequestsPerPartition` | 每个分区同时进行的最大请求数，超出返回 429 | `100` |
+
+> **分区 Key 优先级**：`X-Session-Id` 头 > 客户端 IP（`CF-Connecting-IP` > `X-Forwarded-For` 首段 > `RemoteIpAddress`）> Bearer Token（SHA256 哈希前 16 hex）。带 API Key 的请求仍按 IP 隔离，避免单 key 多用户共享配额。
 
 ### Models[]（模型端点列表）
 
@@ -131,13 +134,21 @@ curl http://localhost:5000/health
 | `FailoverFailureThreshold` | 触发跨请求熔断的连续失败次数 | `3` |
 | `FailoverCooldownSeconds` | 熔断冷却秒数，到期进入半开探测 | `60` |
 | `FailoverHalfOpenMaxProbes` | 半开态允许的最大并发探测请求数 | `1` |
+| `FailoverHalfOpenRequiredSuccesses` | 半开态连续探测成功多少次后才闭合熔断（防单次偶然成功导致抖动） | `1` |
+| `EnableHealthProbe` | 是否启用后台主动健康探活（定时对所有启用模型探测，结果上报断路器） | `true` |
+| `HealthProbeIntervalSeconds` | 后台探活间隔秒数 | `60` |
+| `EnableSemanticRouter` | 是否启用向量空间语义路由（离线词袋模型，余弦相似度匹配） | `true` |
+| `SemanticSimilarityThreshold` | 语义匹配余弦相似度阈值 `[0.0, 1.0]`，低于此值不命中 | `0.25` |
+| `SemanticRoutes` | 语义路由规则列表，每条含 `Name`/`TargetTier`/`Phrases` | `[]` |
+| `MaxResponseStreamBytes` | 流式响应累计字节硬上限，防 OOM/恶意无限流 | `20971520`(20MB) |
 
 ## 路由策略说明
 
 1. **规则分级**（`RuleClassifierPolicy`）：按请求特征推断 Tier——代码请求→Strong，单条短问答→Cheap，复杂指令→Strong，其余→`DefaultTier`。
-2. **Token 估算**（`ITokenEstimator` + `LongInputPolicy`）：默认 `Tiktoken` 模式，用 SharpToken（tiktoken 的 C# 移植，词表内嵌、离线可用）按真实 BPE 精确计数，每条消息另计 3 token 开销，编码由 `TiktokenEncoding` 指定（默认 `o200k_base`）；计数异常时自动回退到分桶粗估。`Bucket` 模式按 rune 分桶加权估算——CJK 按 1.5 字符/token、ASCII 按 4 字符/token、其他按 2.5。超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
-3. **成本预算**（`BudgetGuardPolicy`）：日/会话预算耗尽时，`Degrade` 模式降级到 Cheap tier，`Reject` 模式返回 429。
-4. **失败降级**（`FailoverPolicy` + `ProxyOrchestrator` + `ModelHealthTracker`）：候选链顺序尝试，主模型失败自动切下一个；连续失败达阈值的模型触发三态断路器——Closed（正常）→ Open（熔断冷却）→ HalfOpen（冷却到期，最多放行 `FailoverHalfOpenMaxProbes` 个并发探测）；探测成功则闭合恢复，探测失败则重新进入冷却。流式请求的中途失败同样计入熔断。
+2. **语义路由**（`SemanticRouterPolicy`）：向量空间词袋模型（VSM），100% 离线、零依赖。对最近一条 user 消息做 token 化与 L2 归一化，与各 `SemanticRoutes[].Phrases` 的归一化向量算余弦相似度（归一化后退化为点积），最高相似度 ≥ `SemanticSimilarityThreshold` 则覆盖候选为目标 `TargetTier`。适合「代码助手→Strong」「闲聊→Cheap」等意图分流，配置变更热生效。
+3. **Token 估算**（`ITokenEstimator` + `LongInputPolicy`）：默认 `Tiktoken` 模式，用 SharpToken（tiktoken 的 C# 移植，词表内嵌、离线可用）按真实 BPE 精确计数，每条消息另计 3 token 开销，编码由 `TiktokenEncoding` 指定（默认 `o200k_base`）；计数异常时自动回退到分桶粗估。`Bucket` 模式按 rune 分桶加权估算——CJK 按 1.5 字符/token、ASCII 按 4 字符/token、其他按 2.5。超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
+4. **成本预算**（`BudgetGuardPolicy`）：日/会话预算耗尽时，`Degrade` 模式降级到 Cheap tier，`Reject` 模式返回 429。
+5. **失败降级**（`FailoverPolicy` + `ProxyOrchestrator` + `ModelHealthTracker`）：候选链顺序尝试，主模型失败自动切下一个；连续失败达阈值的模型触发三态断路器——Closed（正常）→ Open（熔断冷却）→ HalfOpen（冷却到期，最多放行 `FailoverHalfOpenMaxProbes` 个并发探测）；探测成功则闭合恢复，探测失败则重新进入冷却。流式请求的中途失败同样计入熔断。
 
 ## curl 示例
 
@@ -211,6 +222,8 @@ dotnet test OptiRouter.sln -c Release --filter "FullyQualifiedName~EndToEndSmoke
 ## 已知限制
 
 - Token 估算默认使用 SharpToken 真实 BPE 精确计数（`TokenEstimation=Tiktoken`），计数异常时回退到分桶粗估；仅当显式配置 `TokenEstimation=Bucket` 或回退触发时才有分桶误差（约 ±15%）。注意 BPE 计数基于配置的编码（默认 `o200k_base`），与上游模型实际分词器可能存在少量偏差。
-- 跨请求熔断为三态断路器（Closed / Open / HalfOpen），半开态按 `FailoverHalfOpenMaxProbes` 限量探测；尚不支持指数退避、半开多次探测成功才闭合等更精细的策略，可按需扩展。
+- 跨请求熔断为三态断路器（Closed / Open / HalfOpen），半开态按 `FailoverHalfOpenMaxProbes` 限量并发探测；按 `FailoverHalfOpenRequiredSuccesses` 要求连续探测成功多次才闭合（默认 1，调高可防单次偶然成功导致抖动）。尚不支持指数退避冷却。
+- **后台主动探活**：`EnableHealthProbe=true`（默认）时，启动预热一轮后按 `HealthProbeIntervalSeconds`（默认 60s）周期对所有启用模型探测，结果上报断路器（成功累计半开/闭合，失败计熔断）。探活串行执行，单次失败仅记录不中断服务。
 - **Models 端点配置支持热更新**：连接相关字段（`BaseUrl`/`ApiKey`/`TimeoutSeconds`）变化时，`ModelClientProvider` 经 `IOptionsMonitor.OnChange` 自动重建对应模型的客户端；旧客户端保留宽限期（默认 2 分钟）后释放，不打断在途请求。`Tier`/价格/上下文长度等路由字段每请求读取，变化下次路由即生效。reload 由配置源的变更通知触发（`appsettings.json` 默认 `reloadOnChange` 开启；环境变量源不支持 reload，仍需重启）。
+- **限流阈值分区定型**：`RequestsPerMinute` 每请求读取，但 `FixedWindowRateLimiter` 的 `PermitLimit` 在分区首次创建时定型——运行时改配置仅对新建分区生效，既有分区沿用创建时的值。变更全局生效需重启进程。`MaxConcurrentRequestsPerPartition` 同理。
 - **成本账本持久化**：`Budget.UsePersistentStore=true`（默认）时落 SQLite 文件（`Budget.StorePath`），跨进程重启保留日/会话花费，使预算真正生效。设为 `false` 用内存实现（重启归零，仅适合测试）。

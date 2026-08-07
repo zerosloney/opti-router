@@ -27,7 +27,15 @@ public sealed class ModelClientProvider : IModelClientProvider, IDisposable
     private readonly Func<HttpMessageHandler, HttpClient> _httpClientFactory;
     private readonly TimeSpan _retirementGrace;
     private readonly object _gate = new();
-    private readonly SocketsHttpHandler _sharedHandler = new() { PooledConnectionLifetime = TimeSpan.FromMinutes(2) };
+    private readonly SocketsHttpHandler _sharedHandler = new()
+    {
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+        PooledConnectionIdleTimeout = TimeSpan.FromMinutes(1),
+        MaxConnectionsPerServer = 500, // Supports high-concurrency throughput
+        KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+        KeepAlivePingPolicy = System.Net.Http.HttpKeepAlivePingPolicy.WithActiveRequests
+    };
     private readonly Dictionary<string, CachedClient> _cache = new(StringComparer.Ordinal);
     private readonly List<RetiredGroup> _retired = new();
     private readonly IDisposable? _changeSubscription;

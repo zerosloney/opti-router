@@ -63,7 +63,7 @@ public class OpenAICompatibleModelClientTests
         var request = new ChatRequest
         {
             Model = "ignored-model",
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "Hi" } },
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = false
         };
 
@@ -77,7 +77,7 @@ public class OpenAICompatibleModelClientTests
         Assert.Single(result.Choices);
         Assert.Equal(0, result.Choices[0].Index);
         Assert.Equal("assistant", result.Choices[0].Message.Role);
-        Assert.Equal("Hello!", result.Choices[0].Message.Content);
+        Assert.Equal("Hello!", result.Choices[0].Message.Content!.Value.GetString());
         Assert.Equal("stop", result.Choices[0].FinishReason);
         Assert.NotNull(result.Usage);
         Assert.Equal(10, result.Usage.PromptTokens);
@@ -131,7 +131,7 @@ public class OpenAICompatibleModelClientTests
         var request = new ChatRequest
         {
             Model = "ignored",
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "Hi" } },
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             MaxTokens = 100,
             Temperature = 0.7,
             Stream = false
@@ -360,7 +360,7 @@ public class OpenAICompatibleModelClientTests
         var request = new ChatRequest
         {
             Model = "ignored",
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "Hi" } },
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = false
         };
 
@@ -461,6 +461,31 @@ public class OpenAICompatibleModelClientTests
         // DONE 标记原样
         Assert.Equal("[DONE]", lines[2].Data);
         Assert.Null(lines[2].Usage);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_OversizedSingleLine_AbortsToPreventOom()
+    {
+        var endpoint = CreateEndpoint(baseUrl: "https://api.openai.com/v1");
+        // 构造一条无换行、超过 MaxStreamLineBytes(1MB) 的 data 行，模拟恶意上游。
+        // 用 'a' 填充至 2MB，无 \n 触发行累计检查。
+        var oversizedLine = "data: " + new string('a', 2 * 1024 * 1024);
+
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(oversizedLine, Encoding.UTF8, "text/event-stream")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        // 超限应抛 InvalidOperationException，而非把整行读入后 yield。
+        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(new ChatRequest { Model = "gpt-4o", Messages = new List<ChatMessage>(), Stream = true }))
+            {
+                // 不应到达此处
+            }
+        });
     }
 
     #endregion

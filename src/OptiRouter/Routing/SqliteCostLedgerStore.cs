@@ -56,6 +56,15 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
             """);
         // 确保总累计行存在（单行表，id 固定为 1）。
         Execute("INSERT OR IGNORE INTO total_spend (id, amount) VALUES (1, 0);");
+
+        Execute("""
+            CREATE TABLE IF NOT EXISTS model_circuits (
+                model_name TEXT PRIMARY KEY,
+                state TEXT NOT NULL,
+                failure_count INTEGER NOT NULL,
+                cooldown_until TEXT NOT NULL
+            );
+            """);
     }
 
     /// <inheritdoc />
@@ -234,6 +243,66 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
             Execute("DELETE FROM session_spend;");
             Execute("UPDATE total_spend SET amount = 0 WHERE id = 1;");
         }
+    }
+
+    /// <inheritdoc />
+    public void SaveCircuitState(string modelName, CircuitState state, int failureCount, DateTime cooldownUntil)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrEmpty(modelName);
+
+        lock (_lock)
+        {
+            using var tx = _connection.BeginTransaction();
+            using var cmd = _connection.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.CommandText = """
+                INSERT INTO model_circuits (model_name, state, failure_count, cooldown_until)
+                VALUES (@model, @state, @failures, @cooldown)
+                ON CONFLICT(model_name) DO UPDATE SET
+                    state = @state,
+                    failure_count = @failures,
+                    cooldown_until = @cooldown;
+                """;
+            cmd.Parameters.AddWithValue("@model", modelName);
+            cmd.Parameters.AddWithValue("@state", state.ToString());
+            cmd.Parameters.AddWithValue("@failures", failureCount);
+            cmd.Parameters.AddWithValue("@cooldown", FormatTimestamp(cooldownUntil));
+            cmd.ExecuteNonQuery();
+            tx.Commit();
+        }
+    }
+
+    /// <inheritdoc />
+    public Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)> LoadCircuitStates()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var result = new Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)>(StringComparer.Ordinal);
+
+        lock (_lock)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT model_name, state, failure_count, cooldown_until FROM model_circuits;";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                string model = reader.GetString(0);
+                string stateStr = reader.GetString(1);
+                int failures = reader.GetInt32(2);
+                string cooldownStr = reader.GetString(3);
+
+                if (Enum.TryParse<CircuitState>(stateStr, out var state))
+                {
+                    DateTime cooldown = DateTime.TryParse(cooldownStr, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out var cd)
+                        ? cd
+                        : default;
+
+                    result[model] = (state, failures, cooldown);
+                }
+            }
+        }
+
+        return result;
     }
 
     /// <inheritdoc />

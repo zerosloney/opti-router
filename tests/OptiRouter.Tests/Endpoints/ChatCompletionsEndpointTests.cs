@@ -172,7 +172,7 @@ public class ChatCompletionsEndpointTests
         return new ChatRequest
         {
             Model = model,
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "Hi" } },
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = stream
         };
     }
@@ -376,7 +376,7 @@ public class ChatCompletionsEndpointTests
         Assert.Equal("Hello!", doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
 
         var ledger = factory.Services.GetRequiredService<CostLedger>();
-        Assert.True(ledger.GetSpend().Session > 0, "Expected cost to be recorded after successful request.");
+        Assert.True(ledger.GetSpend().Total > 0, "Expected cost to be recorded after successful request.");
     }
 
     [Theory]
@@ -418,7 +418,7 @@ public class ChatCompletionsEndpointTests
         {
             "messages" => validRequest with { Messages = new List<ChatMessage>() },
             "role" => validRequest with { Messages = new List<ChatMessage> { new ChatMessage { Role = " " } } },
-            "content-null" => validRequest with { Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = null! } } },
+            "content-null" => validRequest with { Messages = new List<ChatMessage> { new ChatMessage { Role = "user" } } },
             "temperature-low" => validRequest with { Temperature = -0.1 },
             "temperature-high" => validRequest with { Temperature = 2.1 },
             "max-tokens" => validRequest with { MaxTokens = 0 },
@@ -533,7 +533,7 @@ public class ChatCompletionsEndpointTests
         var request = new ChatRequest
         {
             Model = "strong-model",
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "public class Example {}" } }
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "public class Example {}") }
         };
         using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
 
@@ -748,7 +748,7 @@ public class ChatCompletionsEndpointTests
         Assert.Equal(7, lastDoc.RootElement.GetProperty("usage").GetProperty("total_tokens").GetInt32());
 
         var ledger = factory.Services.GetRequiredService<CostLedger>();
-        Assert.True(ledger.GetSpend().Session > 0, "Expected streaming cost to be recorded.");
+        Assert.True(ledger.GetSpend().Total > 0, "Expected streaming cost to be recorded.");
     }
 
     [Fact]
@@ -856,7 +856,7 @@ public class ChatCompletionsEndpointTests
         var request = new ChatRequest
         {
             Model = "strong-model",
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "public class Example {}" } },
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "public class Example {}") },
             Stream = true
         };
         using var httpContent = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
@@ -990,6 +990,71 @@ public class ChatCompletionsEndpointTests
         using var doc = JsonDocument.Parse(body);
         Assert.Equal("cheap-model", doc.RootElement.GetProperty("model").GetString());
         Assert.Equal("Cheap", doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
+    }
+
+    #endregion
+
+    #region GET /v1/models
+
+    [Fact]
+    public async Task GetModels_RequiresApiKey_UnauthorizedWithoutIt()
+    {
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("m1"));
+            });
+        };
+
+        using var client = factory.CreateClient(apiKey: null);
+        var response = await client.GetAsync("/v1/models");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task GetModels_ReturnsOnlyEnabledModels_Sanitized()
+    {
+        var enabled = CreateEndpoint("gpt-4o");
+        enabled.Tier = ModelTier.Strong;
+        var disabled = CreateEndpoint("legacy");
+        disabled.Enabled = false;
+
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(enabled);
+                opt.Models.Add(disabled);
+            });
+        };
+
+        using var client = factory.CreateClient();
+        var response = await client.GetAsync("/v1/models");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+
+        Assert.Equal("list", doc.RootElement.GetProperty("object").GetString());
+        var data = doc.RootElement.GetProperty("data");
+        Assert.Equal(1, data.GetArrayLength());
+
+        var entry = data[0];
+        Assert.Equal("gpt-4o", entry.GetProperty("id").GetString());
+        Assert.Equal("model", entry.GetProperty("object").GetString());
+        Assert.Equal("opti-router", entry.GetProperty("owned_by").GetString());
+        Assert.Equal("strong", entry.GetProperty("tier").GetString());
+
+        // ApiKey 不应出现在响应中（脱敏）
+        var raw = body;
+        Assert.DoesNotContain("sk-test", raw);
+        Assert.DoesNotContain("api_key", raw, StringComparison.OrdinalIgnoreCase);
     }
 
     #endregion

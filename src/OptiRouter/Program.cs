@@ -16,6 +16,11 @@ SQLitePCL.Batteries_V2.Init();
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
+});
+
 // Bind and validate RouterOptions on startup.
 builder.Services.AddOptions<RouterOptions>()
     .Bind(builder.Configuration.GetSection("OptiRouter"))
@@ -59,7 +64,11 @@ builder.Services.AddSingleton<CostLedger>(sp =>
     var store = sp.GetRequiredService<ICostLedgerStore>();
     return new CostLedger(store, options.Budget.SessionEvictionHours);
 });
-builder.Services.AddSingleton<ModelHealthTracker>();
+builder.Services.AddSingleton<ModelHealthTracker>(sp =>
+{
+    var store = sp.GetRequiredService<ICostLedgerStore>();
+    return new ModelHealthTracker(store);
+});
 
 // Token 估算器：Tiktoken 模式用 SharpToken 真实 BPE 计数（内置词表、离线可用，异常自动回退分桶粗估）；
 // Bucket 模式用分桶加权粗估。编码名校验由 RouterOptionsValidator 在启动时完成。
@@ -83,6 +92,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var policies = new List<IRouterPolicy>
     {
         new RuleClassifierPolicy(),
+        new SemanticRouterPolicy(),
         new LongInputPolicy(),
         new BudgetGuardPolicy(ledger),
         new FailoverPolicy(healthTracker)
@@ -92,6 +102,10 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
 
 // t4: 注册降级重试编排器。
 builder.Services.AddSingleton<ProxyOrchestrator>();
+
+// 后台定时主动探活：启动预热一轮，随后按 HealthProbeIntervalSeconds 周期对所有启用模型探测，
+// 结果上报 ModelHealthTracker（成功累计半开/闭合，失败计熔断）。EnableHealthProbe=false 可关闭。
+builder.Services.AddHostedService<ModelHealthProbeService>();
 
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
@@ -109,10 +123,17 @@ builder.Services.AddRateLimiter(options =>
         if (!context.Request.Path.StartsWithSegments("/v1"))
             return RateLimitPartition.GetNoLimiter("public");
 
-        string sourceIp = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
-        return RateLimitPartition.GetFixedWindowLimiter(sourceIp, _ => new FixedWindowRateLimiterOptions
+        string partitionKey = ResolvePartitionKey(context);
+
+        // 每请求从已合并的 IConfiguration 读阈值（含 WebApplicationFactory 经 ConfigureAppConfiguration 注入的值）。
+        // 注意：FixedWindowRateLimiter 的 PermitLimit 在分区首次创建时定型，运行时改配置仅对新建分区生效，
+        // 既有分区沿用创建时的值——变更全局生效需重启进程。这是 ASP.NET 限流器的固有约束，非可热更。
+        var config = context.RequestServices.GetRequiredService<IConfiguration>();
+        int limit = config.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? requestsPerMinute;
+
+        return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
         {
-            PermitLimit = requestsPerMinute,
+            PermitLimit = limit,
             Window = TimeSpan.FromMinutes(1),
             QueueLimit = 0,
             AutoReplenishment = true
@@ -124,7 +145,21 @@ var app = builder.Build();
 
 app.Use(async (context, next) =>
 {
-    if (!context.Request.Path.StartsWithSegments("/v1"))
+    if (!context.Request.Headers.TryGetValue("X-Request-Id", out var requestId) || string.IsNullOrEmpty(requestId))
+    {
+        requestId = Guid.NewGuid().ToString("N");
+    }
+    context.Response.Headers["X-Request-Id"] = requestId;
+    context.Items["RequestId"] = requestId.ToString();
+    await next(context).ConfigureAwait(false);
+});
+
+static bool IsProtectedPath(PathString path) =>
+    path.StartsWithSegments("/v1") || path.StartsWithSegments("/dashboard") || path.StartsWithSegments("/api/dashboard");
+
+app.Use(async (context, next) =>
+{
+    if (!IsProtectedPath(context.Request.Path))
     {
         await next(context).ConfigureAwait(false);
         return;
@@ -137,6 +172,12 @@ app.Use(async (context, next) =>
     {
         providedKey = authorization.Parameter;
     }
+    // Dashboard 浏览器场景：Authorization 头不便携带，支持 ?key= 查询参数（仅 dashboard 路径）。
+    // 运维侧工具，访问者即 key 持有者；key 入 URL 有日志风险，由调用方/反代负责。
+    else if (context.Request.Path.StartsWithSegments("/dashboard") || context.Request.Path.StartsWithSegments("/api/dashboard"))
+    {
+        providedKey = context.Request.Query["key"];
+    }
 
     if (!IsValidApiKey(configuredKey, providedKey))
     {
@@ -145,6 +186,43 @@ app.Use(async (context, next) =>
     }
 
     await next(context).ConfigureAwait(false);
+});
+
+// M2 阶段：分区最大并发数控制，防止单用户请求洪水打满线程池
+app.Use(async (context, next) =>
+{
+    if (!context.Request.Path.StartsWithSegments("/v1"))
+    {
+        await next(context).ConfigureAwait(false);
+        return;
+    }
+
+    string partitionKey = ResolvePartitionKey(context);
+
+    int maxConcurrency = app.Configuration.GetValue<int?>("OptiRouter:MaxConcurrentRequestsPerPartition") ?? 100;
+    var sem = OptiRouter.Concurrency.ConcurrencyRegistry.GetSemaphore(partitionKey, maxConcurrency);
+
+    if (!await sem.WaitAsync(0).ConfigureAwait(false))
+    {
+        context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        context.Response.Headers["Retry-After"] = "5";
+        await context.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
+        {
+            Title = "Too many concurrent requests",
+            Detail = "Concurrency limit exceeded. Please slow down.",
+            Status = StatusCodes.Status429TooManyRequests
+        }).ConfigureAwait(false);
+        return;
+    }
+
+    try
+    {
+        await next(context).ConfigureAwait(false);
+    }
+    finally
+    {
+        sem.Release();
+    }
 });
 
 app.UseRateLimiter();
@@ -168,6 +246,12 @@ if (builder.Environment.IsProduction())
 // t4: 暴露 OpenAI 兼容 Chat Completions 端点。
 app.MapChatCompletions();
 
+// OpenAI 兼容模型发现端点（GET /v1/models），受 /v1/* 鉴权与限流保护。
+app.MapModelsEndpoint();
+
+// 注册可视化配置和健康监控 Dashboard
+app.MapDashboardEndpoints();
+
 app.Run();
 
 static bool IsValidApiKey(string? configuredKey, string? providedKey)
@@ -178,4 +262,45 @@ static bool IsValidApiKey(string? configuredKey, string? providedKey)
     byte[] configuredHash = SHA256.HashData(Encoding.UTF8.GetBytes(configuredKey));
     byte[] providedHash = SHA256.HashData(Encoding.UTF8.GetBytes(providedKey));
     return CryptographicOperations.FixedTimeEquals(configuredHash, providedHash);
+}
+
+// 分区 Key 解析：限流与并发中间件共用。
+// 优先级 Session > IP > Auth：
+//   - Session：显式会话隔离（最强信号）
+//   - IP：网络来源（CF-Connecting-IP > X-Forwarded-For 首段 > RemoteIpAddress）
+//         Auth 头不再压制 IP——多用户共享同一 API key 时仍按来源 IP 隔离，避免单 key 拖垮全租户
+//   - Auth：退路（无 session 无 IP 才用），SHA256 前 16 hex 字符，避免明文 key 入分区诊断日志
+static string ResolvePartitionKey(HttpContext context)
+{
+    var headers = context.Request.Headers;
+
+    if (headers.TryGetValue("X-Session-Id", out var sessionIdHeader) && !string.IsNullOrWhiteSpace(sessionIdHeader))
+        return $"session:{sessionIdHeader}";
+
+    string? ip = null;
+    if (headers.TryGetValue("CF-Connecting-IP", out var cfIp) && !string.IsNullOrEmpty(cfIp))
+        ip = cfIp;
+    else if (headers.TryGetValue("X-Forwarded-For", out var xff) && !string.IsNullOrEmpty(xff))
+        ip = xff.ToString().Split(',')[0].Trim();
+    else
+        ip = context.Connection.RemoteIpAddress?.ToString();
+
+    if (!string.IsNullOrEmpty(ip))
+        return $"ip:{ip}";
+
+    if (headers.TryGetValue("Authorization", out var authHeader)
+        && authHeader.ToString().StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+    {
+        string token = authHeader.ToString().Substring("Bearer ".Length).Trim();
+        return $"auth:{HashPartitionToken(token)}";
+    }
+
+    return "anonymous";
+}
+
+static string HashPartitionToken(string token)
+{
+    // 前 16 hex 字符（64 bit），分区去重足够，且不可逆推原 key。
+    byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
+    return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
 }

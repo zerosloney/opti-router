@@ -1,7 +1,9 @@
+using System.Buffers;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using System.IO.Pipelines;
 using OptiRouter.Configuration;
 
 namespace OptiRouter.Clients;
@@ -11,6 +13,12 @@ namespace OptiRouter.Clients;
 /// </summary>
 public sealed class OpenAICompatibleModelClient : IModelClient
 {
+    /// <summary>
+    /// 流式响应单行最大字节数。防恶意上游发送超长单行撑爆内存。
+    /// 正常 OpenAI SSE chunk 远小于此（通常 &lt;1KB）。
+    /// </summary>
+    private const int MaxStreamLineBytes = 1024 * 1024; // 1 MB
+
     private static readonly JsonSerializerOptions _serializeOptions = new()
     {
         PropertyNamingPolicy = new JsonSnakeCaseNamingPolicy(),
@@ -146,7 +154,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var probeRequest = new ChatRequest
         {
             Model = _endpoint.Name,
-            Messages = new List<ChatMessage> { new ChatMessage { Role = "user", Content = "ping" } },
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "ping") },
             MaxTokens = 1,
             Stream = false
         };
@@ -187,19 +195,40 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var body = request with { Model = _endpoint.Name, Stream = false };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
-        httpRequest.Content = new StringContent(json, Encoding.UTF8);
-        httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        int maxRetries = _endpoint.MaxRetries;
+        int attempt = 0;
 
-        using var response = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
-        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-
-        if (!response.IsSuccessStatusCode)
+        while (true)
         {
-            throw new ModelClientException(response.StatusCode, responseBody);
-        }
+            try
+            {
+                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
+                httpRequest.Content = new StringContent(json, Encoding.UTF8);
+                httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-        return new RawChatResponse(responseBody, TryExtractUsage(responseBody));
+                using var response = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var exception = new ModelClientException(response.StatusCode, responseBody);
+                    if (IsRetryable(response.StatusCode) && attempt < maxRetries)
+                    {
+                        attempt++;
+                        await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                    throw exception;
+                }
+
+                return new RawChatResponse(responseBody, TryExtractUsage(responseBody));
+            }
+            catch (Exception ex) when (IsExceptionRetryable(ex) && attempt < maxRetries)
+            {
+                attempt++;
+                await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <inheritdoc />
@@ -210,46 +239,156 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var body = request with { Model = _endpoint.Name, Stream = true };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
-        httpRequest.Content = new StringContent(json, Encoding.UTF8);
-        httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-
-        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new ModelClientException(response.StatusCode, errorBody);
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var reader = new System.IO.StreamReader(stream);
+        HttpResponseMessage? response = null;
+        int maxRetries = _endpoint.MaxRetries;
+        int attempt = 0;
 
         while (true)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-
-            if (line is null)
-                yield break;
-
-            if (line.Length == 0)
-                continue;
-
-            if (!line.StartsWith("data: ", StringComparison.Ordinal))
-                continue;
-
-            var data = line.Substring("data: ".Length).Trim();
-
-            if (data == "[DONE]")
+            try
             {
-                yield return new RawStreamLine("[DONE]", null);
-                yield break;
-            }
+                var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
+                httpRequest.Content = new StringContent(json, Encoding.UTF8);
+                httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-            yield return new RawStreamLine(data, TryExtractUsage(data));
+                response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var statusCode = response.StatusCode;
+                    var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    var exception = new ModelClientException(statusCode, errorBody);
+                    response.Dispose();
+                    response = null;
+
+                    if (IsRetryable(statusCode) && attempt < maxRetries)
+                    {
+                        attempt++;
+                        await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                    throw exception;
+                }
+
+                break; // 成功
+            }
+            catch (Exception ex) when (IsExceptionRetryable(ex) && attempt < maxRetries)
+            {
+                response?.Dispose();
+                response = null;
+                attempt++;
+                await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+            }
         }
+
+        try
+        {
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            // PipeReader 逐行扫描，单行累计字节超 MaxStreamLineBytes 则中断，防恶意上游发超长单行撑爆内存
+            // （StreamReader.ReadLineAsync 无单行上限，先读入再检查为时已晚）。
+            var reader = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8 * 1024));
+            int pendingLineBytes = 0;
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var result = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                var buffer = result.Buffer;
+
+                // 在 buffer 中找换行符，逐行处理。
+                while (TryReadLine(ref buffer, out var lineBytes))
+                {
+                    pendingLineBytes = 0;
+                    if (lineBytes.IsEmpty) continue; // 空行跳过
+
+                    // 取行内容为字节数组（SSE 单行通常 <1KB，ToArray 开销可忽略）。
+                    byte[] lineArr = lineBytes.ToArray();
+                    var lineSpan = (ReadOnlySpan<byte>)lineArr;
+                    if (!lineSpan.StartsWith("data: "u8))
+                        continue;
+
+                    var dataSpan = lineSpan.Slice("data: ".Length);
+                    // 去尾随 \r（兼容 CRLF）。
+                    if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
+                        dataSpan = dataSpan[..^1];
+
+                    if (dataSpan.SequenceEqual("[DONE]"u8))
+                    {
+                        await reader.CompleteAsync().ConfigureAwait(false);
+                        yield return new RawStreamLine("[DONE]", null);
+                        yield break;
+                    }
+
+                    var data = System.Text.Encoding.UTF8.GetString(dataSpan);
+                    yield return new RawStreamLine(data, TryExtractUsage(data));
+                }
+
+                // 剩余未遇换行的字节：累计，超限则中断。
+                pendingLineBytes += (int)buffer.Length;
+                if (pendingLineBytes > MaxStreamLineBytes)
+                {
+                    await reader.CompleteAsync().ConfigureAwait(false);
+                    throw new InvalidOperationException(
+                        $"Upstream stream line exceeded {MaxStreamLineBytes} bytes; aborting to prevent OOM.");
+                }
+
+                reader.AdvanceTo(buffer.Start, buffer.End);
+
+                if (result.IsCompleted)
+                {
+                    await reader.CompleteAsync().ConfigureAwait(false);
+                    yield break;
+                }
+            }
+        }
+        finally
+        {
+            response?.Dispose();
+        }
+    }
+
+    /// <summary>从 buffer 头部读取一行（到 \n，不含），推进 buffer。返回 false 表示无完整行。</summary>
+    private static bool TryReadLine(ref ReadOnlySequence<byte> buffer, out ReadOnlySequence<byte> line)
+    {
+        var position = buffer.PositionOf((byte)'\n');
+        if (position is null)
+        {
+            line = default;
+            return false;
+        }
+
+        line = buffer.Slice(0, position.Value);
+        buffer = buffer.Slice(buffer.GetPosition(1, position.Value));
+        return true;
+    }
+
+    private static bool IsRetryable(System.Net.HttpStatusCode statusCode)
+    {
+        int code = (int)statusCode;
+        return code is 408 or 429 or >= 500 and <= 599;
+    }
+
+    private static bool IsExceptionRetryable(Exception ex)
+    {
+        // HttpRequestException（DNS/连接/RST 等网络错）→ 重试。
+        if (ex is HttpRequestException)
+            return true;
+
+        // HttpClient 超时抛 TaskCanceledException/OperationCanceledException，InnerException 为 TimeoutException。
+        // 此为客户端内部超时（瞬时），应重试；外部 cancellationToken 主动取消（无 TimeoutException inner）不重试。
+        if (ex is OperationCanceledException)
+            return ex.InnerException is TimeoutException;
+
+        return false;
+    }
+
+    private static async Task DelayWithJitterAsync(int attempt, CancellationToken cancellationToken)
+    {
+        // Exponential backoff: base = 2^attempt * 100 ms
+        int baseDelayMs = (int)Math.Pow(2, attempt) * 100;
+        int jitterMs = Random.Shared.Next(0, 100);
+        await Task.Delay(baseDelayMs + jitterMs, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

@@ -45,24 +45,51 @@ public sealed class ModelHealthTracker
         public int FailureCount;
         public DateTime CoolDownUntil;
         public int ActiveProbes;
+        public int HalfOpenSuccesses;
     }
 
     private readonly object _lock = new();
     private readonly Dictionary<string, CircuitInfo> _circuits = new();
     private readonly Func<DateTime> _nowProvider;
+    private readonly ICircuitStateStore? _store;
 
     /// <summary>
     /// 用系统 UTC 时钟构造。
     /// </summary>
-    public ModelHealthTracker() : this(() => DateTime.UtcNow) { }
+    public ModelHealthTracker() : this(null, () => DateTime.UtcNow) { }
+
+    /// <summary>
+    /// 用存储器和系统时钟构造。
+    /// </summary>
+    public ModelHealthTracker(ICircuitStateStore? store) : this(store, () => DateTime.UtcNow) { }
 
     /// <summary>
     /// 用自定义时钟构造（测试可注入）。
     /// </summary>
     /// <param name="nowProvider">返回当前 UTC 时间。</param>
-    public ModelHealthTracker(Func<DateTime> nowProvider)
+    public ModelHealthTracker(Func<DateTime> nowProvider) : this(null, nowProvider) { }
+
+    /// <summary>
+    /// 用存储器和自定义时钟构造。
+    /// </summary>
+    public ModelHealthTracker(ICircuitStateStore? store, Func<DateTime> nowProvider)
     {
+        _store = store;
         _nowProvider = nowProvider ?? throw new ArgumentNullException(nameof(nowProvider));
+
+        if (_store != null)
+        {
+            var loaded = _store.LoadCircuitStates();
+            foreach (var kvp in loaded)
+            {
+                _circuits[kvp.Key] = new CircuitInfo
+                {
+                    State = kvp.Value.State,
+                    FailureCount = kvp.Value.FailureCount,
+                    CoolDownUntil = kvp.Value.CooldownUntil
+                };
+            }
+        }
     }
 
     /// <summary>
@@ -78,8 +105,25 @@ public sealed class ModelHealthTracker
             if (!_circuits.TryGetValue(modelName, out var info))
                 return CircuitState.Closed;
 
-            TransitionIfExpired(info);
+            TransitionIfExpired(modelName, info);
             return info.State;
+        }
+    }
+
+    /// <summary>
+    /// 获取当前所有处于非闭合状态（或有失败记录）的模型熔断状态快照。
+    /// </summary>
+    public IReadOnlyDictionary<string, (CircuitState State, int FailureCount, int ActiveProbes)> GetCircuitsSnapshot()
+    {
+        lock (_lock)
+        {
+            var snapshot = new Dictionary<string, (CircuitState State, int FailureCount, int ActiveProbes)>(StringComparer.Ordinal);
+            foreach (var kvp in _circuits)
+            {
+                TransitionIfExpired(kvp.Key, kvp.Value);
+                snapshot[kvp.Key] = (kvp.Value.State, kvp.Value.FailureCount, kvp.Value.ActiveProbes);
+            }
+            return snapshot;
         }
     }
 
@@ -108,7 +152,7 @@ public sealed class ModelHealthTracker
             if (!_circuits.TryGetValue(modelName, out var info))
                 return true; // 无记录 = 闭合
 
-            TransitionIfExpired(info);
+            TransitionIfExpired(modelName, info);
             switch (info.State)
             {
                 case CircuitState.Closed:
@@ -147,25 +191,29 @@ public sealed class ModelHealthTracker
                 _circuits[modelName] = info;
             }
 
-            TransitionIfExpired(info);
+            TransitionIfExpired(modelName, info);
 
             // 该失败来自一次已放行的请求（可能是半开探测），先释放占位。
             if (info.ActiveProbes > 0)
                 info.ActiveProbes--;
 
+            bool result = false;
             switch (info.State)
             {
                 case CircuitState.HalfOpen:
-                    // 探测失败：重新打开并重新冷却。
+                    // 探测失败：重新打开并重新冷却，清零半开成功计数。
                     info.State = CircuitState.Open;
                     info.CoolDownUntil = _nowProvider().AddSeconds(cooldownSeconds);
                     info.FailureCount = 0;
-                    return true;
+                    info.HalfOpenSuccesses = 0;
+                    result = true;
+                    break;
 
                 case CircuitState.Open:
                     // 已打开（并发在途请求的迟到失败）：刷新冷却到期时间。
                     info.CoolDownUntil = _nowProvider().AddSeconds(cooldownSeconds);
-                    return true;
+                    result = true;
+                    break;
 
                 default: // Closed
                     info.FailureCount++;
@@ -173,34 +221,55 @@ public sealed class ModelHealthTracker
                     {
                         info.State = CircuitState.Open;
                         info.CoolDownUntil = _nowProvider().AddSeconds(cooldownSeconds);
-                        return true;
+                        info.HalfOpenSuccesses = 0;
+                        result = true;
                     }
-                    return false;
+                    break;
             }
+
+            _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
+            return result;
         }
     }
 
     /// <summary>
-    /// 上报成功：闭合熔断器（半开探测成功即恢复），清零失败计数。
+    /// 上报成功。闭合态直接清零；半开态累计连续探测成功，达 <paramref name="requiredSuccesses"/> 才闭合，
+    /// 未达阈值保持半开（释放探测槽位让下一轮探测进入）；任一失败（见 <see cref="RecordFailure"/>）重开并清零。
     /// </summary>
     /// <param name="modelName">模型名。</param>
-    public void RecordSuccess(string modelName)
+    /// <param name="requiredSuccesses">半开态连续成功闭合阈值；默认 1（单次成功即恢复，保持旧行为）。</param>
+    public void RecordSuccess(string modelName, int requiredSuccesses = 1)
     {
         if (string.IsNullOrEmpty(modelName)) return;
+        int threshold = Math.Max(1, requiredSuccesses);
 
         lock (_lock)
         {
             if (!_circuits.TryGetValue(modelName, out var info))
                 return;
 
-            TransitionIfExpired(info);
+            TransitionIfExpired(modelName, info);
 
             if (info.ActiveProbes > 0)
                 info.ActiveProbes--;
 
+            if (info.State == CircuitState.HalfOpen)
+            {
+                info.HalfOpenSuccesses++;
+                if (info.HalfOpenSuccesses < threshold)
+                {
+                    // 未达闭合阈值：保持半开，等下一轮探测。槽位已释放。
+                    _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
+                    return;
+                }
+            }
+
+            // 闭合态成功 / 半开累计达标：闭合并清零。
             info.State = CircuitState.Closed;
             info.FailureCount = 0;
+            info.HalfOpenSuccesses = 0;
             info.CoolDownUntil = default;
+            _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
         }
     }
 
@@ -224,12 +293,13 @@ public sealed class ModelHealthTracker
     /// 打开状态冷却到期时转入半开（惰性转换，无需独立定时器）。
     /// 调用方必须持有 <see cref="_lock"/>。
     /// </summary>
-    private void TransitionIfExpired(CircuitInfo info)
+    private void TransitionIfExpired(string modelName, CircuitInfo info)
     {
         if (info.State == CircuitState.Open && _nowProvider() >= info.CoolDownUntil)
         {
             info.State = CircuitState.HalfOpen;
             info.FailureCount = 0;
+            _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
             // ActiveProbes 保留：如有在途探测，其占位继续有效。
         }
     }

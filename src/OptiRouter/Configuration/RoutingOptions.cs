@@ -62,4 +62,64 @@ public sealed class RoutingOptions
     /// 必须大于 0。
     /// </summary>
     public int FailoverHalfOpenMaxProbes { get; set; } = 1;
+
+    /// <summary>
+    /// 半开态连续探测成功多少次后才闭合熔断。默认 1（单次成功即恢复，保持既有行为）。
+    /// 调高（如 3）可防止单次偶然成功导致抖动——慢恢复模型需连续多次探测成功才视为稳定。
+    /// 必须大于 0。
+    /// </summary>
+    public int FailoverHalfOpenRequiredSuccesses { get; set; } = 1;
+
+    /// <summary>
+    /// 流式响应（SSE）的最大允许累积字节数（保护性硬限制，防止 OOM/恶意无限流输出）。
+    /// 默认 20MB。
+    /// </summary>
+    public long MaxResponseStreamBytes { get; set; } = 20 * 1024 * 1024; // 20 MB
+
+    /// <summary>
+    /// 是否启用后台主动健康探活（定时对所有启用模型发探测请求，结果上报断路器）。
+    /// 默认 true。关闭则熔断恢复纯靠真实流量半开探测。
+    /// </summary>
+    public bool EnableHealthProbe { get; set; } = true;
+
+    /// <summary>
+    /// 后台探活间隔秒数。默认 60。最小 10（低于 10 按 10 计）。
+    /// </summary>
+    public int HealthProbeIntervalSeconds { get; set; } = 60;
+
+    /// <summary>
+    /// 是否启用向量空间语义路由器。
+    /// </summary>
+    public bool EnableSemanticRouter { get; set; } = true;
+
+    /// <summary>
+    /// 向量余弦相似度匹配阈值。取值范围 [0.0, 1.0]。默认 0.25。
+    /// </summary>
+    public double SemanticSimilarityThreshold { get; set; } = 0.25;
+
+    /// <summary>
+    /// 语义路由规则列表。
+    /// </summary>
+    public System.Collections.Generic.List<SemanticRouteOptions> SemanticRoutes { get; set; } = new();
+}
+
+/// <summary>
+/// 语义路由条目配置。
+/// </summary>
+public sealed class SemanticRouteOptions
+{
+    /// <summary>
+    /// 路由规则名称（如 "code-generation"）。
+    /// </summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 用于相似度匹配的示例短语列表。
+    /// </summary>
+    public System.Collections.Generic.List<string> Phrases { get; set; } = new();
+
+    /// <summary>
+    /// 该路由规则匹配成功时指向的目标能力分档。
+    /// </summary>
+    public ModelTier TargetTier { get; set; } = ModelTier.Medium;
 }

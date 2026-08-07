@@ -29,7 +29,7 @@ public static class TestHelpers
     {
         return new ChatRequest
         {
-            Messages = messages.Select(m => new ChatMessage { Role = m.Role, Content = m.Content }).ToList()
+            Messages = messages.Select(m => ChatMessage.FromText(m.Role, m.Content)).ToList()
         };
     }
 }

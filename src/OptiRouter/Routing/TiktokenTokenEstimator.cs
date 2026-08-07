@@ -75,9 +75,11 @@ public sealed class TiktokenTokenEstimator : ITokenEstimator
 
             foreach (var msg in request.Messages)
             {
-                if (msg is null || string.IsNullOrEmpty(msg.Content)) continue;
+                if (msg is null) continue;
+                var text = msg.GetText();
+                if (string.IsNullOrEmpty(text)) continue;
                 messageCount++;
-                contentTokens += _countTokens(msg.Content);
+                contentTokens += _countTokens(text);
             }
 
             if (messageCount == 0) return 0;

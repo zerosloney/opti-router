@@ -6,7 +6,7 @@ namespace OptiRouter.Routing;
 /// 实现必须保证 <see cref="AddDaily"/> / <see cref="AddSession"/> 的累加是原子的，
 /// 并返回累加后的最新累计值。
 /// </summary>
-public interface ICostLedgerStore : IDisposable
+public interface ICostLedgerStore : ICircuitStateStore, IDisposable
 {
     /// <summary>
     /// 原子累加日花费，返回累加后的当日总花费。

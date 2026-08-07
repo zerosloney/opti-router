@@ -215,4 +215,67 @@ public class ModelHealthTrackerTests
         Assert.False(tracker.RecordFailure("", threshold: 1, cooldownSeconds: 60));
         Assert.False(tracker.IsCoolingDown(""));
     }
+
+    [Fact]
+    public void HalfOpen_RequiredSuccesses_StaysHalfOpenUntilThresholdMet()
+    {
+        var now = DateTime.UtcNow;
+        var tracker = new ModelHealthTracker(() => now);
+
+        // 触发熔断 → 打开
+        for (int i = 0; i < 3; i++)
+            tracker.RecordFailure("m1", threshold: 3, cooldownSeconds: 60);
+        Assert.Equal(CircuitState.Open, tracker.GetState("m1"));
+
+        // 冷却到期 → 半开
+        now = now.AddSeconds(61);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+
+        // requiredSuccesses=3：前两次成功保持半开
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 3));
+        tracker.RecordSuccess("m1", requiredSuccesses: 3);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 3));
+        tracker.RecordSuccess("m1", requiredSuccesses: 3);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+
+        // 第三次成功 → 闭合
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 3));
+        tracker.RecordSuccess("m1", requiredSuccesses: 3);
+        Assert.Equal(CircuitState.Closed, tracker.GetState("m1"));
+    }
+
+    [Fact]
+    public void HalfOpen_RequiredSuccesses_FailureResetsCounterAndReopens()
+    {
+        var now = DateTime.UtcNow;
+        var tracker = new ModelHealthTracker(() => now);
+
+        for (int i = 0; i < 3; i++)
+            tracker.RecordFailure("m1", threshold: 3, cooldownSeconds: 60);
+        Assert.Equal(CircuitState.Open, tracker.GetState("m1"));
+
+        now = now.AddSeconds(61);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+
+        // 两次成功（未达阈值 3）
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 3));
+        tracker.RecordSuccess("m1", requiredSuccesses: 3);
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 3));
+        tracker.RecordSuccess("m1", requiredSuccesses: 3);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+
+        // 第三次探测失败 → 重开，成功计数清零
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 3));
+        Assert.True(tracker.RecordFailure("m1", threshold: 3, cooldownSeconds: 60));
+        Assert.Equal(CircuitState.Open, tracker.GetState("m1"));
+
+        // 再次进入半开后，需重新累计 3 次（非延续之前的 2 次）
+        now = now.AddSeconds(61);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 3));
+        tracker.RecordSuccess("m1", requiredSuccesses: 3);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+    }
 }

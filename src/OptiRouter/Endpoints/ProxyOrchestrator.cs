@@ -76,7 +76,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         int threshold = options.Routing.FailoverFailureThreshold;
         int cooldown = options.Routing.FailoverCooldownSeconds;
         int halfOpenMaxProbes = options.Routing.FailoverHalfOpenMaxProbes;
+        int halfOpenRequiredSuccesses = options.Routing.FailoverHalfOpenRequiredSuccesses;
         bool failoverEnabled = options.Routing.EnableFailover;
+
+        string? lastModelName = null;
+        int? lastStatusCode = null;
+        string? lastErrorMessage = null;
 
         while (true)
         {
@@ -88,9 +93,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             if (decision.Candidates.Count == 0)
             {
-                if (decision.Reason.Contains("reject", StringComparison.OrdinalIgnoreCase))
+                if (decision.BudgetExhausted)
                     throw new BudgetExhaustedException(decision.Reason);
-                throw new AllCandidatesFailedException(attemptedModels);
+                throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
             }
 
             bool attemptedCandidate = false;
@@ -123,7 +128,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         var cost = CostCalculator.Compute(response.Usage, candidate);
                         _ledger.Record(cost, sessionId);
                     }
-                    _healthTracker.RecordSuccess(candidate.Name);
+                    _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     outcomeReported = true;
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
@@ -135,6 +140,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 catch (ModelClientException ex) when (IsRetryable(ex))
                 {
+                    lastModelName = candidate.Name;
+                    lastStatusCode = (int)ex.StatusCode;
+                    lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
@@ -142,6 +150,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 catch (HttpRequestException ex)
                 {
+                    lastModelName = candidate.Name;
+                    lastStatusCode = 503;
+                    lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
@@ -149,6 +160,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 catch (OperationCanceledException) when (!ct.IsCancellationRequested)
                 {
+                    lastModelName = candidate.Name;
+                    lastStatusCode = 408;
+                    lastErrorMessage = "Request timed out inside the proxy.";
                     // 客户端内部超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
@@ -163,7 +177,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
 
             if (!failoverEnabled || !attemptedCandidate)
-                throw new AllCandidatesFailedException(attemptedModels);
+                throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, "All candidates failed.");
         }
     }
 
@@ -188,7 +202,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         int threshold = options.Routing.FailoverFailureThreshold;
         int cooldown = options.Routing.FailoverCooldownSeconds;
         int halfOpenMaxProbes = options.Routing.FailoverHalfOpenMaxProbes;
+        int halfOpenRequiredSuccesses = options.Routing.FailoverHalfOpenRequiredSuccesses;
         bool failoverEnabled = options.Routing.EnableFailover;
+
+        string? lastModelName = null;
+        int? lastStatusCode = null;
+        string? lastErrorMessage = null;
+        long totalBytesTransferred = 0;
+        long maxResponseBytes = options.Routing.MaxResponseStreamBytes;
 
         while (true)
         {
@@ -200,9 +221,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             if (decision.Candidates.Count == 0)
             {
-                if (decision.Reason.Contains("reject", StringComparison.OrdinalIgnoreCase))
+                if (decision.BudgetExhausted)
                     throw new BudgetExhaustedException(decision.Reason);
-                throw new AllCandidatesFailedException(attemptedModels);
+                throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
             }
 
             bool attemptedCandidate = false;
@@ -257,14 +278,23 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     catch (ModelClientException ex) when (IsRetryable(ex))
                     {
                         preStreamFailure = ex;
+                        lastModelName = candidate.Name;
+                        lastStatusCode = (int)ex.StatusCode;
+                        lastErrorMessage = ex.Message;
                     }
                     catch (HttpRequestException ex)
                     {
                         preStreamFailure = ex;
+                        lastModelName = candidate.Name;
+                        lastStatusCode = 503;
+                        lastErrorMessage = ex.Message;
                     }
                     catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
                     {
                         preStreamFailure = ex;
+                        lastModelName = candidate.Name;
+                        lastStatusCode = 408;
+                        lastErrorMessage = "Request timed out inside the proxy.";
                     }
                     finally
                     {
@@ -289,6 +319,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     ArgumentNullException.ThrowIfNull(enumerator);
 
                     // Phase 2: 首行在 try-catch 之外 yield，避免 CS1626。
+                    totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(firstLine.Data ?? "");
+                    if (totalBytesTransferred > maxResponseBytes)
+                    {
+                        throw new InvalidOperationException($"Response size limit exceeded ({maxResponseBytes} bytes).");
+                    }
                     yield return firstLine;
 
                     // 继续 yield 剩余行。内层只有 finally，无 catch，允许 yield。
@@ -314,6 +349,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             var line = enumerator.Current;
                             if (line.Usage is not null)
                                 finalUsage = line.Usage;
+
+                            totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(line.Data ?? "");
+                            if (totalBytesTransferred > maxResponseBytes)
+                            {
+                                throw new InvalidOperationException($"Response size limit exceeded ({maxResponseBytes} bytes).");
+                            }
                             yield return line;
                         }
                     }
@@ -327,7 +368,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         _ledger.Record(CostCalculator.Compute(finalUsage, candidate), sessionId);
                     }
-                    _healthTracker.RecordSuccess(candidate.Name);
+                    _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     probeResolved = true;
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, finalUsage is not null
@@ -356,7 +397,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
 
             if (!failoverEnabled || !attemptedCandidate)
-                throw new AllCandidatesFailedException(attemptedModels);
+                throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, "All candidates failed.");
         }
     }
 
