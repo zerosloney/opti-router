@@ -378,6 +378,98 @@ public class RequestAuditStoreTests
         Assert.Equal("group-1", slow.ParallelGroupId);
     }
 
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_WithEstimatedCost_RoundTrips(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        // 采纳的成功响应：真实成本，IsEstimated=false（默认）。
+        var real = SampleRecord("fast-model") with { Cost = 0.001m, IsAdopted = true };
+        // 被取消的并行尝试：预估成本，IsEstimated=true。
+        var estimated = SampleRecord("slow-model") with
+        {
+            Cost = 0.0005m,
+            IsEstimated = true,
+            IsAdopted = false,
+            Success = false,
+            ErrorMessage = "cancelled"
+        };
+
+        store.Append(real);
+        store.Append(estimated);
+
+        var recent = store.GetRecent(10);
+        var fast = recent.First(r => r.Model == "fast-model");
+        var slow = recent.First(r => r.Model == "slow-model");
+        Assert.False(fast.IsEstimated); // 默认值
+        Assert.True(slow.IsEstimated);
+        Assert.Equal(0.0005m, slow.Cost);
+    }
+
+    [Fact]
+    public void SqliteStore_MigratesOldDb_AddsIsEstimatedColumn()
+    {
+        string path = TempDbPath();
+        try
+        {
+            // 构造旧 schema（无 is_estimated，但有 is_adopted/parallel_group_id）。
+            using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    CREATE TABLE request_audit (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        request_id TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        estimated_tokens INTEGER NOT NULL,
+                        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                        completion_tokens INTEGER NOT NULL DEFAULT 0,
+                        cost REAL NOT NULL DEFAULT 0,
+                        latency_ms INTEGER NOT NULL DEFAULT 0,
+                        session_id TEXT,
+                        routing_reason TEXT NOT NULL,
+                        success INTEGER NOT NULL,
+                        error_message TEXT,
+                        is_streaming INTEGER NOT NULL DEFAULT 0,
+                        routed_tier TEXT,
+                        cascade_triggered INTEGER NOT NULL DEFAULT 0,
+                        upgraded_from TEXT,
+                        is_adopted INTEGER NOT NULL DEFAULT 1,
+                        parallel_group_id TEXT
+                    );
+                    INSERT INTO request_audit
+                        (timestamp, request_id, model, estimated_tokens, prompt_tokens,
+                         completion_tokens, cost, latency_ms, session_id, routing_reason,
+                         success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
+                         is_adopted, parallel_group_id)
+                    VALUES ('2026-01-01T00:00:00.0000000Z', 'r1', 'old', 10, 5, 5, 0.01, 100, null, 'old', 1, null, 0, 'Medium', 0, null, 1, null);
+                    """;
+                cmd.ExecuteNonQuery();
+            }
+
+            using var store = new SqliteRequestAuditStore(path);
+
+            // 旧记录读回，IsEstimated 取默认值 false。
+            var old = store.GetRecent(10);
+            Assert.Single(old);
+            Assert.False(old[0].IsEstimated);
+
+            // 新记录可写入读回。
+            store.Append(SampleRecord("new") with { IsEstimated = true, Cost = 0.002m });
+            var all = store.GetRecent(10);
+            Assert.Equal(2, all.Count);
+            var rec = all.First(r => r.Model == "new");
+            Assert.True(rec.IsEstimated);
+            Assert.Equal(0.002m, rec.Cost);
+        }
+        finally
+        {
+            CleanupDb(path);
+        }
+    }
+
     [Fact]
     public void SqliteStore_MigratesOldDb_AddsParallelColumns()
     {

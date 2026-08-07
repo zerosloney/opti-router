@@ -136,6 +136,82 @@ public class FusionModeTests
     }
 
     [Fact]
+    public async Task Fusion_CancelledAttempt_RecordsEstimatedCost()
+    {
+        // 修复验证：被取消的并行尝试必须记预估成本（上游已计费），且审计标注 IsEstimated=true。
+        using var factory = new FusionFactory();
+        factory.MockClients["fast-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "fast-model" },
+            (req, ct) => Task.FromResult(MakeResponse("fast-model", 10, 5)));
+        factory.MockClients["slow-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "slow-model" },
+            async (req, ct) =>
+            {
+                try { await Task.Delay(TimeSpan.FromSeconds(2), ct); }
+                catch (TaskCanceledException) { throw new OperationCanceledException(ct); }
+                return MakeResponse("slow-model", 10, 5);
+            });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionFactory.Key);
+
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // 等取消的 slow task 收尾（fusion 内部 WhenAll 已等，这里给一点缓冲确保审计落库）。
+        await Task.Delay(200);
+
+        var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+        var recent = auditStore.GetRecent(10);
+
+        // 两条记录：fast（采纳，真实成本）+ slow（被取消，预估成本）。
+        var fast = recent.FirstOrDefault(r => r.Model == "fast-model");
+        var slow = recent.FirstOrDefault(r => r.Model == "slow-model");
+        Assert.NotNull(fast);
+        Assert.NotNull(slow);
+        Assert.True(fast.IsAdopted);
+        Assert.False(fast.IsEstimated); // 真实成本
+        Assert.False(slow.IsAdopted);
+        Assert.True(slow.IsEstimated); // 预估成本
+        Assert.Equal(fast.ParallelGroupId, slow.ParallelGroupId); // 同组
+    }
+
+    [Fact]
+    public async Task Fusion_FailedAttempt_RecordsEstimatedCost()
+    {
+        // 真实失败的并行尝试也记预估成本。
+        using var factory = new FusionFactory();
+        factory.MockClients["fast-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "fast-model" },
+            (req, ct) => Task.FromResult(MakeResponse("fast-model", 10, 5)));
+        // slow 抛真实失败（非取消）——延迟确保 fast 先成功，slow 在收到 cancel 前抛错。
+        // 用 503 模拟上游错误，fast 采纳后 slow 被 cancel，但若 slow 先抛 503 则计入失败。
+        factory.MockClients["slow-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "slow-model" },
+            (req, ct) => throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "down"));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionFactory.Key);
+
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        // fast 采纳成功（slow 失败不影响采纳）。
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+        var recent = auditStore.GetRecent(10);
+        var slow = recent.FirstOrDefault(r => r.Model == "slow-model" && !r.IsAdopted);
+        Assert.NotNull(slow);
+        Assert.True(slow.IsEstimated); // 失败也记预估
+    }
+
+    [Fact]
     public async Task Fusion_AllFail_FallsBackToSerial()
     {
         using var factory = new FusionFactory();
