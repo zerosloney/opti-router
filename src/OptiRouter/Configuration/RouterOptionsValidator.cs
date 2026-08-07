@@ -1,3 +1,5 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OptiRouter.Routing;
 
@@ -8,6 +10,22 @@ namespace OptiRouter.Configuration;
 /// </summary>
 public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
 {
+    private readonly ILogger<RouterOptionsValidator> _logger;
+
+    /// <summary>
+    /// 用默认（null）logger 构造，保持测试零改动。
+    /// </summary>
+    public RouterOptionsValidator() : this(NullLogger<RouterOptionsValidator>.Instance) { }
+
+    /// <summary>
+    /// 用指定 logger 构造，用于 Tags 软校验警告输出。
+    /// </summary>
+    /// <param name="logger">日志记录器。</param>
+    public RouterOptionsValidator(ILogger<RouterOptionsValidator> logger)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    }
+
     /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, RouterOptions options)
     {
@@ -96,6 +114,27 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Routing.FusionMaxParallel < 2 || options.Routing.FusionMaxParallel > 5)
         {
             return ValidateOptionsResult.Fail("Routing.FusionMaxParallel 必须在 [2, 5] 范围内。");
+        }
+
+        // Tags 软校验：未识别的 tag 仅 warning，不阻断启动。
+        // 允许自定义 tag（未来扩展），但提示拼写错误（如 "vison" 应为 "vision"）。
+        // 仅当启用能力过滤时有意义，但始终提示——配置错误在启用前就应发现。
+        var unknownTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var model in options.Models)
+        {
+            if (model.Tags is null) continue;
+            foreach (var tag in model.Tags)
+            {
+                if (!ModelCapabilities.KnownTags.Contains(tag))
+                    unknownTags.Add(tag);
+            }
+        }
+        if (unknownTags.Count > 0 && _logger.IsEnabled(LogLevel.Warning))
+        {
+            _logger.LogWarning(
+                "检测到未识别的模型 Tags: {Unknown}。已知标签: {Known}。" +
+                "若为拼写错误，CapabilityFilter 将无法匹配；自定义 tag 不影响其他策略。",
+                string.Join(", ", unknownTags), string.Join(", ", ModelCapabilities.KnownTags));
         }
 
         return ValidateOptionsResult.Success;

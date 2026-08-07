@@ -29,13 +29,14 @@ public static class DashboardHandler
             ModelHealthTracker tracker,
             IRequestAuditStore auditStore,
             AlertEngine alertEngine,
+            ILatencyStatsProvider latencyStats,
             IOptions<RouterOptions> options,
             IMemoryCache cache) =>
         {
             return cache.GetOrCreate("dashboard:metrics", entry =>
             {
                 entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(1);
-                return ComputeMetrics(ledger, tracker, auditStore, alertEngine, options.Value);
+                return ComputeMetrics(ledger, tracker, auditStore, alertEngine, latencyStats, options.Value);
             });
         });
 
@@ -74,7 +75,7 @@ public static class DashboardHandler
         // 模型配置 CRUD 已迁移到 ModelsConfigHandler (/api/models/*)，与本监控页职责分离。
     }
 
-    private static object ComputeMetrics(CostLedger ledger, ModelHealthTracker tracker, IRequestAuditStore auditStore, AlertEngine alertEngine, RouterOptions options)
+    private static object ComputeMetrics(CostLedger ledger, ModelHealthTracker tracker, IRequestAuditStore auditStore, AlertEngine alertEngine, ILatencyStatsProvider latencyStats, RouterOptions options)
     {
         var circuitSnapshot = tracker.GetCircuitsSnapshot();
         var spend = ledger.GetSpend();
@@ -90,18 +91,27 @@ public static class DashboardHandler
         int totalTokens = recent.Sum(r => r.PromptTokens + r.CompletionTokens);
         double avgLatencyMs = totalRequests > 0 ? recent.Average(r => r.LatencyMs) : 0;
 
-        var modelsList = options.Models.Select(m => new
+        var modelsList = options.Models.Select(m =>
         {
-            m.Name,
-            m.BaseUrl,
-            m.Tier,
-            m.InputPricePerMillion,
-            m.OutputPricePerMillion,
-            m.MaxContextTokens,
-            m.Enabled,
-            CircuitState = circuitSnapshot.TryGetValue(m.Name, out var info) ? info.State.ToString() : "Closed",
-            FailureCount = circuitSnapshot.TryGetValue(m.Name, out var info2) ? info2.FailureCount : 0,
-            ActiveProbes = circuitSnapshot.TryGetValue(m.Name, out var info3) ? info3.ActiveProbes : 0
+            // 延迟统计：后台聚合的内存快照，冷启动/低流量时为 null。
+            var latencyStat = latencyStats.GetStats(m.Name);
+            return new
+            {
+                m.Name,
+                m.BaseUrl,
+                m.Tier,
+                m.InputPricePerMillion,
+                m.OutputPricePerMillion,
+                m.MaxContextTokens,
+                m.Enabled,
+                m.Tags,
+                CircuitState = circuitSnapshot.TryGetValue(m.Name, out var info) ? info.State.ToString() : "Closed",
+                FailureCount = circuitSnapshot.TryGetValue(m.Name, out var info2) ? info2.FailureCount : 0,
+                ActiveProbes = circuitSnapshot.TryGetValue(m.Name, out var info3) ? info3.ActiveProbes : 0,
+                // 延迟感知统计（无数据时 null/0，前端显示 '--'）
+                AvgLatencyMs = latencyStat?.AverageLatencyMs,
+                LatencySamples = latencyStat?.SampleCount ?? 0
+            };
         }).ToList();
 
         return new

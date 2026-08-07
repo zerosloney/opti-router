@@ -1,5 +1,8 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OptiRouter.Configuration;
+using OptiRouter.Routing;
 
 namespace OptiRouter.Tests;
 
@@ -239,6 +242,58 @@ public class RouterOptionsValidatorTests
         var result = validator.Validate(null, options);
 
         Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public void UnknownTags_WarnsButSucceeds()
+    {
+        // 软校验：未识别 tag 仅 warning，不阻断启动。
+        var options = CreateValidOptions();
+        options.Models[0].Tags.Add("vision");   // 已知
+        options.Models[0].Tags.Add("vison");    // 拼写错，未知
+        options.Models[0].Tags.Add("custom");   // 自定义，未知
+        var capture = new CaptureLogger();
+        var validator = new RouterOptionsValidator(capture);
+
+        var result = validator.Validate(null, options);
+
+        Assert.True(result.Succeeded); // 软校验不失败
+        Assert.Contains(capture.Logs, l =>
+            l.LogLevel == LogLevel.Warning &&
+            l.Message.Contains("vison") && l.Message.Contains("custom"));
+    }
+
+    [Fact]
+    public void KnownTags_NoWarning()
+    {
+        var options = CreateValidOptions();
+        options.Models[0].Tags.Add("vision");
+        options.Models[0].Tags.Add("tool-use");
+        options.Models[0].Tags.Add("json-mode");
+        var capture = new CaptureLogger();
+        var validator = new RouterOptionsValidator(capture);
+
+        var result = validator.Validate(null, options);
+
+        Assert.True(result.Succeeded);
+        Assert.DoesNotContain(capture.Logs, l => l.LogLevel == LogLevel.Warning);
+    }
+
+    /// <summary>捕获日志条目用于断言。</summary>
+    private sealed class CaptureLogger : ILogger<RouterOptionsValidator>
+    {
+        public List<(LogLevel LogLevel, string Message)> Logs { get; } = new();
+
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullDisposable.Instance;
+        public bool IsEnabled(LogLevel logLevel) => logLevel == LogLevel.Warning;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            => Logs.Add((logLevel, formatter(state, exception)));
+    }
+
+    private sealed class NullDisposable : IDisposable
+    {
+        public static readonly NullDisposable Instance = new();
+        public void Dispose() { }
     }
 
     private static RouterOptions CreateValidOptions()

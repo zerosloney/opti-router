@@ -212,6 +212,52 @@ public class FusionModeTests
     }
 
     [Fact]
+    public async Task Fusion_AuditGroup_OnlyOneAdoptedPerGroup()
+    {
+        // 同一并行组内仅采纳者 IsAdopted=true，其余 IsAdopted=false。
+        using var factory = new FusionFactory();
+        factory.MockClients["fast-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "fast-model" },
+            (req, ct) => Task.FromResult(MakeResponse("fast-model", 10, 5)));
+        factory.MockClients["slow-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "slow-model" },
+            async (req, ct) =>
+            {
+                try { await Task.Delay(TimeSpan.FromSeconds(2), ct); }
+                catch (TaskCanceledException) { throw new OperationCanceledException(ct); }
+                return MakeResponse("slow-model", 10, 5);
+            });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionFactory.Key);
+
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await client.PostAsync("/v1/chat/completions", content, cts.Token);
+        await Task.Delay(300); // 等审计落库
+
+        var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+        var recent = auditStore.GetRecent(20);
+
+        // 找到 fusion 组记录（有 ParallelGroupId 的）。
+        var groupRecords = recent.Where(r => !string.IsNullOrEmpty(r.ParallelGroupId)).ToList();
+        Assert.True(groupRecords.Count >= 2, "应有至少 2 条并行组记录");
+
+        // 同组内仅一条 IsAdopted=true。
+        var groups = groupRecords.GroupBy(r => r.ParallelGroupId);
+        foreach (var grp in groups)
+        {
+            int adopted = grp.Count(r => r.IsAdopted);
+            Assert.True(adopted <= 1, $"组 {grp.Key} 内 IsAdopted=true 的记录应 ≤1，实际 {adopted}");
+            // 采纳的那条 Success=true，被取消的 Success=false。
+            var adoptedRec = grp.FirstOrDefault(r => r.IsAdopted);
+            if (adoptedRec is not null)
+                Assert.True(adoptedRec.Success);
+        }
+    }
+
+    [Fact]
     public async Task Fusion_AllFail_FallsBackToSerial()
     {
         using var factory = new FusionFactory();
