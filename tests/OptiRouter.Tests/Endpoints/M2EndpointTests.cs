@@ -199,6 +199,10 @@ public class M2EndpointTests
         };
         using var client = factory.CreateClient();
 
+        // 用唯一 session key 隔离静态 ConcurrencyRegistry 跨测试复用：
+        // Post_WithSessionId 也用 session-a，其 factory 默认 max=100，若复用其信号量则本测试 max=1 配置被忽略。
+        var sessionKey = "session-concurrent-" + Guid.NewGuid().ToString("N");
+
         // Request content
         var payload = "{\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}";
 
@@ -208,19 +212,19 @@ public class M2EndpointTests
             Content = new StringContent(payload, Encoding.UTF8, "application/json")
         };
         req1.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "m2-test-key");
-        req1.Headers.Add("X-Session-Id", "session-a");
+        req1.Headers.Add("X-Session-Id", sessionKey);
         var task1 = client.SendAsync(req1);
 
         // Give it a brief moment to enter the middleware and wait
         await Task.Delay(100);
 
-        // 2. Send second request under same partition (Session A). Should fail immediately with 429 (Concurrency Exceeded).
+        // 2. Send second request under same partition. Should fail immediately with 429 (Concurrency Exceeded).
         var req2 = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
         {
             Content = new StringContent(payload, Encoding.UTF8, "application/json")
         };
         req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "m2-test-key");
-        req2.Headers.Add("X-Session-Id", "session-a");
+        req2.Headers.Add("X-Session-Id", sessionKey);
         var resp2 = await client.SendAsync(req2);
 
         Assert.Equal(HttpStatusCode.TooManyRequests, resp2.StatusCode);

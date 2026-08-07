@@ -96,45 +96,52 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var reader = new System.IO.StreamReader(stream);
+        // PipeReader 限单行字节，防恶意上游发超长单行撑爆内存（与 StreamRawAsync 一致的防御）。
+        var reader = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8 * 1024));
+        int pendingLineBytes = 0;
 
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            var result = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            var buffer = result.Buffer;
 
-            if (line is null)
-                yield break;
-
-            // 跳过空行。
-            if (line.Length == 0)
-                continue;
-
-            // SSE 格式：每行以 "data: " 开头。
-            if (!line.StartsWith("data: ", StringComparison.Ordinal))
-                continue;
-
-            var data = line.Substring("data: ".Length).Trim();
-
-            // 结束标记。
-            if (data == "[DONE]")
-                yield break;
-
-            // 解析 JSON，失败则跳过该行并继续。
-            RawStreamChunk? raw = null;
-            try
+            while (TryReadLine(ref buffer, out var lineBytes))
             {
-                raw = JsonSerializer.Deserialize<RawStreamChunk>(data, _deserializeOptions);
-            }
-            catch
-            {
-                // JSON 解析失败，跳过该行。
-                continue;
-            }
+                pendingLineBytes = 0;
+                if (lineBytes.IsEmpty) continue;
 
-            if (raw is null)
-                continue;
+                byte[] lineArr = lineBytes.ToArray();
+                var lineSpan = (ReadOnlySpan<byte>)lineArr;
+                if (!lineSpan.StartsWith("data: "u8))
+                    continue;
+
+                var dataSpan = lineSpan.Slice("data: ".Length);
+                if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
+                    dataSpan = dataSpan[..^1];
+
+                if (dataSpan.SequenceEqual("[DONE]"u8))
+                {
+                    await reader.CompleteAsync().ConfigureAwait(false);
+                    yield break;
+                }
+
+                var data = System.Text.Encoding.UTF8.GetString(dataSpan);
+
+                // 解析 JSON，失败则跳过该行并继续。
+                RawStreamChunk? raw = null;
+                try
+                {
+                    raw = JsonSerializer.Deserialize<RawStreamChunk>(data, _deserializeOptions);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (raw is null)
+                    continue;
 
             var chunk = new ChatStreamChunk
             {
@@ -144,7 +151,25 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 Usage = raw.Usage
             };
 
-            yield return chunk;
+                yield return chunk;
+            }
+
+            // 剩余未遇换行的字节：累计，超限则中断。
+            pendingLineBytes += (int)buffer.Length;
+            if (pendingLineBytes > MaxStreamLineBytes)
+            {
+                await reader.CompleteAsync().ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    $"Upstream stream line exceeded {MaxStreamLineBytes} bytes; aborting to prevent OOM.");
+            }
+
+            reader.AdvanceTo(buffer.Start, buffer.End);
+
+            if (result.IsCompleted)
+            {
+                await reader.CompleteAsync().ConfigureAwait(false);
+                yield break;
+            }
         }
     }
 
