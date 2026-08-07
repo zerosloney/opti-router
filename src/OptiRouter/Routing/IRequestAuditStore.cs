@@ -38,4 +38,12 @@ public interface IRequestAuditStore : IDisposable
     /// 淘汰早于指定时间的审计记录，返回实际淘汰条数。
     /// </summary>
     int EvictBefore(DateTime cutoff);
+
+    /// <summary>
+    /// 按模型聚合指定时间以来的成功请求延迟统计。
+    /// 供 <see cref="ILatencyStatsProvider"/> 后台聚合用——失败/重试请求不统计（污染延迟分布）。
+    /// </summary>
+    /// <param name="since">统计起始 UTC 时间（含）。</param>
+    /// <returns>模型名到 (平均延迟ms, 样本数) 的映射。</returns>
+    IReadOnlyDictionary<string, (double AverageLatencyMs, int SampleCount)> GetLatencyStatsSince(DateTime since);
 }

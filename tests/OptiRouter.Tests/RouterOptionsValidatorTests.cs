@@ -188,6 +188,59 @@ public class RouterOptionsValidatorTests
         Assert.True(result.Succeeded);
     }
 
+    [Fact]
+    public void NegativeLatencyMinSamples_ShouldReturnFailure()
+    {
+        var options = CreateValidOptions();
+        options.Routing.LatencyMinSamples = -1;
+        var validator = CreateValidator();
+
+        var result = validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("LatencyMinSamples 不能为负数", result.FailureMessage);
+    }
+
+    [Fact]
+    public void ZeroLatencyStatsWindowMinutes_ShouldReturnFailure()
+    {
+        var options = CreateValidOptions();
+        options.Routing.LatencyStatsWindowMinutes = 0;
+        var validator = CreateValidator();
+
+        var result = validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("LatencyStatsWindowMinutes 必须大于 0", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(6)]
+    public void FusionMaxParallelOutOfRange_ShouldReturnFailure(int value)
+    {
+        var options = CreateValidOptions();
+        options.Routing.FusionMaxParallel = value;
+        var validator = CreateValidator();
+
+        var result = validator.Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("FusionMaxParallel 必须在 [2, 5]", result.FailureMessage);
+    }
+
+    [Fact]
+    public void DefaultNewOptions_ShouldValidateSuccessfully()
+    {
+        // 默认值（延迟感知/能力过滤/并行首试全关闭，参数默认值）应通过校验。
+        var options = CreateValidOptions();
+        var validator = CreateValidator();
+
+        var result = validator.Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
     private static RouterOptions CreateValidOptions()
     {
         var options = new RouterOptions();

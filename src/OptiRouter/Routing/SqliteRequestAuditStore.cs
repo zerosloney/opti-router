@@ -53,6 +53,9 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         EnsureColumn("routed_tier", "TEXT");
         EnsureColumn("cascade_triggered", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn("upgraded_from", "TEXT");
+        // 并行首试审计字段（向后兼容：旧记录 is_adopted=1、parallel_group_id=NULL）。
+        EnsureColumn("is_adopted", "INTEGER NOT NULL DEFAULT 1");
+        EnsureColumn("parallel_group_id", "TEXT");
     }
 
     private void EnsureColumn(string columnName, string definition)
@@ -90,10 +93,11 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 INSERT INTO request_audit
                     (timestamp, request_id, model, estimated_tokens, prompt_tokens,
                      completion_tokens, cost, latency_ms, session_id, routing_reason,
-                     success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from)
+                     success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
+                     is_adopted, parallel_group_id)
                 VALUES
                     (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
-                     @rtier, @cascade, @upg);
+                     @rtier, @cascade, @upg, @adopted, @pgid);
                 """;
             cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
             cmd.Parameters.AddWithValue("@rid", record.RequestId);
@@ -111,6 +115,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.Parameters.AddWithValue("@rtier", record.RoutedTier.ToString());
             cmd.Parameters.AddWithValue("@cascade", record.CascadeTriggered ? 1 : 0);
             cmd.Parameters.AddWithValue("@upg", (object?)record.UpgradedFrom ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@adopted", record.IsAdopted ? 1 : 0);
+            cmd.Parameters.AddWithValue("@pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
             cmd.ExecuteNonQuery();
             tx.Commit();
         }
@@ -128,7 +134,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
-                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from
+                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
+                       is_adopted, parallel_group_id
                 FROM request_audit
                 ORDER BY id DESC
                 LIMIT @limit;
@@ -151,7 +158,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
-                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from
+                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
+                       is_adopted, parallel_group_id
                 FROM request_audit
                 WHERE model = @model
                 ORDER BY id DESC
@@ -187,7 +195,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
-                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from
+                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
+                       is_adopted, parallel_group_id
                 FROM request_audit
                 WHERE timestamp >= @from AND timestamp <= @to
                 ORDER BY id DESC
@@ -213,6 +222,36 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.CommandText = "DELETE FROM request_audit WHERE timestamp < @cutoff;";
             cmd.Parameters.AddWithValue("@cutoff", FormatTimestamp(cutoff));
             return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyDictionary<string, (double AverageLatencyMs, int SampleCount)> GetLatencyStatsSince(DateTime since)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_lock)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT model, AVG(latency_ms), COUNT(*)
+                FROM request_audit
+                WHERE timestamp >= @since AND success = 1
+                GROUP BY model;
+                """;
+            cmd.Parameters.AddWithValue("@since", FormatTimestamp(since));
+
+            var result = new Dictionary<string, (double, int)>(StringComparer.Ordinal);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                string model = reader.GetString(0);
+                // AVG 返回 REAL；SQLite NULL 兜底为 0（理论上 COUNT>0 时 AVG 非 NULL）。
+                double avg = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
+                int n = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture);
+                result[model] = (avg, n);
+            }
+            return result;
         }
     }
 
@@ -247,7 +286,9 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 IsStreaming: reader.GetInt32(12) != 0,
                 RoutedTier: reader.IsDBNull(13) ? ModelTier.Medium : Enum.Parse<ModelTier>(reader.GetString(13), ignoreCase: true),
                 CascadeTriggered: reader.IsDBNull(14) ? false : reader.GetInt32(14) != 0,
-                UpgradedFrom: reader.IsDBNull(15) ? null : reader.GetString(15)));
+                UpgradedFrom: reader.IsDBNull(15) ? null : reader.GetString(15),
+                IsAdopted: reader.IsDBNull(16) ? true : reader.GetInt32(16) != 0,
+                ParallelGroupId: reader.IsDBNull(17) ? null : reader.GetString(17)));
         }
         return list;
     }

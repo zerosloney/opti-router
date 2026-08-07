@@ -21,6 +21,10 @@ namespace OptiRouter.Routing;
 /// <param name="RoutedTier">路由命中档（首选候选的 tier）。用于离线评估路由分档正确性。</param>
 /// <param name="CascadeTriggered">是否触发了 Cheap→Strong 级联自校验。</param>
 /// <param name="UpgradedFrom">升级源模型名（null = 无升级）。配合 <paramref name="CascadeTriggered"/> 追踪升级链。</param>
+/// <param name="IsAdopted">并行首试模式下，本次尝试是否被采纳（响应实际返回给客户端）。
+/// 串行模式/级联重答恒为 true（默认值）。并行模式下同组共享 <paramref name="ParallelGroupId"/>，仅采纳者 IsAdopted=true。
+/// 用于区分"被取消的慢尝试"与"实际生效的响应"。</param>
+/// <param name="ParallelGroupId">并行首试组 ID。串行模式为 null。并行模式下同一次 SendAsync 的多个并行尝试共享此 ID。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -37,4 +41,6 @@ public sealed record RequestAuditRecord(
     bool IsStreaming,
     ModelTier RoutedTier = ModelTier.Medium,
     bool CascadeTriggered = false,
-    string? UpgradedFrom = null);
+    string? UpgradedFrom = null,
+    bool IsAdopted = true,
+    string? ParallelGroupId = null);

@@ -141,6 +141,49 @@ public sealed class RoutingOptions
     /// 留空则用内置默认 prompt（中文）。
     /// </summary>
     public string CascadeUpgradeSelfVerifyPrompt { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 是否启用延迟感知路由。开启后，同 tier 段内按历史平均延迟重排（快模型优先），
+    /// 跨 tier 顺序不变。延迟统计由后台 <c>LatencyStatsAggregatorService</c> 聚合，决策层零 I/O。
+    /// 冷启动（样本不足）时透传，退回 MaxContextTokens 排序。默认 false。
+    /// </summary>
+    public bool EnableLatencyAware { get; set; } = false;
+
+    /// <summary>
+    /// 延迟感知生效所需的最小样本数。模型历史成功请求数低于此值时不参与延迟排序（噪声大）。
+    /// 默认 10。设为 0 则忽略样本数检查（不推荐，冷启动噪声会污染排序）。
+    /// </summary>
+    public int LatencyMinSamples { get; set; } = 10;
+
+    /// <summary>
+    /// 延迟聚合统计窗口（分钟）。后台聚合只统计此窗口内的成功请求延迟。
+    /// 默认 60。窗口越长越平滑，但响应慢（模型变慢后需等窗口滚动才反映）。
+    /// 必须 > 0。
+    /// </summary>
+    public int LatencyStatsWindowMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// 是否启用模型能力过滤。开启后，根据请求内容检测所需能力（vision/tool-use/json-mode），
+    /// 排除 Tags 不含所需能力的模型。无能力需求时透传，过滤后为空时保留原候选（让上游报错）。
+    /// 能力标注通过 <see cref="ModelEndpointOptions.Tags"/> 表达，语义约定：
+    /// "vision" / "tool-use" / "json-mode"。默认 false。
+    /// </summary>
+    public bool EnableCapabilityFilter { get; set; } = false;
+
+    /// <summary>
+    /// 是否启用并行首试（Fusion-lite）。开启后，非流式请求首轮并行尝试候选链前 N 个模型，
+    /// 取最快成功响应，取消其余。仅非流式（流式首 chunk 锁定模型无法切换）。
+    /// 成本语义：所有并行尝试的真实消耗都入账（上游对已发出的请求仍计费）。
+    /// 审计语义：每个尝试记一条，共享 ParallelGroupId，仅采纳的标记 IsAdopted=true。
+    /// 默认 false。与 EnableFailover 正交（熔断排除仍生效）。
+    /// </summary>
+    public bool EnableFusionMode { get; set; } = false;
+
+    /// <summary>
+    /// 并行首试首轮并发数。默认 2，范围 [2, 5]。值越大延迟越低但成本越高（并发 token 消耗）。
+    /// 半开模型探测槽位满时自动降级为串行单独尝试。
+    /// </summary>
+    public int FusionMaxParallel { get; set; } = 2;
 }
 
 /// <summary>
