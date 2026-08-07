@@ -21,7 +21,10 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
 });
 
+// 文件变更由 ModelsConfigService 监控并触发 IConfigurationRoot.Reload()。
+
 // Bind and validate RouterOptions on startup.
+builder.Services.AddMemoryCache();
 builder.Services.AddOptions<RouterOptions>()
     .Bind(builder.Configuration.GetSection("OptiRouter"))
     .ValidateOnStart();
@@ -131,6 +134,18 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
 // t4: 注册降级重试编排器。
 builder.Services.AddSingleton<ProxyOrchestrator>();
 
+// 模型配置文件服务（独立 models-config.json，Dashboard 读写，IConfigurationRoot.Reload() 热生效）。
+builder.Services.AddSingleton<ModelsConfigService>(sp =>
+{
+    var env = sp.GetRequiredService<IWebHostEnvironment>();
+    var configRoot = (IConfigurationRoot)sp.GetRequiredService<IConfiguration>();
+    var logger = sp.GetRequiredService<ILogger<ModelsConfigService>>();
+    return new ModelsConfigService(
+        Path.Combine(env.ContentRootPath, "models-config.json"),
+        configRoot,
+        logger);
+});
+
 // 后台定时主动探活：启动预热一轮，随后按 HealthProbeIntervalSeconds 周期对所有启用模型探测，
 // 结果上报 ModelHealthTracker（成功累计半开/闭合，失败计熔断）。EnableHealthProbe=false 可关闭。
 builder.Services.AddHostedService<ModelHealthProbeService>();
@@ -183,7 +198,11 @@ app.Use(async (context, next) =>
 });
 
 static bool IsProtectedPath(PathString path) =>
-    path.StartsWithSegments("/v1") || path.StartsWithSegments("/dashboard") || path.StartsWithSegments("/api/dashboard");
+    path.StartsWithSegments("/v1")
+    || path.StartsWithSegments("/dashboard")
+    || path.StartsWithSegments("/models")
+    || path.StartsWithSegments("/api/dashboard")
+    || path.StartsWithSegments("/api/models");
 
 app.Use(async (context, next) =>
 {
@@ -200,9 +219,12 @@ app.Use(async (context, next) =>
     {
         providedKey = authorization.Parameter;
     }
-    // Dashboard 浏览器场景：Authorization 头不便携带，支持 ?key= 查询参数（仅 dashboard 路径）。
+    // Dashboard/模型配置浏览器场景：Authorization 头不便携带，支持 ?key= 查询参数（仅 dashboard/models 路径）。
     // 运维侧工具，访问者即 key 持有者；key 入 URL 有日志风险，由调用方/反代负责。
-    else if (context.Request.Path.StartsWithSegments("/dashboard") || context.Request.Path.StartsWithSegments("/api/dashboard"))
+    else if (context.Request.Path.StartsWithSegments("/dashboard")
+        || context.Request.Path.StartsWithSegments("/api/dashboard")
+        || context.Request.Path.StartsWithSegments("/models")
+        || context.Request.Path.StartsWithSegments("/api/models"))
     {
         providedKey = context.Request.Query["key"];
     }
@@ -277,8 +299,26 @@ app.MapChatCompletions();
 // OpenAI 兼容模型发现端点（GET /v1/models），受 /v1/* 鉴权与限流保护。
 app.MapModelsEndpoint();
 
-// 注册可视化配置和健康监控 Dashboard
+// 注册可视化监控 Dashboard 与模型配置页（两页职责分离）
+// Serve dashboard.js / models.js (extracted from embedded string to avoid C# verbatim-string JS escaping issues)
+app.MapGet("/dashboard.js", (IWebHostEnvironment env) =>
+{
+    string path = Path.Combine(env.ContentRootPath, "dashboard.js");
+    if (!File.Exists(path))
+        return Results.NotFound();
+    return Results.File(path, "application/javascript; charset=utf-8");
+});
+
+app.MapGet("/models.js", (IWebHostEnvironment env) =>
+{
+    string path = Path.Combine(env.ContentRootPath, "models.js");
+    if (!File.Exists(path))
+        return Results.NotFound();
+    return Results.File(path, "application/javascript; charset=utf-8");
+});
+
 app.MapDashboardEndpoints();
+app.MapModelsConfigEndpoints();
 
 app.Run();
 

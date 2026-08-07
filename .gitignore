@@ -130,6 +130,7 @@ data/
 
 # Others
 .zcode/
+.codegraph/
 *.dbmdl
 *.dbproj.schemaview
 *.pfx
