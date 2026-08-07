@@ -188,4 +188,60 @@ public class SemanticRouterTests
         Assert.Single(decision2.Candidates);
         Assert.Equal("model-medium", decision2.Candidates[0].Name);
     }
+
+    /// <summary>
+    /// TF-IDF 改进验证：常见词 "write" 同时出现在 code 和 chat route 时，纯词频会因 "write" 高权重
+    /// 把 "write me a funny story" 误判到 code-assistance。IDF 加权后 "write" 权重被抑制，
+    /// "story"/"funny" 成判别特征，应命中 casual-chat 而非 code-assistance。
+    /// </summary>
+    [Fact]
+    public void TfIdf_CommonWordDepreciated_StoryNotRoutedToCode()
+    {
+        var policy = new SemanticRouterPolicy();
+        var options = new RouterOptions();
+        options.Routing.EnableSemanticRouter = true;
+        options.Routing.SemanticSimilarityThreshold = 0.25;
+        // 关键：两个 route 都含 "write"，制造常见词冲突。
+        options.Routing.SemanticRoutes = new List<SemanticRouteOptions>
+        {
+            new()
+            {
+                Name = "code-assistance",
+                TargetTier = ModelTier.Strong,
+                Phrases = new List<string>
+                {
+                    "write a python function to compute fibonacci",
+                    "write code to implement binary search"
+                }
+            },
+            new()
+            {
+                Name = "casual-chat",
+                TargetTier = ModelTier.Cheap,
+                Phrases = new List<string>
+                {
+                    "write me a funny story",
+                    "tell me a joke"
+                }
+            }
+        };
+
+        var mockModels = GetMockModels();
+        var request = new ChatRequest
+        {
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "write me a funny story please") }
+        };
+        var context = new RouterContext
+        {
+            Request = request,
+            AllModels = mockModels,
+            Options = options
+        };
+        var decision = policy.Apply(context, new RouterDecision { Candidates = mockModels, Reason = "init" });
+
+        // 应命中 casual-chat（Cheap），而非 code-assistance（Strong）。
+        Assert.Contains("matched=casual-chat", decision.Reason);
+        Assert.Single(decision.Candidates);
+        Assert.Equal("model-cheap", decision.Candidates[0].Name);
+    }
 }

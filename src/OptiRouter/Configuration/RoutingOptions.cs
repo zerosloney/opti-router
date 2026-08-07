@@ -101,6 +101,26 @@ public sealed class RoutingOptions
     /// 语义路由规则列表。
     /// </summary>
     public System.Collections.Generic.List<SemanticRouteOptions> SemanticRoutes { get; set; } = new();
+
+    /// <summary>
+    /// 是否启用会话粘性路由。开启后，同 X-Session-Id 的多轮对话尽量命中上次成功使用的模型，
+    /// 避免每轮重新路由导致风格/能力割裂。默认 false。
+    /// 粘性模型若已被失败排除或熔断，下游策略（Failover/LongInput）仍会覆盖，保证可用性。
+    /// </summary>
+    public bool EnableSessionAffinity { get; set; } = false;
+
+    /// <summary>
+    /// 会话粘性记录的存活时长（秒）。默认 600（10 分钟）。
+    /// 超时后该会话下次请求重新路由，避免长期固定在已不合适的模型。
+    /// </summary>
+    public int SessionAffinityTtlSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// 是否启用同 tier 负载均衡。开启后，候选链中同一 tier 段内的模型按 MaxContextTokens 加权随机重排，
+    /// 避免同 tier 首模型承担全部流量。跨 tier 顺序不变（保留能力择优）。默认 false。
+    /// 放在策略链末（Failover 之后），仅对熔断排除后的存活候选生效。
+    /// </summary>
+    public bool EnableLoadBalance { get; set; } = false;
 }
 
 /// <summary>

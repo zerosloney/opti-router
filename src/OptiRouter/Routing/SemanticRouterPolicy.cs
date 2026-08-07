@@ -6,19 +6,25 @@ using System.Text.RegularExpressions;
 namespace OptiRouter.Routing;
 
 /// <summary>
-/// 向量空间语义路由策略。采用局域轻量级词袋模型（Vector Space Model）计算余弦相似度，
+/// 向量空间语义路由策略。采用 TF-IDF 加权词袋模型（Vector Space Model）计算余弦相似度，
 /// 支撑 100% 离线、高吞吐、零延迟、Native AOT 兼容的智能意图路由。
 /// </summary>
+/// <remarks>
+/// IDF 加权：常见词（the/how/write）因出现在大量短语中 IDF 低，权重被抑制；
+/// 罕见词（fibonacci/rust/database）IDF 高，成为判别性特征，避免常见词误判。
+/// </remarks>
 public sealed class SemanticRouterPolicy : IRouterPolicy
 {
     private sealed class CompiledRoutes
     {
         public Dictionary<string, int> Vocabulary { get; }
+        public double[] Idf { get; }
         public List<(SemanticRouteOptions Route, double[] NormalizedVector)> PhraseVectors { get; }
 
-        public CompiledRoutes(Dictionary<string, int> vocabulary, List<(SemanticRouteOptions, double[])> phraseVectors)
+        public CompiledRoutes(Dictionary<string, int> vocabulary, double[] idf, List<(SemanticRouteOptions, double[])> phraseVectors)
         {
             Vocabulary = vocabulary;
+            Idf = idf;
             PhraseVectors = phraseVectors;
         }
     }
@@ -50,8 +56,8 @@ public sealed class SemanticRouterPolicy : IRouterPolicy
             return previous;
         }
 
-        // 3. 将 Query 向量化并归一化
-        var queryVector = VectorizeAndNormalize(queryText, compiled.Vocabulary);
+        // 3. 将 Query 向量化并归一化（TF-IDF 加权）
+        var queryVector = VectorizeAndNormalize(queryText, compiled.Vocabulary, compiled.Idf);
         if (queryVector is null)
         {
             return previous with { Reason = $"{previous.Reason}; semantic-router: no-match(zero-vector)" };
@@ -113,37 +119,55 @@ public sealed class SemanticRouterPolicy : IRouterPolicy
         var vocabulary = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         int termIndex = 0;
 
-        // Step 1: 建立全局特征词库字典
+        // 收集所有短语及其去重 token 集，用于计算 IDF 的 df（文档频率）。
+        var allPhrases = new List<string>();
+        var phraseDocFreq = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        // Step 1: 建立全局特征词库字典 + 统计 df
         foreach (var route in routes)
         {
             if (route.Phrases is null) continue;
             foreach (var phrase in route.Phrases)
             {
+                allPhrases.Add(phrase);
                 var tokens = Tokenize(phrase);
-                foreach (var token in tokens)
+                var uniqueTokens = new HashSet<string>(tokens, StringComparer.OrdinalIgnoreCase);
+                foreach (var token in uniqueTokens)
                 {
                     if (!vocabulary.ContainsKey(token))
                     {
                         vocabulary[token] = termIndex++;
                     }
+                    phraseDocFreq[token] = phraseDocFreq.TryGetValue(token, out int c) ? c + 1 : 1;
                 }
             }
         }
 
-        // Step 2: 将各短语进行特征向量化并进行 L2 范数归一化
+        // Step 2: 计算每个词的 IDF = ln(N / df)。N=短语总数。
+        // df=1（仅出现在一个短语）时 IDF 最大；df=N（出现在所有短语）时 IDF=0（完全无判别性）。
+        // +1 平滑防 df=0（理论上不会，因词来自短语）。
+        double n = allPhrases.Count;
+        var idf = new double[vocabulary.Count];
+        foreach (var (term, idx) in vocabulary)
+        {
+            int df = phraseDocFreq.TryGetValue(term, out int d) ? d : 1;
+            idf[idx] = Math.Log((n + 1) / df);
+        }
+
+        // Step 3: 将各短语进行 TF-IDF 特征向量化并进行 L2 范数归一化
         var phraseVectors = new List<(SemanticRouteOptions, double[])>();
         foreach (var route in routes)
         {
             if (route.Phrases is null) continue;
             foreach (var phrase in route.Phrases)
             {
-                var vector = Vectorize(phrase, vocabulary);
+                var vector = Vectorize(phrase, vocabulary, idf);
                 Normalize(vector);
                 phraseVectors.Add((route, vector));
             }
         }
 
-        return new CompiledRoutes(vocabulary, phraseVectors);
+        return new CompiledRoutes(vocabulary, idf, phraseVectors);
     }
 
     private static string GetQueryText(Clients.ChatRequest request)
@@ -166,10 +190,11 @@ public sealed class SemanticRouterPolicy : IRouterPolicy
         return request.Messages[^1]?.GetText() ?? string.Empty;
     }
 
-    private static double[] Vectorize(string text, Dictionary<string, int> vocabulary)
+    private static double[] Vectorize(string text, Dictionary<string, int> vocabulary, double[] idf)
     {
         var vector = new double[vocabulary.Count];
         var tokens = Tokenize(text);
+        // 先统计词频（TF），再乘 IDF 加权。
         foreach (var token in tokens)
         {
             if (vocabulary.TryGetValue(token, out int idx))
@@ -177,12 +202,16 @@ public sealed class SemanticRouterPolicy : IRouterPolicy
                 vector[idx]++;
             }
         }
+        for (int i = 0; i < vector.Length; i++)
+        {
+            vector[i] *= idf[i];
+        }
         return vector;
     }
 
-    private static double[]? VectorizeAndNormalize(string text, Dictionary<string, int> vocabulary)
+    private static double[]? VectorizeAndNormalize(string text, Dictionary<string, int> vocabulary, double[] idf)
     {
-        var vector = Vectorize(text, vocabulary);
+        var vector = Vectorize(text, vocabulary, idf);
         return Normalize(vector) ? vector : null;
     }
 

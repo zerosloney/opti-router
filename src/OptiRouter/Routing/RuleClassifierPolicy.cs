@@ -89,20 +89,40 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     {
         if (string.IsNullOrEmpty(content)) return false;
 
-        // intentional-simple: 常见代码标记
+        // intentional-simple: 常见代码标记，覆盖通用 + SQL/Shell/Go/Rust。
+        // 不含中文标记（"函数"/"类" 在自然语言误报率高）。
         ReadOnlySpan<string> indicators = new[]
         {
+            // 通用 / 围栏代码块
             "```",
             "function ",
             "def ",
             "class ",
             "public ",
-            "import "
+            "import ",
+            // SQL
+            "select ",
+            "create table",
+            "insert into",
+            // Shell
+            "#!/bin/",
+            "sudo ",
+            "chmod ",
+            // Go
+            "func ",
+            "package ",
+            "go func",
+            // Rust
+            "fn ",
+            "impl ",
+            "cargo "
         };
 
         foreach (var indicator in indicators)
         {
-            if (content.Contains(indicator, StringComparison.Ordinal))
+            // OrdinalIgnoreCase：覆盖跨大小写的语言关键字（SQL SELECT/select、Rust fn/FN）。
+            // 指标词均为代码/命令专属（select/fn/impl/cargo/sudo/chmod），自然语言误报率低。
+            if (content.Contains(indicator, StringComparison.OrdinalIgnoreCase))
                 return true;
         }
 

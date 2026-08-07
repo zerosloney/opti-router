@@ -113,4 +113,28 @@ public class RuleClassifierPolicyTests
         // Falls back to DefaultTier = Medium
         Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Medium, m.Tier));
     }
+
+    [Theory]
+    [InlineData("SELECT id, name FROM users WHERE active = 1")]
+    [InlineData("create table orders (id int primary key, total decimal)")]
+    [InlineData("#!/bin/bash\necho hello")]
+    [InlineData("sudo apt-get update")]
+    [InlineData("func main() { go func() {} }")]
+    [InlineData("package main\nimport \"fmt\"")]
+    [InlineData("fn fibonacci(n: u32) -> u32 { n }")]
+    [InlineData("impl Iterator for MyStruct { }")]
+    [InlineData("cargo build --release")]
+    public void Apply_DetectsSqlShellGoRust_SelectsStrongTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+    }
 }

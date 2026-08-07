@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
@@ -22,6 +23,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly ModelHealthTracker _healthTracker;
     private readonly ILogger<ProxyOrchestrator> _logger;
     private readonly IRequestAuditStore _auditStore;
+    private readonly IMemoryCache _affinityCache;
     private bool _disposed;
 
     /// <summary>
@@ -34,6 +36,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// <param name="ledger">成本账本。</param>
     /// <param name="healthTracker">跨请求模型健康跟踪器。</param>
     /// <param name="auditStore">请求审计存储。</param>
+    /// <param name="affinityCache">会话粘性缓存。请求成功后回写本次模型名，供 SessionAffinityPolicy 下次提升。</param>
     /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
@@ -42,6 +45,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         CostLedger ledger,
         ModelHealthTracker healthTracker,
         IRequestAuditStore auditStore,
+        IMemoryCache affinityCache,
         ILogger<ProxyOrchestrator> logger)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
@@ -50,6 +54,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(ledger);
         ArgumentNullException.ThrowIfNull(healthTracker);
         ArgumentNullException.ThrowIfNull(auditStore);
+        ArgumentNullException.ThrowIfNull(affinityCache);
         ArgumentNullException.ThrowIfNull(logger);
 
         _clientProvider = clientProvider;
@@ -58,6 +63,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _ledger = ledger;
         _healthTracker = healthTracker;
         _auditStore = auditStore;
+        _affinityCache = affinityCache;
         _logger = logger;
     }
 
@@ -144,6 +150,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     outcomeReported = true;
+                    RecordAffinity(sessionId, candidate.Name);
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, response.Usage is not null
@@ -393,6 +400,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         _ledger.Record(CostCalculator.Compute(finalUsage, candidate), sessionId);
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
+                    RecordAffinity(sessionId, candidate.Name);
                     probeResolved = true;
                     attemptSw.Stop();
                     RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
@@ -494,6 +502,29 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         catch
         {
             // Audit recording must not break the request path.
+        }
+    }
+
+    /// <summary>
+    /// 记录会话粘性：成功命中某模型后写入内存缓存，供 <see cref="SessionAffinityPolicy"/> 下次决策提升该模型。
+    /// 仅在启用会话粘性且存在 sessionId 时写。写失败（理论上 IMemoryCache 不会抛）不影响主流程。
+    /// </summary>
+    private void RecordAffinity(string? sessionId, string modelName)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+            return;
+        var routing = _options.CurrentValue.Routing;
+        if (!routing.EnableSessionAffinity)
+            return;
+
+        int ttl = routing.SessionAffinityTtlSeconds > 0 ? routing.SessionAffinityTtlSeconds : 600;
+        try
+        {
+            _affinityCache.Set(SessionAffinityPolicy.CacheKeyPrefix + sessionId, modelName, TimeSpan.FromSeconds(ttl));
+        }
+        catch
+        {
+            // 粘性记录失败不应影响已成功的请求。
         }
     }
 }

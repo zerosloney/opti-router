@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
@@ -123,10 +124,12 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var policies = new List<IRouterPolicy>
     {
         new RuleClassifierPolicy(),
+        new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),
         new SemanticRouterPolicy(),
         new LongInputPolicy(),
         new BudgetGuardPolicy(ledger),
-        new FailoverPolicy(healthTracker)
+        new FailoverPolicy(healthTracker),
+        new LoadBalancePolicy()
     };
     return new RouterEngine(ledger, policies, tokenEstimator);
 });
