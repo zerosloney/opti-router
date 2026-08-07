@@ -503,6 +503,17 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         return statusCode is 408 or 429 or >= 500 and <= 599;
     }
 
+    /// <summary>
+    /// 按 EstimatedInputTokens × 模型 input 价格预估成本。仅 input 部分（被取消/失败的请求未生成 output）。
+    /// 用于并行首试中被取消/失败的尝试——上游对已接收的请求计费，但本地拿不到真实 Usage。
+    /// estimatedTokens ≤ 0 或 input 价格为 0 时返回 0（避免记零成本噪声）。
+    /// </summary>
+    private static decimal EstimateInputCost(ModelEndpointOptions model, int estimatedTokens)
+    {
+        if (estimatedTokens <= 0) return 0m;
+        return estimatedTokens * model.InputPricePerMillion / 1_000_000m;
+    }
+
     private void RecordAudit(
         string? requestId,
         string model,
@@ -519,7 +530,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         bool cascadeTriggered = false,
         string? upgradedFrom = null,
         bool isAdopted = true,
-        string? parallelGroupId = null)
+        string? parallelGroupId = null,
+        bool isEstimated = false)
     {
         try
         {
@@ -541,7 +553,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 CascadeTriggered: cascadeTriggered,
                 UpgradedFrom: upgradedFrom,
                 IsAdopted: isAdopted,
-                ParallelGroupId: parallelGroupId));
+                ParallelGroupId: parallelGroupId,
+                IsEstimated: isEstimated));
         }
         catch
         {
@@ -771,6 +784,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string? adoptedModel = null;
         // remaining 保留 tasks 的完整元组泛型，避免 WhenAny 退化成 Task 丢失字段。
         var remaining = tasks.ToList();
+        // 循环内已记审计的候选（成功/失败/被取消），步骤 5 不重复处理。
+        var accounted = new HashSet<string>(StringComparer.Ordinal);
 
         while (remaining.Count > 0)
         {
@@ -793,6 +808,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,
                     isAdopted: true, parallelGroupId: groupId);
+                accounted.Add(model.Name);
 
                 adopted = response;
                 adoptedModel = model.Name;
@@ -810,9 +826,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             {
                 // 被取消（非自身失败）：仅释放探测槽位，不计断路器失败。
                 _healthTracker.ReleaseProbe(model.Name);
-                RecordAudit(null, model.Name, estimatedTokens, null, 0m, elapsedMs, sessionId,
+                // 预估成本入账：请求已发出到上游，上游对已接收的请求计费，但本地拿不到 Usage（响应未完整返回）。
+                // 按 EstimatedInputTokens × input 价格估算，标注 IsEstimated=true 以区分真实成本。
+                decimal estCost = EstimateInputCost(model, estimatedTokens);
+                if (estCost > 0m)
+                    _ledger.Record(estCost, sessionId);
+                RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: cancelled-by-race", false, "cancelled", false, routedTier,
-                    isAdopted: false, parallelGroupId: groupId);
+                    isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
+                accounted.Add(model.Name);
                 continue;
             }
 
@@ -831,10 +853,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             lastStatusCode = status;
             lastErrorMessage = error?.Message ?? "unknown";
 
-            RecordAudit(null, model.Name, estimatedTokens, null, 0m, elapsedMs, sessionId,
+            // 真实失败同样预估入账：请求已到上游，上游按已处理 input 计费。
+            decimal failedEstCost = EstimateInputCost(model, estimatedTokens);
+            if (failedEstCost > 0m)
+                _ledger.Record(failedEstCost, sessionId);
+            RecordAudit(null, model.Name, estimatedTokens, null, failedEstCost, elapsedMs, sessionId,
                 decision.Reason + "; fusion: failed" + (tripped ? " (circuit tripped)" : ""),
                 false, error?.Message, false, routedTier,
-                isAdopted: false, parallelGroupId: groupId);
+                isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m);
+            accounted.Add(model.Name);
         }
 
         // 4. 等待所有被 cancel 的 task 收尾（避免 task 泄漏/未观察异常）。
@@ -848,18 +875,24 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             // task 内部已 try-catch，不应抛；防御性吞掉。
         }
 
-        // 5. 清理被取消但 task 未走失败分支的候选探测槽位。
-        // WhenAny 循环里 cancelledByRace 已处理；但 break 后 remaining 中可能还有未遍历的被 cancel task，
-        // 它们返回 (model, null, OperationCanceledException)，上面 WhenAll 后没单独处理——这里补释放。
-        // 已在循环内处理过的（cancelledByRace=true）不会重复：RecordSuccess/Failure/ReleaseProbe 对重复调用幂等或已置零。
+        // 5. 清理被取消但 task 未走失败分支的候选：释放探测槽位 + 记预估成本审计。
+        // WhenAny 循环里 cancelledByRace 已处理循环内到达的；break 后 remaining 中未被遍历的被 cancel task，
+        // 它们返回 (model, null, OperationCanceledException)，WhenAll 等待完成但不再走循环体——这里补全。
         foreach (var (m, cts, wasHalfOpen) in perCandidateCts)
         {
             cts.Dispose();
-            // 仅对未上报结果的候选释放（采纳者/已 RecordFailure 的跳过）。
-            // 简化：对除采纳者和 failedInThisRequest 之外的，确保释放。
-            // intentional-simple: ReleaseProbe 对 ActiveProbes=0 是 no-op，重复释放安全。
-            if (m.Name != adoptedModel && !failedInThisRequest.Contains(m.Name))
-                _healthTracker.ReleaseProbe(m.Name);
+            // 跳过循环内已记审计的（成功采纳/失败/被取消）。
+            if (accounted.Contains(m.Name))
+                continue;
+
+            _healthTracker.ReleaseProbe(m.Name);
+            // 预估成本入账（与循环内 cancelledByRace 分支一致）：请求已发出到上游，按估算 input 计费。
+            decimal estCost = EstimateInputCost(m, estimatedTokens);
+            if (estCost > 0m)
+                _ledger.Record(estCost, sessionId);
+            RecordAudit(null, m.Name, estimatedTokens, null, estCost, 0, sessionId,
+                decision.Reason + "; fusion: cancelled-by-race (post-break)", false, "cancelled", false, routedTier,
+                isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
         }
 
         // 6. 被跳过的候选（熔断/槽位满）不影响本轮，留待串行降级处理（它们不在 attemptedModels，串行路径会尝试）。

@@ -25,6 +25,9 @@ namespace OptiRouter.Routing;
 /// 串行模式/级联重答恒为 true（默认值）。并行模式下同组共享 <paramref name="ParallelGroupId"/>，仅采纳者 IsAdopted=true。
 /// 用于区分"被取消的慢尝试"与"实际生效的响应"。</param>
 /// <param name="ParallelGroupId">并行首试组 ID。串行模式为 null。并行模式下同一次 SendAsync 的多个并行尝试共享此 ID。</param>
+/// <param name="IsEstimated">本次成本是否为预估值（非上游真实 Usage）。
+/// 并行首试中被取消/失败的尝试拿不到上游 Usage，按 EstimatedInputTokens × 模型 input 价格预估入账，
+/// 标注此字段以区分真实成本。串行模式/采纳的成功响应恒为 false（默认值）。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -43,4 +46,5 @@ public sealed record RequestAuditRecord(
     bool CascadeTriggered = false,
     string? UpgradedFrom = null,
     bool IsAdopted = true,
-    string? ParallelGroupId = null);
+    string? ParallelGroupId = null,
+    bool IsEstimated = false);

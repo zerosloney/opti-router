@@ -106,7 +106,7 @@ curl http://localhost:5000/health
 | `TimeoutSeconds` | 单次请求超时秒数 | `120` |
 | `MaxRetries` | 失败后最大重试次数 | `0` |
 | `Enabled` | 是否启用该模型 | `true` |
-| `Tags` | 能力标签 | `["vision", "tool-use"]` |
+| `Tags` | 能力标签，配合 `EnableCapabilityFilter` 使用。约定值：`vision`（图片输入）、`tool-use`（函数调用）、`json-mode`（`response_format: json_object`） | `["vision", "tool-use"]` |
 
 ### Budget（预算控制）
 
@@ -141,6 +141,14 @@ curl http://localhost:5000/health
 | `SemanticSimilarityThreshold` | 语义匹配余弦相似度阈值 `[0.0, 1.0]`，低于此值不命中 | `0.25` |
 | `SemanticRoutes` | 语义路由规则列表，每条含 `Name`/`TargetTier`/`Phrases` | `[]` |
 | `MaxResponseStreamBytes` | 流式响应累计字节硬上限，防 OOM/恶意无限流 | `20971520`(20MB) |
+| `EnableCascadeUpgrade` | Cheap→Strong 级联自校验（采样，低置信升级重答） | `false` |
+| `CascadeUpgradeSampleRate` | 级联采样率 `[0.0, 1.0]`，0=关闭，1=全量 | `0.1` |
+| `EnableLatencyAware` | 同 tier 段按历史延迟重排（快模型优先），后台聚合零 I/O | `false` |
+| `LatencyMinSamples` | 延迟排序生效所需最小样本数，低于此值不参与排序 | `10` |
+| `LatencyStatsWindowMinutes` | 延迟聚合统计窗口（分钟），窗口越长越平滑但响应慢 | `60` |
+| `EnableCapabilityFilter` | 按请求能力需求（vision/tool-use/json-mode）排除 Tags 不含的模型 | `false` |
+| `EnableFusionMode` | 并行首试：非流式首轮并行前 N 候选取最快成功，取消其余 | `false` |
+| `FusionMaxParallel` | 并行首试首轮并发数，范围 `[2, 5]` | `2` |
 
 ## 路由策略说明
 
@@ -149,6 +157,11 @@ curl http://localhost:5000/health
 3. **Token 估算**（`ITokenEstimator` + `LongInputPolicy`）：默认 `Tiktoken` 模式，用 SharpToken（tiktoken 的 C# 移植，词表内嵌、离线可用）按真实 BPE 精确计数，每条消息另计 3 token 开销，编码由 `TiktokenEncoding` 指定（默认 `o200k_base`）；计数异常时自动回退到分桶粗估。`Bucket` 模式按 rune 分桶加权估算——CJK 按 1.5 字符/token、ASCII 按 4 字符/token、其他按 2.5。超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
 4. **成本预算**（`BudgetGuardPolicy`）：日/会话预算耗尽时，`Degrade` 模式降级到 Cheap tier，`Reject` 模式返回 429。
 5. **失败降级**（`FailoverPolicy` + `ProxyOrchestrator` + `ModelHealthTracker`）：候选链顺序尝试，主模型失败自动切下一个；连续失败达阈值的模型触发三态断路器——Closed（正常）→ Open（熔断冷却）→ HalfOpen（冷却到期，最多放行 `FailoverHalfOpenMaxProbes` 个并发探测）；探测成功则闭合恢复，探测失败则重新进入冷却。流式请求的中途失败同样计入熔断。
+6. **能力过滤**（`CapabilityFilterPolicy`，策略链首位，默认关）：按请求内容检测所需能力——`image_url` 多模态内容→需 `vision`，`tools` 非空数组→需 `tool-use`，`response_format.type=json_object`→需 `json-mode`；排除 `Tags` 不含所需能力的模型。无能力需求时透传，过滤后为空时保留原候选（让上游报错，避免误配 Tags 导致全拒）。能力标注通过 `Models[].Tags` 表达。
+7. **规则分级扩展**（`RuleClassifierPolicy`）：在原有代码/简单问答检测上新增——数学/公式（LaTeX 环境、`\frac`、求解/求导/积分）→Strong，翻译请求（`translate...to`、`翻译...为`、`把...翻译成`）→Medium。低误报正则模式，代码优先级最高。
+8. **延迟感知**（`LatencyAwarePolicy`，默认关）：后台 `LatencyStatsAggregatorService` 周期聚合审计表成功请求延迟（窗口 `LatencyStatsWindowMinutes`，默认 60 分钟），写入内存快照。策略同 tier 段内按 `1/(avgMs+50ms)` 排序（快模型优先），样本数不足 `LatencyMinSamples` 的尾部保留，冷启动透传。决策层零 I/O、零锁。
+9. **并行首试**（`EnableFusionMode`，默认关，仅非流式）：首轮并行尝试候选链前 `FusionMaxParallel` 个模型，取最快成功响应，取消其余。成本语义见下方「已知限制」。流式不支持（首 chunk 锁定模型无法切换）。全失败/取消回退串行降级链。
+10. **级联自校验**（`EnableCascadeUpgrade`，默认关，仅非流式）：路由到 Cheap 的请求按 `CascadeUpgradeSampleRate` 采样，用同 Cheap 模型判定 CONFIDENT/UNCERTAIN，低置信则升级首个 Strong 模型重答。复核调用的 token 成本计入账本。
 
 ## curl 示例
 
@@ -253,3 +266,5 @@ python scripts/analyze_audit.py --db /path/to/optirouter-budget.db \
 - **Models 端点配置支持热更新**：连接相关字段（`BaseUrl`/`ApiKey`/`TimeoutSeconds`）变化时，`ModelClientProvider` 经 `IOptionsMonitor.OnChange` 自动重建对应模型的客户端；旧客户端保留宽限期（默认 2 分钟）后释放，不打断在途请求。`Tier`/价格/上下文长度等路由字段每请求读取，变化下次路由即生效。reload 由配置源的变更通知触发（`appsettings.json` 默认 `reloadOnChange` 开启；环境变量源不支持 reload，仍需重启）。
 - **限流阈值分区定型**：`RequestsPerMinute` 每请求读取，但 `FixedWindowRateLimiter` 的 `PermitLimit` 在分区首次创建时定型——运行时改配置仅对新建分区生效，既有分区沿用创建时的值。变更全局生效需重启进程。`MaxConcurrentRequestsPerPartition` 同理。
 - **成本账本持久化**：`Budget.UsePersistentStore=true`（默认）时落 SQLite 文件（`Budget.StorePath`），跨进程重启保留日/会话花费，使预算真正生效。设为 `false` 用内存实现（重启归零，仅适合测试）。
+- **并行首试成本语义**：`EnableFusionMode=true` 时，被取消/失败的并行尝试拿不到上游真实 Usage（响应未完整返回），但上游对已发出的请求仍计费。OptiRouter 按 `EstimatedInputTokens × 模型 input 价格` 记一笔预估成本到账本，审计记录标注 `IsEstimated=true` 以区分真实成本。预估为下限（仅 input，未含已生成的部分 output），实际偏差随 `FusionMaxParallel` 增大；采纳的成功响应记真实成本（`IsEstimated=false`）。
+- **延迟感知冷启动**：`EnableLatencyAware=true` 时，新模型或低流量模型样本数不足 `LatencyMinSamples`，不参与延迟排序，退回 `MaxContextTokens` 排序；聚合服务复用 `HealthProbeIntervalSeconds` 周期，首次请求前预热一轮。
