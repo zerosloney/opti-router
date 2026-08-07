@@ -196,6 +196,32 @@ dotnet test OptiRouter.sln -c Release
 dotnet test OptiRouter.sln -c Release --filter "FullyQualifiedName~EndToEndSmokeTests"
 ```
 
+## 离线审计分析
+
+OptiRouter 把每条请求的成败、成本、延迟、命中分档、级联事件写进 SQLite 审计库（默认 `data/optirouter-budget.db` 的 `request_audit` 表）。`scripts/analyze_audit.py` 消费这些数据，产出 Markdown 报告，用于闭环路由策略调优的实证依据——验证规则分类误判率、各档实际成功率/成本分布、级联触发率。
+
+零外部依赖，仅 Python 标准库 `sqlite3`。只读 DB，不改数据。
+
+```bash
+# 默认读 data/optirouter-budget.db，报告打到 stdout
+python scripts/analyze_audit.py
+
+# 指定 DB 与时间范围，写文件
+python scripts/analyze_audit.py --db /path/to/optirouter-budget.db \
+    --from 2026-07-01 --to 2026-08-07 --out report.md
+```
+
+报告维度：
+
+- **Summary**：总请求、整体成功率、总成本、平均/p95 延迟、最贵/最慢模型。
+- **By Model**：每个模型的请求数、成功率、p95 延迟、总成本、单位成本（$/1k 请求、$/1M token）。
+- **By Routed Tier**：按路由命中档聚合。**Cheap 档低成功率**或 **Strong 档处理极短 prompt** 是规则分类误判的离线信号。
+- **Cascade Upgrade**：级联自校验触发率、升级率、升级源模型分布。
+- **By Routing Reason Signal**：按路由原因关键词（`code-detected` / `simple-qa` / `semantic-router: matched` 等）分组。某信号的成功率/成本与同类异常（如 `code-detected` 命中却是自然语言短文本）提示需人工复核 reason 文本。
+- **Daily Trend**：按天聚合请求量、成功率、成本。
+
+报告只给统计与信号提示，规则误判的精确判定仍需人工结合 reason 文本复核。
+
 ## 部署
 
 ### HTTPS 要求

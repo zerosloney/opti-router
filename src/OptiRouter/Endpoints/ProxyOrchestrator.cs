@@ -579,22 +579,35 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         var verifyRequest = ResponseConfidenceChecker.BuildVerificationRequest(originalRequest, cheapAnswer, verifyPrompt);
 
+        var verifySw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var cheapClient = _clientProvider.GetClient(cheapModel);
             var verifyResponse = await cheapClient.CompleteAsync(verifyRequest, ct).ConfigureAwait(false);
+            verifySw.Stop();
 
             bool confident = ResponseConfidenceChecker.IsConfident(verifyResponse);
-            // 记录自校验事件（不记 cost，复核调用暂不单独计费；通过 CascadeTriggered 标记可离线统计触发率）。
-            RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, 0m, 0, sessionId,
+            // 复核调用真实消耗 token，必须入账成本账本，否则开级联时预算系统性偏低（漂移）。
+            decimal verifyCost = verifyResponse.Usage is not null
+                ? CostCalculator.Compute(verifyResponse.Usage, cheapModel)
+                : 0m;
+            if (verifyResponse.Usage is not null)
+                _ledger.Record(verifyCost, sessionId);
+
+            RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
                 true, null, false, routedTier, cascadeTriggered: true);
 
             if (confident) return null;
 
-            // 低置信 → 升级候选链首个 Strong 且未在本请求失败的模型。
-            var upgradeTarget = decision.Candidates.FirstOrDefault(c =>
-                c.Tier == ModelTier.Strong && !failedInThisRequest.Contains(c.Name));
+            // 低置信 → 升级到首个可用 Strong 模型。
+            // 升级目标从全量启用模型选，不依赖 decision.Candidates——
+            // 候选链经 RuleClassifier/SemanticRouter 的 FilterByTier 砍成单 tier 后不含 Strong。
+            // 排序与 RouterEngine 初始候选一致（Strong 优先 + MaxContextTokens 降序），结果可预测。
+            var upgradeTarget = _options.CurrentValue.Models
+                .Where(m => m.Enabled && m.Tier == ModelTier.Strong && !failedInThisRequest.Contains(m.Name))
+                .OrderByDescending(m => m.MaxContextTokens)
+                .FirstOrDefault();
             if (upgradeTarget is null) return null;
 
             var strongSw = System.Diagnostics.Stopwatch.StartNew();

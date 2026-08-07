@@ -20,6 +20,7 @@ namespace OptiRouter.Tests.Endpoints;
 internal sealed class MockModelClient : IModelClient
 {
     private readonly Func<ChatRequest, CancellationToken, Task<RawChatResponse>>? _completeRawFunc;
+    private readonly Func<ChatRequest, CancellationToken, Task<Clients.ChatResponse>>? _completeFunc;
     private readonly Func<ChatRequest, CancellationToken, IAsyncEnumerable<RawStreamLine>>? _streamRawFunc;
 
     /// <inheritdoc />
@@ -31,15 +32,18 @@ internal sealed class MockModelClient : IModelClient
     /// <param name="endpoint">关联的端点配置。</param>
     /// <param name="completeRawFunc">非流式原始回调，为 null 时调用会抛出 NotImplementedException。</param>
     /// <param name="streamRawFunc">流式原始回调，为 null 时调用会抛出 NotImplementedException。</param>
+    /// <param name="completeFunc">解析后的非流式回调（级联自校验用 CompleteAsync）；为 null 时抛 NotImplementedException。</param>
     public MockModelClient(
         ModelEndpointOptions endpoint,
         Func<ChatRequest, CancellationToken, Task<RawChatResponse>>? completeRawFunc = null,
-        Func<ChatRequest, CancellationToken, IAsyncEnumerable<RawStreamLine>>? streamRawFunc = null)
+        Func<ChatRequest, CancellationToken, IAsyncEnumerable<RawStreamLine>>? streamRawFunc = null,
+        Func<ChatRequest, CancellationToken, Task<Clients.ChatResponse>>? completeFunc = null)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         Endpoint = endpoint;
         _completeRawFunc = completeRawFunc;
         _streamRawFunc = streamRawFunc;
+        _completeFunc = completeFunc;
     }
 
     /// <inheritdoc />
@@ -60,7 +64,11 @@ internal sealed class MockModelClient : IModelClient
 
     /// <inheritdoc />
     public Task<Clients.ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken = default)
-        => throw new NotImplementedException("Legacy CompleteAsync not used; use CompleteRawAsync.");
+    {
+        if (_completeFunc == null)
+            throw new NotImplementedException($"CompleteAsync is not set up for model '{Endpoint.Name}'.");
+        return _completeFunc(request, cancellationToken);
+    }
 
     /// <inheritdoc />
     public IAsyncEnumerable<Clients.ChatStreamChunk> StreamAsync(ChatRequest request, CancellationToken cancellationToken = default)
