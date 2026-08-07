@@ -26,20 +26,14 @@ namespace OptiRouter.Routing;
 /// </remarks>
 public sealed class CapabilityFilterPolicy : IRouterPolicy
 {
-    /// <summary>
-    /// 模型 Tags 中标识支持视觉输入的标签。大小写不敏感比较。
-    /// </summary>
-    public const string VisionTag = "vision";
+    /// <summary>模型 Tags 中标识支持视觉输入的标签。委托 <see cref="ModelCapabilities.Vision"/>。</summary>
+    public const string VisionTag = ModelCapabilities.Vision;
 
-    /// <summary>
-    /// 模型 Tags 中标识支持工具调用的标签。大小写不敏感比较。
-    /// </summary>
-    public const string ToolUseTag = "tool-use";
+    /// <summary>模型 Tags 中标识支持工具调用的标签。委托 <see cref="ModelCapabilities.ToolUse"/>。</summary>
+    public const string ToolUseTag = ModelCapabilities.ToolUse;
 
-    /// <summary>
-    /// 模型 Tags 中标识支持 json-mode 的标签。大小写不敏感比较。
-    /// </summary>
-    public const string JsonModeTag = "json-mode";
+    /// <summary>模型 Tags 中标识支持 json-mode 的标签。委托 <see cref="ModelCapabilities.JsonMode"/>。</summary>
+    public const string JsonModeTag = ModelCapabilities.JsonMode;
 
     /// <inheritdoc />
     public RouterDecision Apply(RouterContext context, RouterDecision previous)

@@ -30,7 +30,8 @@ builder.Services.AddOptions<RouterOptions>()
     .Bind(builder.Configuration.GetSection("OptiRouter"))
     .ValidateOnStart();
 
-builder.Services.AddSingleton<IValidateOptions<RouterOptions>, RouterOptionsValidator>();
+builder.Services.AddSingleton<IValidateOptions<RouterOptions>>(sp =>
+    new RouterOptionsValidator(sp.GetRequiredService<ILogger<RouterOptionsValidator>>()));
 
 // 注册模型客户端工厂。
 builder.Services.AddSingleton<ModelClientFactory>();
