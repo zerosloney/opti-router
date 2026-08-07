@@ -137,4 +137,70 @@ public class RuleClassifierPolicyTests
 
         Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
     }
+
+    [Theory]
+    [InlineData("求解这个微分方程: dy/dx = 2x")]
+    [InlineData("计算二次方程 ax^2 + bx + c = 0 的根")]
+    [InlineData("证明不等式 (a+b)/2 >= sqrt(ab)")]
+    [InlineData("\\begin{equation}\nE = mc^2\n\\end{equation}")]
+    [InlineData("\\frac{1}{2} + \\frac{1}{3} = ?")]
+    [InlineData("对 f(x) = x^2 求导")]
+    [InlineData("计算定积分 \\int_0^1 x dx")]
+    [InlineData("f(x) = 2x + 1, find f(3)")]
+    public void Apply_DetectsMath_SelectsStrongTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+    }
+
+    [Theory]
+    [InlineData("translate this book to French")]
+    [InlineData("translate the paragraph into Japanese please")]
+    [InlineData("帮我把这段翻译成英文")]
+    [InlineData("翻译以下内容为日语")]
+    [InlineData("把这封信翻译成德语")]
+    public void Apply_DetectsTranslation_SelectsMediumTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 8000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Medium, m.Tier));
+    }
+
+    [Theory]
+    // 讨论性文本，不应触发翻译/数学。
+    [InlineData("the translation quality is poor")]
+    [InlineData("翻译理论很重要")]
+    [InlineData("等于号表示赋值")]
+    [InlineData("平均成绩是 85 分")]
+    public void Apply_NaturalLanguageNoTrigger_SelectsDefaultTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        // 默认 tier = Medium（单轮短消息无代码无数学无翻译 → 不命中 simple-qa 因长度可能 >100 或多词，
+        // 但翻译/数学不应触发，避免误升档）。这里宽松断言：不应是 Strong（无代码）。
+        Assert.All(result.Candidates, m => Assert.NotEqual(ModelTier.Strong, m.Tier));
+    }
 }

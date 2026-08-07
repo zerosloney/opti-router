@@ -159,6 +159,40 @@ public sealed class InMemoryRequestAuditStore : IRequestAuditStore, IDisposable
     }
 
     /// <inheritdoc />
+    public IReadOnlyDictionary<string, (double AverageLatencyMs, int SampleCount)> GetLatencyStatsSince(DateTime since)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // intentional-simple: 单次遍历累加，O(n)。审计缓冲通常 ≤10K 条，后台聚合低频，无需预聚合索引。
+        var sumMs = new Dictionary<string, double>(StringComparer.Ordinal);
+        var count = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        lock (_lock)
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                int idx = (_head + i) % _buffer.Length;
+                var r = _buffer[idx];
+                if (r.Timestamp < since || !r.Success)
+                    continue;
+
+                sumMs.TryGetValue(r.Model, out double sum);
+                sumMs[r.Model] = sum + r.LatencyMs;
+                count.TryGetValue(r.Model, out int c);
+                count[r.Model] = c + 1;
+            }
+        }
+
+        var result = new Dictionary<string, (double, int)>(sumMs.Count, StringComparer.Ordinal);
+        foreach (var model in sumMs.Keys)
+        {
+            int n = count[model];
+            result[model] = (sumMs[model] / n, n);
+        }
+        return result;
+    }
+
+    /// <inheritdoc />
     public void Dispose()
     {
         if (_disposed) return;

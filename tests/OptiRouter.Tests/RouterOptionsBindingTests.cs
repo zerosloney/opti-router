@@ -37,7 +37,13 @@ public class RouterOptionsBindingTests
             ["OptiRouter:Routing:FailoverCooldownSeconds"] = "60",
             ["OptiRouter:Routing:FailoverHalfOpenMaxProbes"] = "2",
             ["OptiRouter:Routing:TokenEstimation"] = "Tiktoken",
-            ["OptiRouter:Routing:TiktokenEncoding"] = "o200k_base"
+            ["OptiRouter:Routing:TiktokenEncoding"] = "o200k_base",
+            ["OptiRouter:Routing:EnableLatencyAware"] = "true",
+            ["OptiRouter:Routing:LatencyMinSamples"] = "15",
+            ["OptiRouter:Routing:LatencyStatsWindowMinutes"] = "30",
+            ["OptiRouter:Routing:EnableCapabilityFilter"] = "true",
+            ["OptiRouter:Routing:EnableFusionMode"] = "true",
+            ["OptiRouter:Routing:FusionMaxParallel"] = "3"
         };
 
         var configuration = new ConfigurationBuilder()
@@ -77,5 +83,13 @@ public class RouterOptionsBindingTests
         Assert.Equal(2, options.Value.Routing.FailoverHalfOpenMaxProbes);
         Assert.Equal(TokenEstimationMode.Tiktoken, options.Value.Routing.TokenEstimation);
         Assert.Equal("o200k_base", options.Value.Routing.TiktokenEncoding);
+
+        // 第一批新增配置项绑定。
+        Assert.True(options.Value.Routing.EnableLatencyAware);
+        Assert.Equal(15, options.Value.Routing.LatencyMinSamples);
+        Assert.Equal(30, options.Value.Routing.LatencyStatsWindowMinutes);
+        Assert.True(options.Value.Routing.EnableCapabilityFilter);
+        Assert.True(options.Value.Routing.EnableFusionMode);
+        Assert.Equal(3, options.Value.Routing.FusionMaxParallel);
     }
 }

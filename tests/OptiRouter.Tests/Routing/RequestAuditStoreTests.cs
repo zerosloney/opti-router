@@ -309,4 +309,134 @@ public class RequestAuditStoreTests
             CleanupDb(path);
         }
     }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetLatencyStatsSince_AggregatesSuccessfulRequests(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        // model-a：3 次成功（100, 200, 300 ms → 均 200），1 次失败（应排除）。
+        store.Append(SampleRecord("model-a", success: true) with { LatencyMs = 100 });
+        store.Append(SampleRecord("model-a", success: true) with { LatencyMs = 200 });
+        store.Append(SampleRecord("model-a", success: true) with { LatencyMs = 300 });
+        store.Append(SampleRecord("model-a", success: false) with { LatencyMs = 9999 });
+        // model-b：1 次成功。
+        store.Append(SampleRecord("model-b", success: true) with { LatencyMs = 50 });
+
+        var stats = store.GetLatencyStatsSince(DateTime.UtcNow.AddMinutes(-5));
+
+        Assert.Equal(2, stats.Count);
+        Assert.Equal(200.0, stats["model-a"].AverageLatencyMs, precision: 1);
+        Assert.Equal(3, stats["model-a"].SampleCount);
+        Assert.Equal(50.0, stats["model-b"].AverageLatencyMs);
+        Assert.Equal(1, stats["model-b"].SampleCount);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetLatencyStatsSince_OldRecordsExcluded(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var old = DateTime.UtcNow.AddHours(-2);
+        var recent = DateTime.UtcNow;
+
+        store.Append(SampleRecord("model-a", success: true, ts: old) with { LatencyMs = 100 });
+        store.Append(SampleRecord("model-a", success: true, ts: recent) with { LatencyMs = 200 });
+
+        // cutoff = 1 小时前 → 仅 recent 记录计入。
+        var stats = store.GetLatencyStatsSince(DateTime.UtcNow.AddHours(-1));
+
+        Assert.Single(stats);
+        Assert.Equal(200.0, stats["model-a"].AverageLatencyMs);
+        Assert.Equal(1, stats["model-a"].SampleCount);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_WithParallelFields_RoundTrips(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var adopted = SampleRecord("fast-model") with { IsAdopted = true, ParallelGroupId = "group-1" };
+        var cancelled = SampleRecord("slow-model") with
+        {
+            IsAdopted = false,
+            ParallelGroupId = "group-1",
+            Success = false,
+            ErrorMessage = "cancelled"
+        };
+
+        store.Append(adopted);
+        store.Append(cancelled);
+
+        var recent = store.GetRecent(10);
+        Assert.Equal(2, recent.Count);
+        var fast = recent.First(r => r.Model == "fast-model");
+        var slow = recent.First(r => r.Model == "slow-model");
+        Assert.True(fast.IsAdopted);
+        Assert.Equal("group-1", fast.ParallelGroupId);
+        Assert.False(slow.IsAdopted);
+        Assert.Equal("group-1", slow.ParallelGroupId);
+    }
+
+    [Fact]
+    public void SqliteStore_MigratesOldDb_AddsParallelColumns()
+    {
+        string path = TempDbPath();
+        try
+        {
+            // 构造旧 schema（无 is_adopted/parallel_group_id）。
+            using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    CREATE TABLE request_audit (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        request_id TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        estimated_tokens INTEGER NOT NULL,
+                        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                        completion_tokens INTEGER NOT NULL DEFAULT 0,
+                        cost REAL NOT NULL DEFAULT 0,
+                        latency_ms INTEGER NOT NULL DEFAULT 0,
+                        session_id TEXT,
+                        routing_reason TEXT NOT NULL,
+                        success INTEGER NOT NULL,
+                        error_message TEXT,
+                        is_streaming INTEGER NOT NULL DEFAULT 0,
+                        routed_tier TEXT,
+                        cascade_triggered INTEGER NOT NULL DEFAULT 0,
+                        upgraded_from TEXT
+                    );
+                    INSERT INTO request_audit
+                        (timestamp, request_id, model, estimated_tokens, prompt_tokens,
+                         completion_tokens, cost, latency_ms, session_id, routing_reason,
+                         success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from)
+                    VALUES ('2026-01-01T00:00:00.0000000Z', 'r1', 'old', 10, 5, 5, 0.01, 100, null, 'old', 1, null, 0, 'Medium', 0, null);
+                    """;
+                cmd.ExecuteNonQuery();
+            }
+
+            using var store = new SqliteRequestAuditStore(path);
+
+            // 旧记录读回，新字段取默认值（IsAdopted=true，ParallelGroupId=null）。
+            var old = store.GetRecent(10);
+            Assert.Single(old);
+            Assert.True(old[0].IsAdopted);
+            Assert.Null(old[0].ParallelGroupId);
+
+            // 新记录带并行字段可写入读回。
+            store.Append(SampleRecord("fast") with { IsAdopted = true, ParallelGroupId = "g1" });
+            var all = store.GetRecent(10);
+            Assert.Equal(2, all.Count);
+            var fast = all.First(r => r.Model == "fast");
+            Assert.True(fast.IsAdopted);
+            Assert.Equal("g1", fast.ParallelGroupId);
+        }
+        finally
+        {
+            CleanupDb(path);
+        }
+    }
 }

@@ -83,6 +83,21 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
                 "常见取值：o200k_base、cl100k_base。");
         }
 
+        if (options.Routing.LatencyMinSamples < 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.LatencyMinSamples 不能为负数。");
+        }
+
+        if (options.Routing.LatencyStatsWindowMinutes <= 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.LatencyStatsWindowMinutes 必须大于 0。");
+        }
+
+        if (options.Routing.FusionMaxParallel < 2 || options.Routing.FusionMaxParallel > 5)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionMaxParallel 必须在 [2, 5] 范围内。");
+        }
+
         return ValidateOptionsResult.Success;
     }
 }

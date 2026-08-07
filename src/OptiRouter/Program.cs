@@ -92,6 +92,9 @@ builder.Services.AddSingleton<ModelHealthTracker>(sp =>
     return new ModelHealthTracker(store);
 });
 
+// 延迟统计缓存：后台聚合服务写入，路由策略零 I/O 读快照。
+builder.Services.AddSingleton<ILatencyStatsProvider, LatencyStatsCache>();
+
 // 告警引擎：检查预算、断路器、失败率等条件。
 builder.Services.AddSingleton<AlertEngine>(sp =>
 {
@@ -123,10 +126,12 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
     var policies = new List<IRouterPolicy>
     {
+        new CapabilityFilterPolicy(),
         new RuleClassifierPolicy(),
         new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),
         new SemanticRouterPolicy(),
         new LongInputPolicy(),
+        new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>()),
         new BudgetGuardPolicy(ledger),
         new FailoverPolicy(healthTracker),
         new LoadBalancePolicy()
@@ -152,6 +157,10 @@ builder.Services.AddSingleton<ModelsConfigService>(sp =>
 // 后台定时主动探活：启动预热一轮，随后按 HealthProbeIntervalSeconds 周期对所有启用模型探测，
 // 结果上报 ModelHealthTracker（成功累计半开/闭合，失败计熔断）。EnableHealthProbe=false 可关闭。
 builder.Services.AddHostedService<ModelHealthProbeService>();
+
+// 后台周期聚合模型延迟统计，写入 ILatencyStatsProvider 供 LatencyAwarePolicy 读。
+// 复用 HealthProbeIntervalSeconds 周期，避免引入独立定时器。EnableLatencyAware=false 时不聚合。
+builder.Services.AddHostedService<LatencyStatsAggregatorService>();
 
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
