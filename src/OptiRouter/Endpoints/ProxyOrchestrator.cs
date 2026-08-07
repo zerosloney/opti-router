@@ -99,6 +99,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         {
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
             int estimatedTokens = decision.EstimatedInputTokens;
+            // 本轮路由命中档（首选候选 tier），用于审计追踪路由分档正确性。
+            ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
 
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
@@ -142,15 +144,25 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         var cost = CostCalculator.Compute(response.Usage, candidate);
                         _ledger.Record(cost, sessionId);
-                        RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false);
+                        RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
                     }
                     else
                     {
-                        RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false);
+                        RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     outcomeReported = true;
                     RecordAffinity(sessionId, candidate.Name);
+
+                    // 级联自校验：Cheap 首选 + 启用 + 采样命中 → 自校验，低置信升级 Strong。
+                    // 仅非流式（流式首 chunk 已透传无法切模型）。失败不影响主流程，返回原 Cheap 答案。
+                    if (candidate.Tier == ModelTier.Cheap)
+                    {
+                        var upgraded = await TryCascadeUpgradeAsync(
+                            request, response, decision, candidate, estimatedTokens, routedTier, sessionId, failedInThisRequest, ct).ConfigureAwait(false);
+                        if (upgraded is not null)
+                            return upgraded;
+                    }
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, response.Usage is not null
@@ -167,7 +179,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
-                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false);
+                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 }
@@ -179,7 +191,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
-                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false);
+                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -192,7 +204,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 客户端内部超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     outcomeReported = true;
-                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "timeout", false);
+                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "timeout", false, routedTier);
                     _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -241,6 +253,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         while (true)
         {
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
+            ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
 
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
@@ -341,7 +354,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             ? $"status {(int)modelFailure.StatusCode}"
                             : preStreamFailure.Message;
                         RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                            attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true);
+                            attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
                         continue;
@@ -405,7 +418,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     attemptSw.Stop();
                     RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
                         finalUsage is not null ? CostCalculator.Compute(finalUsage, candidate) : 0m,
-                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true);
+                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, finalUsage is not null
                             ? CostCalculator.Compute(finalUsage, candidate).ToString("F6")
@@ -422,7 +435,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             attemptSw.Stop();
                             bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                             RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true);
+                                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier);
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                                 candidate.Name, tripped ? " (circuit tripped)" : "");
                         }
@@ -480,7 +493,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string routingReason,
         bool success,
         string? errorMessage,
-        bool isStreaming)
+        bool isStreaming,
+        ModelTier routedTier,
+        bool cascadeTriggered = false,
+        string? upgradedFrom = null)
     {
         try
         {
@@ -497,7 +513,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 RoutingReason: routingReason,
                 Success: success,
                 ErrorMessage: errorMessage,
-                IsStreaming: isStreaming));
+                IsStreaming: isStreaming,
+                RoutedTier: routedTier,
+                CascadeTriggered: cascadeTriggered,
+                UpgradedFrom: upgradedFrom));
         }
         catch
         {
@@ -525,6 +544,97 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         catch
         {
             // 粘性记录失败不应影响已成功的请求。
+        }
+    }
+
+    /// <summary>
+    /// Cheap→Strong 级联自校验。返回 null 表示不升级（用原 Cheap 答案）；返回 RawChatResponse 表示升级到 Strong 的重答结果。
+    /// 触发条件：EnableCascadeUpgrade 且采样命中（CascadeUpgradeSampleRate）。自校验用同 Cheap 模型，低置信则升级候选链首个 Strong。
+    /// 级联全程异常吞掉返回 null：质量兜底不应破坏已成功的请求。
+    /// </summary>
+    private async Task<RawChatResponse?> TryCascadeUpgradeAsync(
+        ChatRequest originalRequest,
+        RawChatResponse cheapResponse,
+        RouterDecision decision,
+        ModelEndpointOptions cheapModel,
+        int estimatedTokens,
+        ModelTier routedTier,
+        string? sessionId,
+        HashSet<string> failedInThisRequest,
+        CancellationToken ct)
+    {
+        var routing = _options.CurrentValue.Routing;
+        if (!routing.EnableCascadeUpgrade) return null;
+
+        double rate = routing.CascadeUpgradeSampleRate;
+        if (rate <= 0 || Random.Shared.NextDouble() >= rate) return null;
+
+        // 提取 Cheap 答案文本；为空（多模态/解析失败）则跳过，避免无效自校验。
+        string cheapAnswer = ResponseConfidenceChecker.ExtractAssistantText(cheapResponse);
+        if (string.IsNullOrWhiteSpace(cheapAnswer)) return null;
+
+        string verifyPrompt = string.IsNullOrWhiteSpace(routing.CascadeUpgradeSelfVerifyPrompt)
+            ? ResponseConfidenceChecker.DefaultSelfVerifyPrompt
+            : routing.CascadeUpgradeSelfVerifyPrompt;
+
+        var verifyRequest = ResponseConfidenceChecker.BuildVerificationRequest(originalRequest, cheapAnswer, verifyPrompt);
+
+        try
+        {
+            var cheapClient = _clientProvider.GetClient(cheapModel);
+            var verifyResponse = await cheapClient.CompleteAsync(verifyRequest, ct).ConfigureAwait(false);
+
+            bool confident = ResponseConfidenceChecker.IsConfident(verifyResponse);
+            // 记录自校验事件（不记 cost，复核调用暂不单独计费；通过 CascadeTriggered 标记可离线统计触发率）。
+            RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, 0m, 0, sessionId,
+                decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
+                true, null, false, routedTier, cascadeTriggered: true);
+
+            if (confident) return null;
+
+            // 低置信 → 升级候选链首个 Strong 且未在本请求失败的模型。
+            var upgradeTarget = decision.Candidates.FirstOrDefault(c =>
+                c.Tier == ModelTier.Strong && !failedInThisRequest.Contains(c.Name));
+            if (upgradeTarget is null) return null;
+
+            var strongSw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                var strongClient = _clientProvider.GetClient(upgradeTarget);
+                var strongResponse = await strongClient.CompleteRawAsync(originalRequest, ct).ConfigureAwait(false);
+                strongSw.Stop();
+
+                if (strongResponse.Usage is not null)
+                {
+                    var cost = CostCalculator.Compute(strongResponse.Usage, upgradeTarget);
+                    _ledger.Record(cost, sessionId);
+                }
+                _healthTracker.RecordSuccess(upgradeTarget.Name,
+                    routing.FailoverHalfOpenRequiredSuccesses);
+                RecordAffinity(sessionId, upgradeTarget.Name);
+
+                RecordAudit(null, upgradeTarget.Name, estimatedTokens, strongResponse.Usage,
+                    strongResponse.Usage is not null ? CostCalculator.Compute(strongResponse.Usage, upgradeTarget) : 0m,
+                    strongSw.ElapsedMilliseconds, sessionId, decision.Reason + "; cascade: upgraded from " + cheapModel.Name,
+                    true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name);
+
+                _logger.LogInformation("Cascade upgrade: {Cheap} -> {Strong} (self-verify uncertain)",
+                    cheapModel.Name, upgradeTarget.Name);
+
+                return strongResponse;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || ct.IsCancellationRequested)
+            {
+                // 升级调用失败：记录但不抛，返回 null 让调用方用原 Cheap 答案（已有，质量兜底不优于崩溃）。
+                _logger.LogWarning(ex, "Cascade upgrade to {Strong} failed, returning cheap answer", upgradeTarget.Name);
+                return null;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || ct.IsCancellationRequested)
+        {
+            // 自校验本身失败：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。
+            _logger.LogDebug(ex, "Cascade self-verify failed for {Cheap}, skipping upgrade", cheapModel.Name);
+            return null;
         }
     }
 }

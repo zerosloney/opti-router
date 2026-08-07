@@ -47,6 +47,32 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
         Execute("CREATE INDEX IF NOT EXISTS idx_request_audit_timestamp ON request_audit(timestamp);");
         Execute("CREATE INDEX IF NOT EXISTS idx_request_audit_model ON request_audit(model);");
+
+        // 增量列迁移：旧 DB（无 routed_tier/cascade_triggered/upgraded_from）需补列。
+        // SQLite 不支持 ADD COLUMN IF NOT EXISTS，用 PRAGMA table_info 探测后补加。
+        EnsureColumn("routed_tier", "TEXT");
+        EnsureColumn("cascade_triggered", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("upgraded_from", "TEXT");
+    }
+
+    private void EnsureColumn(string columnName, string definition)
+    {
+        lock (_lock)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "PRAGMA table_info(request_audit);";
+            var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            using (var reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                    existing.Add(reader.GetString(1)); // column name is field 1
+            }
+
+            if (!existing.Contains(columnName))
+            {
+                Execute($"ALTER TABLE request_audit ADD COLUMN {columnName} {definition};");
+            }
+        }
     }
 
     /// <inheritdoc />
@@ -64,9 +90,10 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 INSERT INTO request_audit
                     (timestamp, request_id, model, estimated_tokens, prompt_tokens,
                      completion_tokens, cost, latency_ms, session_id, routing_reason,
-                     success, error_message, is_streaming)
+                     success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from)
                 VALUES
-                    (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream);
+                    (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
+                     @rtier, @cascade, @upg);
                 """;
             cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
             cmd.Parameters.AddWithValue("@rid", record.RequestId);
@@ -81,6 +108,9 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.Parameters.AddWithValue("@succ", record.Success ? 1 : 0);
             cmd.Parameters.AddWithValue("@err", (object?)record.ErrorMessage ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@stream", record.IsStreaming ? 1 : 0);
+            cmd.Parameters.AddWithValue("@rtier", record.RoutedTier.ToString());
+            cmd.Parameters.AddWithValue("@cascade", record.CascadeTriggered ? 1 : 0);
+            cmd.Parameters.AddWithValue("@upg", (object?)record.UpgradedFrom ?? DBNull.Value);
             cmd.ExecuteNonQuery();
             tx.Commit();
         }
@@ -98,7 +128,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
-                       success, error_message, is_streaming
+                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from
                 FROM request_audit
                 ORDER BY id DESC
                 LIMIT @limit;
@@ -121,7 +151,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
-                       success, error_message, is_streaming
+                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from
                 FROM request_audit
                 WHERE model = @model
                 ORDER BY id DESC
@@ -157,7 +187,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
-                       success, error_message, is_streaming
+                       success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from
                 FROM request_audit
                 WHERE timestamp >= @from AND timestamp <= @to
                 ORDER BY id DESC
@@ -214,7 +244,10 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 RoutingReason: reader.GetString(9),
                 Success: reader.GetInt32(10) != 0,
                 ErrorMessage: reader.IsDBNull(11) ? null : reader.GetString(11),
-                IsStreaming: reader.GetInt32(12) != 0));
+                IsStreaming: reader.GetInt32(12) != 0,
+                RoutedTier: reader.IsDBNull(13) ? ModelTier.Medium : Enum.Parse<ModelTier>(reader.GetString(13), ignoreCase: true),
+                CascadeTriggered: reader.IsDBNull(14) ? false : reader.GetInt32(14) != 0,
+                UpgradedFrom: reader.IsDBNull(15) ? null : reader.GetString(15)));
         }
         return list;
     }

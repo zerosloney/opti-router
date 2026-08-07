@@ -131,6 +131,13 @@ data/
 # Others
 .zcode/
 .codegraph/
+# Agent tooling working dirs (local-only)
+.codebuddy/
+.codex/
+.omp/
+.opencode/
+.agents/
+.trellis/
 *.dbmdl
 *.dbproj.schemaview
 *.pfx

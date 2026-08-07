@@ -46,7 +46,7 @@ public sealed class RouterEngine
 
         // 3. 初始决策：所有 enabled 模型按 tier 升序（Strong 优先）作为候选
         var initialCandidates = context.AllModels
-            .OrderBy(m => (int)m.Tier)
+            .OrderBy(m => TierOrder.Rank(m.Tier))
             .ThenByDescending(m => m.MaxContextTokens)
             .ToList();
 

@@ -121,6 +121,26 @@ public sealed class RoutingOptions
     /// 放在策略链末（Failover 之后），仅对熔断排除后的存活候选生效。
     /// </summary>
     public bool EnableLoadBalance { get; set; } = false;
+
+    /// <summary>
+    /// 是否启用 Cheap→Strong 级联自校验。开启后，路由到 Cheap 模型的请求（仅非流式）按采样率做一次
+    /// 自校验（同 Cheap 模型判定 CONFIDENT/UNCERTAIN），低置信则升级 Strong 模型重答。
+    /// 闭质量漏洞：规则误判简单→Cheap 答错时仍有兜底。默认 false。
+    /// 流式请求不级联（首 chunk 已透传无法切模型）。
+    /// </summary>
+    public bool EnableCascadeUpgrade { get; set; } = false;
+
+    /// <summary>
+    /// 级联自校验采样率 [0.0, 1.0]。仅采样的 Cheap 请求触发自校验，防全量升级成本爆炸。默认 0.1（10%）。
+    /// 0.0 = 完全关闭级联（即使 EnableCascadeUpgrade=true）；1.0 = 全部 Cheap 请求都校验。
+    /// </summary>
+    public double CascadeUpgradeSampleRate { get; set; } = 0.1;
+
+    /// <summary>
+    /// 级联自校验用的复核 prompt。模型应只回 CONFIDENT / UNCERTAIN。
+    /// 留空则用内置默认 prompt（中文）。
+    /// </summary>
+    public string CascadeUpgradeSelfVerifyPrompt { get; set; } = string.Empty;
 }
 
 /// <summary>

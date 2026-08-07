@@ -18,6 +18,9 @@ namespace OptiRouter.Routing;
 /// <param name="Success">是否成功（上游返回有效响应）。</param>
 /// <param name="ErrorMessage">失败时错误信息（成功时为 null）。</param>
 /// <param name="IsStreaming">是否为流式请求。</param>
+/// <param name="RoutedTier">路由命中档（首选候选的 tier）。用于离线评估路由分档正确性。</param>
+/// <param name="CascadeTriggered">是否触发了 Cheap→Strong 级联自校验。</param>
+/// <param name="UpgradedFrom">升级源模型名（null = 无升级）。配合 <paramref name="CascadeTriggered"/> 追踪升级链。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -31,4 +34,7 @@ public sealed record RequestAuditRecord(
     string RoutingReason,
     bool Success,
     string? ErrorMessage,
-    bool IsStreaming);
+    bool IsStreaming,
+    ModelTier RoutedTier = ModelTier.Medium,
+    bool CascadeTriggered = false,
+    string? UpgradedFrom = null);

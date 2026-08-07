@@ -85,10 +85,9 @@ public sealed class FailoverPolicy : IRouterPolicy
         IReadOnlyList<ModelEndpointOptions> previousCandidates,
         IReadOnlySet<string> excludedModels)
     {
-        // intentional-simple: 降级顺序 Strong -> Medium -> Cheap，同 tier 按 MaxContextTokens 降序
-        var tierOrder = new[] { ModelTier.Strong, ModelTier.Medium, ModelTier.Cheap };
-
-        foreach (var tier in tierOrder)
+        // intentional-simple: 降级顺序 Strong -> Medium -> Cheap，同 tier 按 MaxContextTokens 降序。
+        // 顺序真源见 TierOrder.FallbackChain，避免与 RouterEngine 初始排序假设不一致。
+        foreach (var tier in TierOrder.FallbackChain)
         {
             var sameTierFallback = allModels
                 .Where(m => m.Enabled && m.Tier == tier && !excludedModels.Contains(m.Name))

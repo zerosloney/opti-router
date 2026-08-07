@@ -229,4 +229,84 @@ public class RequestAuditStoreTests
         }
         catch { /* test cleanup tolerates failures */ }
     }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_WithNewFields_RoundTrips(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var record = SampleRecord() with
+        {
+            RoutedTier = ModelTier.Cheap,
+            CascadeTriggered = true,
+            UpgradedFrom = "cheap-model"
+        };
+
+        store.Append(record);
+
+        var recent = store.GetRecent(1);
+        Assert.Single(recent);
+        Assert.Equal(ModelTier.Cheap, recent[0].RoutedTier);
+        Assert.True(recent[0].CascadeTriggered);
+        Assert.Equal("cheap-model", recent[0].UpgradedFrom);
+    }
+
+    [Fact]
+    public void Sqlite_MigratesOldSchema_AddsNewColumns()
+    {
+        // 构造旧 schema（无 routed_tier/cascade_triggered/upgraded_from），写入旧记录。
+        string path = TempDbPath();
+        try
+        {
+            using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
+            {
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    CREATE TABLE request_audit (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp TEXT NOT NULL,
+                        request_id TEXT NOT NULL,
+                        model TEXT NOT NULL,
+                        estimated_tokens INTEGER NOT NULL,
+                        prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                        completion_tokens INTEGER NOT NULL DEFAULT 0,
+                        cost REAL NOT NULL DEFAULT 0,
+                        latency_ms INTEGER NOT NULL DEFAULT 0,
+                        session_id TEXT,
+                        routing_reason TEXT NOT NULL,
+                        success INTEGER NOT NULL,
+                        error_message TEXT,
+                        is_streaming INTEGER NOT NULL DEFAULT 0
+                    );
+                    INSERT INTO request_audit (timestamp, request_id, model, estimated_tokens, prompt_tokens,
+                        completion_tokens, cost, latency_ms, session_id, routing_reason, success, error_message, is_streaming)
+                    VALUES ('2026-01-01T00:00:00.0000000Z', 'r1', 'old-model', 10, 5, 5, 0.01, 100, null, 'old', 1, null, 0);
+                    """;
+                cmd.ExecuteNonQuery();
+            }
+
+            // 用旧 DB 构造 store → 应触发列迁移。
+            using var store = new SqliteRequestAuditStore(path);
+
+            // 旧记录可读，新字段取默认值。
+            var old = store.GetRecent(10);
+            Assert.Single(old);
+            Assert.Equal(ModelTier.Medium, old[0].RoutedTier); // 默认
+            Assert.False(old[0].CascadeTriggered);
+            Assert.Null(old[0].UpgradedFrom);
+
+            // 新记录可写入读回。
+            store.Append(SampleRecord() with { RoutedTier = ModelTier.Strong, CascadeTriggered = true, UpgradedFrom = "src" });
+            var all = store.GetRecent(10);
+            Assert.Equal(2, all.Count);
+            Assert.Equal(ModelTier.Strong, all[0].RoutedTier);
+            Assert.True(all[0].CascadeTriggered);
+            Assert.Equal("src", all[0].UpgradedFrom);
+        }
+        finally
+        {
+            CleanupDb(path);
+        }
+    }
 }
