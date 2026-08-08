@@ -160,21 +160,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         double score = 0.0;
         foreach (var (key, weight) in weights)
         {
-            double capabilityVal;
-            if (model.Capabilities is not null && model.Capabilities.TryGetValue(key, out var val))
-            {
-                capabilityVal = val;
-            }
-            else
-            {
-                capabilityVal = model.Tier switch
-                {
-                    ModelTier.Strong => 0.9,
-                    ModelTier.Medium => 0.6,
-                    _ => 0.3
-                };
-            }
-            score += weight * capabilityVal;
+            score += weight * model.GetEffectiveCapability(key);
         }
         return score;
     }

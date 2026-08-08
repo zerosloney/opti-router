@@ -66,4 +66,21 @@ public sealed class ModelEndpointOptions
     /// 模型在各维度的能力评分（0.0 至 1.0），如 "coding": 0.95, "reasoning": 0.90。
     /// </summary>
     public IDictionary<string, double> Capabilities { get; set; } = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 获取指定维度的能力评分；若未显式配置，则按 <see cref="Tier"/> 回退到默认值。
+    /// </summary>
+    public double GetEffectiveCapability(string dimension)
+    {
+        if (Capabilities is not null && Capabilities.TryGetValue(dimension, out double val))
+        {
+            return val;
+        }
+        return Tier switch
+        {
+            ModelTier.Strong => 0.9,
+            ModelTier.Medium => 0.6,
+            _ => 0.3
+        };
+    }
 }

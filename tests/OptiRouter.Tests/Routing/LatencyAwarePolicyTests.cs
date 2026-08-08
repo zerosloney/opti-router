@@ -55,7 +55,7 @@ public class LatencyAwarePolicyTests
             ("a", ModelTier.Medium, 8000, 1m),
             ("b", ModelTier.Medium, 8000, 1m));
         options.Routing.EnableLatencyAware = false;
-        var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider());
+        var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(), new ThompsonStateStore());
 
         var (ctx, initial) = Setup(options, options.Models);
         var result = policy.Apply(ctx, initial);
@@ -71,7 +71,7 @@ public class LatencyAwarePolicyTests
             ("a", ModelTier.Medium, 8000, 1m),
             ("b", ModelTier.Medium, 8000, 1m));
         options.Routing.EnableLatencyAware = true;
-        var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider()); // 无统计
+        var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(), new ThompsonStateStore()); // 无统计
 
         var (ctx, initial) = Setup(options, options.Models);
         var result = policy.Apply(ctx, initial);
@@ -90,7 +90,7 @@ public class LatencyAwarePolicyTests
         options.Routing.LatencyMinSamples = 10;
         // 两个模型样本都 < 10，不参与排序。
         var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(
-            ("a", 500.0, 3), ("b", 100.0, 2)));
+            ("a", 500.0, 3), ("b", 100.0, 2)), new ThompsonStateStore());
 
         var (ctx, initial) = Setup(options, options.Models);
         var result = policy.Apply(ctx, initial);
@@ -109,7 +109,7 @@ public class LatencyAwarePolicyTests
         options.Routing.LatencyMinSamples = 5;
         // slow 平均 1000ms，fast 平均 100ms。fast 应排前。
         var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(
-            ("slow", 1000.0, 50), ("fast", 100.0, 50)));
+            ("slow", 1000.0, 50), ("fast", 100.0, 50)), new ThompsonStateStore());
 
         var (ctx, initial) = Setup(options, options.Models);
         var result = policy.Apply(ctx, initial);
@@ -130,7 +130,7 @@ public class LatencyAwarePolicyTests
         options.Routing.LatencyMinSamples = 5;
         // a/c 有充足统计，b 样本不足 → b 应在尾部。
         var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(
-            ("a", 200.0, 20), ("c", 100.0, 20))); // b 无统计
+            ("a", 200.0, 20), ("c", 100.0, 20)), new ThompsonStateStore()); // b 无统计
 
         var (ctx, initial) = Setup(options, options.Models);
         var result = policy.Apply(ctx, initial);
@@ -154,7 +154,7 @@ public class LatencyAwarePolicyTests
         options.Routing.LatencyMinSamples = 5;
         var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(
             ("s-slow", 1000.0, 20), ("s-fast", 100.0, 20),
-            ("c-slow", 800.0, 20), ("c-fast", 80.0, 20)));
+            ("c-slow", 800.0, 20), ("c-fast", 80.0, 20)), new ThompsonStateStore());
 
         // 初始候选：Strong 段在前，Cheap 段在后。
         var initial = new RouterDecision
@@ -185,7 +185,7 @@ public class LatencyAwarePolicyTests
     {
         var options = TestHelpers.BuildOptions(("only", ModelTier.Medium, 8000, 1m));
         options.Routing.EnableLatencyAware = true;
-        var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(("only", 100.0, 50)));
+        var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(("only", 100.0, 50)), new ThompsonStateStore());
 
         var (ctx, initial) = Setup(options, options.Models);
         var result = policy.Apply(ctx, initial);

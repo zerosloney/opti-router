@@ -30,11 +30,11 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     /// 构造延迟感知策略。
     /// </summary>
     /// <param name="statsProvider">延迟统计读接口（内存快照，零 I/O）。</param>
-    /// <param name="tsStore">Thompson 采样参数存储中心，传入空时将默认自建（供单元测试和旧代码向后兼容）。</param>
-    public LatencyAwarePolicy(ILatencyStatsProvider statsProvider, ThompsonStateStore? tsStore = null)
+    /// <param name="tsStore">Thompson 采样参数存储中心。</param>
+    public LatencyAwarePolicy(ILatencyStatsProvider statsProvider, ThompsonStateStore tsStore)
     {
         _statsProvider = statsProvider ?? throw new ArgumentNullException(nameof(statsProvider));
-        _tsStore = tsStore ?? new ThompsonStateStore();
+        _tsStore = tsStore ?? throw new ArgumentNullException(nameof(tsStore));
     }
 
     /// <inheritdoc />
