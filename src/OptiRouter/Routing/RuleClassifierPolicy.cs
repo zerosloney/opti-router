@@ -46,14 +46,16 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         }
 
         var (targetTier, targetReason) = ClassifyRequest(context);
-        var candidates = FilterByTier(context.AllModels, targetTier);
+        // 在上游策略（如 CapabilityFilter）已过滤的候选上再按 tier 筛，保持策略链叠加语义。
+        // 从 AllModels 取会丢弃上游过滤结果（如 vision 标注），导致能力过滤失效。
+        var candidates = FilterByTier(previous.Candidates, targetTier);
 
         if (candidates.Count == 0)
         {
-            // 回落到 DefaultTier
+            // 回落到 DefaultTier（仍基于 previous.Candidates，保持叠加）
             targetTier = context.Options.Routing.DefaultTier;
             targetReason = "fallback-to-default";
-            candidates = FilterByTier(context.AllModels, targetTier);
+            candidates = FilterByTier(previous.Candidates, targetTier);
         }
 
         // 按 MaxContextTokens 降序
@@ -201,11 +203,13 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     }
 
     private static List<ModelEndpointOptions> FilterByTier(
-        IReadOnlyList<ModelEndpointOptions> models,
+        IReadOnlyList<ModelEndpointOptions> candidates,
         ModelTier tier)
     {
-        return models
-            .Where(m => m.Enabled && m.Tier == tier)
+        // 不重复过滤 Enabled：初始候选链（RouterEngine）已排除 disabled 模型，
+        // 上游策略亦不应引入 disabled 候选。此处仅按 tier 筛选。
+        return candidates
+            .Where(m => m.Tier == tier)
             .ToList();
     }
 }

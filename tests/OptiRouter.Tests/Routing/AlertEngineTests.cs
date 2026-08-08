@@ -215,6 +215,50 @@ public class AlertEngineTests
     }
 
     [Fact]
+    public void Check_HighFailureRate_Over1000Samples_TriggersAlert()
+    {
+        // 回归：CheckFailureRate 曾用 limit=1000 截断 items 但 totalCount 不截断，
+        // 分子分母不同源，大流量下失败率被系统性低估、告警永不触发。
+        // 构造 1500 条（1200 失败 + 300 成功），真实失败率 80% > 50% 阈值。
+        var ledger = new FakeCostLedger();
+        var tracker = new ModelHealthTracker();
+        var auditStore = new InMemoryRequestAuditStore();
+        var now = DateTime.UtcNow;
+
+        for (int i = 0; i < 1500; i++)
+        {
+            auditStore.Append(new RequestAuditRecord(
+                Timestamp: now.AddSeconds(-i * 0.2),
+                RequestId: "req-" + i,
+                Model: "gpt-4o",
+                EstimatedInputTokens: 100,
+                PromptTokens: 80,
+                CompletionTokens: 40,
+                Cost: 0.001m,
+                LatencyMs: 200,
+                SessionId: null,
+                RoutingReason: "test",
+                Success: i >= 1200,
+                ErrorMessage: i >= 1200 ? null : "fail",
+                IsStreaming: false));
+        }
+
+        var options = new RouterOptions
+        {
+            Budget = new BudgetOptions { DailyBudgetUsd = 100m },
+            Routing = new RoutingOptions { EnableFailover = true }
+        };
+        var monitor = new FakeOptionsMonitor<RouterOptions>(options);
+
+        var engine = new AlertEngine(ledger, tracker, auditStore, monitor);
+        var alerts = engine.Check();
+
+        var failureAlert = Assert.Single(alerts, a => a.Id == "high-failure-rate");
+        Assert.Equal("critical", failureAlert.Level);
+        Assert.Contains("80%", failureAlert.Message);
+    }
+
+    [Fact]
     public void Check_NoAlerts_ReturnsEmpty()
     {
         var ledger = new FakeCostLedger(daily: 10m, total: 10m);
