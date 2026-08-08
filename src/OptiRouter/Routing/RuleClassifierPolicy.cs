@@ -37,6 +37,15 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         @"把.{1,40}?翻译成",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    /// <summary>分类原因常量，ClassifyRequest 与 GetWeightsForClassification 共用，避免字符串漂移。</summary>
+    private const string ReasonCodeDetected = "code-detected";
+    private const string ReasonMathDetected = "math-detected";
+    private const string ReasonComplexInstruction = "complex-instruction";
+    private const string ReasonTranslationRequest = "translation-request";
+    private const string ReasonSimpleQA = "simple-qa";
+    private const string ReasonDefault = "default";
+    private const string ReasonFallbackToDefault = "fallback-to-default";
+
     /// <summary>
     /// 代码特征匹配正则：结合上下文与词边界，避免自然语言中 "select a dress" / "high class hotel" 等误判。
     /// </summary>
@@ -95,7 +104,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         {
             // 回落到 DefaultTier（仍基于 previous.Candidates，保持叠加）
             targetTier = context.Options.Routing.DefaultTier;
-            targetReason = "fallback-to-default";
+            targetReason = ReasonFallbackToDefault;
             candidates = FilterByTier(previous.Candidates, targetTier);
         }
 
@@ -116,25 +125,25 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         var weights = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
         switch (reason)
         {
-            case "code-detected":
+            case ReasonCodeDetected:
                 weights["coding"] = 1.0;
                 weights["reasoning"] = 0.6;
                 weights["language"] = 0.3;
                 break;
-            case "math-detected":
+            case ReasonMathDetected:
                 weights["reasoning"] = 1.0;
                 weights["coding"] = 0.5;
                 weights["language"] = 0.3;
                 break;
-            case "complex-instruction":
+            case ReasonComplexInstruction:
                 weights["reasoning"] = 0.8;
                 weights["language"] = 0.7;
                 break;
-            case "translation-request":
+            case ReasonTranslationRequest:
                 weights["language"] = 1.0;
                 weights["coding"] = 0.1;
                 break;
-            case "simple-qa":
+            case ReasonSimpleQA:
                 weights["language"] = 1.0;
                 weights["reasoning"] = 0.1;
                 break;
@@ -197,34 +206,47 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
 
         if (hasCode)
         {
-            return (ModelTier.Strong, "code-detected");
+            return (ModelTier.Strong, ReasonCodeDetected);
         }
 
         // 数学/公式：优先级仅次于代码。需 Strong 模型（符号推理、LaTeX 生成准确）。
         // 拼接全部文本后正则匹配，避免跨消息公式被截断漏检。
         if (ContainsMathIndicators(request))
         {
-            return (ModelTier.Strong, "math-detected");
+            return (ModelTier.Strong, ReasonMathDetected);
         }
 
         if (totalMessageCount > 1 && hasLongSystemPrompt)
         {
-            return (ModelTier.Strong, "complex-instruction");
+            return (ModelTier.Strong, ReasonComplexInstruction);
         }
 
         // 翻译：Medium 足够（现代中等模型翻译质量已达实用水平，Strong 边际收益低）。
         // 放在 simple-qa 检测之前——翻译请求即使单轮短消息也应走 Medium 而非 Cheap。
         if (ContainsTranslationPattern(request))
         {
-            return (ModelTier.Medium, "translation-request");
+            return (ModelTier.Medium, ReasonTranslationRequest);
         }
 
         if (isSingleShortMessage)
         {
-            return (ModelTier.Cheap, "simple-qa");
+            return (ModelTier.Cheap, ReasonSimpleQA);
         }
 
-        return (context.Options.Routing.DefaultTier, "default");
+        return (context.Options.Routing.DefaultTier, ReasonDefault);
+    }
+
+    /// <summary>将所有消息文本用换行拼接，供跨消息正则匹配使用。</summary>
+    private static string ConcatMessages(Clients.ChatRequest request)
+    {
+        if (request.Messages is null || request.Messages.Count == 0) return string.Empty;
+        var sb = new System.Text.StringBuilder();
+        foreach (var msg in request.Messages)
+        {
+            sb.Append(msg.GetText());
+            sb.Append('\n');
+        }
+        return sb.ToString();
     }
 
     /// <summary>
@@ -233,14 +255,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     private static bool ContainsMathIndicators(Clients.ChatRequest request)
     {
         if (request.Messages is null || request.Messages.Count == 0) return false;
-        // intentional-simple: 拼接全部文本扫描一次正则。消息数通常 <50，总长度 <100KB，开销可忽略。
-        var sb = new System.Text.StringBuilder();
-        foreach (var msg in request.Messages)
-        {
-            sb.Append(msg.GetText());
-            sb.Append('\n');
-        }
-        return MathIndicatorRegex.IsMatch(sb.ToString());
+        return MathIndicatorRegex.IsMatch(ConcatMessages(request));
     }
 
     /// <summary>
@@ -249,13 +264,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     private static bool ContainsTranslationPattern(Clients.ChatRequest request)
     {
         if (request.Messages is null || request.Messages.Count == 0) return false;
-        var sb = new System.Text.StringBuilder();
-        foreach (var msg in request.Messages)
-        {
-            sb.Append(msg.GetText());
-            sb.Append('\n');
-        }
-        return TranslationPatternRegex.IsMatch(sb.ToString());
+        return TranslationPatternRegex.IsMatch(ConcatMessages(request));
     }
 
     private static bool ContainsCodeIndicators(string content)
