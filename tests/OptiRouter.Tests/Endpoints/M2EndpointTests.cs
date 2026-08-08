@@ -63,6 +63,7 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
 {
     public int RequestsPerMinute { get; set; } = 60;
     public int MaxConcurrentRequestsPerPartition { get; set; } = 100;
+    public bool TrustProxyHeaders { get; set; } = false;
     public Func<ChatRequest, CancellationToken, Task<RawChatResponse>>? OnCompleteRaw { get; set; }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -74,6 +75,7 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
                 ["OptiRouter:ProxyApiKey"] = "m2-test-key",
                 ["OptiRouter:RequestsPerMinute"] = RequestsPerMinute.ToString(),
                 ["OptiRouter:MaxConcurrentRequestsPerPartition"] = MaxConcurrentRequestsPerPartition.ToString(),
+                ["OptiRouter:TrustProxyHeaders"] = TrustProxyHeaders.ToString(),
                 ["OptiRouter:Models:0:Name"] = "gpt-4o",
                 ["OptiRouter:Models:0:BaseUrl"] = "http://localhost/v1",
                 ["OptiRouter:Models:0:ApiKey"] = "sk-xxx",
@@ -113,7 +115,7 @@ public class M2EndpointTests
     public async Task Post_WithClientIP_IsolatesRateLimitPartitions()
     {
         // Arrange
-        using var factory = new M2WebApplicationFactory { RequestsPerMinute = 1 };
+        using var factory = new M2WebApplicationFactory { RequestsPerMinute = 1, TrustProxyHeaders = true };
         using var client = factory.CreateClient();
 
         var requestContent = new StringContent(
@@ -147,6 +149,34 @@ public class M2EndpointTests
         req3.Headers.Add("X-Forwarded-For", "1.1.1.1");
         var resp3 = await client.SendAsync(req3);
         Assert.Equal(HttpStatusCode.TooManyRequests, resp3.StatusCode);
+    }
+
+    [Fact]
+    public async Task Post_DefaultOffXForwardedFor_IsIgnored_SoPartitionsNotSpoofed()
+    {
+        // Arrange: TrustProxyHeaders 默认 false——伪造 X-Forwarded-For 不得隔离限流分区。
+        // 否则攻击者每请求改一次头即可绕过限流（安全回归）。
+        using var factory = new M2WebApplicationFactory { RequestsPerMinute = 1 };
+        using var client = factory.CreateClient();
+
+        var content = () => new StringContent(
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}",
+            Encoding.UTF8,
+            "application/json");
+
+        // 1. 首请求携带伪造 XFF，成功（占满单分区配额）。
+        var req1 = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = content() };
+        req1.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "m2-test-key");
+        req1.Headers.Add("X-Forwarded-For", "9.9.9.9");
+        var resp1 = await client.SendAsync(req1);
+        Assert.Equal(HttpStatusCode.OK, resp1.StatusCode);
+
+        // 2. 不同伪造 XFF 也必须落在同一分区 → 429（证明头被忽略）。
+        var req2 = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = content() };
+        req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "m2-test-key");
+        req2.Headers.Add("X-Forwarded-For", "8.8.8.8");
+        var resp2 = await client.SendAsync(req2);
+        Assert.Equal(HttpStatusCode.TooManyRequests, resp2.StatusCode);
     }
 
     [Fact]

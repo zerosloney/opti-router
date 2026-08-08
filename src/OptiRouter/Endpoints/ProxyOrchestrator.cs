@@ -383,17 +383,18 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                     ArgumentNullException.ThrowIfNull(enumerator);
 
-                    // Phase 2: 首行在 try-catch 之外 yield，避免 CS1626。
-                    totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(firstLine.Data ?? "");
-                    if (totalBytesTransferred > maxResponseBytes)
-                    {
-                        throw new InvalidOperationException($"Response size limit exceeded ({maxResponseBytes} bytes).");
-                    }
-                    yield return firstLine;
-
-                    // 继续 yield 剩余行。内层只有 finally，无 catch，允许 yield。
+                    // Phase 2: 首行与剩余行统一在内层 try-finally 内 yield（无 catch，CS1626 允许）。
+                    // size-limit 抛出时 finally 仍会 dispose enumerator，避免 socket/stream 泄漏。
                     try
                     {
+                        totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(firstLine.Data ?? "");
+                        if (totalBytesTransferred > maxResponseBytes)
+                        {
+                            throw new InvalidOperationException($"Response size limit exceeded ({maxResponseBytes} bytes).");
+                        }
+                        yield return firstLine;
+
+                        // 继续 yield 剩余行。
                         while (true)
                         {
                             bool moved;
@@ -819,8 +820,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
 
             // 失败路径：区分真实失败 vs 被取消（因别人成功）。
+            // linkedCts.IsCancellationRequested 区分 race-cancel（raceCts 取消传播到 linkedCts）
+            // 与 client 自身超时（HttpClient 取消内部 token，不取消 linkedCts）。
+            // 后者应计入断路器失败，否则故障模型持续收流量。
+            var linkedCts = perCandidateCts.FirstOrDefault(p => p.Model.Name == model.Name).Cts;
             bool cancelledByRace = raceCts.IsCancellationRequested
-                && error is OperationCanceledException;
+                && error is OperationCanceledException
+                && linkedCts is not null
+                && linkedCts.IsCancellationRequested;
 
             if (cancelledByRace)
             {
@@ -865,7 +872,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         }
 
         // 4. 等待所有被 cancel 的 task 收尾（避免 task 泄漏/未观察异常）。
-        // 已被 raceCts.Cancel 的，WhenAll 会快速完成（抛 OperationCanceledException 被 task 内 try 吞）。
+        //    已被 raceCts.Cancel 的，WhenAll 会快速完成（抛 OperationCanceledException 被 task 内 try 吞）。
         try
         {
             await Task.WhenAll(remaining).ConfigureAwait(false);
@@ -875,24 +882,47 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             // task 内部已 try-catch，不应抛；防御性吞掉。
         }
 
-        // 5. 清理被取消但 task 未走失败分支的候选：释放探测槽位 + 记预估成本审计。
-        // WhenAny 循环里 cancelledByRace 已处理循环内到达的；break 后 remaining 中未被遍历的被 cancel task，
-        // 它们返回 (model, null, OperationCanceledException)，WhenAll 等待完成但不再走循环体——这里补全。
-        foreach (var (m, cts, wasHalfOpen) in perCandidateCts)
-        {
+        // 释放所有候选的 linked CTS。
+        foreach (var (m, cts, _) in perCandidateCts)
             cts.Dispose();
+
+        // 5. 清理 break 后未遍历的候选，按 task 实际结果区分"成功"vs"取消"，避免误算。
+        //    WhenWhenAll 已使任务全部完成，此处再 await 立即返回缓存结果。
+        foreach (var task in remaining)
+        {
+            var (m, response, error, elapsedMs, _) = await task.ConfigureAwait(false);
+
             // 跳过循环内已记审计的（成功采纳/失败/被取消）。
             if (accounted.Contains(m.Name))
                 continue;
 
+            // 竞态窗口内该候选在 cancel 传播前已收到成功响应：计真实成功 + 真实成本。
+            // 否则模型熔断器收不到成功信号（可能误开路），且成本被低估为估算值。
+            if (response is not null && error is null)
+            {
+                ChatUsage? usage = response.Usage;
+                decimal cost = usage is not null ? CostCalculator.Compute(usage, m) : 0m;
+                if (usage is not null)
+                    _ledger.Record(cost, sessionId);
+                _healthTracker.RecordSuccess(m.Name, requiredSuccesses);
+                RecordAudit(null, m.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
+                    decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
+                    isAdopted: false, parallelGroupId: groupId);
+                accounted.Add(m.Name);
+                continue;
+            }
+
+            // 真正被取消：释放探测槽位 + 预估成本入账。
+            // 前提假设：请求已发出到上游，上游按已处理的 input 计费（本地拿不到 Usage）。
+            // 该估算标 IsEstimated=true，区分于真实成本；若在 cancel 传播前请求未发出，此项可能高估。
             _healthTracker.ReleaseProbe(m.Name);
-            // 预估成本入账（与循环内 cancelledByRace 分支一致）：请求已发出到上游，按估算 input 计费。
             decimal estCost = EstimateInputCost(m, estimatedTokens);
             if (estCost > 0m)
                 _ledger.Record(estCost, sessionId);
             RecordAudit(null, m.Name, estimatedTokens, null, estCost, 0, sessionId,
                 decision.Reason + "; fusion: cancelled-by-race (post-break)", false, "cancelled", false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
+            accounted.Add(m.Name);
         }
 
         // 6. 被跳过的候选（熔断/槽位满）不影响本轮，留待串行降级处理（它们不在 attemptedModels，串行路径会尝试）。

@@ -39,10 +39,16 @@ public static class ModelsConfigHandler
             return Results.Json(models);
         });
 
-        // 3. GET full JSON (用于编辑表单)
+        // 3. GET full JSON (用于编辑表单；剥除 ApiKey 明文，仅保留是否已配置)
         endpoints.MapGet("/api/models/raw", (ModelsConfigService cfg) =>
         {
-            return Results.Json(new { models = cfg.LoadModels(), configFile = cfg.ConfigFilePath });
+            var models = cfg.LoadModels().Select(m => new
+            {
+                m.Name, m.BaseUrl, m.Tier, m.MaxContextTokens, m.TimeoutSeconds,
+                m.MaxRetries, m.Enabled, m.InputPricePerMillion, m.OutputPricePerMillion, m.Tags,
+                HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
+            });
+            return Results.Json(new { models, configFile = cfg.ConfigFilePath });
         });
 
         // 4. POST create new model
@@ -63,18 +69,26 @@ public static class ModelsConfigHandler
                 BaseUrl = req.BaseUrl.Trim().TrimEnd('/'),
                 ApiKey = req.ApiKey,
                 Tier = req.Tier ?? ModelTier.Medium,
-                MaxContextTokens = req.MaxContextTokens ?? 8192,
-                InputPricePerMillion = req.InputPricePerMillion ?? 0,
-                OutputPricePerMillion = req.OutputPricePerMillion ?? 0,
-                TimeoutSeconds = req.TimeoutSeconds ?? 120,
-                MaxRetries = req.MaxRetries ?? 0,
+                // 数值 clamp：镜像 RouterOptionsValidator 边界，防止坏值落盘导致重启 ValidateOnStart 失败。
+                MaxContextTokens = (req.MaxContextTokens is > 0) ? req.MaxContextTokens.Value : 8192,
+                InputPricePerMillion = (req.InputPricePerMillion ?? 0) < 0 ? 0 : req.InputPricePerMillion!.Value,
+                OutputPricePerMillion = (req.OutputPricePerMillion ?? 0) < 0 ? 0 : req.OutputPricePerMillion!.Value,
+                TimeoutSeconds = (req.TimeoutSeconds is > 0) ? req.TimeoutSeconds.Value : 120,
+                MaxRetries = (req.MaxRetries is >= 0) ? req.MaxRetries.Value : 0,
                 Enabled = req.Enabled ?? true
             };
             if (req.Tags is not null)
                 foreach (var tag in req.Tags)
                     model.Tags.Add(tag);
 
-            cfg.UpsertModel(model);
+            try
+            {
+                cfg.UpsertModel(model);
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
             return Results.Created($"/api/models/{model.Name}", new { message = $"Model '{model.Name}' created", model = new { model.Name, model.BaseUrl, model.Tier, model.Enabled } });
         });
 
@@ -86,7 +100,7 @@ public static class ModelsConfigHandler
             if (model is null)
                 return Results.NotFound(new { error = $"Model '{name}' not found" });
 
-            if (req.BaseUrl is not null) model.BaseUrl = req.BaseUrl.TrimEnd('/');
+            if (req.BaseUrl is not null && !string.IsNullOrWhiteSpace(req.BaseUrl)) model.BaseUrl = req.BaseUrl.TrimEnd('/');
             if (req.ApiKey is not null) model.ApiKey = req.ApiKey; // 空字符串表示清除
             if (req.Tier is not null) model.Tier = req.Tier.Value;
             if (req.MaxContextTokens is > 0) model.MaxContextTokens = req.MaxContextTokens.Value;
@@ -96,7 +110,14 @@ public static class ModelsConfigHandler
             if (req.InputPricePerMillion >= 0) model.InputPricePerMillion = req.InputPricePerMillion.Value;
             if (req.OutputPricePerMillion >= 0) model.OutputPricePerMillion = req.OutputPricePerMillion.Value;
 
-            cfg.UpsertModel(model);
+            try
+            {
+                cfg.UpsertModel(model);
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
             return Results.Ok(new { message = $"Model '{name}' updated", model = new { model.Name, model.BaseUrl, model.Tier, model.MaxContextTokens, model.TimeoutSeconds, model.MaxRetries, model.Enabled, model.InputPricePerMillion, model.OutputPricePerMillion, HasApiKey = !string.IsNullOrEmpty(model.ApiKey) } });
         });
 

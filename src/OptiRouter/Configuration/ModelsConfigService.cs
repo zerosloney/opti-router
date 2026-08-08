@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using OptiRouter.Routing;
 
 namespace OptiRouter.Configuration;
 
@@ -56,15 +57,20 @@ public sealed class ModelsConfigService : IDisposable
             _logger.LogInformation("Created models-config.json at {Path}", _filePath);
         }
 
-        // 文件系统监控，变更时触发配置热重载
+        // 文件系统监控，变更时触发配置热重载。
+        // NotifyFilter 含 FileName/CreationTime 以捕获部分编辑器的 delete-and-recreate 保存
+        // （仅监 LastWrite|Size 会漏检 rename 覆盖）。Changed/Created/Renamed 均触发重载。
         string? name = Path.GetFileName(_filePath);
         if (dir is not null && name is not null)
         {
             _watcher = new FileSystemWatcher(dir, name)
             {
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size
+                    | NotifyFilters.FileName | NotifyFilters.CreationTime
             };
             _watcher.Changed += OnFileChanged;
+            _watcher.Created += OnFileChanged;
+            _watcher.Renamed += OnFileChanged;
             _watcher.EnableRaisingEvents = true;
         }
         else
@@ -115,6 +121,13 @@ public sealed class ModelsConfigService : IDisposable
     /// </summary>
     public void UpsertModel(ModelEndpointOptions model)
     {
+        // 落盘前校验数值边界，与启动校验（RouterOptionsValidator）一致，避免坏配置导致重启 ValidateOnStart 失败。
+        string? error = RouterOptionsValidator.ValidateModel(model);
+        if (error is not null)
+            throw new ArgumentException(error, nameof(model));
+
+        WarnUnknownTags(model);
+
         var models = LoadModels().ToList();
         var existing = models.FirstOrDefault(m =>
             string.Equals(m.Name, model.Name, StringComparison.Ordinal));
@@ -161,17 +174,34 @@ public sealed class ModelsConfigService : IDisposable
         File.WriteAllText(_filePath, json);
     }
 
+    /// <summary>
+    /// Tags 软校验：未识别 tag 仅 warning，不阻断写入（与启动校验语义一致）。
+    /// </summary>
+    private void WarnUnknownTags(ModelEndpointOptions model)
+    {
+        if (model.Tags is null || model.Tags.Count == 0) return;
+        var unknown = model.Tags
+            .Where(t => !ModelCapabilities.KnownTags.Contains(t))
+            .ToList();
+        if (unknown.Count > 0 && _logger.IsEnabled(LogLevel.Warning))
+        {
+            _logger.LogWarning(
+                "模型 {Name} 含未识别的 Tags: {Unknown}。已知标签: {Known}。" +
+                "若为拼写错误，CapabilityFilter 将无法匹配；自定义 tag 不影响其他策略。",
+                model.Name, string.Join(", ", unknown), string.Join(", ", ModelCapabilities.KnownTags));
+        }
+    }
+
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
         // 防抖：忽略短时间内的重复事件（Windows 文件系统有时会触发多次）
         Thread.Sleep(50);
         try
         {
-            lock (_gate)
-            {
-                _configRoot.Reload();
-                _logger.LogInformation("models-config.json changed externally, configuration reloaded");
-            }
+            // Reload 不持 _gate：Reload 同步扇出所有 IOptionsMonitor.OnChange 回调，
+            // 持锁会让慢回调阻塞 watcher 线程并阻塞 SaveModels/LoadModels。Reload 本身线程安全。
+            _configRoot.Reload();
+            _logger.LogInformation("models-config.json changed externally ({ChangeType}), configuration reloaded", e.ChangeType);
         }
         catch (Exception ex)
         {
@@ -186,9 +216,13 @@ public sealed class ModelsConfigService : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _watcher.EnableRaisingEvents = false;
-        _watcher.Changed -= OnFileChanged;
-        _watcher.Dispose();
+        // _watcher 在 dir/name 不可解析时为 null（见构造器），Dispose 需防御。
+        if (_watcher is not null)
+        {
+            _watcher.EnableRaisingEvents = false;
+            _watcher.Changed -= OnFileChanged;
+            _watcher.Dispose();
+        }
         GC.SuppressFinalize(this);
     }
 }

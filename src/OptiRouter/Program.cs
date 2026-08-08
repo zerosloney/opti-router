@@ -22,7 +22,29 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
 });
 
-// 文件变更由 ModelsConfigService 监控并触发 IConfigurationRoot.Reload()。
+// 注册 models-config.json 为配置源（后于 appsettings.json，覆盖 OptiRouter:Models 段）。
+// Dashboard 写入该文件后 ModelsConfigService 触发 IConfigurationRoot.Reload()，IOptionsMonitor 派发到 router。
+// 首启种子：config.json 不存在时，把 appsettings.json 的 Models 段写入 config.json，
+// 使 provider 首次 Load 即覆盖 appsettings 的 index 0..N（消除双源 index 合并残留）。
+string modelsConfigPath = Path.Combine(builder.Environment.ContentRootPath, "models-config.json");
+if (!File.Exists(modelsConfigPath))
+{
+    var seeded = builder.Configuration.GetSection("OptiRouter:Models")
+        .Get<List<OptiRouter.Configuration.ModelEndpointOptions>>();
+    Directory.CreateDirectory(Path.GetDirectoryName(modelsConfigPath)!);
+    System.Text.Json.JsonSerializer.Serialize(File.Create(modelsConfigPath),
+        seeded ?? new List<OptiRouter.Configuration.ModelEndpointOptions>(),
+        new System.Text.Json.JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase) }
+        });
+}
+builder.Configuration.Sources.Add(new ModelsJsonConfigurationSource
+{
+    FilePath = modelsConfigPath
+});
 
 // Bind and validate RouterOptions on startup.
 builder.Services.AddMemoryCache();
@@ -179,12 +201,13 @@ builder.Services.AddRateLimiter(options =>
         if (!context.Request.Path.StartsWithSegments("/v1"))
             return RateLimitPartition.GetNoLimiter("public");
 
-        string partitionKey = ResolvePartitionKey(context);
-
         // 每请求从已合并的 IConfiguration 读阈值（含 WebApplicationFactory 经 ConfigureAppConfiguration 注入的值）。
+        var config = context.RequestServices.GetRequiredService<IConfiguration>();
+        bool trustProxy = config.GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false;
+        string partitionKey = ResolvePartitionKey(context, trustProxy);
+
         // 注意：FixedWindowRateLimiter 的 PermitLimit 在分区首次创建时定型，运行时改配置仅对新建分区生效，
         // 既有分区沿用创建时的值——变更全局生效需重启进程。这是 ASP.NET 限流器的固有约束，非可热更。
-        var config = context.RequestServices.GetRequiredService<IConfiguration>();
         int limit = config.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? requestsPerMinute;
 
         return RateLimitPartition.GetFixedWindowLimiter(partitionKey, _ => new FixedWindowRateLimiterOptions
@@ -260,7 +283,8 @@ app.Use(async (context, next) =>
         return;
     }
 
-    string partitionKey = ResolvePartitionKey(context);
+    string partitionKey = ResolvePartitionKey(context,
+        app.Configuration.GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false);
 
     int maxConcurrency = app.Configuration.GetValue<int?>("OptiRouter:MaxConcurrentRequestsPerPartition") ?? 100;
     var sem = OptiRouter.Concurrency.ConcurrencyRegistry.GetSemaphore(partitionKey, maxConcurrency);
@@ -348,10 +372,11 @@ static bool IsValidApiKey(string? configuredKey, string? providedKey)
 // 分区 Key 解析：限流与并发中间件共用。
 // 优先级 Session > IP > Auth：
 //   - Session：显式会话隔离（最强信号）
-//   - IP：网络来源（CF-Connecting-IP > X-Forwarded-For 首段 > RemoteIpAddress）
-//         Auth 头不再压制 IP——多用户共享同一 API key 时仍按来源 IP 隔离，避免单 key 拖垮全租户
+//   - IP：网络来源（CF-Connecting-IP > X-Forwarded-For 首段 > RemoteIpAddress），
+//         仅当 OptiRouter:TrustProxyHeaders=true 时信任代理头（必须位于可信反代/CF 之后）；
+//         否则回退 socket 级 RemoteIpAddress，防止客户端伪造代理头绕过限流/并发限制
 //   - Auth：退路（无 session 无 IP 才用），SHA256 前 16 hex 字符，避免明文 key 入分区诊断日志
-static string ResolvePartitionKey(HttpContext context)
+static string ResolvePartitionKey(HttpContext context, bool trustProxyHeaders)
 {
     var headers = context.Request.Headers;
 
@@ -359,9 +384,9 @@ static string ResolvePartitionKey(HttpContext context)
         return $"session:{sessionIdHeader}";
 
     string? ip = null;
-    if (headers.TryGetValue("CF-Connecting-IP", out var cfIp) && !string.IsNullOrEmpty(cfIp))
+    if (trustProxyHeaders && headers.TryGetValue("CF-Connecting-IP", out var cfIp) && !string.IsNullOrEmpty(cfIp))
         ip = cfIp;
-    else if (headers.TryGetValue("X-Forwarded-For", out var xff) && !string.IsNullOrEmpty(xff))
+    else if (trustProxyHeaders && headers.TryGetValue("X-Forwarded-For", out var xff) && !string.IsNullOrEmpty(xff))
         ip = xff.ToString().Split(',')[0].Trim();
     else
         ip = context.Connection.RemoteIpAddress?.ToString();

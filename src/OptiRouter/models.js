@@ -152,8 +152,24 @@ function renderModelConfigs() {
     }
     tbody.innerHTML = '';
     modelConfigs.forEach(function(m, idx) {
-        var esc = m.name.replace(/'/g, "\\'");
+        // escHtml：文本显示字段（<td>、title 属性）的 HTML 转义，防存储型 XSS。
+        // escHandler：内联 onclick 的 JS 单引号字符串转义（先 HTML 转义 <>&" 防破属性，再转义 \ 与 ' 防破 JS 串）。
+        var escHtml = function(s) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        };
+        var escHandler = function(s) {
+            var e = String(s == null ? '' : s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            return e.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+        };
+        var esc = escHandler(m.name);
+        var nameHtml = escHtml(m.name);
+        var baseUrlHtml = escHtml(m.baseUrl||'');
+        var tierHtml = escHtml(m.tier||'');
         var urlShort = m.baseUrl ? (m.baseUrl.length > 25 ? m.baseUrl.substring(0,25)+'...' : m.baseUrl) : '-';
+        urlShort = escHtml(urlShort);
         var keyMask = m.hasApiKey ? '\u2022\u2022\u2022\u2022\u2022\u2022' : '<span style="color:var(--danger)">未配置</span>';
 
         if (editingName === m.name) {
@@ -161,8 +177,8 @@ function renderModelConfigs() {
             var tr = document.createElement('tr');
             tr.style.background = 'rgba(99,102,241,0.05)';
             tr.innerHTML =
-                '<td><strong>' + m.name + '</strong></td>' +
-                '<td><input type="text" id="edit-baseurl" value="' + (m.baseUrl||'') + '" style="font-size:0.8rem; width:120px;"></td>' +
+                '<td><strong>' + nameHtml + '</strong></td>' +
+                '<td><input type="text" id="edit-baseurl" value="' + escHtml(m.baseUrl||'') + '" style="font-size:0.8rem; width:120px;"></td>' +
                 '<td><input type="password" id="edit-apikey" placeholder="(不变更则留空)" style="font-size:0.8rem; width:80px;"></td>' +
                 '<td><select id="edit-tier" style="font-size:0.8rem;">' +
                     ['Strong','Medium','Cheap'].map(function(t){ return '<option value="'+t+'"' + (m.tier===t?' selected':'') + '>'+t+'</option>'; }).join('') +
@@ -186,10 +202,10 @@ function renderModelConfigs() {
             var enText = m.enabled ? '是' : '否';
             var tr = document.createElement('tr');
             tr.innerHTML =
-                '<td><strong>' + m.name + '</strong></td>' +
-                '<td title="'+(m.baseUrl||'')+'" style="max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.8rem;">' + urlShort + '</td>' +
+                '<td><strong>' + nameHtml + '</strong></td>' +
+                '<td title="'+baseUrlHtml+'" style="max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:0.8rem;">' + urlShort + '</td>' +
                 '<td style="font-size:0.8rem;">' + keyMask + '</td>' +
-                '<td style="font-size:0.8rem;">' + (m.tier||'') + '</td>' +
+                '<td style="font-size:0.8rem;">' + tierHtml + '</td>' +
                 '<td style="font-size:0.8rem;">' + ((m.maxContextTokens||0)/1000+'K') + '</td>' +
                 '<td style="font-size:0.8rem;">' + (m.timeoutSeconds||120) + 's</td>' +
                 '<td style="font-size:0.8rem;">' + (m.maxRetries||0) + '</td>' +

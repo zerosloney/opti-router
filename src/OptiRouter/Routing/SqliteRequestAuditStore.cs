@@ -21,10 +21,12 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
 
-        _connection = new SqliteConnection($"Data Source={path}");
+        // Default Timeout 连接串参数 = busy_timeout（秒）；与 SqliteCostLedgerStore 共享同一文件需跨 store 写串行化。
+        _connection = new SqliteConnection($"Data Source={path};Default Timeout=15");
         _connection.Open();
 
         Execute("PRAGMA journal_mode=WAL;");
+        Execute("PRAGMA busy_timeout=5000;");
 
         Execute("""
             CREATE TABLE IF NOT EXISTS request_audit (

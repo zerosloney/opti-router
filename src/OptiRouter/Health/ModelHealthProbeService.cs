@@ -50,11 +50,11 @@ public sealed class ModelHealthProbeService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var options = _options.CurrentValue;
-        if (!options.Routing.EnableHealthProbe)
-            return;
 
         // 启动预热：不等首个周期，立即探活一轮，提前暴露配置/网络问题。
-        await ProbeAllAsync(stoppingToken).ConfigureAwait(false);
+        // 未启用时跳过预热但进入循环——reload 中途开启 EnableHealthProbe 仍可生效（对齐 LatencyStatsAggregatorService）。
+        if (options.Routing.EnableHealthProbe)
+            await ProbeAllAsync(stoppingToken).ConfigureAwait(false);
 
         while (!stoppingToken.IsCancellationRequested)
         {

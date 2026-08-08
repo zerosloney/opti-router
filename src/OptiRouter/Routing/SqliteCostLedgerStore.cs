@@ -26,12 +26,15 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
 
-        _connection = new SqliteConnection($"Data Source={path}");
+        // Default Timeout 连接串参数 = busy_timeout（秒），让 SQLite 在写锁竞争时等待而非立即抛 SQLITE_BUSY。
+        // 两个 store（Cost + Audit）共享同一文件，各自独立连接，必须靠 busy_timeout 串行化跨 store 写。
+        _connection = new SqliteConnection($"Data Source={path};Default Timeout=15");
         _connection.Open();
 
-        // WAL 模式：提升并发读，崩溃恢复。
+        // WAL 模式：提升并发读，崩溃恢复。busy_timeout PRAGMA 兜底（连接串 Default Timeout 已设）。
         Execute("PRAGMA journal_mode=WAL;");
         Execute("PRAGMA synchronous=NORMAL;");
+        Execute("PRAGMA busy_timeout=5000;");
 
         Execute("""
             CREATE TABLE IF NOT EXISTS daily_spend (
@@ -206,13 +209,8 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         ObjectDisposedException.ThrowIf(_disposed, this);
         lock (_lock)
         {
-            // Archive today's daily spend before clearing.
-            string todayKey = FormatDate(DateTime.UtcNow);
-            Execute($"""
-                INSERT INTO daily_spend_history (date, amount)
-                SELECT date, amount FROM daily_spend WHERE date = '{todayKey}'
-                ON CONFLICT(date) DO UPDATE SET amount = excluded.amount;
-                """);
+            // 仅清空当日累计。归档由 CostLedger.ResetDailyIfNewDay 在调用本方法前
+            // 经 SnapshotDaily(_lastDailyDate) 完成（归档昨天），此处再归档会重复且日期错（今天）。
             Execute("DELETE FROM daily_spend;");
         }
     }

@@ -43,7 +43,9 @@ public sealed class ModelsJsonConfigurationProvider : ConfigurationProvider
             });
 
             Data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            if (models is not null)
+            // 空 config（首次启动 / dashboard 清空）不覆盖 appsettings.json 的 Models 段，
+            // 让 appsettings 作为初始种子，避免空 [] 导致 ValidateOnStart 失败。
+            if (models is not null && models.Count > 0)
             {
                 for (int i = 0; i < models.Count; i++)
                 {

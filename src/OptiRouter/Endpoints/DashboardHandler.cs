@@ -88,7 +88,7 @@ public static class DashboardHandler
         double qps = recentCount / 60.0;
 
         int totalRequests = recent.Count;
-        int totalTokens = recent.Sum(r => r.PromptTokens + r.CompletionTokens);
+        long totalTokens = recent.Sum(r => (long)r.PromptTokens + r.CompletionTokens);
         double avgLatencyMs = totalRequests > 0 ? recent.Average(r => r.LatencyMs) : 0;
 
         var modelsList = options.Models.Select(m =>

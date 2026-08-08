@@ -99,6 +99,13 @@ function renderAlerts(alerts) {
     if (msg) msg.textContent = pendingAlerts.map(function(a){ return a.message; }).join(' | ');
 }
 
+// HTML 转义服务端/API 返回的可信外字符串（模型名、BaseUrl、tag 等），防止注入进 innerHTML 形成存储型 XSS。
+function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+}
+
 function renderModels(models) {
     var grid = document.getElementById('models-grid');
     if (!grid) return;
@@ -113,7 +120,8 @@ function renderModels(models) {
         // 延迟感知统计：无数据（冷启动/低流量）显示 '--'。
         var avgLat = (m.avgLatencyMs != null) ? Math.round(m.avgLatencyMs) + ' ms' : '--';
         var samples = m.latencySamples || 0;
-        card.innerHTML = '<div class="card-header-row"><div><div class="model-name">' + m.name + '</div><div style="font-size:0.75rem; color:var(--text-secondary); margin-top:0.15rem;">' + (m.tier || '') + ' Tier</div></div><span class="status-badge ' + badgeColor + '">' + badgeText + '</span></div><div class="info-grid"><span class="info-label">BaseUrl</span><span class="info-val" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:160px;">' + (m.baseUrl || '') + '</span><span class="info-label">输入 $/M</span><span class="info-val">$' + (m.inputPricePerMillion||0).toFixed(2) + '</span><span class="info-label">输出 $/M</span><span class="info-val">$' + (m.outputPricePerMillion||0).toFixed(2) + '</span><span class="info-label">最大上下文</span><span class="info-val">' + (m.maxContextTokens||0).toLocaleString() + '</span><span class="info-label">Tags</span><span class="info-val" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:160px;" title="' + tagsText + '">' + tagsText + '</span></div><div class="metrics-row"><div class="metric-item"><span class="metric-lbl">失败次数</span><span class="metric-val" style="color:' + ((m.failureCount||0)>0 ? 'var(--danger)' : 'var(--text-secondary)') + ';">' + (m.failureCount||0) + '</span></div><div class="metric-item" style="text-align:center;"><span class="metric-lbl">平均延迟</span><span class="metric-val" style="color:' + (samples > 0 ? 'var(--primary)' : 'var(--text-secondary)') + ';">' + avgLat + '</span></div><div class="metric-item" style="text-align:center;"><span class="metric-lbl">延迟样本</span><span class="metric-val" style="color:' + (samples > 0 ? 'var(--text-secondary)' : 'var(--text-secondary)') + ';">' + samples + '</span></div><div class="metric-item" style="text-align:right;"><span class="metric-lbl">活跃探测</span><span class="metric-val" style="color:' + ((m.activeProbes||0)>0 ? 'var(--warning)' : 'var(--text-secondary)') + ';">' + (m.activeProbes||0) + '</span></div></div>';
+        var nameE = esc(m.name), tierE = esc(m.tier || ''), baseUrlE = esc(m.baseUrl || ''), tagsE = esc(tagsText);
+        card.innerHTML = '<div class="card-header-row"><div><div class="model-name">' + nameE + '</div><div style="font-size:0.75rem; color:var(--text-secondary); margin-top:0.15rem;">' + tierE + ' Tier</div></div><span class="status-badge ' + badgeColor + '">' + badgeText + '</span></div><div class="info-grid"><span class="info-label">BaseUrl</span><span class="info-val" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:160px;">' + baseUrlE + '</span><span class="info-label">输入 $/M</span><span class="info-val">$' + (m.inputPricePerMillion||0).toFixed(2) + '</span><span class="info-label">输出 $/M</span><span class="info-val">$' + (m.outputPricePerMillion||0).toFixed(2) + '</span><span class="info-label">最大上下文</span><span class="info-val">' + (m.maxContextTokens||0).toLocaleString() + '</span><span class="info-label">Tags</span><span class="info-val" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:160px;" title="' + tagsE + '">' + tagsE + '</span></div><div class="metrics-row"><div class="metric-item"><span class="metric-lbl">失败次数</span><span class="metric-val" style="color:' + ((m.failureCount||0)>0 ? 'var(--danger)' : 'var(--text-secondary)') + ';">' + (m.failureCount||0) + '</span></div><div class="metric-item" style="text-align:center;"><span class="metric-lbl">平均延迟</span><span class="metric-val" style="color:' + (samples > 0 ? 'var(--primary)' : 'var(--text-secondary)') + ';">' + avgLat + '</span></div><div class="metric-item" style="text-align:center;"><span class="metric-lbl">延迟样本</span><span class="metric-val" style="color:' + (samples > 0 ? 'var(--text-secondary)' : 'var(--text-secondary)') + ';">' + samples + '</span></div><div class="metric-item" style="text-align:right;"><span class="metric-lbl">活跃探测</span><span class="metric-val" style="color:' + ((m.activeProbes||0)>0 ? 'var(--warning)' : 'var(--text-secondary)') + ';">' + (m.activeProbes||0) + '</span></div></div>';
         grid.appendChild(card);
     });
 }
@@ -188,7 +196,7 @@ async function loadLogs() {
         (data.items||[]).forEach(function(item){
             var tr = document.createElement('tr');
             var costText = '$' + (item.cost||0).toFixed(6) + (item.isEstimated ? ' <span style="color:var(--warning); font-size:0.7rem;">预估</span>' : '');
-            tr.innerHTML = '<td>' + new Date(item.timestamp).toLocaleTimeString() + '</td><td>' + (item.model||'') + '</td><td>' + ((item.promptTokens||0)+(item.completionTokens||0)) + '</td><td>' + costText + '</td><td>' + (item.latencyMs||0) + 'ms</td><td class="' + (item.success?'success':'failure') + '">' + (item.success?'成功':'失败') + '</td><td>' + (item.isStreaming?'是':'否') + '</td>';
+            tr.innerHTML = '<td>' + new Date(item.timestamp).toLocaleTimeString() + '</td><td>' + esc(item.model||'') + '</td><td>' + ((item.promptTokens||0)+(item.completionTokens||0)) + '</td><td>' + costText + '</td><td>' + (item.latencyMs||0) + 'ms</td><td class="' + (item.success?'success':'failure') + '">' + (item.success?'成功':'失败') + '</td><td>' + (item.isStreaming?'是':'否') + '</td>';
             tbody.appendChild(tr);
         });
         var infoEl = document.getElementById('log-info');

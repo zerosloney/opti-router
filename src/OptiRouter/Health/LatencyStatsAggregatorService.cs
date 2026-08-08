@@ -48,19 +48,19 @@ public sealed class LatencyStatsAggregatorService : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var options = _options.CurrentValue;
-        // 延迟感知未启用时不聚合（省审计表 I/O）；中途启用经 reload 在下一周期生效。
-        if (!options.Routing.EnableLatencyAware)
-            return;
+        // 启动预热：若启用立即聚合一轮，避免首个请求无延迟数据。
+        if (options.Routing.EnableLatencyAware)
+            await AggregateAsync(stoppingToken).ConfigureAwait(false);
 
-        // 启动预热：立即聚合一轮，避免首个请求无延迟数据。
-        await AggregateAsync(stoppingToken).ConfigureAwait(false);
-
+        // 延迟感知未启用时仅跳过聚合，循环持续运行——这样才能观测到经 reload 中途开启 EnableLatencyAware。
+        // intentional-simple: 空闲时每周期一次 Delay，开销可忽略；换来 reload 生效性。
         while (!stoppingToken.IsCancellationRequested)
         {
-            int interval = Math.Max(10, options.Routing.HealthProbeIntervalSeconds);
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(interval), stoppingToken).ConfigureAwait(false);
+                // 周期/启用状态在延迟期间由 optionsMonitor reload，下一轮读取最新值。
+                await Task.Delay(TimeSpan.FromSeconds(Math.Max(10, options.Routing.HealthProbeIntervalSeconds)),
+                    stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {

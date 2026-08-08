@@ -47,19 +47,10 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
                 return ValidateOptionsResult.Fail($"模型 Name 必须唯一，重复值: {model.Name}。");
             }
 
-            if (model.InputPricePerMillion < 0)
+            string? modelError = ValidateModel(model);
+            if (modelError is not null)
             {
-                return ValidateOptionsResult.Fail($"模型 {model.Name} 的 InputPricePerMillion 不能为负数。");
-            }
-
-            if (model.OutputPricePerMillion < 0)
-            {
-                return ValidateOptionsResult.Fail($"模型 {model.Name} 的 OutputPricePerMillion 不能为负数。");
-            }
-
-            if (model.MaxContextTokens <= 0)
-            {
-                return ValidateOptionsResult.Fail($"模型 {model.Name} 的 MaxContextTokens 必须大于 0。");
+                return ValidateOptionsResult.Fail(modelError);
             }
         }
 
@@ -116,6 +107,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FusionMaxParallel 必须在 [2, 5] 范围内。");
         }
 
+        if (options.Routing.MaxResponseStreamBytes <= 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.MaxResponseStreamBytes 必须大于 0。");
+        }
+
         // Tags 软校验：未识别的 tag 仅 warning，不阻断启动。
         // 允许自定义 tag（未来扩展），但提示拼写错误（如 "vison" 应为 "vision"）。
         // 仅当启用能力过滤时有意义，但始终提示——配置错误在启用前就应发现。
@@ -138,5 +134,25 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         }
 
         return ValidateOptionsResult.Success;
+    }
+
+    /// <summary>
+    /// 校验单个模型端点的数值边界（价格非负、MaxContextTokens>0）。
+    /// 供启动校验与 Dashboard 写入复用，确保两条路径一致。
+    /// </summary>
+    /// <param name="model">待校验模型。</param>
+    /// <returns>错误消息（含模型名）；null 表示通过。</returns>
+    public static string? ValidateModel(ModelEndpointOptions model)
+    {
+        if (model.InputPricePerMillion < 0)
+            return $"模型 {model.Name} 的 InputPricePerMillion 不能为负数。";
+
+        if (model.OutputPricePerMillion < 0)
+            return $"模型 {model.Name} 的 OutputPricePerMillion 不能为负数。";
+
+        if (model.MaxContextTokens <= 0)
+            return $"模型 {model.Name} 的 MaxContextTokens 必须大于 0。";
+
+        return null;
     }
 }

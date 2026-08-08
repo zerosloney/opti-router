@@ -50,6 +50,21 @@ public static class ConcurrencyRegistry
         // 惰性观察：若已存在且当前空闲，清掉 IdleSince（视为重新激活）。
         if (_semaphores.TryGetValue(key, out var existing))
         {
+            // 若并发限制变更，重建信号量（原子替换），让新配置生效。
+            // 旧信号量被当前持有者引用，Release 正常；无引用后 GC 回收。
+            if (existing.InitialCount != maxConcurrency)
+            {
+                var newEntry = new Entry
+                {
+                    Semaphore = new SemaphoreSlim(maxConcurrency, maxConcurrency),
+                    InitialCount = maxConcurrency
+                };
+                if (_semaphores.TryUpdate(key, newEntry, existing))
+                    return newEntry.Semaphore;
+                // 并发竞争：另一线程已替换该 key，回退到现有 entry。
+                newEntry.Semaphore.Dispose();
+            }
+
             if (existing.Semaphore.CurrentCount == existing.InitialCount)
                 existing.IdleSinceUtc = null;
             return existing.Semaphore;
@@ -87,10 +102,12 @@ public static class ConcurrencyRegistry
                     if (now - entry.IdleSinceUtc.Value >= IdleEvictionInterval)
                     {
                         // 尝试移除：仅当仍空闲时（并发刚占用则跳过）。
-                        if (entry.Semaphore.CurrentCount == entry.InitialCount
-                            && _semaphores.TryRemove(kvp.Key, out var removed))
+                        // 不 Dispose 信号量：GetSemaphore 可能正返回同一实例给调用方，
+                        // Dispose 后调用方 WaitAsync/Release 会抛 ObjectDisposedException。
+                        // 移除后旧实例脱离 registry，调用方 Release 完毕无引用即由 GC 回收。
+                        if (entry.Semaphore.CurrentCount == entry.InitialCount)
                         {
-                            removed.Semaphore.Dispose();
+                            _semaphores.TryRemove(kvp.Key, out _);
                         }
                     }
                 }

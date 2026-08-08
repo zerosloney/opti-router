@@ -153,3 +153,6 @@ data/
 *.cache
 *.user
 *.suo
+
+# 运行时数据文件（首启由 appsettings.json Models 段 seed 生成）
+src/OptiRouter/models-config.json
