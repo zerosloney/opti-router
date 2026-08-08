@@ -164,7 +164,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (response.Usage is not null)
                     {
                         var cost = CostCalculator.Compute(response.Usage, candidate);
-                        _ledger.Record(cost, sessionId);
+                        RecordCost(cost, sessionId);
                         RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
                     }
                     else
@@ -432,7 +432,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 流正常结束，记账 + 标记健康。
                     if (finalUsage is not null)
                     {
-                        _ledger.Record(CostCalculator.Compute(finalUsage, candidate), sessionId);
+                        RecordCost(CostCalculator.Compute(finalUsage, candidate), sessionId);
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     RecordAffinity(sessionId, candidate.Name);
@@ -564,6 +564,22 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
+    /// 入账成本，写失败不破坏已成功的请求（与审计一致）。
+    /// 上游已对请求计费，故账本写失败仅记录告警，不向上抛。
+    /// </summary>
+    private void RecordCost(decimal cost, string? sessionId)
+    {
+        try
+        {
+            _ledger.Record(cost, sessionId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cost ledger write failed; cost {Cost} not recorded", cost);
+        }
+    }
+
+    /// <summary>
     /// 记录会话粘性：成功命中某模型后写入内存缓存，供 <see cref="SessionAffinityPolicy"/> 下次决策提升该模型。
     /// 仅在启用会话粘性且存在 sessionId 时写。写失败（理论上 IMemoryCache 不会抛）不影响主流程。
     /// </summary>
@@ -631,7 +647,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 ? CostCalculator.Compute(verifyResponse.Usage, cheapModel)
                 : 0m;
             if (verifyResponse.Usage is not null)
-                _ledger.Record(verifyCost, sessionId);
+                RecordCost(verifyCost, sessionId);
 
             RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
@@ -659,7 +675,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (strongResponse.Usage is not null)
                 {
                     var cost = CostCalculator.Compute(strongResponse.Usage, upgradeTarget);
-                    _ledger.Record(cost, sessionId);
+                    RecordCost(cost, sessionId);
                 }
                 _healthTracker.RecordSuccess(upgradeTarget.Name,
                     routing.FailoverHalfOpenRequiredSuccesses);
@@ -675,16 +691,18 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                 return strongResponse;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException || ct.IsCancellationRequested)
+            catch (Exception ex) when (!ct.IsCancellationRequested)
             {
-                // 升级调用失败：记录但不抛，返回 null 让调用方用原 Cheap 答案（已有，质量兜底不优于崩溃）。
+                // 升级调用失败（含客户端内部超时）：记录但不抛，返回 null 让调用方用原 Cheap 答案（已有，质量兜底不优于崩溃）。
+                // 仅放行外界取消；内部超时不破坏已成功的 Cheap 请求，也不污染 Cheap 熔断。
                 _logger.LogWarning(ex, "Cascade upgrade to {Strong} failed, returning cheap answer", upgradeTarget.Name);
                 return null;
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || ct.IsCancellationRequested)
-        {
-            // 自校验本身失败：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。
+catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                // 自校验本身失败（含客户端内部超时）：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。
+                // 仅放行外界取消，避免内部超时破坏已成功的 Cheap 请求。
             _logger.LogDebug(ex, "Cascade self-verify failed for {Cheap}, skipping upgrade", cheapModel.Name);
             return null;
         }
@@ -802,7 +820,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 ChatUsage? usage = response.Usage;
                 decimal cost = usage is not null ? CostCalculator.Compute(usage, model) : 0m;
                 if (usage is not null)
-                    _ledger.Record(cost, sessionId);
+                    RecordCost(cost, sessionId);
 
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
                 RecordAffinity(sessionId, model.Name);
@@ -823,6 +841,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             // linkedCts.IsCancellationRequested 区分 race-cancel（raceCts 取消传播到 linkedCts）
             // 与 client 自身超时（HttpClient 取消内部 token，不取消 linkedCts）。
             // 后者应计入断路器失败，否则故障模型持续收流量。
+            // linkedCts 与 admitted 一一对应，理论上必存在；防御找不到时按非取消处理。
             var linkedCts = perCandidateCts.FirstOrDefault(p => p.Model.Name == model.Name).Cts;
             bool cancelledByRace = raceCts.IsCancellationRequested
                 && error is OperationCanceledException
@@ -837,7 +856,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 // 按 EstimatedInputTokens × input 价格估算，标注 IsEstimated=true 以区分真实成本。
                 decimal estCost = EstimateInputCost(model, estimatedTokens);
                 if (estCost > 0m)
-                    _ledger.Record(estCost, sessionId);
+                    RecordCost(estCost, sessionId);
                 RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: cancelled-by-race", false, "cancelled", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
@@ -863,7 +882,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             // 真实失败同样预估入账：请求已到上游，上游按已处理 input 计费。
             decimal failedEstCost = EstimateInputCost(model, estimatedTokens);
             if (failedEstCost > 0m)
-                _ledger.Record(failedEstCost, sessionId);
+                RecordCost(failedEstCost, sessionId);
             RecordAudit(null, model.Name, estimatedTokens, null, failedEstCost, elapsedMs, sessionId,
                 decision.Reason + "; fusion: failed" + (tripped ? " (circuit tripped)" : ""),
                 false, error?.Message, false, routedTier,
@@ -903,7 +922,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 ChatUsage? usage = response.Usage;
                 decimal cost = usage is not null ? CostCalculator.Compute(usage, m) : 0m;
                 if (usage is not null)
-                    _ledger.Record(cost, sessionId);
+                    RecordCost(cost, sessionId);
                 _healthTracker.RecordSuccess(m.Name, requiredSuccesses);
                 RecordAudit(null, m.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
@@ -918,8 +937,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             _healthTracker.ReleaseProbe(m.Name);
             decimal estCost = EstimateInputCost(m, estimatedTokens);
             if (estCost > 0m)
-                _ledger.Record(estCost, sessionId);
-            RecordAudit(null, m.Name, estimatedTokens, null, estCost, 0, sessionId,
+                RecordCost(estCost, sessionId);
+            RecordAudit(null, m.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
                 decision.Reason + "; fusion: cancelled-by-race (post-break)", false, "cancelled", false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
             accounted.Add(m.Name);

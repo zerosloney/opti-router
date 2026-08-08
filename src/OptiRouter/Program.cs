@@ -32,14 +32,17 @@ if (!File.Exists(modelsConfigPath))
     var seeded = builder.Configuration.GetSection("OptiRouter:Models")
         .Get<List<OptiRouter.Configuration.ModelEndpointOptions>>();
     Directory.CreateDirectory(Path.GetDirectoryName(modelsConfigPath)!);
-    System.Text.Json.JsonSerializer.Serialize(File.Create(modelsConfigPath),
-        seeded ?? new List<OptiRouter.Configuration.ModelEndpointOptions>(),
-        new System.Text.Json.JsonSerializerOptions
-        {
-            WriteIndented = true,
-            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
-            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase) }
-        });
+    using (var stream = File.Create(modelsConfigPath))
+    {
+        System.Text.Json.JsonSerializer.Serialize(stream,
+            seeded ?? new List<OptiRouter.Configuration.ModelEndpointOptions>(),
+            new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase) }
+            });
+    }
 }
 builder.Configuration.Sources.Add(new ModelsJsonConfigurationSource
 {
@@ -248,7 +251,19 @@ app.Use(async (context, next) =>
         return;
     }
 
-    string? configuredKey = app.Configuration["OptiRouter:ProxyApiKey"];
+    // 管理端与代理分离鉴权：管理路径（dashboard/models）优先用 AdminApiKey，
+    // 未配置 AdminApiKey 时回退到 ProxyApiKey（保持既有行为，非破坏性）。
+    bool isAdminPath = context.Request.Path.StartsWithSegments("/dashboard")
+        || context.Request.Path.StartsWithSegments("/api/dashboard")
+        || context.Request.Path.StartsWithSegments("/models")
+        || context.Request.Path.StartsWithSegments("/api/models");
+    string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
+    string configuredKey = isAdminPath
+        ? (app.Configuration["OptiRouter:AdminApiKey"] ?? "").Length > 0
+            ? app.Configuration["OptiRouter:AdminApiKey"]!
+            : proxyKey ?? ""
+        : proxyKey ?? "";
+
     string? providedKey = null;
     if (AuthenticationHeaderValue.TryParse(context.Request.Headers.Authorization, out var authorization)
         && authorization.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase))
@@ -257,10 +272,7 @@ app.Use(async (context, next) =>
     }
     // Dashboard/模型配置浏览器场景：Authorization 头不便携带，支持 ?key= 查询参数（仅 dashboard/models 路径）。
     // 运维侧工具，访问者即 key 持有者；key 入 URL 有日志风险，由调用方/反代负责。
-    else if (context.Request.Path.StartsWithSegments("/dashboard")
-        || context.Request.Path.StartsWithSegments("/api/dashboard")
-        || context.Request.Path.StartsWithSegments("/models")
-        || context.Request.Path.StartsWithSegments("/api/models"))
+    else if (isAdminPath)
     {
         providedKey = context.Request.Query["key"];
     }
@@ -270,6 +282,9 @@ app.Use(async (context, next) =>
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         return;
     }
+
+    // 管理端 key 经 URL/referer 有泄露风险：禁止页面外传 referer，降低泄露面。
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
 
     await next(context).ConfigureAwait(false);
 });
