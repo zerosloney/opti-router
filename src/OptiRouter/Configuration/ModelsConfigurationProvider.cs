@@ -75,6 +75,13 @@ public sealed class ModelsJsonConfigurationProvider : ConfigurationProvider
         data[$"{prefix}MaxRetries"] = m.MaxRetries.ToString();
         data[$"{prefix}Enabled"] = m.Enabled.ToString();
         // Tags 暂不映射为分段配置项（Dashboard UI 通过 ModelsConfigService API 读取完整 JSON）
+        if (m.Capabilities is not null)
+        {
+            foreach (var kvp in m.Capabilities)
+            {
+                data[$"{prefix}Capabilities:{kvp.Key}"] = kvp.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
     }
 }
 

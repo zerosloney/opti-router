@@ -184,6 +184,26 @@ public sealed class RoutingOptions
     /// 半开模型探测槽位满时自动降级为串行单独尝试。
     /// </summary>
     public int FusionMaxParallel { get; set; } = 2;
+
+    /// <summary>
+    /// 是否启用多维能力评估路由。
+    /// </summary>
+    public bool EnableMultiDimensionalRouting { get; set; } = false;
+
+    /// <summary>
+    /// 是否启用 Thompson 采样自适应延迟感知路由。
+    /// </summary>
+    public bool EnableThompsonSampling { get; set; } = false;
+
+    /// <summary>
+    /// Thompson 采样的历史折扣/衰减因子（0.5 至 0.99）。值越小，系统对端点性能变化的反应越灵敏。
+    /// </summary>
+    public double ThompsonDiscountFactor { get; set; } = 0.95;
+
+    /// <summary>
+    /// 理想平均延迟目标（毫秒）。实际成功延迟小于该值计为 Alpha 自适应成功增量，否则（超时、大延迟或故障）计为 Beta 惩罚。
+    /// </summary>
+    public double ThompsonLatencyTargetMs { get; set; } = 800.0;
 }
 
 /// <summary>

@@ -183,11 +183,16 @@ public class RuleClassifierPolicyTests
     }
 
     [Theory]
-    // 讨论性文本，不应触发翻译/数学。
+    // 讨论性文本，不应触发翻译/数学/代码。
     [InlineData("the translation quality is poor")]
     [InlineData("翻译理论很重要")]
     [InlineData("等于号表示赋值")]
     [InlineData("平均成绩是 85 分")]
+    [InlineData("Can you select a nice shirt for me?")]
+    [InlineData("This hotel offers first class service.")]
+    [InlineData("Education is a public good in modern society.")]
+    [InlineData("We need to import more raw materials from abroad.")]
+    [InlineData("What is the main function of the human kidney?")]
     public void Apply_NaturalLanguageNoTrigger_SelectsDefaultTier(string content)
     {
         var options = TestHelpers.BuildOptions(
@@ -200,7 +205,7 @@ public class RuleClassifierPolicyTests
         var result = Apply(policy, options, request);
 
         // 默认 tier = Medium（单轮短消息无代码无数学无翻译 → 不命中 simple-qa 因长度可能 >100 或多词，
-        // 但翻译/数学不应触发，避免误升档）。这里宽松断言：不应是 Strong（无代码）。
+        // 但翻译/数学/代码不应触发，避免误升档）。这里断言：不应是 Strong（无代码）。
         Assert.All(result.Candidates, m => Assert.NotEqual(ModelTier.Strong, m.Tier));
     }
 }

@@ -244,4 +244,111 @@ public class SemanticRouterTests
         Assert.Single(decision.Candidates);
         Assert.Equal("model-cheap", decision.Candidates[0].Name);
     }
+
+    [Fact]
+    public void Apply_FiltersWithinPreviousCandidates_PreservesUpstreamFilters()
+    {
+        var policy = new SemanticRouterPolicy();
+        var options = new RouterOptions();
+        options.Routing.EnableSemanticRouter = true;
+        options.Routing.SemanticSimilarityThreshold = 0.25;
+        options.Routing.SemanticRoutes = new List<SemanticRouteOptions>
+        {
+            new()
+            {
+                Name = "casual-chat",
+                TargetTier = ModelTier.Cheap,
+                Phrases = new List<string> { "tell me a funny story" }
+            }
+        };
+
+        var allModels = new List<ModelEndpointOptions>
+        {
+            new() { Name = "model-strong-vision", Tier = ModelTier.Strong, Enabled = true, MaxContextTokens = 128000, Tags = { "vision" } },
+            new() { Name = "model-cheap-no-vision", Tier = ModelTier.Cheap, Enabled = true, MaxContextTokens = 16000 }
+        };
+
+        // 模拟上游 CapabilityFilterPolicy 已经过滤掉了不支持 vision 的 model-cheap-no-vision
+        var previousCandidates = new List<ModelEndpointOptions>
+        {
+            allModels[0] // 仅剩 model-strong-vision
+        };
+
+        var request = new ChatRequest
+        {
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "tell me a funny story") }
+        };
+        var context = new RouterContext
+        {
+            Request = request,
+            AllModels = allModels,
+            Options = options
+        };
+
+        var decision = policy.Apply(context, new RouterDecision { Candidates = previousCandidates, Reason = "capability-filtered" });
+
+        // 由于 previousCandidates 中没有 Cheap 模型，SemanticRouterPolicy 尝试在 previousCandidates 中按 Cheap 筛选结果为 0，
+        // 从而不覆盖 previousCandidates（不带回无 vision 标签的 model-cheap-no-vision）。
+        Assert.Single(decision.Candidates);
+        Assert.Equal("model-strong-vision", decision.Candidates[0].Name);
+    }
+
+    [Fact]
+    public void CjkTokenizer_SegmenterExtractsUnigramsAndBigrams()
+    {
+        var tokens = TfIdfSemanticVectorEngine.Tokenize("写 Python 快排");
+        Assert.Contains("python", tokens);
+        Assert.Contains("写", tokens);
+        Assert.Contains("快", tokens);
+        Assert.Contains("排", tokens);
+        Assert.Contains("快排", tokens);
+    }
+
+    [Fact]
+    public void ChinesePhrases_MatchesSemanticRoute()
+    {
+        var policy = new SemanticRouterPolicy(new TfIdfSemanticVectorEngine());
+        var options = new RouterOptions();
+        options.Routing.EnableSemanticRouter = true;
+        options.Routing.SemanticSimilarityThreshold = 0.25;
+        options.Routing.SemanticRoutes = new List<SemanticRouteOptions>
+        {
+            new()
+            {
+                Name = "chinese-code",
+                TargetTier = ModelTier.Strong,
+                Phrases = new List<string> { "用 Python 实现快速排序算法" }
+            },
+            new()
+            {
+                Name = "chinese-translation",
+                TargetTier = ModelTier.Medium,
+                Phrases = new List<string> { "翻译下面的文字为英语" }
+            }
+        };
+
+        var mockModels = GetMockModels();
+
+        // 1. 中文代码类 Query -> 应命中 chinese-code (Strong)
+        var codeRequest = new ChatRequest
+        {
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "请帮我写个 Python 快排") }
+        };
+        var codeContext = new RouterContext { Request = codeRequest, AllModels = mockModels, Options = options };
+        var codeDecision = policy.Apply(codeContext, new RouterDecision { Candidates = mockModels, Reason = "init" });
+
+        Assert.Contains("matched=chinese-code", codeDecision.Reason);
+        Assert.Equal("model-strong", codeDecision.Candidates[0].Name);
+
+        // 2. 中文翻译类 Query -> 应命中 chinese-translation (Medium)
+        var transRequest = new ChatRequest
+        {
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "请把这段文本翻译成英文") }
+        };
+        var transContext = new RouterContext { Request = transRequest, AllModels = mockModels, Options = options };
+        var transDecision = policy.Apply(transContext, new RouterDecision { Candidates = mockModels, Reason = "init" });
+
+        Assert.Contains("matched=chinese-translation", transDecision.Reason);
+        Assert.Equal("model-medium", transDecision.Candidates[0].Name);
+    }
 }

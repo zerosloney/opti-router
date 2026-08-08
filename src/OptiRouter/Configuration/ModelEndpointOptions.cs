@@ -61,4 +61,9 @@ public sealed class ModelEndpointOptions
     /// 可选能力标签，如 ["vision","tool-use"]。
     /// </summary>
     public IList<string> Tags { get; } = new Collection<string>();
+
+    /// <summary>
+    /// 模型在各维度的能力评分（0.0 至 1.0），如 "coding": 0.95, "reasoning": 0.90。
+    /// </summary>
+    public IDictionary<string, double> Capabilities { get; set; } = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 }

@@ -24,14 +24,17 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     private const double LatencyFloorMs = 50.0;
 
     private readonly ILatencyStatsProvider _statsProvider;
+    private readonly ThompsonStateStore _tsStore;
 
     /// <summary>
     /// 构造延迟感知策略。
     /// </summary>
     /// <param name="statsProvider">延迟统计读接口（内存快照，零 I/O）。</param>
-    public LatencyAwarePolicy(ILatencyStatsProvider statsProvider)
+    /// <param name="tsStore">Thompson 采样参数存储中心，传入空时将默认自建（供单元测试和旧代码向后兼容）。</param>
+    public LatencyAwarePolicy(ILatencyStatsProvider statsProvider, ThompsonStateStore? tsStore = null)
     {
         _statsProvider = statsProvider ?? throw new ArgumentNullException(nameof(statsProvider));
+        _tsStore = tsStore ?? new ThompsonStateStore();
     }
 
     /// <inheritdoc />
@@ -63,7 +66,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
                 continue;
             }
 
-            var reordered = ReorderByLatency(seg, minSamples);
+            var reordered = ReorderByLatency(seg, minSamples, context);
             if (!SameOrder(seg, reordered))
                 segmentsReordered++;
             result.AddRange(reordered);
@@ -74,16 +77,39 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             return previous with { Reason = $"{previous.Reason}; latency-aware: no change" };
         }
 
+        string extraTag = context.Options.Routing.EnableThompsonSampling ? " [Thompson Sampling]" : "";
         return previous with
         {
             Candidates = result,
-            Reason = $"{previous.Reason}; latency-aware: reordered {segmentsReordered} tier segment(s)"
+            Reason = $"{previous.Reason}; latency-aware: reordered {segmentsReordered} tier segment(s){extraTag}"
         };
     }
 
     /// <summary>同 tier 段内：有统计且样本充足的按延迟升序；无统计/样本不足的追加尾部（保持原顺序）。</summary>
-    private List<ModelEndpointOptions> ReorderByLatency(List<ModelEndpointOptions> segment, int minSamples)
+    private List<ModelEndpointOptions> ReorderByLatency(List<ModelEndpointOptions> segment, int minSamples, RouterContext context)
     {
+        if (context.Options.Routing.EnableThompsonSampling)
+        {
+            // 汤姆森自适应采样：计算各个候选模型的 Beta 分布采样分数值并降序
+            var sampled = new List<(ModelEndpointOptions Model, double Sample)>(segment.Count);
+            foreach (var m in segment)
+            {
+                var stats = _tsStore.GetOrAdd(m.Name);
+                double alpha, beta;
+                lock (stats.Lock)
+                {
+                    alpha = stats.Alpha;
+                    beta = stats.Beta;
+                }
+                double val = ThompsonSampler.SampleBeta(alpha, beta);
+                sampled.Add((m, val));
+            }
+
+            // 采样分数值越高（性能越优越可靠），排序越靠前。若相同则保持原始稳定性。
+            sampled.Sort((a, b) => b.Sample.CompareTo(a.Sample));
+            return sampled.Select(s => s.Model).ToList();
+        }
+
         // 拆分：ordered 参与延迟排序，tail 不参与（追加尾部保持原顺序）。
         var ordered = new List<(ModelEndpointOptions Model, double Score)>();
         var tail = new List<ModelEndpointOptions>();

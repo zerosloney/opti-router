@@ -37,6 +37,30 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         @"把.{1,40}?翻译成",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// 代码特征匹配正则：结合上下文与词边界，避免自然语言中 "select a dress" / "high class hotel" 等误判。
+    /// </summary>
+    private static readonly Regex CodeIndicatorRegex = new(
+        @"```|" +
+        @"#!/bin/|" +
+        @"\bdef\s+[A-Za-z_]\w*\s*\(|" +
+        @"\bfunction\s*(?:\*\s*)?[A-Za-z_]\w*\s*\(|" +
+        @"\bclass\s+\w+\s*(?:[:\{\(]|extends\b|implements\b)|" +
+        @"\bpublic\s+(?:class|interface|enum|struct|static|void|int|string|bool|double|float|long|var|async|override|virtual|sealed|abstract|event|delegate|[A-Z]\w*\s+\w+\s*[\(;=])\b|" +
+        @"\bimport\s+(?:[""']|\{[\s\w,]+\}\s+from\b|\w+\s+from\s+[""']|\w+\s+as\s+\w+|\w+(?:\.\w+)*\s*;|(?:sys|os|json|re|math|datetime|typing|collections|asyncio|time|pathlib|subprocess)\b)|" +
+        @"\bfrom\s+\w+\s+import\b|" +
+        @"\bselect\b[\s\S]{1,200}?\bfrom\b|" +
+        @"\bcreate\s+table\b|" +
+        @"\binsert\s+into\b|" +
+        @"\bsudo\s+(?:apt|apt-get|yum|dnf|pacman|systemctl|service|docker|netstat|chmod|chown|mkdir|rm|cp|mv|systemd|zypper|apk)\b|" +
+        @"\bchmod\s+(?:\+[xrw]|[0-7]{3,4})\b|" +
+        @"\bfunc\s+(?:\([^)]+\)\s*)?[A-Za-z_]\w*|" +
+        @"\bpackage\s+[A-Za-z_]\w*|" +
+        @"\bfn\s+[A-Za-z_]\w*\s*[\(<]|" +
+        @"\bimpl(?:\s*<[^>]+>)?\s+(?:[A-Za-z_]\w*\s+for\s+)?[A-Za-z_]\w*|" +
+        @"\bcargo\s+(?:build|run|test|check|clean|install|update|publish|bench|new|init)\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     /// <inheritdoc />
     public RouterDecision Apply(RouterContext context, RouterDecision previous)
     {
@@ -46,6 +70,23 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         }
 
         var (targetTier, targetReason) = ClassifyRequest(context);
+
+        if (context.Options.Routing.EnableMultiDimensionalRouting)
+        {
+            var weights = GetWeightsForClassification(targetReason);
+            var reordered = previous.Candidates
+                .OrderByDescending(m => CalculateMatchScore(m, weights))
+                .ThenBy(m => m.InputPricePerMillion)
+                .ToList();
+
+            string mdReason = $"rule-classifier: multi-dimensional active ({targetReason}), weights=[{string.Join(", ", weights.Select(kv => $"{kv.Key}:{kv.Value:F1}"))}], {reordered.Count} candidates";
+            return previous with
+            {
+                Candidates = reordered,
+                Reason = $"{previous.Reason}; {mdReason}"
+            };
+        }
+
         // 在上游策略（如 CapabilityFilter）已过滤的候选上再按 tier 筛，保持策略链叠加语义。
         // 从 AllModels 取会丢弃上游过滤结果（如 vision 标注），导致能力过滤失效。
         var candidates = FilterByTier(previous.Candidates, targetTier);
@@ -68,6 +109,65 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
             Candidates = candidates,
             Reason = $"{previous.Reason}; {reason}"
         };
+    }
+
+    private static Dictionary<string, double> GetWeightsForClassification(string reason)
+    {
+        var weights = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        switch (reason)
+        {
+            case "code-detected":
+                weights["coding"] = 1.0;
+                weights["reasoning"] = 0.6;
+                weights["language"] = 0.3;
+                break;
+            case "math-detected":
+                weights["reasoning"] = 1.0;
+                weights["coding"] = 0.5;
+                weights["language"] = 0.3;
+                break;
+            case "complex-instruction":
+                weights["reasoning"] = 0.8;
+                weights["language"] = 0.7;
+                break;
+            case "translation-request":
+                weights["language"] = 1.0;
+                weights["coding"] = 0.1;
+                break;
+            case "simple-qa":
+                weights["language"] = 1.0;
+                weights["reasoning"] = 0.1;
+                break;
+            default:
+                weights["language"] = 0.8;
+                weights["reasoning"] = 0.5;
+                break;
+        }
+        return weights;
+    }
+
+    private static double CalculateMatchScore(ModelEndpointOptions model, Dictionary<string, double> weights)
+    {
+        double score = 0.0;
+        foreach (var (key, weight) in weights)
+        {
+            double capabilityVal;
+            if (model.Capabilities is not null && model.Capabilities.TryGetValue(key, out var val))
+            {
+                capabilityVal = val;
+            }
+            else
+            {
+                capabilityVal = model.Tier switch
+                {
+                    ModelTier.Strong => 0.9,
+                    ModelTier.Medium => 0.6,
+                    _ => 0.3
+                };
+            }
+            score += weight * capabilityVal;
+        }
+        return score;
     }
 
     private static (ModelTier Tier, string Reason) ClassifyRequest(RouterContext context)
@@ -161,45 +261,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     private static bool ContainsCodeIndicators(string content)
     {
         if (string.IsNullOrEmpty(content)) return false;
-
-        // intentional-simple: 常见代码标记，覆盖通用 + SQL/Shell/Go/Rust。
-        // 不含中文标记（"函数"/"类" 在自然语言误报率高）。
-        ReadOnlySpan<string> indicators = new[]
-        {
-            // 通用 / 围栏代码块
-            "```",
-            "function ",
-            "def ",
-            "class ",
-            "public ",
-            "import ",
-            // SQL
-            "select ",
-            "create table",
-            "insert into",
-            // Shell
-            "#!/bin/",
-            "sudo ",
-            "chmod ",
-            // Go
-            "func ",
-            "package ",
-            "go func",
-            // Rust
-            "fn ",
-            "impl ",
-            "cargo "
-        };
-
-        foreach (var indicator in indicators)
-        {
-            // OrdinalIgnoreCase：覆盖跨大小写的语言关键字（SQL SELECT/select、Rust fn/FN）。
-            // 指标词均为代码/命令专属（select/fn/impl/cargo/sudo/chmod），自然语言误报率低。
-            if (content.Contains(indicator, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-
-        return false;
+        return CodeIndicatorRegex.IsMatch(content);
     }
 
     private static List<ModelEndpointOptions> FilterByTier(

@@ -77,6 +77,7 @@ public sealed class LatencyStatsAggregatorService : BackgroundService
 
     private async Task AggregateAsync(CancellationToken cancellationToken)
     {
+        await Task.CompletedTask;
         var options = _options.CurrentValue;
         int windowMinutes = options.Routing.LatencyStatsWindowMinutes > 0
             ? options.Routing.LatencyStatsWindowMinutes

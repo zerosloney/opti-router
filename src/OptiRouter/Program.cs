@@ -29,11 +29,15 @@ builder.WebHost.ConfigureKestrel(options =>
 string modelsConfigPath = Path.Combine(builder.Environment.ContentRootPath, "models-config.json");
 if (!File.Exists(modelsConfigPath))
 {
-    var seeded = builder.Configuration.GetSection("OptiRouter:Models")
-        .Get<List<OptiRouter.Configuration.ModelEndpointOptions>>();
-    Directory.CreateDirectory(Path.GetDirectoryName(modelsConfigPath)!);
-    using (var stream = File.Create(modelsConfigPath))
+    try
     {
+        var seeded = builder.Configuration.GetSection("OptiRouter:Models")
+            .Get<List<OptiRouter.Configuration.ModelEndpointOptions>>();
+        string? parentDir = Path.GetDirectoryName(modelsConfigPath);
+        if (!string.IsNullOrEmpty(parentDir))
+            Directory.CreateDirectory(parentDir);
+
+        using var stream = new FileStream(modelsConfigPath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
         System.Text.Json.JsonSerializer.Serialize(stream,
             seeded ?? new List<OptiRouter.Configuration.ModelEndpointOptions>(),
             new System.Text.Json.JsonSerializerOptions
@@ -42,6 +46,10 @@ if (!File.Exists(modelsConfigPath))
                 PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
                 Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase) }
             });
+    }
+    catch (IOException)
+    {
+        // 并发初始化防御：忽略并发创建竞争
     }
 }
 builder.Configuration.Sources.Add(new ModelsJsonConfigurationSource
@@ -142,11 +150,16 @@ builder.Services.AddSingleton<ITokenEstimator>(sp =>
     return new TiktokenTokenEstimator(options.Routing.TiktokenEncoding);
 });
 
+builder.Services.AddSingleton<ISemanticVectorEngine, TfIdfSemanticVectorEngine>();
+builder.Services.AddSingleton<ThompsonStateStore>();
+
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
     var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
     var tokenEstimator = sp.GetRequiredService<ITokenEstimator>();
+    var vectorEngine = sp.GetRequiredService<ISemanticVectorEngine>();
+    var tsStore = sp.GetRequiredService<ThompsonStateStore>();
     // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
     // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
@@ -155,9 +168,9 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new CapabilityFilterPolicy(),
         new RuleClassifierPolicy(),
         new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),
-        new SemanticRouterPolicy(),
+        new SemanticRouterPolicy(vectorEngine),
         new LongInputPolicy(),
-        new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>()),
+        new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore),
         new BudgetGuardPolicy(ledger),
         new FailoverPolicy(healthTracker),
         new LoadBalancePolicy()
@@ -425,3 +438,5 @@ static string HashPartitionToken(string token)
     byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
     return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
 }
+
+public partial class Program { }
