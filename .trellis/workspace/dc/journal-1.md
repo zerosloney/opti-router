@@ -38,3 +38,36 @@ Successfully implemented multi-dimensional capability routing based on utility d
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: Routing Foundation MVP
+
+**Date**: 2026-08-10
+**Task**: Routing Foundation MVP
+**Branch**: `master`
+
+### Summary
+
+Implemented cache-aware upstream metadata and pricing, quota-only 429 handling, stable-prefix affinity, dynamic Fusion panel selection, additive SQLite audit fields, dashboard/config propagation, and 407-test quality gates.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `5061c67` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
