@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Components;
+using OptiRouter.Configuration;
 
 namespace OptiRouter.Components.Services;
 
@@ -58,7 +59,13 @@ public class ApiService
     public void SetKey(string? key) => _key = key;
 
     private string Url(string path)
-        => string.IsNullOrEmpty(_key) ? path : $"{path}?key={Uri.EscapeDataString(_key)}";
+    {
+        if (string.IsNullOrEmpty(_key))
+            return path;
+
+        char separator = path.Contains('?', StringComparison.Ordinal) ? '&' : '?';
+        return $"{path}{separator}key={Uri.EscapeDataString(_key)}";
+    }
 
     // ── Dashboard ──────────────────────────────────────────────────
 
@@ -114,6 +121,7 @@ public class ApiService
 
     public record SystemInfo(
         DateTime Time,
+        [property: JsonPropertyName("routingPolicy")]
         RoutingPolicyInfo Routing,
         BudgetInfo Budget,
         double Qps,
@@ -147,7 +155,7 @@ public class ApiService
     public record ModelInfo(
         string Name,
         string BaseUrl,
-        string Tier,
+        ModelTier Tier,
         decimal InputPricePerMillion,
         decimal OutputPricePerMillion,
         int MaxContextTokens,

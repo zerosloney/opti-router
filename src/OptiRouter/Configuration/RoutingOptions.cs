@@ -186,6 +186,50 @@ public sealed class RoutingOptions
     public int FusionMaxParallel { get; set; } = 2;
 
     /// <summary>
+    /// 是否启用融合路由（OpenRouter Fusion 式）。开启后，非流式请求首轮并行叫 panel 模型作答，
+    /// <c>analyst</c> 模型读全部 panel 回答产出结构化分析（共识/矛盾/缺口/独特洞察），
+    /// <c>outer</c> 模型再依分析写最终答案。仅非流式（流式首 chunk 锁定模型无法切换）。
+    /// 成本语义：N 个 panel + 1 analyst + 1 outer ≈ N+2 次调用，是质量技术而非省钱技术，生产默认关。
+    /// 与 <see cref="EnableFusionMode"/>（并行 race 取最快）正交，二者可同开；本模式在 race 之前尝试。
+    /// </summary>
+    public bool EnableFusionRouter { get; set; } = false;
+
+    /// <summary>
+    /// 融合路由 panel 模型数（并行作答的候选数）。默认 3，范围 [2, 5]。
+    /// panel 取路由决策候选链前 N 个（策略链已过滤可用模型）。值越大答案越多样但成本/延迟越高。
+    /// </summary>
+    public int FusionRouterPanelSize { get; set; } = 3;
+
+    /// <summary>
+    /// 融合路由 analyst 模型名。留空（默认）则用主候选（候选链首）担任 analyst。
+    /// analyst 读全部 panel 回答，temp 固定 0，只产结构化 JSON 分析，不写最终答案。
+    /// </summary>
+    public string? FusionRouterAnalystModel { get; set; }
+
+    /// <summary>
+    /// 融合路由 analyst 的结构化分析提示词。留空时使用内置 JSON 契约提示词。
+    /// 此配置独立于 <see cref="CascadeUpgradeSelfVerifyPrompt"/>，两者输出契约不同。
+    /// </summary>
+    public string? FusionRouterAnalystPrompt { get; set; }
+
+    /// <summary>
+    /// 融合路由 outer 模型名（写最终答案的模型）。留空（默认）则用主候选担任 outer。
+    /// outer 读 analyst 分析 + 原问题写最终答案。
+    /// </summary>
+    public string? FusionRouterOuterModel { get; set; }
+
+    /// <summary>
+    /// 融合路由最终答案最大输出 token 数。默认 16000（对齐 OpenRouter 默认）。
+    /// 仅约束 outer 写答案的 <c>MaxTokens</c>；panel 保留原请求上限，analyst 不设上限。
+    /// </summary>
+    public int FusionRouterMaxOutputTokens { get; set; } = 16000;
+
+    /// <summary>
+    /// 融合路由 panel / analyst 的采样温度。默认 0（确定性）。仅当原请求未显式设置 Temperature 时生效。
+    /// </summary>
+    public double FusionRouterTemperature { get; set; } = 0.0;
+
+    /// <summary>
     /// 是否启用多维能力评估路由。
     /// </summary>
     public bool EnableMultiDimensionalRouting { get; set; } = false;

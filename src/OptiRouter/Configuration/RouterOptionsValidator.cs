@@ -107,6 +107,21 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FusionMaxParallel 必须在 [2, 5] 范围内。");
         }
 
+        if (options.Routing.FusionRouterPanelSize < 2 || options.Routing.FusionRouterPanelSize > 5)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterPanelSize 必须在 [2, 5] 范围内。");
+        }
+
+        if (options.Routing.EnableFusionRouter && options.Routing.FusionRouterMaxOutputTokens <= 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterMaxOutputTokens 必须大于 0（启用融合路由时）。");
+        }
+
+        if (options.Routing.FusionRouterTemperature < 0 || options.Routing.FusionRouterTemperature > 2)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterTemperature 必须在 [0, 2] 范围内。");
+        }
+
         if (options.Routing.MaxResponseStreamBytes <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.MaxResponseStreamBytes 必须大于 0。");

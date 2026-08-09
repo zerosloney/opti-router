@@ -6,8 +6,8 @@ namespace OptiRouter.Routing;
 /// 单条请求审计记录。
 /// </summary>
 /// <param name="Timestamp">请求完成 UTC 时间。</param>
-    /// <param name="RequestId">HTTP 请求 ID（X-Request-Id），可能为 null。</param>
-    /// <param name="Model">实际使用的模型名。</param>
+/// <param name="RequestId">HTTP 请求 ID（X-Request-Id），可能为 null。</param>
+/// <param name="Model">实际使用的模型名。</param>
 /// <param name="EstimatedInputTokens">路由引擎估算的输入 token 数。</param>
 /// <param name="PromptTokens">实际 prompt token 数（上游返回，可能为 0）。</param>
 /// <param name="CompletionTokens">实际补全 token 数（上游返回，可能为 0）。</param>
@@ -28,6 +28,8 @@ namespace OptiRouter.Routing;
 /// <param name="IsEstimated">本次成本是否为预估值（非上游真实 Usage）。
 /// 并行首试中被取消/失败的尝试拿不到上游 Usage，按 EstimatedInputTokens × 模型 input 价格预估入账，
 /// 标注此字段以区分真实成本。串行模式/采纳的成功响应恒为 false（默认值）。</param>
+/// <param name="FusionRole">融合路由中的角色：<c>panel</c>（并行 panel 调用）、<c>analyst</c>（结构化分析）、
+/// <c>outer</c>（最终答案撰写）。非融合路由为 null（默认值）。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -47,4 +49,5 @@ public sealed record RequestAuditRecord(
     string? UpgradedFrom = null,
     bool IsAdopted = true,
     string? ParallelGroupId = null,
-    bool IsEstimated = false);
+    bool IsEstimated = false,
+    string? FusionRole = null);

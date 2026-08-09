@@ -24,14 +24,13 @@ WORKDIR /app
 # 非 root 运行（安全最佳实践）。安装 curl 供 HEALTHCHECK 探测 /health。
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/* \
-    && adduser --disabled-password --gecos "" --uid 1000 app \
     && mkdir -p /app/data \
-    && chown -R app:app /app
+    && chown -R "$APP_UID:$APP_UID" /app
 
 # 仅拷发布产物（无 SDK、无源码、无 obj/bin），镜像体积最小化。
 COPY --from=build /app/publish ./
 
-USER app
+USER $APP_UID
 
 # Kestrel 监听 5000。容器内 HTTP，TLS 由外部反代终结（见 README 部署章节）。
 ENV ASPNETCORE_URLS=http://+:5000 \
