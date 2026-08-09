@@ -12,6 +12,7 @@ using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
 using OptiRouter.Health;
 using OptiRouter.Routing;
+using Prometheus;
 
 // 初始化 SQLitePCLRaw 原生库（使用 bundle_e_sqlite3）。必须在使用 Microsoft.Data.Sqlite 前调用一次。
 SQLitePCL.Batteries_V2.Init();
@@ -182,6 +183,11 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
 // t4: 注册降级重试编排器。
 builder.Services.AddSingleton<ProxyOrchestrator>();
 
+// Prometheus 指标集合（单例，ProxyOrchestrator 经 DI 注入）。
+// 仪表（Counter/Histogram/Gauge）在 RouterMetrics 构造时向 prometheus-net 静态注册表登记，
+// 后台 MetricsGaugeUpdaterService 周期刷新花费/断路器 gauge。
+builder.Services.AddSingleton<OptiRouter.Metrics.RouterMetrics>();
+
 // 模型配置文件服务（独立 models-config.json，Dashboard 读写，IConfigurationRoot.Reload() 热生效）。
 builder.Services.AddSingleton<ModelsConfigService>(sp =>
 {
@@ -204,6 +210,10 @@ builder.Services.AddHostedService<LatencyStatsAggregatorService>();
 
 // 审计保留淘汰：按 AuditRetentionHours 周期 EvictBefore，防止 request_audit 无界增长。
 builder.Services.AddHostedService<AuditRetentionService>();
+
+// 指标 gauge 刷新服务：周期同步花费/断路器 gauge（复用探活周期，零独立定时器）。
+// EnableMetrics=false 时不影响功能，但 gauge 保持零值。
+builder.Services.AddHostedService<MetricsGaugeUpdaterService>();
 
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
@@ -377,6 +387,21 @@ app.UseRateLimiter();
 
 // 健康检查端点，无需 API Key，不受限流影响（非 /v1/* 路径）。
 app.MapHealthChecks("/health");
+
+// Prometheus 指标导出端点 /metrics，无需 API Key（同 /health，便于抓取），不受限流影响（非 /v1/* 路径）。
+// 仅暴露聚合数（请求数/token/成本/延迟）与模型名，不含 API Key 或 PII。
+// EnableMetrics=false 时不映射端点（仪表仍登记，但无抓取入口）。
+bool enableMetrics = app.Configuration.GetValue<bool?>("OptiRouter:Routing:EnableMetrics") ?? true;
+if (enableMetrics)
+{
+    string metricsPath = app.Configuration.GetValue<string?>("OptiRouter:Routing:MetricsEndpointPath") ?? "/metrics";
+    app.UseHttpMetrics(options =>
+    {
+        // 用自定义 optirouter_request_duration_ms（按模型标签）替代默认 ASP.NET http_request_duration_seconds。
+        options.RequestDuration.Enabled = false;
+    });
+    app.MapMetrics(metricsPath);
+}
 
 // 生产环境 HTTPS 检查。
 if (builder.Environment.IsProduction())

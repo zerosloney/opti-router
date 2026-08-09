@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
+using OptiRouter.Metrics;
 using OptiRouter.Routing;
 
 namespace OptiRouter.Endpoints;
@@ -25,6 +26,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly IRequestAuditStore _auditStore;
     private readonly IMemoryCache _affinityCache;
     private readonly ThompsonStateStore _tsStore;
+    private readonly RouterMetrics _metrics;
     private bool _disposed;
 
     /// <summary>
@@ -39,6 +41,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// <param name="auditStore">请求审计存储。</param>
     /// <param name="affinityCache">会话粘性缓存。请求成功后回写本次模型名，供 SessionAffinityPolicy 下次提升。</param>
     /// <param name="tsStore">Thompson 采样参数存储中心，传入空时将默认自建（供向后兼容）。</param>
+    /// <param name="metrics">Prometheus 指标记录器。</param>
     /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
@@ -49,6 +52,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         IRequestAuditStore auditStore,
         IMemoryCache affinityCache,
         ThompsonStateStore? tsStore,
+        RouterMetrics metrics,
         ILogger<ProxyOrchestrator> logger)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
@@ -58,6 +62,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(healthTracker);
         ArgumentNullException.ThrowIfNull(auditStore);
         ArgumentNullException.ThrowIfNull(affinityCache);
+        ArgumentNullException.ThrowIfNull(metrics);
         ArgumentNullException.ThrowIfNull(logger);
 
         _clientProvider = clientProvider;
@@ -68,6 +73,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _auditStore = auditStore;
         _affinityCache = affinityCache;
         _tsStore = tsStore ?? new ThompsonStateStore();
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -577,6 +583,26 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         catch
         {
             // Audit recording must not break the request path.
+        }
+
+        // Prometheus 指标：与审计同源（成功/各类失败都经过此方法），记录聚合数。
+        // 预估成本（IsEstimated）也计入，与账本语义一致（上游对已发请求计费）。
+        try
+        {
+            _metrics.RecordAttempt(
+                model,
+                routedTier,
+                success,
+                errorMessage,
+                isStreaming,
+                latencyMs,
+                usage?.PromptTokens ?? 0,
+                usage?.CompletionTokens ?? 0,
+                cost);
+        }
+        catch
+        {
+            // 指标记录失败不得影响请求路径。
         }
     }
 

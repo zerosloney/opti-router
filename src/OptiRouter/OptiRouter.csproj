@@ -26,5 +26,11 @@
     <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Prometheus 指标导出：暴露 /metrics 端点供 Prometheus 抓取。 -->
+    <!-- OTel Prometheus exporter 仅 beta；用稳定的 prometheus-net，仍通过 System.Diagnostics.Metrics 定义仪表。 -->
+    <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
+  </ItemGroup>
+
 
 </Project>

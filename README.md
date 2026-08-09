@@ -37,7 +37,7 @@
 
 ### 前置要求
 
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
+- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 
 ### 构建
 
@@ -149,6 +149,8 @@ curl http://localhost:5000/health
 | `EnableCapabilityFilter` | 按请求能力需求（vision/tool-use/json-mode）排除 Tags 不含的模型 | `false` |
 | `EnableFusionMode` | 并行首试：非流式首轮并行前 N 候选取最快成功，取消其余 | `false` |
 | `FusionMaxParallel` | 并行首试首轮并发数，范围 `[2, 5]` | `2` |
+| `EnableMetrics` | 启用 Prometheus `/metrics` 端点（无鉴权，仅聚合数+模型名） | `true` |
+| `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
 
 ## 路由策略说明
 
@@ -237,6 +239,35 @@ python scripts/analyze_audit.py --db /path/to/optirouter-budget.db \
 
 ## 部署
 
+### Docker（推荐容器化部署）
+
+多阶段构建（`sdk:8.0` 编译 → `aspnet:8.0` 运行），非 root 用户运行，内建 `HEALTHCHECK` 与 `/app/data` 数据卷。
+
+```bash
+# 构建镜像
+docker build -t optirouter .
+
+# 运行（SQLite 账本持久化到宿主目录，便于跨容器重建保留）
+docker run -d --name optirouter \
+  -p 5000:5000 \
+  -v optirouter-data:/app/data \
+  -e OptiRouter__ProxyApiKey="your-proxy-api-key" \
+  -e OptiRouter__AdminApiKey="your-admin-api-key" \
+  -e OptiRouter__Models__0__ApiKey="sk-..." \
+  optirouter
+```
+
+配置通过环境变量注入（双下划线 `__` 分隔层级，对应 `OptiRouter:*` 配置节）。容器内监听 HTTP `5000`，TLS 由外部反代终结（见下方 HTTPS 要求）。
+
+验证：
+
+```bash
+curl http://localhost:5000/health    # → Healthy
+curl http://localhost:5000/metrics   # → Prometheus 指标（无需 API Key）
+```
+
+> 镜像默认环境：`ASPNETCORE_URLS=http://+:5000`、`ASPNETCORE_ENVIRONMENT=Production`、`OptiRouter__Budget__StorePath=data/optirouter-budget.db`。
+
 ### HTTPS 要求
 
 生产环境**必须**使用 HTTPS 终结 API Key 传输。两种方式：
@@ -257,6 +288,47 @@ python scripts/analyze_audit.py --db /path/to/optirouter-budget.db \
 ### 成本账本数据
 
 默认 `data/optirouter-budget.db`（SQLite）。目录不存在自动创建。该文件累加所有请求的成本数据，建议纳入备份/监控范围。
+
+### 指标监控（Prometheus）
+
+`EnableMetrics=true`（默认）时暴露 `/metrics` 端点（prometheus-net，标准 Prometheus exposition format）。该端点**无需 API Key**（同 `/health`，便于抓取），仅暴露聚合数与模型名，不含 API Key 或 PII。
+
+**暴露的指标**：
+
+| 指标 | 类型 | 标签 | 含义 |
+|------|------|------|------|
+| `optirouter_proxy_requests_total` | counter | model, tier, outcome, streaming | 模型尝试数（每次候选尝试计一次）；outcome: success/timeout/stream_error/model_error/error |
+| `optirouter_tokens_total` | counter | model, direction | token 消耗（direction: input/output） |
+| `optirouter_cost_usd_total` | counter | model | 累计美元成本 |
+| `optirouter_request_duration_ms` | histogram | model, streaming | 单次尝试延迟（50ms~200s 指数桶） |
+| `optirouter_circuit_failure_count` | gauge | model | 断路器当前连续失败数 |
+| `optirouter_daily_spend_usd` | gauge | — | 当日 UTC 花费 |
+| `optirouter_total_spend_usd` | gauge | — | 进程生命周期累计花费 |
+| `http_requests_received_total` | counter | code, method, endpoint | ASP.NET 请求计数（prometheus-net 内建） |
+| `http_requests_in_progress` | gauge | — | 当前在途请求数 |
+
+> Gauge 型指标（花费/断路器）由后台 `MetricsGaugeUpdaterService` 复用 `HealthProbeIntervalSeconds` 周期刷新；Counter/Histogram 在请求路径即时记录。
+
+**Prometheus scrape 配置示例**：
+
+```yaml
+scrape_configs:
+  - job_name: optirouter
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["your-host:5000"]
+```
+
+关闭指标导出：设 `OptiRouter:Routing:EnableMetrics=false`。自定义端点路径：`OptiRouter:Routing:MetricsEndpointPath=/custom-metrics`。
+
+### CI（GitHub Actions）
+
+`.github/workflows/ci.yml` 在 push 到 `master` 或 PR 时触发：
+
+1. **build-test**（每次）：`dotnet restore` + `dotnet build -c Release -warnaserror`（强制零警告）+ `dotnet test`（带 XPlat 覆盖率，产物上传 artifact）。
+2. **docker-build**（仅 push 到 master）：构建 Docker 镜像验证 Dockerfile 可用（不打 tag 推送）。
+
+同分支并发自动取消旧运行，节省 CI 配额。
 
 ## 已知限制
 

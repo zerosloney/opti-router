@@ -213,6 +213,20 @@ public sealed class RoutingOptions
     /// 防止 request_audit 无界增长。默认 168（7 天）。必须 &gt;= 1，由 RouterOptionsValidator 强制。
     /// </summary>
     public int AuditRetentionHours { get; set; } = 168;
+
+    /// <summary>
+    /// 是否启用 Prometheus 指标导出（<c>/metrics</c> 端点）。默认 true。
+    /// 关闭时不注册指标中间件与 gauge 刷新服务，但 <see cref="OptiRouter.Metrics.RouterMetrics"/> 单例仍存在
+    /// （ProxyOrchestrator 仍可无副作用调用 RecordAttempt，prometheus-net 的仪表为空集）。
+    /// <c>/metrics</c> 端点无鉴权（同 <c>/health</c>），便于 Prometheus 抓取；仅暴露聚合数与模型名。
+    /// </summary>
+    public bool EnableMetrics { get; set; } = true;
+
+    /// <summary>
+    /// Prometheus 指标导出端点路径。默认 <c>/metrics</c>。仅当 <see cref="EnableMetrics"/> 为 true 时生效。
+    /// 修改后需同步更新反代/Prometheus scrape 配置。
+    /// </summary>
+    public string MetricsEndpointPath { get; set; } = "/metrics";
 }
 
 /// <summary>
