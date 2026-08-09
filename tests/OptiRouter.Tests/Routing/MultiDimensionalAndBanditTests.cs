@@ -105,6 +105,29 @@ public sealed class MultiDimensionalAndBanditTests
     }
 
     [Fact]
+    public void ThompsonSampler_BetaShape_MeanReflectsAlphaBetaRatio()
+    {
+        // 分布断言：Beta(50,1) 偏向 1（高成功），Beta(1,50) 偏向 0（低成功）。
+        // 仅断言 (0,1) 范围（ThompsonSampler_SamplesValidValues）无法捕获退化成均匀分布的 bug。
+        // seeded RNG 保证确定性；均值容差用大数定律 3000 样本收敛。
+        var rngHigh = new Random(1);
+        var rngLow = new Random(2);
+        double sumHigh = 0, sumLow = 0;
+        const int N = 3000;
+        for (int i = 0; i < N; i++)
+        {
+            sumHigh += ThompsonSampler.SampleBeta(50.0, 1.0, rngHigh);
+            sumLow += ThompsonSampler.SampleBeta(1.0, 50.0, rngLow);
+        }
+        double meanHigh = sumHigh / N;
+        double meanLow = sumLow / N;
+
+        // Beta(50,1) 均值 = 50/51 ≈ 0.98；Beta(1,50) 均值 = 1/51 ≈ 0.02。给宽松容差防噪声。
+        Assert.True(meanHigh > 0.90, $"Beta(50,1) 均值应 >0.90，实际 {meanHigh:F3}");
+        Assert.True(meanLow < 0.10, $"Beta(1,50) 均值应 <0.10，实际 {meanLow:F3}");
+    }
+
+    [Fact]
     public void ThompsonStateStore_UpdatesParametersWithDiscount()
     {
         var store = new ThompsonStateStore();
@@ -123,6 +146,23 @@ public sealed class MultiDimensionalAndBanditTests
         store.RecordOutcome(modelName, isGood: false, discountFactor: 0.9);
         Assert.Equal(1.9 * 0.9 + 0.0, stats.Alpha); // 1.71
         Assert.Equal(0.9 * 0.9 + 1.0, stats.Beta);  // 1.81
+    }
+
+    [Theory]
+    [InlineData(2.0)]   // 超上限：Math.Clamp 截到 1.0，等效无衰减全量保留
+    [InlineData(-5.0)]  // 超下限：Math.Clamp 截到 0.1，强衰减
+    [InlineData(0.0)]
+    public void ThompsonStateStore_RecordOutcome_ClampsDiscountFactor(double factor)
+    {
+        // 验证 Math.Clamp(discountFactor, 0.1, 1.0) 防护：非法因子不应抛异常或破坏状态。
+        var store = new ThompsonStateStore();
+        var stats = store.GetOrAdd("clamp-model");
+        double alphaBefore = stats.Alpha;
+
+        store.RecordOutcome("clamp-model", isGood: true, discountFactor: factor);
+
+        double clamped = Math.Clamp(factor, 0.1, 1.0);
+        Assert.Equal(alphaBefore * clamped + 1.0, stats.Alpha);
     }
 
     [Fact]
@@ -147,7 +187,13 @@ public sealed class MultiDimensionalAndBanditTests
             store.RecordOutcome("m-bad", isGood: false, discountFactor: 0.95);
         }
 
-        var policy = new LatencyAwarePolicy(new StubLatencyStatsProvider(), store);
+        // 注入 seeded RNG 采样委托，使测试确定性（生产用线程本地未播种 RNG，
+        // m-good alpha≈80 >> m-bad beta≈80 时大概率但不 100% m-good 胜出，CI 偶发翻转）。
+        var seededRng = new Random(42);
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(),
+            store,
+            (a, b) => ThompsonSampler.SampleBeta(a, b, seededRng));
         var (ctx, initial) = Setup(options, options.Models, "hi");
 
         var result = policy.Apply(ctx, initial);

@@ -47,6 +47,14 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     private const string ReasonFallbackToDefault = "fallback-to-default";
 
     /// <summary>
+    /// 多维路由能力分数容差：分数差距在此范围内的候选视为「能力相近」，改按价格择廉。
+    /// 避免 tier 回退值（Strong 0.9 vs Cheap 0.3）让简单查询过度路由到昂贵模型。
+    /// 0.15 对应单维度约半档能力差距，足以让 simple-qa 等低门槛查询在能力足够时选便宜模型，
+    /// 同时保留 coding/reasoning 等强需求场景的能力主导排序。
+    /// </summary>
+    private const double CapabilityScoreTolerance = 0.15;
+
+    /// <summary>
     /// 代码特征匹配正则：结合上下文与词边界，避免自然语言中 "select a dress" / "high class hotel" 等误判。
     /// </summary>
     private static readonly Regex CodeIndicatorRegex = new(
@@ -86,10 +94,23 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         if (context.Options.Routing.EnableMultiDimensionalRouting)
         {
             var weights = GetWeightsForClassification(targetReason);
-            var reordered = previous.Candidates
-                .OrderByDescending(m => CalculateMatchScore(m, weights))
-                .ThenBy(m => m.InputPricePerMillion)
+            // 多维路由修复：原实现纯按 capability score 降序、仅 score 相等才看价格。
+            // tier 回退（Strong=0.9/Medium=0.6/Cheap=0.3）使 simple-qa 等仅靠 language 维度
+            // 的查询里 Cheap 模型系统性垫底，Strong 必胜——成本分层被反转。
+            // 修复语义：capability 是硬门槛，但 capability「相近」（差距 ≤ 阈值）时按价格择廉，
+            // 让 cheap 模型在能力足够（分数不显著落后）时胜出。
+            var scored = previous.Candidates
+                .Select(m => (Model: m, Score: CalculateMatchScore(m, weights)))
                 .ToList();
+            scored.Sort((a, b) =>
+            {
+                double diff = b.Score - a.Score; // 降序
+                if (Math.Abs(diff) > CapabilityScoreTolerance)
+                    return diff.CompareTo(0);
+                // 分数相近：便宜优先，避免为微弱能力差距多付成本。
+                return a.Model.InputPricePerMillion.CompareTo(b.Model.InputPricePerMillion);
+            });
+            var reordered = scored.Select(s => s.Model).ToList();
 
             string mdReason = $"rule-classifier: multi-dimensional active ({targetReason}), weights=[{string.Join(", ", weights.Select(kv => $"{kv.Key}:{kv.Value:F1}"))}], {reordered.Count} candidates";
             return previous with

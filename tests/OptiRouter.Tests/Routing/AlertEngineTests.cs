@@ -228,7 +228,9 @@ public class AlertEngineTests
         for (int i = 0; i < 1500; i++)
         {
             auditStore.Append(new RequestAuditRecord(
-                Timestamp: now.AddSeconds(-i * 0.2),
+                // 间隔 0.1s：1500 条最老记录在 now-149.9s，远离 5 分钟窗口边界（原 0.2s 间隔下
+                // 最老记录在 now-299.8s，距窗口 now-300s 仅 0.2s，稍动参数即跌破阈值）。
+                Timestamp: now.AddSeconds(-i * 0.1),
                 RequestId: "req-" + i,
                 Model: "gpt-4o",
                 EstimatedInputTokens: 100,

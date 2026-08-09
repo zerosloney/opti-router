@@ -34,16 +34,25 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
 
     private readonly ILatencyStatsProvider _statsProvider;
     private readonly ThompsonStateStore _tsStore;
+    private readonly Func<double, double, double> _sampleBeta;
 
     /// <summary>
     /// 构造延迟感知策略。
     /// </summary>
     /// <param name="statsProvider">延迟统计读接口（内存快照，零 I/O）。</param>
     /// <param name="tsStore">Thompson 采样参数存储中心。</param>
-    public LatencyAwarePolicy(ILatencyStatsProvider statsProvider, ThompsonStateStore tsStore)
+    /// <param name="sampleBeta">
+    /// Thompson Beta 采样委托，默认 <see cref="ThompsonSampler.SampleBeta(double,double)"/>（线程本地 RNG）。
+    /// 仅供测试注入确定性采样；生产路径留空。
+    /// </param>
+    public LatencyAwarePolicy(
+        ILatencyStatsProvider statsProvider,
+        ThompsonStateStore tsStore,
+        Func<double, double, double>? sampleBeta = null)
     {
         _statsProvider = statsProvider ?? throw new ArgumentNullException(nameof(statsProvider));
         _tsStore = tsStore ?? throw new ArgumentNullException(nameof(tsStore));
+        _sampleBeta = sampleBeta ?? ThompsonSampler.SampleBeta;
     }
 
     /// <inheritdoc />
@@ -123,7 +132,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
                 alpha = stats.Alpha;
                 beta = stats.Beta;
             }
-            double val = ThompsonSampler.SampleBeta(alpha, beta);
+            double val = _sampleBeta(alpha, beta);
             sampled.Add((m, val));
         }
 
