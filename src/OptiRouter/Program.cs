@@ -202,6 +202,9 @@ builder.Services.AddHostedService<ModelHealthProbeService>();
 // 复用 HealthProbeIntervalSeconds 周期，避免引入独立定时器。EnableLatencyAware=false 时不聚合。
 builder.Services.AddHostedService<LatencyStatsAggregatorService>();
 
+// 审计保留淘汰：按 AuditRetentionHours 周期 EvictBefore，防止 request_audit 无界增长。
+builder.Services.AddHostedService<AuditRetentionService>();
+
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
     .AddCheck<CostLedgerHealthCheck>("cost-ledger", failureStatus: HealthStatus.Unhealthy);

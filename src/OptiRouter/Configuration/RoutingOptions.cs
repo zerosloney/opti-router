@@ -207,6 +207,12 @@ public sealed class RoutingOptions
     /// 实际成功延迟小于该值计为 Alpha 自适应成功增量，否则（超时、大延迟或故障）计为 Beta 惩罚。
     /// </summary>
     public double ThompsonLatencyTargetMs { get; set; } = 800.0;
+
+    /// <summary>
+    /// 审计记录保留时长（小时）。超出后由后台 AuditRetentionService 周期淘汰，
+    /// 防止 request_audit 无界增长。默认 168（7 天）。必须 &gt;= 1，由 RouterOptionsValidator 强制。
+    /// </summary>
+    public int AuditRetentionHours { get; set; } = 168;
 }
 
 /// <summary>
