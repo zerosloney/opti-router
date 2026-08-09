@@ -136,7 +136,7 @@
                                 <tr>
                                     <td><strong>@m.Name</strong></td>
                                     <td title="@m.BaseUrl">@Truncate(m.BaseUrl, 25)</td>
-                                    <td>@(m.HasApiKey ? "••••••" : "<span class='text-danger'>未配置</span>")</td>
+                                    <td>@(m.HasApiKey ? (MarkupString)"••••••" : (MarkupString)"<span class='text-danger'>未配置</span>")</td>
                                     <td>@m.Tier</td>
                                     <td>@(m.MaxContextTokens / 1000)K</td>
                                     <td>@m.TimeoutSeconds s</td>
@@ -215,7 +215,8 @@
             NewModel.MaxContextTokens > 0 ? NewModel.MaxContextTokens : 8192,
             NewModel.TimeoutSeconds > 0 ? NewModel.TimeoutSeconds : 120,
             Math.Max(0, NewModel.MaxRetries),
-            NewModel.Enabled,
+            // select 绑 EnabledStr（HTML option 值为 string），需解析为 bool；option 限定 true/false，Parse 安全。
+            bool.Parse(NewModel.EnabledStr),
             Math.Max(0, NewModel.InputPricePerMillion),
             Math.Max(0, NewModel.OutputPricePerMillion),
             null);

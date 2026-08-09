@@ -75,9 +75,8 @@ public sealed class LatencyStatsAggregatorService : BackgroundService
         }
     }
 
-    private async Task AggregateAsync(CancellationToken cancellationToken)
+    private Task AggregateAsync(CancellationToken cancellationToken)
     {
-        await Task.CompletedTask;
         var options = _options.CurrentValue;
         int windowMinutes = options.Routing.LatencyStatsWindowMinutes > 0
             ? options.Routing.LatencyStatsWindowMinutes
@@ -104,5 +103,7 @@ public sealed class LatencyStatsAggregatorService : BackgroundService
             // 聚合失败不应影响请求路径。下次周期重试。
             _logger.LogWarning(ex, "Latency stats aggregation failed");
         }
+
+        return Task.CompletedTask;
     }
 }
