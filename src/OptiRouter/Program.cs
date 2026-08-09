@@ -7,6 +7,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
+using OptiRouter.Components.Services;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
 using OptiRouter.Health;
@@ -205,6 +206,10 @@ builder.Services.AddHostedService<LatencyStatsAggregatorService>();
 builder.Services.AddHealthChecks()
     .AddCheck<CostLedgerHealthCheck>("cost-ledger", failureStatus: HealthStatus.Unhealthy);
 
+// Blazor Server：组件化 Dashboard + 模型配置 UI。
+builder.Services.AddServerSideBlazor();
+builder.Services.AddHttpClient<ApiService>();
+
 int requestsPerMinute = builder.Configuration.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? 60;
 if (requestsPerMinute <= 0)
     throw new InvalidOperationException("OptiRouter:RequestsPerMinute must be greater than zero.");
@@ -365,22 +370,10 @@ app.MapChatCompletions();
 app.MapModelsEndpoint();
 
 // 注册可视化监控 Dashboard 与模型配置页（两页职责分离）
-// Serve dashboard.js / models.js (extracted from embedded string to avoid C# verbatim-string JS escaping issues)
-app.MapGet("/dashboard.js", (IWebHostEnvironment env) =>
-{
-    string path = Path.Combine(env.ContentRootPath, "dashboard.js");
-    if (!File.Exists(path))
-        return Results.NotFound();
-    return Results.File(path, "application/javascript; charset=utf-8");
-});
-
-app.MapGet("/models.js", (IWebHostEnvironment env) =>
-{
-    string path = Path.Combine(env.ContentRootPath, "models.js");
-    if (!File.Exists(path))
-        return Results.NotFound();
-    return Results.File(path, "application/javascript; charset=utf-8");
-});
+// Blazor Server UI routes: /dashboard and /models are served by _Host.cshtml Razor Pages.
+app.MapRazorPages();
+app.MapBlazorHub();
+app.MapFallbackToPage("/_Host");
 
 app.MapDashboardEndpoints();
 app.MapModelsConfigEndpoints();

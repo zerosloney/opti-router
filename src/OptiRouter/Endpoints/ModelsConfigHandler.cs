@@ -12,14 +12,8 @@ public static class ModelsConfigHandler
     /// </summary>
     public static void MapModelsConfigEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        // 1. Models Config UI (served from static file)
-        endpoints.MapGet("/models", (IWebHostEnvironment env) =>
-        {
-            string path = Path.Combine(env.ContentRootPath, "models.html");
-            if (!File.Exists(path))
-                return Results.NotFound();
-            return Results.File(path, "text/html; charset=utf-8");
-        });
+        // 1. Models Config UI is now served by Blazor Server via Pages/Models/_Host.cshtml (Razor Pages routing).
+        //    Old MapGet removed - was: static models.html served here.
 
         // 2. GET all (不暴露完整 ApiKey，只返回是否已配置)
         endpoints.MapGet("/api/models", (ModelsConfigService cfg) =>

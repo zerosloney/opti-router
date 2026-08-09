@@ -1,0 +1,306 @@
+@page "/dashboard"
+@inject ApiService Api
+@inject IJSRuntime JS
+
+<PageTitle>OptiRouter - 监控面板</PageTitle>
+
+<div class="page-grid">
+    <!-- 侧边栏 -->
+    <aside class="sidebar">
+        <!-- 日预算 -->
+        <div class="glass-card">
+            <div class="card-label">日预算消耗</div>
+            <div class="stat-value">$@((Metrics?.System.Budget.DailySpend ?? 0).ToString("F6"))</div>
+            <div class="budget-bar">
+                <div class="budget-fill" style="width: @(BudgetPercent)%"></div>
+            </div>
+            <div class="budget-text">
+                <span>@BudgetPercent.ToString("F2")% 已用</span>
+                <span>上限 $@((Metrics?.System.Budget.DailyBudgetUsd ?? 0).ToString("F2"))</span>
+            </div>
+        </div>
+
+        <!-- 累计消费 -->
+        <div class="glass-card">
+            <div class="card-label">累计消费</div>
+            <div class="stat-value" style="color:#38bdf8;">$@((Metrics?.System.Budget.TotalSpend ?? 0).ToString("F6"))</div>
+            <div class="meta-text">服务启动以来的合计</div>
+        </div>
+
+        <!-- 请求统计 -->
+        <div class="glass-card">
+            <div class="card-label">请求统计</div>
+            <div class="stat-row">
+                <span class="stat-row-label">QPS（1分钟）</span>
+                <span class="stat-row-val">@((Metrics?.System.Qps ?? 0).ToString("F1"))</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">总请求数</span>
+                <span class="stat-row-val">@((Metrics?.System.TotalRequests ?? 0).ToString("N0"))</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">总 Token 数</span>
+                <span class="stat-row-val">@((Metrics?.System.TotalTokens ?? 0).ToString("N0"))</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">平均延迟</span>
+                <span class="stat-row-val">@((Metrics?.System.AvgLatencyMs ?? 0).ToString("F1")) ms</span>
+            </div>
+        </div>
+
+        <!-- 路由引擎 -->
+        <div class="glass-card">
+            <div class="card-label">路由引擎</div>
+            <div class="stat-row">
+                <span class="stat-row-label">故障转移</span>
+                <span class="@(IsEnabled(Metrics?.System.Routing.EnableFailover))">@(Metrics?.System.Routing.EnableFailover == true ? "启用" : "禁用")</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">预算防护</span>
+                <span class="@(IsEnabled(Metrics?.System.Routing.EnableBudgetGuard))">@(Metrics?.System.Routing.EnableBudgetGuard == true ? "启用" : "禁用")</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">分类器</span>
+                <span class="@(IsEnabled(Metrics?.System.Routing.EnableRuleClassifier))">@(Metrics?.System.Routing.EnableRuleClassifier == true ? "启用" : "禁用")</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">延迟感知</span>
+                <span class="@(IsEnabled(Metrics?.System.Routing.EnableLatencyAware))">@(Metrics?.System.Routing.EnableLatencyAware == true ? "启用" : "禁用")</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">语义路由</span>
+                <span class="@(IsEnabled(Metrics?.System.Routing.EnableSemanticRouter))">@(Metrics?.System.Routing.EnableSemanticRouter == true ? "启用" : "禁用")</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 主内容 -->
+    <div class="content-area">
+        <!-- 告警 -->
+        @if (Alerts.Any())
+        {
+            <div class="alert-banner alert-@Alerts.First().Level">
+                <span class="indicator pulse"></span>
+                <span>@string.Join(" | ", Alerts.Select(a => a.Message))</span>
+            </div>
+        }
+
+        <!-- 费用趋势图 -->
+        <div class="glass-card">
+            <div class="card-label">费用趋势</div>
+            <div class="trend-controls">
+                <button class="@(TrendDays == 7 ? "active" : "")" @onclick="() => SetTrendDays(7)">近7天</button>
+                <button class="@(TrendDays == 30 ? "active" : "")" @onclick="() => SetTrendDays(30)">近30天</button>
+            </div>
+            <div class="chart-container">
+                <canvas id="trend-chart" @ref="ChartCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- 快速统计 -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-card-label">QPS（1分钟）</div>
+                <div class="stat-card-val">@((Metrics?.System.Qps ?? 0).ToString("F1"))</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">总请求数</div>
+                <div class="stat-card-val">@((Metrics?.System.TotalRequests ?? 0).ToString("N0"))</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">总 Token 数</div>
+                <div class="stat-card-val">@((Metrics?.System.TotalTokens ?? 0).ToString("N0"))</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">平均延迟</div>
+                <div class="stat-card-val">@((Metrics?.System.AvgLatencyMs ?? 0).ToString("F1")) ms</div>
+            </div>
+        </div>
+
+        <!-- 模型卡片 -->
+        <div class="models-grid">
+            @if (Metrics?.Models != null)
+            {
+                @foreach (var m in Metrics.Models)
+                {
+                    <div class="model-card state-@m.CircuitState.ToLower()">
+                        <div class="card-header-row">
+                            <div>
+                                <div class="model-name">@m.Name</div>
+                                <div class="model-tier">@m.Tier Tier</div>
+                            </div>
+                            <span class="badge badge-@CircuitBadge(m.CircuitState)">@CircuitText(m.CircuitState)</span>
+                        </div>
+
+                        <div class="info-grid">
+                            <span class="info-label">BaseUrl</span>
+                            <span class="info-val" title="@m.BaseUrl">@Truncate(m.BaseUrl, 25)</span>
+                            <span class="info-label">输入 $/M</span>
+                            <span class="info-val">$@m.InputPricePerMillion.ToString("F2")</span>
+                            <span class="info-label">输出 $/M</span>
+                            <span class="info-val">$@m.OutputPricePerMillion.ToString("F2")</span>
+                            <span class="info-label">最大上下文</span>
+                            <span class="info-val">@m.MaxContextTokens.ToString("N0")</span>
+                            <span class="info-label">Tags</span>
+                            <span class="info-val" title="@string.Join(", ", m.Tags ?? new())">@(m.Tags?.Any() == true ? string.Join(", ", m.Tags) : "-")</span>
+                        </div>
+
+                        <div class="metrics-row">
+                            <div class="metric-item">
+                                <span class="metric-label">失败次数</span>
+                                <span class="metric-val @(m.FailureCount > 0 ? "text-danger" : "")">@m.FailureCount</span>
+                            </div>
+                            <div class="metric-item" style="text-align:center;">
+                                <span class="metric-label">平均延迟</span>
+                                <span class="metric-val @(m.LatencySamples > 0 ? "text-primary" : "")">@(m.LatencySamples > 0 ? $"{m.AvgLatencyMs:F0} ms" : "--")</span>
+                            </div>
+                            <div class="metric-item" style="text-align:center;">
+                                <span class="metric-label">延迟样本</span>
+                                <span class="metric-val">@m.LatencySamples</span>
+                            </div>
+                            <div class="metric-item" style="text-align:right;">
+                                <span class="metric-label">活跃探测</span>
+                                <span class="metric-val @(m.ActiveProbes > 0 ? "text-warning" : "")">@m.ActiveProbes</span>
+                            </div>
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+
+        <!-- 审计日志 -->
+        <div class="glass-card">
+            <div class="card-label">请求审计日志</div>
+            <div class="log-controls">
+                <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" @bind:event="oninput" />
+                <select @bind="LogLimit">
+                    <option value="50">每页 50 条</option>
+                    <option value="100">每页 100 条</option>
+                </select>
+                <button class="btn-primary" @onclick="LoadLogs">加载</button>
+            </div>
+            <div class="table-wrap">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th>时间</th><th>模型</th><th>Token</th><th>费用</th><th>延迟</th><th>状态</th><th>流式</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (AuditItems.Any())
+                        {
+                            @foreach (var item in AuditItems)
+                            {
+                                <tr>
+                                    <td>@item.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
+                                    <td>@item.Model</td>
+                                    <td>@(item.PromptTokens + item.CompletionTokens)</td>
+                                    <td>
+                                        $@item.Cost.ToString("F6")
+                                        @if (item.IsEstimated)
+                                        {
+                                            <span class="tag tag-warning">预估</span>
+                                        }
+                                    </td>
+                                    <td>@item.LatencyMs.ToString("F0") ms</td>
+                                    <td class="@(item.Success ? "text-success" : "text-danger")">@(item.Success ? "成功" : "失败")</td>
+                                    <td>@(item.IsStreaming ? "是" : "否")</td>
+                                </tr>
+                            }
+                        }
+                        else
+                        {
+                            <tr><td colspan="7" class="text-center text-secondary">暂无数据</td></tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <div class="pagination">
+                <span class="text-secondary">显示 @AuditItems.Count 条，共 @AuditTotal 条</span>
+                <div>
+                    <button disabled="@(LogOffset == 0)" @onclick="() => { LogOffset = Math.Max(0, LogOffset - LogLimit); _ = LoadLogs(); }">上一页</button>
+                    <button disabled="@(LogOffset + LogLimit >= AuditTotal)" @onclick="() => { LogOffset += LogLimit; _ = LoadLogs(); }">下一页</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@code {
+    private ApiService.DashboardMetrics? Metrics;
+    private List<ApiService.DailySpend> Trends = new();
+    private List<ApiService.AlertInfo> Alerts => Metrics?.System.Alerts ?? new();
+    private int TrendDays = 7;
+    private int LogOffset = 0;
+    private int LogLimit = 50;
+    private string? LogFilterModel;
+    private int AuditTotal = 0;
+    private List<ApiService.AuditItem> AuditItems = new();
+    private ElementReference ChartCanvas;
+    private Timer? _refreshTimer;
+
+    private double BudgetPercent =>
+        (Metrics?.System.Budget.DailyBudgetUsd ?? 0) > 0
+            ? (double)(Metrics?.System.Budget.DailySpend ?? 0) / (double)Metrics!.System.Budget.DailyBudgetUsd * 100
+            : 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshAll();
+        _refreshTimer = new Timer(async _ =>
+        {
+            await RefreshMetrics();
+            _ = InvokeAsync(StateHasChanged);
+        }, null, 2000, 2000);
+    }
+
+    private async Task RefreshAll()
+    {
+        await Task.WhenAll(RefreshMetrics(), LoadLogs());
+    }
+
+    private async Task RefreshMetrics()
+    {
+        Metrics = await Api.GetMetricsAsync();
+        var newTrends = await Api.GetTrendsAsync(TrendDays);
+        if (newTrends.Count != Trends.Count || Trends.Zip(newTrends, (a, b) => a.Amount != b.Amount).Any())
+        {
+            Trends = newTrends;
+            await DrawChart();
+        }
+    }
+
+    private async Task LoadLogs()
+    {
+        var page = await Api.GetAuditLogAsync(LogLimit, LogOffset, LogFilterModel);
+        AuditItems = page.Items;
+        AuditTotal = page.TotalCount;
+    }
+
+    private async Task SetTrendDays(int days)
+    {
+        TrendDays = days;
+        Trends = await Api.GetTrendsAsync(days);
+        await DrawChart();
+    }
+
+    private async Task DrawChart()
+    {
+        if (Trends.Count == 0) return;
+        try
+        {
+            await JS.InvokeVoidAsync("drawTrendChart", ChartCanvas, Trends);
+        }
+        catch { /* chart init may be delayed */ }
+    }
+
+    private static string IsEnabled(bool? v) => v == true ? "toggle-on" : "toggle-off";
+    private static string CircuitBadge(string s) => s.ToLower() switch { "open" => "danger", "halfopen" => "warning", _ => "success" };
+    private static string CircuitText(string s) => s.ToLower() switch { "open" => "熔断", "halfopen" => "半开", _ => "正常" };
+    private static string Truncate(string? s, int len) => s != null && s.Length > len ? s[..len] + "..." : s ?? "-";
+
+    public void Dispose()
+    {
+        _refreshTimer?.Dispose();
+    }
+}

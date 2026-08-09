@@ -1,0 +1,332 @@
+@page "/models"
+@inject ApiService Api
+
+<PageTitle>OptiRouter - 模型配置</PageTitle>
+
+<div class="models-page">
+    <!-- Banner -->
+    <div class="alert-banner alert-info">
+        <span class="indicator pulse"></span>
+        <span>模型配置页。增删改后立即热生效（写入 models-config.json 并触发配置重载）。</span>
+    </div>
+
+    <div class="glass-card">
+        <div class="card-header-row">
+            <div class="card-label">模型配置</div>
+            <button class="btn-primary" @onclick="ToggleAddForm">
+                @(ShowAddForm ? "- 取消添加" : "+ 添加模型")
+            </button>
+        </div>
+
+        <!-- 添加表单 -->
+        @if (ShowAddForm)
+        {
+            <div class="add-form">
+                <div class="form-grid">
+                    <div class="form-field full">
+                        <label>名称 *</label>
+                        <input type="text" @bind="NewModel.Name" placeholder="如 gpt-4o" />
+                    </div>
+                    <div class="form-field full">
+                        <label>BaseUrl *</label>
+                        <input type="text" @bind="NewModel.BaseUrl" placeholder="https://api.openai.com/v1" />
+                    </div>
+                    <div class="form-field full">
+                        <label>ApiKey</label>
+                        <input type="password" @bind="NewModel.ApiKey" placeholder="sk-..." />
+                    </div>
+                    <div class="form-field">
+                        <label>Tier</label>
+                        <select @bind="NewModel.Tier">
+                            <option value="Strong">Strong</option>
+                            <option value="Medium">Medium</option>
+                            <option value="Cheap">Cheap</option>
+                        </select>
+                    </div>
+                    <div class="form-field">
+                        <label>最大上下文 Token</label>
+                        <input type="number" @bind="NewModel.MaxContextTokens" min="1" />
+                    </div>
+                    <div class="form-field">
+                        <label>超时（秒）</label>
+                        <input type="number" @bind="NewModel.TimeoutSeconds" min="1" />
+                    </div>
+                    <div class="form-field">
+                        <label>最大重试次数</label>
+                        <input type="number" @bind="NewModel.MaxRetries" min="0" />
+                    </div>
+                    <div class="form-field">
+                        <label>输入价格 $/M</label>
+                        <input type="number" @bind="NewModel.InputPricePerMillion" min="0" step="0.001" />
+                    </div>
+                    <div class="form-field">
+                        <label>输出价格 $/M</label>
+                        <input type="number" @bind="NewModel.OutputPricePerMillion" min="0" step="0.001" />
+                    </div>
+                    <div class="form-field">
+                        <label>启用</label>
+                        <select @bind="NewModel.EnabledStr">
+                            <option value="true">是</option>
+                            <option value="false">否</option>
+                        </select>
+                    </div>
+                </div>
+                @if (!string.IsNullOrEmpty(ErrorMsg))
+                {
+                    <div class="form-error">@ErrorMsg</div>
+                }
+                <div class="form-actions">
+                    <button class="btn-ghost" @onclick="ToggleAddForm">取消</button>
+                    <button class="btn-primary" @onclick="SubmitAdd">确认添加</button>
+                </div>
+            </div>
+        }
+
+        <!-- 模型列表 -->
+        <div class="table-wrap">
+            <table class="config-table">
+                <thead>
+                    <tr>
+                        <th>名称</th><th>BaseUrl</th><th>ApiKey</th><th>Tier</th><th>上下文</th>
+                        <th>超时</th><th>重试</th><th>启用</th><th>输入$/M</th><th>输出$/M</th><th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (!ModelList.Any())
+                    {
+                        <tr><td colspan="11" class="text-center text-secondary">暂无模型配置，点击上方"+ 添加模型"开始添加。</td></tr>
+                    }
+                    else
+                    {
+                        @foreach (var m in ModelList)
+                        {
+                            @if (EditingName == m.Name)
+                            {
+                                <!-- 内联编辑行 -->
+                                <tr class="editing-row">
+                                    <td><strong>@m.Name</strong></td>
+                                    <td><input type="text" @bind="EditModel.BaseUrl" /></td>
+                                    <td><input type="password" @bind="EditModel.ApiKey" placeholder="(不变更则留空)" /></td>
+                                    <td>
+                                        <select @bind="EditModel.Tier">
+                                            <option value="Strong">Strong</option>
+                                            <option value="Medium">Medium</option>
+                                            <option value="Cheap">Cheap</option>
+                                        </select>
+                                    </td>
+                                    <td><input type="number" @bind="EditModel.MaxContextTokens" min="1" /></td>
+                                    <td><input type="number" @bind="EditModel.TimeoutSeconds" min="1" /></td>
+                                    <td><input type="number" @bind="EditModel.MaxRetries" min="0" /></td>
+                                    <td>
+                                        <select @bind="EditModel.EnabledStr">
+                                            <option value="true">是</option>
+                                            <option value="false">否</option>
+                                        </select>
+                                    </td>
+                                    <td><input type="number" @bind="EditModel.InputPricePerMillion" step="0.001" /></td>
+                                    <td><input type="number" @bind="EditModel.OutputPricePerMillion" step="0.001" /></td>
+                                    <td>
+                                        <button class="btn-primary btn-sm" @onclick="() => SubmitEdit(m.Name)">保存</button>
+                                        <button class="btn-ghost btn-sm" @onclick="CancelEdit">取消</button>
+                                    </td>
+                                </tr>
+                            }
+                            else
+                            {
+                                <tr>
+                                    <td><strong>@m.Name</strong></td>
+                                    <td title="@m.BaseUrl">@Truncate(m.BaseUrl, 25)</td>
+                                    <td>@(m.HasApiKey ? "••••••" : "<span class='text-danger'>未配置</span>")</td>
+                                    <td>@m.Tier</td>
+                                    <td>@(m.MaxContextTokens / 1000)K</td>
+                                    <td>@m.TimeoutSeconds s</td>
+                                    <td>@m.MaxRetries</td>
+                                    <td class="@(m.Enabled ? "text-success" : "text-secondary")">@(m.Enabled ? "是" : "否")</td>
+                                    <td>$@m.InputPricePerMillion.ToString("F3")</td>
+                                    <td>$@m.OutputPricePerMillion.ToString("F3")</td>
+                                    <td>
+                                        <button class="btn-primary btn-sm" @onclick="() => StartEdit(m)">编辑</button>
+                                        <button class="btn-danger btn-sm" @onclick="() => Delete(m.Name)">删除</button>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(ToastMsg))
+{
+    <div class="toast-overlay">
+        <div class="toast-content @(ToastIsError ? "toast-error" : "toast-success")">
+            <span>@ToastMsg</span>
+            <button @onclick="() => ToastMsg = null">&times;</button>
+        </div>
+    </div>
+}
+
+@code {
+    private List<ApiService.ModelDto> ModelList = new();
+    private bool ShowAddForm = false;
+    private string? EditingName;
+    private string? ErrorMsg;
+    private string? ToastMsg;
+    private bool ToastIsError = false;
+
+    // New model form — use a mutable object to support binding
+    private NewModelForm NewModel = new();
+    private EditModelForm EditModel = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadModels();
+    }
+
+    private async Task LoadModels()
+    {
+        ModelList = await Api.GetModelsAsync() ?? new();
+    }
+
+    private void ToggleAddForm()
+    {
+        ShowAddForm = !ShowAddForm;
+        if (ShowAddForm)
+        {
+            NewModel = new();
+            ErrorMsg = null;
+        }
+    }
+
+    private async Task SubmitAdd()
+    {
+        ErrorMsg = null;
+        if (string.IsNullOrWhiteSpace(NewModel.Name))
+        { ErrorMsg = "名称不能为空"; return; }
+        if (string.IsNullOrWhiteSpace(NewModel.BaseUrl))
+        { ErrorMsg = "BaseUrl 不能为空"; return; }
+
+        var req = new ApiService.CreateModelRequest(
+            NewModel.Name.Trim(), NewModel.BaseUrl.Trim().TrimEnd('/'),
+            string.IsNullOrWhiteSpace(NewModel.ApiKey) ? null : NewModel.ApiKey,
+            NewModel.Tier,
+            NewModel.MaxContextTokens > 0 ? NewModel.MaxContextTokens : 8192,
+            NewModel.TimeoutSeconds > 0 ? NewModel.TimeoutSeconds : 120,
+            Math.Max(0, NewModel.MaxRetries),
+            NewModel.Enabled,
+            Math.Max(0, NewModel.InputPricePerMillion),
+            Math.Max(0, NewModel.OutputPricePerMillion),
+            null);
+
+        var ok = await Api.CreateModelAsync(req);
+        if (ok)
+        {
+            Toast($"模型 \"{NewModel.Name}\" 添加成功");
+            ShowAddForm = false;
+            await LoadModels();
+        }
+        else
+        {
+            ErrorMsg = "创建失败，请检查配置是否正确";
+        }
+    }
+
+    private void StartEdit(ApiService.ModelDto m)
+    {
+        EditingName = m.Name;
+        EditModel = new EditModelForm
+        {
+            BaseUrl = m.BaseUrl,
+            ApiKey = "",
+            Tier = m.Tier,
+            MaxContextTokens = m.MaxContextTokens,
+            TimeoutSeconds = m.TimeoutSeconds,
+            MaxRetries = m.MaxRetries,
+            EnabledStr = m.Enabled.ToString().ToLower(),
+            InputPricePerMillion = m.InputPricePerMillion,
+            OutputPricePerMillion = m.OutputPricePerMillion
+        };
+    }
+
+    private void CancelEdit()
+    {
+        EditingName = null;
+    }
+
+    private async Task SubmitEdit(string name)
+    {
+        var req = new ApiService.UpdateModelRequest(
+            string.IsNullOrWhiteSpace(EditModel.BaseUrl) ? null : EditModel.BaseUrl.TrimEnd('/'),
+            string.IsNullOrWhiteSpace(EditModel.ApiKey) ? null : EditModel.ApiKey,
+            EditModel.Tier,
+            EditModel.MaxContextTokens > 0 ? EditModel.MaxContextTokens : null,
+            EditModel.TimeoutSeconds > 0 ? EditModel.TimeoutSeconds : null,
+            EditModel.MaxRetries >= 0 ? EditModel.MaxRetries : null,
+            bool.TryParse(EditModel.EnabledStr, out var en) ? en : null,
+            EditModel.InputPricePerMillion >= 0 ? EditModel.InputPricePerMillion : null,
+            EditModel.OutputPricePerMillion >= 0 ? EditModel.OutputPricePerMillion : null);
+
+        var ok = await Api.UpdateModelAsync(name, req);
+        if (ok)
+        {
+            Toast($"模型 \"{name}\" 更新成功");
+            EditingName = null;
+            await LoadModels();
+        }
+        else
+        {
+            Toast($"更新失败", true);
+        }
+    }
+
+    private async Task Delete(string name)
+    {
+        if (!await Api.DeleteModelAsync(name))
+        {
+            Toast($"删除失败", true);
+            return;
+        }
+        Toast($"模型 \"{name}\" 已删除");
+        await LoadModels();
+    }
+
+    private void Toast(string msg, bool isError = false)
+    {
+        ToastMsg = msg;
+        ToastIsError = isError;
+        _ = Task.Delay(3000).ContinueWith(_ => InvokeAsync(() => { ToastMsg = null; StateHasChanged(); }));
+    }
+
+    private static string Truncate(string? s, int len) => s != null && s.Length > len ? s[..len] + "..." : s ?? "-";
+
+    // Mutable form helpers
+    private class NewModelForm
+    {
+        public string Name { get; set; } = "";
+        public string BaseUrl { get; set; } = "";
+        public string? ApiKey { get; set; }
+        public string Tier { get; set; } = "Medium";
+        public int MaxContextTokens { get; set; } = 8192;
+        public int TimeoutSeconds { get; set; } = 120;
+        public int MaxRetries { get; set; } = 0;
+        public bool Enabled { get; set; } = true;
+        public decimal InputPricePerMillion { get; set; } = 0;
+        public decimal OutputPricePerMillion { get; set; } = 0;
+        public string EnabledStr { get; set; } = "true";
+    }
+
+    private class EditModelForm
+    {
+        public string BaseUrl { get; set; } = "";
+        public string? ApiKey { get; set; }
+        public string Tier { get; set; } = "Medium";
+        public int MaxContextTokens { get; set; } = 8192;
+        public int TimeoutSeconds { get; set; } = 120;
+        public int MaxRetries { get; set; } = 0;
+        public string EnabledStr { get; set; } = "true";
+        public decimal InputPricePerMillion { get; set; } = 0;
+        public decimal OutputPricePerMillion { get; set; } = 0;
+    }
+}

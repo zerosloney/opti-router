@@ -16,14 +16,8 @@ public static class DashboardHandler
     /// <param name="endpoints">路由构建器。</param>
     public static void MapDashboardEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        // 1. Dashboard UI Main View (served from static file)
-        endpoints.MapGet("/dashboard", (IWebHostEnvironment env) =>
-        {
-            string path = Path.Combine(env.ContentRootPath, "dashboard.html");
-            if (!File.Exists(path))
-                return Results.NotFound();
-            return Results.File(path, "text/html; charset=utf-8");
-        });
+        // 1. Dashboard UI is now served by Blazor Server via Pages/Dashboard/_Host.cshtml (Razor Pages routing).
+        //    Old MapGet removed - was: static dashboard.html served here.
 
         // 2. Dashboard Live Metrics API (cached 1s)
         endpoints.MapGet("/api/dashboard/metrics", (
