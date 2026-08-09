@@ -142,7 +142,8 @@ data/
 .omp/
 .opencode/
 .agents/
-.trellis/
+.kilocode/
+.kiro/
 *.dbmdl
 *.dbproj.schemaview
 *.pfx
