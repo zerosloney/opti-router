@@ -294,14 +294,37 @@ public class SemanticRouterTests
     }
 
     [Fact]
-    public void CjkTokenizer_SegmenterExtractsUnigramsAndBigrams()
+    public void CjkTokenizer_ExtractsBigramsFromCjkRuns()
     {
+        // CJK 按 CJK 连续性分段，非 CJK 字符断段。每段产 Bigram，单字段段兜底 Unigram。
+        // "写 Python 快排" → Latin "python"；CJK 两段 "写"(单字兜底→"写")、"快排"(→"快排")。
         var tokens = TfIdfSemanticVectorEngine.Tokenize("写 Python 快排");
         Assert.Contains("python", tokens);
+        Assert.Contains("写", tokens);       // 单字段兜底
+        Assert.Contains("快排", tokens);     // bigram
+        Assert.DoesNotContain("快", tokens); // bigram-only：不含孤立单字（"快排"段 ≥2 字）
+        Assert.DoesNotContain("排", tokens);
+    }
+
+    [Fact]
+    public void CjkTokenizer_MultiCharRunProducesOnlyBigrams()
+    {
+        // "写代码" 单段 3 字 → 仅相邻 bigram，token 数 ≈ Latin 量级（原 unigram+bigram 产 5 token）。
+        var tokens = TfIdfSemanticVectorEngine.Tokenize("写代码");
+        Assert.Equal(new[] { "写代", "代码" }, tokens);
+    }
+
+    [Fact]
+    public void CjkTokenizer_MixedCjkLatinSplitsAtBoundary()
+    {
+        // "用py写" → Latin "py"；CJK 两段 "用"(单字兜底)、"写"(单字兜底)。
+        // 跨 CJK/Latin 边界不产混合 bigram（无 "用py"/"py写"）。
+        var tokens = TfIdfSemanticVectorEngine.Tokenize("用py写");
+        Assert.Contains("py", tokens);
+        Assert.Contains("用", tokens);
         Assert.Contains("写", tokens);
-        Assert.Contains("快", tokens);
-        Assert.Contains("排", tokens);
-        Assert.Contains("快排", tokens);
+        Assert.DoesNotContain("用py", tokens);
+        Assert.DoesNotContain("py写", tokens);
     }
 
     [Fact]

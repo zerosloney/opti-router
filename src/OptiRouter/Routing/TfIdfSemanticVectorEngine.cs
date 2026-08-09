@@ -186,8 +186,13 @@ public sealed class TfIdfSemanticVectorEngine : ISemanticVectorEngine
     }
 
     /// <summary>
-    /// 混合分词器：英文/数字提取 Word Tokens，CJK 中日韩字符提取 Unigram + Bigram，
+    /// 混合分词器：英文/数字提取 Word Tokens，CJK 连续段提取 Bigram（单字段段兜底 Unigram）。
     /// 解决中英文混合意图在 TF-IDF 向量空间无空格分词导致的全句匹配失败问题。
+    /// <para>
+    /// CJK 仅产 Bigram（Unigram+Bigram 会让 CJK 文本 token 数约为 Latin 的 2x，
+    /// TF/df 权重不对称，跨语言路由库 cosine 有偏）。Bigram 已隐含 Unigram 信息。
+    /// 单字段孤立 CJK 段产 Unigram 兜底，避免零 token。
+    /// </para>
     /// </summary>
     public static List<string> Tokenize(string text)
     {
@@ -201,29 +206,40 @@ public sealed class TfIdfSemanticVectorEngine : ISemanticVectorEngine
             list.Add(m.Value.ToLowerInvariant());
         }
 
-        // 2. 提取 CJK 字符 Unigram 与 Bigram
-        var cjkChars = new List<char>();
+        // 2. CJK 连续段提取 Bigram（按 CJK 连续性分段，非 CJK 字符断段）。
+        var run = new List<char>();
         foreach (char c in text)
         {
             if (IsCjkCharacter(c))
             {
-                cjkChars.Add(c);
+                run.Add(c);
             }
-        }
-
-        for (int i = 0; i < cjkChars.Count; i++)
-        {
-            // 单字 Unigram
-            list.Add(cjkChars[i].ToString());
-
-            // 划窗双字 Bigram
-            if (i < cjkChars.Count - 1)
+            else
             {
-                list.Add(new string(new[] { cjkChars[i], cjkChars[i + 1] }));
+                FlushCjkRun(run, list);
+                run.Clear();
             }
         }
+        FlushCjkRun(run, list);
 
         return list;
+    }
+
+    /// <summary>
+    /// 输出一个 CJK 连续段的 token：多字段段产相邻 Bigram，单字段段产 Unigram 兜底。
+    /// </summary>
+    private static void FlushCjkRun(List<char> run, List<string> tokens)
+    {
+        if (run.Count == 0) return;
+        if (run.Count == 1)
+        {
+            tokens.Add(run[0].ToString()); // 单字兜底，避免零 token。
+            return;
+        }
+        for (int i = 0; i < run.Count - 1; i++)
+        {
+            tokens.Add(new string(new[] { run[i], run[i + 1] }));
+        }
     }
 
     private static bool IsCjkCharacter(char c)
