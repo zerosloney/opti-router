@@ -478,8 +478,9 @@ public class OpenAICompatibleModelClientTests
         var handler = CreateHandler(response);
         var client = CreateClient(endpoint, handler);
 
-        // 超限应抛 InvalidOperationException，而非把整行读入后 yield。
-        await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+        // 超限应抛 ResponseSizeLimitExceededException（专用异常，供 endpoint 精确分类为 RESPONSE_TOO_LARGE），
+        // 而非把整行读入后 yield。
+        await Assert.ThrowsAsync<ResponseSizeLimitExceededException>(async () =>
         {
             await foreach (var _ in client.StreamRawAsync(new ChatRequest { Model = "gpt-4o", Messages = new List<ChatMessage>(), Stream = true }))
             {

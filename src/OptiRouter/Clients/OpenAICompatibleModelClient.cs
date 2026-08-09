@@ -159,7 +159,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             if (pendingLineBytes > MaxStreamLineBytes)
             {
                 await reader.CompleteAsync().ConfigureAwait(false);
-                throw new InvalidOperationException(
+                throw new ResponseSizeLimitExceededException(MaxStreamLineBytes,
                     $"Upstream stream line exceeded {MaxStreamLineBytes} bytes; aborting to prevent OOM.");
             }
 
@@ -354,7 +354,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 if (pendingLineBytes > MaxStreamLineBytes)
                 {
                     await reader.CompleteAsync().ConfigureAwait(false);
-                    throw new InvalidOperationException(
+                    throw new ResponseSizeLimitExceededException(MaxStreamLineBytes,
                         $"Upstream stream line exceeded {MaxStreamLineBytes} bytes; aborting to prevent OOM.");
                 }
 

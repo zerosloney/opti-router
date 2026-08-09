@@ -20,13 +20,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly IModelClientProvider _clientProvider;
     private readonly RouterEngine _engine;
     private readonly IOptionsMonitor<RouterOptions> _options;
-    private readonly CostLedger _ledger;
     private readonly ModelHealthTracker _healthTracker;
     private readonly ILogger<ProxyOrchestrator> _logger;
-    private readonly IRequestAuditStore _auditStore;
-    private readonly IMemoryCache _affinityCache;
-    private readonly ThompsonStateStore _tsStore;
-    private readonly RouterMetrics _metrics;
+    private readonly OutcomeRecorder _recorder;
+    private readonly CascadeUpgradeHandler _cascadeHandler;
+    private readonly FusionRouter _fusionRouter;
+    private readonly RaceOrchestrator _raceOrchestrator;
     private bool _disposed;
 
     /// <summary>
@@ -36,51 +35,42 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// <param name="engine">路由引擎。</param>
     /// <param name="options">路由配置监视器。Routing 开关经 reload 可生效；
     /// 但 Models 端点（BaseUrl/ApiKey/Timeout）按模型名缓存在 ModelClientProvider，变更需重启进程。</param>
-    /// <param name="ledger">成本账本。</param>
     /// <param name="healthTracker">跨请求模型健康跟踪器。</param>
-    /// <param name="auditStore">请求审计存储。</param>
-    /// <param name="affinityCache">会话粘性缓存。请求成功后回写本次模型名，供 SessionAffinityPolicy 下次提升。</param>
-    /// <param name="tsStore">Thompson 采样参数存储中心，传入空时将默认自建（供向后兼容）。</param>
-    /// <param name="metrics">Prometheus 指标记录器。</param>
+    /// <param name="recorder">统一的审计/成本/指标/粘性/Thompson 记录器。</param>
+    /// <param name="cascadeHandler">Cheap→Strong 级联自校验处理器。</param>
+    /// <param name="fusionRouter">panel→analyst→outer 融合路由器。</param>
+    /// <param name="raceOrchestrator">并行首试（Fusion-lite）编排器。</param>
     /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
         RouterEngine engine,
         IOptionsMonitor<RouterOptions> options,
-        CostLedger ledger,
         ModelHealthTracker healthTracker,
-        IRequestAuditStore auditStore,
-        IMemoryCache affinityCache,
-        ThompsonStateStore? tsStore,
-        RouterMetrics metrics,
+        OutcomeRecorder recorder,
+        CascadeUpgradeHandler cascadeHandler,
+        FusionRouter fusionRouter,
+        RaceOrchestrator raceOrchestrator,
         ILogger<ProxyOrchestrator> logger)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(ledger);
         ArgumentNullException.ThrowIfNull(healthTracker);
-        ArgumentNullException.ThrowIfNull(auditStore);
-        ArgumentNullException.ThrowIfNull(affinityCache);
-        ArgumentNullException.ThrowIfNull(metrics);
+        ArgumentNullException.ThrowIfNull(recorder);
+        ArgumentNullException.ThrowIfNull(cascadeHandler);
+        ArgumentNullException.ThrowIfNull(fusionRouter);
+        ArgumentNullException.ThrowIfNull(raceOrchestrator);
         ArgumentNullException.ThrowIfNull(logger);
 
         _clientProvider = clientProvider;
         _engine = engine;
         _options = options;
-        _ledger = ledger;
         _healthTracker = healthTracker;
-        _auditStore = auditStore;
-        _affinityCache = affinityCache;
-        _tsStore = tsStore ?? new ThompsonStateStore();
-        _metrics = metrics;
+        _recorder = recorder;
+        _cascadeHandler = cascadeHandler;
+        _fusionRouter = fusionRouter;
+        _raceOrchestrator = raceOrchestrator;
         _logger = logger;
-    }
-
-    private void RecordThompsonOutcome(string modelName, bool isGood)
-    {
-        var routing = _options.CurrentValue.Routing;
-        _tsStore.RecordOutcome(modelName, isGood, routing.ThompsonDiscountFactor);
     }
 
     /// <summary>
@@ -137,7 +127,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 && decision.Candidates.Count >= 2)
             {
                 fusionRouterAttempted = true;
-                var fusionResult = await TryFusionRouterAsync(
+                var fusionResult = await _fusionRouter.ExecuteAsync(
                     request, options, decision, estimatedTokens, routedTier,
                     sessionId, failedInThisRequest, attemptedModels, ct).ConfigureAwait(false);
 
@@ -156,7 +146,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 && failedInThisRequest.Count == 0 && !request.Stream
                 && decision.Candidates.Count >= 2)
             {
-                var fusionResult = await TryParallelFirstAttemptAsync(
+                var fusionResult = await _raceOrchestrator.ExecuteAsync(
                     request, options, decision, estimatedTokens, routedTier,
                     sessionId, failedInThisRequest, attemptedModels, ct).ConfigureAwait(false);
 
@@ -200,23 +190,23 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (response.Usage is not null)
                     {
                         var cost = CostCalculator.Compute(response.Usage, candidate);
-                        RecordCost(cost, sessionId);
-                        RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
+                        _recorder.RecordCost(cost, sessionId);
+                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
                     }
                     else
                     {
-                        RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
+                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
                     outcomeReported = true;
-                    RecordAffinity(sessionId, candidate.Name);
+                    _recorder.RecordAffinity(sessionId, candidate.Name);
 
                     // 级联自校验：Cheap 首选 + 启用 + 采样命中 → 自校验，低置信升级 Strong。
                     // 仅非流式（流式首 chunk 已透传无法切模型）。失败不影响主流程，返回原 Cheap 答案。
                     if (candidate.Tier == ModelTier.Cheap)
                     {
-                        var upgraded = await TryCascadeUpgradeAsync(
+                        var upgraded = await _cascadeHandler.TryUpgradeAsync(
                              request, response, decision, candidate, estimatedTokens, routedTier, sessionId, failedInThisRequest, ct).ConfigureAwait(false);
                         if (upgraded is not null)
                             return upgraded;
@@ -236,9 +226,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastStatusCode = (int)ex.StatusCode;
                     lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    RecordThompsonOutcome(candidate.Name, false);
+                    _recorder.RecordThompsonOutcome(candidate.Name, false);
                     outcomeReported = true;
-                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 }
@@ -249,9 +239,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastStatusCode = 503;
                     lastErrorMessage = ex.Message;
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    RecordThompsonOutcome(candidate.Name, false);
+                    _recorder.RecordThompsonOutcome(candidate.Name, false);
                     outcomeReported = true;
-                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -263,9 +253,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastErrorMessage = "Request timed out inside the proxy.";
                     // 客户端内部超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    RecordThompsonOutcome(candidate.Name, false);
+                    _recorder.RecordThompsonOutcome(candidate.Name, false);
                     outcomeReported = true;
-                    RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "timeout", false, routedTier);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "timeout", false, routedTier);
                     _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -410,12 +400,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         attemptSw.Stop();
                         bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                        RecordThompsonOutcome(candidate.Name, false);
+                        _recorder.RecordThompsonOutcome(candidate.Name, false);
                         probeResolved = true;
                         string failure = preStreamFailure is ModelClientException modelFailure
                             ? $"status {(int)modelFailure.StatusCode}"
                             : preStreamFailure.Message;
-                        RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
+                        _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                             attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
@@ -431,7 +421,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(firstLine.Data ?? "");
                         if (totalBytesTransferred > maxResponseBytes)
                         {
-                            throw new InvalidOperationException($"Response size limit exceeded ({maxResponseBytes} bytes).");
+                            throw new ResponseSizeLimitExceededException(maxResponseBytes,
+                                $"Response size limit exceeded ({maxResponseBytes} bytes).");
                         }
                         yield return firstLine;
 
@@ -460,7 +451,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(line.Data ?? "");
                             if (totalBytesTransferred > maxResponseBytes)
                             {
-                                throw new InvalidOperationException($"Response size limit exceeded ({maxResponseBytes} bytes).");
+                                throw new ResponseSizeLimitExceededException(maxResponseBytes,
+                                    $"Response size limit exceeded ({maxResponseBytes} bytes).");
                             }
                             yield return line;
                         }
@@ -473,14 +465,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 流正常结束，记账 + 标记健康。
                     if (finalUsage is not null)
                     {
-                        RecordCost(CostCalculator.Compute(finalUsage, candidate), sessionId);
+                        _recorder.RecordCost(CostCalculator.Compute(finalUsage, candidate), sessionId);
                     }
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
-                    RecordAffinity(sessionId, candidate.Name);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
+                    _recorder.RecordAffinity(sessionId, candidate.Name);
                     probeResolved = true;
                     attemptSw.Stop();
-                    RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
+                    _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
                         finalUsage is not null ? CostCalculator.Compute(finalUsage, candidate) : 0m,
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
@@ -498,8 +490,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             // 中途失败计入断路器统计（与非流式失败同等对待）。
                             attemptSw.Stop();
                             bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                            RecordThompsonOutcome(candidate.Name, false);
-                            RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
+                            _recorder.RecordThompsonOutcome(candidate.Name, false);
+                            _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                                 attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier);
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                                 candidate.Name, tripped ? " (circuit tripped)" : "");
@@ -547,761 +539,4 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         return statusCode is 408 or 429 or >= 500 and <= 599;
     }
 
-    /// <summary>
-    /// 按 EstimatedInputTokens × 模型 input 价格预估成本。仅 input 部分（被取消/失败的请求未生成 output）。
-    /// 用于并行首试中被取消/失败的尝试——上游对已接收的请求计费，但本地拿不到真实 Usage。
-    /// estimatedTokens ≤ 0 或 input 价格为 0 时返回 0（避免记零成本噪声）。
-    /// </summary>
-    private static decimal EstimateInputCost(ModelEndpointOptions model, int estimatedTokens)
-    {
-        if (estimatedTokens <= 0) return 0m;
-        return estimatedTokens * model.InputPricePerMillion / 1_000_000m;
-    }
-
-    private void RecordAudit(
-        string? requestId,
-        string model,
-        int estimatedTokens,
-        ChatUsage? usage,
-        decimal cost,
-        long latencyMs,
-        string? sessionId,
-        string routingReason,
-        bool success,
-        string? errorMessage,
-        bool isStreaming,
-        ModelTier routedTier,
-        bool cascadeTriggered = false,
-        string? upgradedFrom = null,
-        bool isAdopted = true,
-        string? parallelGroupId = null,
-        bool isEstimated = false,
-        string? fusionRole = null)
-    {
-        try
-        {
-            _auditStore.Append(new RequestAuditRecord(
-                Timestamp: DateTime.UtcNow,
-                RequestId: requestId,
-                Model: model,
-                EstimatedInputTokens: estimatedTokens,
-                PromptTokens: usage?.PromptTokens ?? 0,
-                CompletionTokens: usage?.CompletionTokens ?? 0,
-                Cost: cost,
-                LatencyMs: latencyMs,
-                SessionId: sessionId,
-                RoutingReason: routingReason,
-                Success: success,
-                ErrorMessage: errorMessage,
-                IsStreaming: isStreaming,
-                RoutedTier: routedTier,
-                CascadeTriggered: cascadeTriggered,
-                UpgradedFrom: upgradedFrom,
-                IsAdopted: isAdopted,
-                ParallelGroupId: parallelGroupId,
-                IsEstimated: isEstimated,
-                FusionRole: fusionRole));
-        }
-        catch
-        {
-            // Audit recording must not break the request path.
-        }
-
-        // Prometheus 指标：与审计同源（成功/各类失败都经过此方法），记录聚合数。
-        // 预估成本（IsEstimated）也计入，与账本语义一致（上游对已发请求计费）。
-        try
-        {
-            _metrics.RecordAttempt(
-                model,
-                routedTier,
-                success,
-                errorMessage,
-                isStreaming,
-                latencyMs,
-                usage?.PromptTokens ?? 0,
-                usage?.CompletionTokens ?? 0,
-                cost);
-        }
-        catch
-        {
-            // 指标记录失败不得影响请求路径。
-        }
-    }
-
-    /// <summary>
-    /// 入账成本，写失败不破坏已成功的请求（与审计一致）。
-    /// 上游已对请求计费，故账本写失败仅记录告警，不向上抛。
-    /// </summary>
-    private void RecordCost(decimal cost, string? sessionId)
-    {
-        try
-        {
-            _ledger.Record(cost, sessionId);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Cost ledger write failed; cost {Cost} not recorded", cost);
-        }
-    }
-
-    /// <summary>
-    /// 记录会话粘性：成功命中某模型后写入内存缓存，供 <see cref="SessionAffinityPolicy"/> 下次决策提升该模型。
-    /// 仅在启用会话粘性且存在 sessionId 时写。写失败（理论上 IMemoryCache 不会抛）不影响主流程。
-    /// </summary>
-    private void RecordAffinity(string? sessionId, string modelName)
-    {
-        if (string.IsNullOrEmpty(sessionId))
-            return;
-        var routing = _options.CurrentValue.Routing;
-        if (!routing.EnableSessionAffinity)
-            return;
-
-        int ttl = routing.SessionAffinityTtlSeconds > 0 ? routing.SessionAffinityTtlSeconds : 600;
-        try
-        {
-            _affinityCache.Set(SessionAffinityPolicy.CacheKeyPrefix + sessionId, modelName, TimeSpan.FromSeconds(ttl));
-        }
-        catch
-        {
-            // 粘性记录失败不应影响已成功的请求。
-        }
-    }
-
-    /// <summary>
-    /// Cheap→Strong 级联自校验。返回 null 表示不升级（用原 Cheap 答案）；返回 RawChatResponse 表示升级到 Strong 的重答结果。
-    /// 触发条件：EnableCascadeUpgrade 且采样命中（CascadeUpgradeSampleRate）。自校验用同 Cheap 模型，低置信则升级候选链首个 Strong。
-    /// 级联全程异常吞掉返回 null：质量兜底不应破坏已成功的请求。
-    /// </summary>
-    private async Task<RawChatResponse?> TryCascadeUpgradeAsync(
-        ChatRequest originalRequest,
-        RawChatResponse cheapResponse,
-        RouterDecision decision,
-        ModelEndpointOptions cheapModel,
-        int estimatedTokens,
-        ModelTier routedTier,
-        string? sessionId,
-        HashSet<string> failedInThisRequest,
-        CancellationToken ct)
-    {
-        var routing = _options.CurrentValue.Routing;
-        if (!routing.EnableCascadeUpgrade) return null;
-
-        double rate = routing.CascadeUpgradeSampleRate;
-        if (rate <= 0 || Random.Shared.NextDouble() >= rate) return null;
-
-        // 提取 Cheap 答案文本；为空（多模态/解析失败）则跳过，避免无效自校验。
-        string cheapAnswer = ResponseConfidenceChecker.ExtractAssistantText(cheapResponse);
-        if (string.IsNullOrWhiteSpace(cheapAnswer)) return null;
-
-        string verifyPrompt = string.IsNullOrWhiteSpace(routing.CascadeUpgradeSelfVerifyPrompt)
-            ? ResponseConfidenceChecker.DefaultSelfVerifyPrompt
-            : routing.CascadeUpgradeSelfVerifyPrompt;
-
-        var verifyRequest = ResponseConfidenceChecker.BuildVerificationRequest(originalRequest, cheapAnswer, verifyPrompt);
-
-        var verifySw = System.Diagnostics.Stopwatch.StartNew();
-        try
-        {
-            var cheapClient = _clientProvider.GetClient(cheapModel);
-            var verifyResponse = await cheapClient.CompleteAsync(verifyRequest, ct).ConfigureAwait(false);
-            verifySw.Stop();
-
-            bool confident = ResponseConfidenceChecker.IsConfident(verifyResponse);
-            // 复核调用真实消耗 token，必须入账成本账本，否则开级联时预算系统性偏低（漂移）。
-            decimal verifyCost = verifyResponse.Usage is not null
-                ? CostCalculator.Compute(verifyResponse.Usage, cheapModel)
-                : 0m;
-            if (verifyResponse.Usage is not null)
-                RecordCost(verifyCost, sessionId);
-
-            RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
-                decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
-                true, null, false, routedTier, cascadeTriggered: true);
-
-            if (confident) return null;
-
-            // 低置信 → 升级到首个可用 Strong 模型。
-            // 升级目标从全量启用模型选，不依赖 decision.Candidates——
-            // 候选链经 RuleClassifier/SemanticRouter 的 FilterByTier 砍成单 tier 后不含 Strong。
-            // 排序与 RouterEngine 初始候选一致（Strong 优先 + MaxContextTokens 降序），结果可预测。
-            var upgradeTarget = _options.CurrentValue.Models
-                .Where(m => m.Enabled && m.Tier == ModelTier.Strong && !failedInThisRequest.Contains(m.Name))
-                .OrderByDescending(m => m.MaxContextTokens)
-                .FirstOrDefault();
-            if (upgradeTarget is null) return null;
-
-            var strongSw = System.Diagnostics.Stopwatch.StartNew();
-            try
-            {
-                var strongClient = _clientProvider.GetClient(upgradeTarget);
-                var strongResponse = await strongClient.CompleteRawAsync(originalRequest, ct).ConfigureAwait(false);
-                strongSw.Stop();
-
-                if (strongResponse.Usage is not null)
-                {
-                    var cost = CostCalculator.Compute(strongResponse.Usage, upgradeTarget);
-                    RecordCost(cost, sessionId);
-                }
-                _healthTracker.RecordSuccess(upgradeTarget.Name,
-                    routing.FailoverHalfOpenRequiredSuccesses);
-                RecordAffinity(sessionId, upgradeTarget.Name);
-
-                RecordAudit(null, upgradeTarget.Name, estimatedTokens, strongResponse.Usage,
-                    strongResponse.Usage is not null ? CostCalculator.Compute(strongResponse.Usage, upgradeTarget) : 0m,
-                    strongSw.ElapsedMilliseconds, sessionId, decision.Reason + "; cascade: upgraded from " + cheapModel.Name,
-                    true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name);
-
-                _logger.LogInformation("Cascade upgrade: {Cheap} -> {Strong} (self-verify uncertain)",
-                    cheapModel.Name, upgradeTarget.Name);
-
-                return strongResponse;
-            }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
-            {
-                // 升级调用失败（含客户端内部超时）：记录但不抛，返回 null 让调用方用原 Cheap 答案（已有，质量兜底不优于崩溃）。
-                // 仅放行外界取消；内部超时不破坏已成功的 Cheap 请求，也不污染 Cheap 熔断。
-                _logger.LogWarning(ex, "Cascade upgrade to {Strong} failed, returning cheap answer", upgradeTarget.Name);
-                return null;
-            }
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            // 自校验本身失败（含客户端内部超时）：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。
-            // 仅放行外界取消，避免内部超时破坏已成功的 Cheap 请求。
-            _logger.LogDebug(ex, "Cascade self-verify failed for {Cheap}, skipping upgrade", cheapModel.Name);
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// 并行首试（Fusion-lite）：对候选链前 N 个模型并行发起非流式请求，取最快成功响应，取消其余。
-    /// </summary>
-    /// <remarks>
-    /// 成本语义：所有并行尝试的真实消耗都入账（上游对已发出的请求仍计费，否则预算系统性偏低）。
-    /// 审计语义：每个尝试记一条，共享同一次调用的并行组 ID，仅采纳者 IsAdopted=true。
-    /// 断路器语义：每个尝试独立占探测槽位；成功 RecordSuccess，真实失败 RecordFailure，被取消 ReleaseProbe。
-    /// 全部失败/取消时把真实失败的模型加入 <paramref name="failedInThisRequest"/>，返回 Response=null 让调用方走串行降级链。
-    /// </remarks>
-    /// <returns>采纳的响应 + last* 三元组（供调用方回写局部变量）；Response 为 null 表示全部失败/取消。</returns>
-    private async Task<FusionAttemptResult> TryParallelFirstAttemptAsync(
-        ChatRequest request,
-        RouterOptions options,
-        RouterDecision decision,
-        int estimatedTokens,
-        ModelTier routedTier,
-        string? sessionId,
-        HashSet<string> failedInThisRequest,
-        List<string> attemptedModels,
-        CancellationToken ct)
-    {
-        string? lastModelName = null;
-        int? lastStatusCode = null;
-        string? lastErrorMessage = null;
-        int halfOpenMaxProbes = options.Routing.FailoverHalfOpenMaxProbes;
-        int requiredSuccesses = options.Routing.FailoverHalfOpenRequiredSuccesses;
-        int threshold = options.Routing.FailoverFailureThreshold;
-        int cooldown = options.Routing.FailoverCooldownSeconds;
-        int maxParallel = options.Routing.FusionMaxParallel;
-
-        // 1. 选参与并行的候选：前 N 个中能拿到探测许可的（闭合直接放行；半开占槽位；打开/槽位满跳过）。
-        //    拿到许可的候选必须最终上报结果（成功/失败/释放），否则槽位泄漏。
-        string groupId = Guid.NewGuid().ToString("N");
-        var admitted = new List<(ModelEndpointOptions Model, bool WasHalfOpenProbe)>();
-        var skipped = new List<ModelEndpointOptions>();
-
-        foreach (var candidate in decision.Candidates.Take(maxParallel))
-        {
-            if (!_healthTracker.TryBeginProbe(candidate.Name, halfOpenMaxProbes))
-            {
-                skipped.Add(candidate);
-                continue;
-            }
-            // 半开态才占槽位（闭合态 TryBeginProbe 返回 true 但不计 ActiveProbes，RecordSuccess/Failure 对闭合态是 no-op 探测释放）。
-            bool isHalfOpen = _healthTracker.GetState(candidate.Name) == CircuitState.HalfOpen;
-            admitted.Add((candidate, isHalfOpen));
-            attemptedModels.Add(candidate.Name);
-        }
-
-        if (admitted.Count < 2)
-        {
-            // 并行凑不齐 2 个（多数模型在熔断/半开槽位满）：回退串行。
-            // 已拿许可的候选需释放，让串行路径重新获取（避免重复占用）。
-            foreach (var (m, _) in admitted)
-                _healthTracker.ReleaseProbe(m.Name);
-            // 把 attemptedModels 中刚加的并行候选移除（串行路径会重新加）。
-            foreach (var (m, _) in admitted)
-                attemptedModels.Remove(m.Name);
-            return new FusionAttemptResult(null, null, null, null);
-        }
-
-        // 2. 并行发起。每个候选配 linked CTS，首个成功后 cancel 其余。
-        using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var perCandidateCts = new List<(ModelEndpointOptions Model, CancellationTokenSource Cts, bool WasHalfOpen)>();
-        var tasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs, bool WasHalfOpen)>>();
-
-        foreach (var (model, wasHalfOpen) in admitted)
-        {
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(raceCts.Token);
-            perCandidateCts.Add((model, linkedCts, wasHalfOpen));
-            var modelCopy = model; // 闭包捕获。
-            var wasHalfOpenCopy = wasHalfOpen;
-            tasks.Add(Task.Run(async () =>
-            {
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                try
-                {
-                    var client = _clientProvider.GetClient(modelCopy);
-                    var response = await client.CompleteRawAsync(request, linkedCts.Token).ConfigureAwait(false);
-                    sw.Stop();
-                    return (modelCopy, response, (Exception?)null, sw.ElapsedMilliseconds, wasHalfOpenCopy);
-                }
-                catch (Exception ex)
-                {
-                    sw.Stop();
-                    return (modelCopy, (RawChatResponse?)null, ex, sw.ElapsedMilliseconds, wasHalfOpenCopy);
-                }
-            }, linkedCts.Token));
-        }
-
-        // 3. WhenAny 循环：首个成功立即采纳并 cancel 其余。
-        RawChatResponse? adopted = null;
-        string? adoptedModel = null;
-        // remaining 保留 tasks 的完整元组泛型，避免 WhenAny 退化成 Task 丢失字段。
-        var remaining = tasks.ToList();
-        // 循环内已记审计的候选（成功/失败/被取消），步骤 5 不重复处理。
-        var accounted = new HashSet<string>(StringComparer.Ordinal);
-
-        while (remaining.Count > 0)
-        {
-            var done = await Task.WhenAny(remaining).ConfigureAwait(false);
-            remaining.Remove(done);
-
-            var (model, response, error, elapsedMs, wasHalfOpen) = await done.ConfigureAwait(false);
-
-            // 成功路径：采纳，cancel 其余。
-            if (response is not null && error is null)
-            {
-                // 成本入账（即使后续被取消的也在它们各自的 task 里处理——此处只记采纳者）。
-                ChatUsage? usage = response.Usage;
-                decimal cost = usage is not null ? CostCalculator.Compute(usage, model) : 0m;
-                if (usage is not null)
-                    RecordCost(cost, sessionId);
-
-                _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                RecordThompsonOutcome(model.Name, elapsedMs < options.Routing.ThompsonLatencyTargetMs);
-                RecordAffinity(sessionId, model.Name);
-                RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
-                    decision.Reason + "; fusion: adopted", true, null, false, routedTier,
-                    isAdopted: true, parallelGroupId: groupId);
-                accounted.Add(model.Name);
-
-                adopted = response;
-                adoptedModel = model.Name;
-
-                // 取消其余并行任务——它们的失败按"被取消"处理（ReleaseProbe），不记断路器失败。
-                raceCts.Cancel();
-                break;
-            }
-
-            // 失败路径：区分真实失败 vs 被取消（因别人成功）。
-            // linkedCts.IsCancellationRequested 区分 race-cancel（raceCts 取消传播到 linkedCts）
-            // 与 client 自身超时（HttpClient 取消内部 token，不取消 linkedCts）。
-            // 后者应计入断路器失败，否则故障模型持续收流量。
-            // linkedCts 与 admitted 一一对应，理论上必存在；防御找不到时按非取消处理。
-            var linkedCts = perCandidateCts.FirstOrDefault(p => p.Model.Name == model.Name).Cts;
-            bool cancelledByRace = raceCts.IsCancellationRequested
-                && error is OperationCanceledException
-                && linkedCts is not null
-                && linkedCts.IsCancellationRequested;
-
-            if (cancelledByRace)
-            {
-                // 被取消（非自身失败）：仅释放探测槽位，不计断路器失败。
-                _healthTracker.ReleaseProbe(model.Name);
-                // Thompson：被取消意味着未在竞速中胜出（延迟更高或故障），计为坏反馈，与串行超时语义一致。
-                RecordThompsonOutcome(model.Name, false);
-                // 预估成本入账：请求已发出到上游，上游对已接收的请求计费，但本地拿不到 Usage（响应未完整返回）。
-                // 按 EstimatedInputTokens × input 价格估算，标注 IsEstimated=true 以区分真实成本。
-                decimal estCost = EstimateInputCost(model, estimatedTokens);
-                if (estCost > 0m)
-                    RecordCost(estCost, sessionId);
-                RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
-                    decision.Reason + "; fusion: cancelled-by-race", false, "cancelled", false, routedTier,
-                    isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
-                accounted.Add(model.Name);
-                continue;
-            }
-
-            // 真实失败：记断路器 + 审计，标记进入 failedInThisRequest（让串行降级排除它）。
-            failedInThisRequest.Add(model.Name);
-            lastModelName = model.Name;
-            bool tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
-            RecordThompsonOutcome(model.Name, false);
-
-            int status = error switch
-            {
-                ModelClientException mce => (int)mce.StatusCode,
-                HttpRequestException => 503,
-                OperationCanceledException => 408,
-                _ => lastStatusCode ?? 500
-            };
-            lastStatusCode = status;
-            lastErrorMessage = error?.Message ?? "unknown";
-
-            // 真实失败同样预估入账：请求已到上游，上游按已处理 input 计费。
-            decimal failedEstCost = EstimateInputCost(model, estimatedTokens);
-            if (failedEstCost > 0m)
-                RecordCost(failedEstCost, sessionId);
-            RecordAudit(null, model.Name, estimatedTokens, null, failedEstCost, elapsedMs, sessionId,
-                decision.Reason + "; fusion: failed" + (tripped ? " (circuit tripped)" : ""),
-                false, error?.Message, false, routedTier,
-                isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m);
-            accounted.Add(model.Name);
-        }
-
-        // 4. 等待所有被 cancel 的 task 收尾（避免 task 泄漏/未观察异常）。
-        //    已被 raceCts.Cancel 的，WhenAll 会快速完成（抛 OperationCanceledException 被 task 内 try 吞）。
-        try
-        {
-            await Task.WhenAll(remaining).ConfigureAwait(false);
-        }
-        catch
-        {
-            // task 内部已 try-catch，不应抛；防御性吞掉。
-        }
-
-        // 释放所有候选的 linked CTS。
-        foreach (var (m, cts, _) in perCandidateCts)
-            cts.Dispose();
-
-        // 5. 清理 break 后未遍历的候选，按 task 实际结果区分"成功"vs"取消"，避免误算。
-        //    WhenWhenAll 已使任务全部完成，此处再 await 立即返回缓存结果。
-        foreach (var task in remaining)
-        {
-            var (m, response, error, elapsedMs, _) = await task.ConfigureAwait(false);
-
-            // 跳过循环内已记审计的（成功采纳/失败/被取消）。
-            if (accounted.Contains(m.Name))
-                continue;
-
-            // 竞态窗口内该候选在 cancel 传播前已收到成功响应：计真实成功 + 真实成本。
-            // 否则模型熔断器收不到成功信号（可能误开路），且成本被低估为估算值。
-            if (response is not null && error is null)
-            {
-                ChatUsage? usage = response.Usage;
-                decimal cost = usage is not null ? CostCalculator.Compute(usage, m) : 0m;
-                if (usage is not null)
-                    RecordCost(cost, sessionId);
-                _healthTracker.RecordSuccess(m.Name, requiredSuccesses);
-                RecordThompsonOutcome(m.Name, elapsedMs < options.Routing.ThompsonLatencyTargetMs);
-                RecordAudit(null, m.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
-                    decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
-                    isAdopted: false, parallelGroupId: groupId);
-                accounted.Add(m.Name);
-                continue;
-            }
-
-            // 真正被取消：释放探测槽位 + 预估成本入账。
-            // 前提假设：请求已发出到上游，上游按已处理的 input 计费（本地拿不到 Usage）。
-            // 该估算标 IsEstimated=true，区分于真实成本；若在 cancel 传播前请求未发出，此项可能高估。
-            _healthTracker.ReleaseProbe(m.Name);
-            RecordThompsonOutcome(m.Name, false);
-            decimal estCost = EstimateInputCost(m, estimatedTokens);
-            if (estCost > 0m)
-                RecordCost(estCost, sessionId);
-            RecordAudit(null, m.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
-                decision.Reason + "; fusion: cancelled-by-race (post-break)", false, "cancelled", false, routedTier,
-                isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
-            accounted.Add(m.Name);
-        }
-
-        // 6. 被跳过的候选（熔断/槽位满）不影响本轮，留待串行降级处理（它们不在 attemptedModels，串行路径会尝试）。
-
-        if (_logger.IsEnabled(LogLevel.Information))
-        {
-            if (adopted is not null)
-            {
-                _logger.LogInformation("Fusion parallel race: adopted {Model} (group {GroupId})", adoptedModel, groupId);
-            }
-            else
-            {
-                _logger.LogInformation("Fusion parallel race: all failed/cancelled (group {GroupId}), falling back to serial", groupId);
-            }
-        }
-
-        // adopted 为 null（全部失败/取消）：failedInThisRequest 已含真实失败者，
-        // 被取消者虽未计入 failedInThisRequest 但串行降级链会重试它们（除非它们也在 skipped）。
-        // 若全部是 cancelled-by-race（无真实失败），说明采纳者实际存在——不可能走到这。
-        return new FusionAttemptResult(adopted, lastModelName, lastStatusCode, lastErrorMessage);
-    }
-
-    /// <summary>
-    /// 融合路由（OpenRouter Fusion 式 quality router）：并行 panel 作答 → analyst 结构化分析 → outer 写最终答案。
-    /// 仅非流式首轮触发。失败时返回 null，由调用方继续 Fusion-lite 或串行降级链。
-    /// </summary>
-    /// <remarks>
-    /// 成本语义：N 个 panel + 1 analyst + 1 outer 全部按真实/预估成本入账。
-    /// 审计语义：每条调用记一条记录，共享 <c>ParallelGroupId</c>，<c>FusionRole</c> 区分 panel/analyst/outer。
-    /// 断路器语义：panel 各占探测槽位后用 RecordSuccess/ReleaseProbe 结算；analyst/outer 直接调用不占槽位（非候选链探活）。
-    /// </remarks>
-    private async Task<FusionAttemptResult> TryFusionRouterAsync(
-        ChatRequest request,
-        RouterOptions options,
-        RouterDecision decision,
-        int estimatedTokens,
-        ModelTier routedTier,
-        string? sessionId,
-        HashSet<string> failedInThisRequest,
-        List<string> attemptedModels,
-        CancellationToken ct)
-    {
-        var routing = options.Routing;
-        int panelSize = routing.FusionRouterPanelSize;
-        int halfOpenMaxProbes = routing.FailoverHalfOpenMaxProbes;
-        int requiredSuccesses = routing.FailoverHalfOpenRequiredSuccesses;
-        int threshold = routing.FailoverFailureThreshold;
-        int cooldown = routing.FailoverCooldownSeconds;
-        string groupId = Guid.NewGuid().ToString("N");
-
-        // 1. 选 panel 候选：前 N 个能拿到探测许可的。半开态占槽位，闭合直接放行。
-        var admitted = new List<ModelEndpointOptions>();
-        foreach (var candidate in decision.Candidates.Take(panelSize))
-        {
-            if (!_healthTracker.TryBeginProbe(candidate.Name, halfOpenMaxProbes))
-                continue;
-            admitted.Add(candidate);
-            attemptedModels.Add(candidate.Name);
-        }
-
-        if (admitted.Count < 2)
-        {
-            foreach (var m in admitted)
-                _healthTracker.ReleaseProbe(m.Name);
-            foreach (var m in admitted)
-                attemptedModels.Remove(m.Name);
-            return new FusionAttemptResult(null, null, null, null);
-        }
-
-        // 2. 并行 fire panel，收集全部回答。
-        ChatRequest panelRequest = request with
-        {
-            Temperature = request.Temperature ?? routing.FusionRouterTemperature
-        };
-        var panelResults = new List<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)>();
-        var panelTasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)>>();
-
-        foreach (var model in admitted)
-        {
-            var modelCopy = model;
-            panelTasks.Add(InvokePanelAsync(modelCopy));
-
-            async Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)> InvokePanelAsync(
-                ModelEndpointOptions panelModel)
-            {
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                try
-                {
-                    var client = _clientProvider.GetClient(panelModel);
-                    var resp = await client.CompleteRawAsync(panelRequest, ct).ConfigureAwait(false);
-                    sw.Stop();
-                    return (panelModel, resp, (Exception?)null, sw.ElapsedMilliseconds);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    sw.Stop();
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    sw.Stop();
-                    return (panelModel, (RawChatResponse?)null, ex, sw.ElapsedMilliseconds);
-                }
-            }
-        }
-
-        // 3. 等待全部 panel 完成，逐条处理。
-        try
-        {
-            await Task.WhenAll(panelTasks).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested();
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            // 客户端取消不是模型健康信号：释放所有可能占用的半开探测槽，且不记
-            // failure、Thompson 惩罚、预估成本或失败审计。
-            foreach (var model in admitted)
-                _healthTracker.ReleaseProbe(model.Name);
-            throw;
-        }
-
-        foreach (var task in panelTasks)
-        {
-            // 各 task 内部吞异常并返回包含 Model 的元组，await 正常返回。
-            var result = await task.ConfigureAwait(false);
-            panelResults.Add(result);
-        }
-
-        // 4. 处理每个 panel 结果：提取文本、记账、审计、健康跟踪。
-        var panelAnswers = new List<(string Model, string Text)>();
-        string? lastModelName = null;
-        int? lastStatusCode = null;
-        string? lastErrorMessage = null;
-
-        foreach (var (model, response, error, elapsedMs) in panelResults)
-        {
-            if (response is not null && error is null)
-            {
-                // 成功
-                string text = ResponseConfidenceChecker.ExtractAssistantText(response);
-                panelAnswers.Add((model.Name, text));
-
-                ChatUsage? usage = response.Usage;
-                decimal cost = usage is not null ? CostCalculator.Compute(usage, model) : 0m;
-                if (usage is not null)
-                    RecordCost(cost, sessionId);
-
-                _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                RecordThompsonOutcome(model.Name, elapsedMs < routing.ThompsonLatencyTargetMs);
-                RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
-                    decision.Reason + "; fusion-router: panel success", true, null, false, routedTier,
-                    isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "panel");
-            }
-            else
-            {
-                // 失败
-                failedInThisRequest.Add(model.Name);
-                lastModelName = model.Name;
-                var tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
-                RecordThompsonOutcome(model.Name, false);
-
-                int status = error switch
-                {
-                    ModelClientException mce => (int)mce.StatusCode,
-                    HttpRequestException => 503,
-                    OperationCanceledException => 408,
-                    _ => 500
-                };
-                lastStatusCode = status;
-                lastErrorMessage = error?.Message ?? "unknown";
-
-                decimal estCost = EstimateInputCost(model, estimatedTokens);
-                if (estCost > 0m)
-                    RecordCost(estCost, sessionId);
-                RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
-                    decision.Reason + "; fusion-router: panel failed" + (tripped ? " (circuit tripped)" : ""),
-                    false, error?.Message, false, routedTier,
-                    isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m, fusionRole: "panel");
-            }
-        }
-
-        // 5. 若所有 panel 全部失败，回退串行。
-        if (panelAnswers.Count == 0)
-        {
-            _logger.LogInformation("Fusion router: all panel models failed (group {GroupId}), falling back to serial", groupId);
-            // 注意：已记入 failedInThisRequest 的 panel 失败模型会在串行降级中被排除。
-            // 被跳过的候选（未 admission）仍在候选链中，串行会尝试它们。
-            return new FusionAttemptResult(null, lastModelName, lastStatusCode, lastErrorMessage);
-        }
-
-        // 6. 解析 analyst 模型。
-        ModelEndpointOptions? analystModel = null;
-        if (!string.IsNullOrWhiteSpace(routing.FusionRouterAnalystModel))
-        {
-            analystModel = options.Models
-                .FirstOrDefault(m => m.Enabled && m.Name.Equals(routing.FusionRouterAnalystModel, StringComparison.OrdinalIgnoreCase));
-        }
-        analystModel ??= decision.Candidates[0];
-
-        // 7. 调用 analyst（结构化分析）。
-        string analystPrompt = string.IsNullOrWhiteSpace(routing.FusionRouterAnalystPrompt)
-            ? FusionSynthesis.DefaultAnalystPrompt
-            : routing.FusionRouterAnalystPrompt;
-
-        var analystRequest = FusionSynthesis.BuildAnalystRequest(request, panelAnswers, analystPrompt, routing.FusionRouterTemperature);
-        FusionAnalysis? analysis = null;
-        long analystElapsedMs = 0;
-
-        try
-        {
-            var analystSw = System.Diagnostics.Stopwatch.StartNew();
-            var analystClient = _clientProvider.GetClient(analystModel);
-            var analystResponse = await analystClient.CompleteRawAsync(analystRequest, ct).ConfigureAwait(false);
-            analystSw.Stop();
-            analystElapsedMs = analystSw.ElapsedMilliseconds;
-
-            ChatUsage? analystUsage = analystResponse.Usage;
-            decimal analystCost = analystUsage is not null ? CostCalculator.Compute(analystUsage, analystModel) : 0m;
-            if (analystUsage is not null)
-                RecordCost(analystCost, sessionId);
-
-            _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
-            RecordAudit(null, analystModel.Name, estimatedTokens, analystUsage, analystCost, analystElapsedMs, sessionId,
-                decision.Reason + "; fusion-router: analyst", true, null, false, routedTier,
-                isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst");
-
-            analysis = FusionSynthesis.ParseAnalysis(analystResponse);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogWarning(ex, "Fusion router analyst call failed (model {Model}), falling back to serial", analystModel.Name);
-            // analyst 失败不记 failedInThisRequest（analyst 不是候选模型），释放主力模型用串行。
-            return new FusionAttemptResult(null, analystModel.Name, 502, ex.Message);
-        }
-
-        // 分析解析失败（JSON 解析/格式不对）→ 回退串行。
-        if (analysis is null)
-        {
-            _logger.LogWarning("Fusion router analyst parse failed (model {Model}), falling back to serial", analystModel.Name);
-            return new FusionAttemptResult(null, analystModel.Name, 502, "analyst parse failed");
-        }
-
-        // 8. 解析 outer 模型并调用。
-        ModelEndpointOptions? outerModel = null;
-        if (!string.IsNullOrWhiteSpace(routing.FusionRouterOuterModel))
-        {
-            outerModel = options.Models
-                .FirstOrDefault(m => m.Enabled && m.Name.Equals(routing.FusionRouterOuterModel, StringComparison.OrdinalIgnoreCase));
-        }
-        outerModel ??= decision.Candidates[0];
-
-        var outerRequest = FusionSynthesis.BuildOuterRequest(
-            request, analysis, FusionSynthesis.DefaultOuterPrompt, routing.FusionRouterMaxOutputTokens);
-
-        try
-        {
-            var outerSw = System.Diagnostics.Stopwatch.StartNew();
-            var outerClient = _clientProvider.GetClient(outerModel);
-            var outerResponse = await outerClient.CompleteRawAsync(outerRequest, ct).ConfigureAwait(false);
-            outerSw.Stop();
-
-            ChatUsage? outerUsage = outerResponse.Usage;
-            decimal outerCost = outerUsage is not null ? CostCalculator.Compute(outerUsage, outerModel) : 0m;
-            if (outerUsage is not null)
-                RecordCost(outerCost, sessionId);
-
-            _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses);
-            RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
-            RecordAffinity(sessionId, outerModel.Name);
-            RecordAudit(null, outerModel.Name, estimatedTokens, outerUsage, outerCost, outerSw.ElapsedMilliseconds, sessionId,
-                decision.Reason + "; fusion-router: outer", true, null, false, routedTier,
-                isAdopted: true, parallelGroupId: groupId, isEstimated: false, fusionRole: "outer");
-
-            _logger.LogInformation("Fusion router: completed (group {GroupId}), panel={PanelCount}, analyst={Analyst}, outer={Outer}",
-                groupId, panelAnswers.Count, analystModel.Name, outerModel.Name);
-
-            return new FusionAttemptResult(outerResponse, outerModel.Name, null, null);
-        }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogWarning(ex, "Fusion router outer call failed (model {Model}), falling back to serial", outerModel.Name);
-            return new FusionAttemptResult(null, outerModel.Name, 502, ex.Message);
-        }
-    }
-
-    /// <summary>并行首试结果：采纳的响应（可能为 null）+ 失败诊断三元组。</summary>
-    private sealed record FusionAttemptResult(
-        RawChatResponse? Response,
-        string? LastModelName,
-        int? LastStatusCode,
-        string? LastErrorMessage);
 }

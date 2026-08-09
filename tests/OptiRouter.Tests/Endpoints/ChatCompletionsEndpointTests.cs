@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.IO;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -212,6 +213,24 @@ public class ChatCompletionsEndpointTests
         ct.ThrowIfCancellationRequested();
         yield return await Task.FromException<RawStreamLine>(
             new ModelClientException(statusCode, responseBody));
+    }
+
+    /// <summary>
+    /// 模拟中途失败流：先 yield 一个正常首 chunk（让代理 flush 200 + 透传），
+    /// 随后抛指定异常模拟不同失败类型（上游断连/超时/size limit）。
+    /// 用于验证 endpoint 的中途错误注入 + code 分类路径。
+    /// </summary>
+    private static async IAsyncEnumerable<RawStreamLine> CreateMidStreamFailingStream(
+        Exception midStreamException,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-mid\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}",
+            null);
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
+        throw midStreamException;
     }
 
     private static TestWebApplicationFactory CreateSecurityFactory(Action? onUpstream = null)
@@ -820,7 +839,251 @@ public class ChatCompletionsEndpointTests
         Assert.NotEmpty(dataLines);
         Assert.Equal("[DONE]", dataLines[^1]);
         using var errorDoc = JsonDocument.Parse(dataLines[0]);
-        Assert.Equal("all model candidates failed", errorDoc.RootElement.GetProperty("error").GetString());
+        // OpenAI 兼容嵌套结构：{"error":{"message":...,"type":...,"code":...}}
+        var errorObj = errorDoc.RootElement.GetProperty("error");
+        Assert.Equal("all model candidates failed", errorObj.GetProperty("message").GetString());
+        Assert.Equal("all_candidates_failed", errorObj.GetProperty("type").GetString());
+        Assert.Equal("ALL_CANDIDATES_FAILED", errorObj.GetProperty("code").GetString());
+    }
+
+    /// <summary>
+    /// 流式首 chunk 已透传后，上游中途断连：代理不硬断 500，
+    /// 而是注入 OpenAI 兼容 error event（UPSTREAM_ERROR）+ [DONE] 干净终止，
+    /// 客户端可机读 error.code/type 判定是否重试。
+    /// </summary>
+    [Fact]
+    public async Task Post_Streaming_MidStreamFailure_InjectsErrorEventAndDone()
+    {
+        // Arrange
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        var endpoint = CreateEndpoint("model-a");
+        // mock 先 yield 首 chunk，随后抛 IOException 模拟上游中途断连。
+        factory.MockClients["model-a"] = new MockModelClient(endpoint,
+            streamRawFunc: (req, ct) => CreateMidStreamFailingStream(
+                new IOException("upstream connection reset mid-stream"), ct));
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("model-a", stream: true);
+        var json = JsonSerializer.Serialize(request);
+        using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
+
+        // Act
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+
+        // Assert：HTTP 仍 200（首 chunk 前已 flush header），error 在 SSE 内。
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var reader = new StreamReader(stream);
+        var dataLines = new List<string>();
+        string? line;
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            if (!line.StartsWith("data: ", StringComparison.Ordinal))
+                continue;
+            var data = line.Substring("data: ".Length).Trim();
+            if (data == "[DONE]")
+            {
+                dataLines.Add("[DONE]");
+                break;
+            }
+            dataLines.Add(data);
+        }
+
+        // dataLines = [首chunk, errorEvent, [DONE]] —— 证明部分内容已透传，非全程失败。
+        Assert.True(dataLines.Count >= 3, "Expected first chunk + error event + [DONE]");
+        Assert.Equal("[DONE]", dataLines[^1]);
+
+        // 首 chunk 是真实透传内容。
+        using var firstDoc = JsonDocument.Parse(dataLines[0]);
+        Assert.Equal("partial", firstDoc.RootElement.GetProperty("choices")[0].GetProperty("delta").GetProperty("content").GetString());
+
+        // error event：上游断连 → UPSTREAM_ERROR（可重试类别），OpenAI 嵌套结构。
+        using var errorDoc = JsonDocument.Parse(dataLines[^2]);
+        var errorObj = errorDoc.RootElement.GetProperty("error");
+        Assert.Contains("upstream connection reset", errorObj.GetProperty("message").GetString());
+        Assert.Equal("upstream_error", errorObj.GetProperty("type").GetString());
+        Assert.Equal("UPSTREAM_ERROR", errorObj.GetProperty("code").GetString());
+    }
+
+    /// <summary>
+    /// 流式中途超时（HttpClient 内部 timeout，非外部 ct 取消）→ TIMEOUT（可重试类别）。
+    /// </summary>
+    [Fact]
+    public async Task Post_Streaming_MidStreamTimeout_InjectsTimeoutCode()
+    {
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        var endpoint = CreateEndpoint("model-a");
+        factory.MockClients["model-a"] = new MockModelClient(endpoint,
+            streamRawFunc: (req, ct) => CreateMidStreamFailingStream(
+                new OperationCanceledException("upstream read timed out"), ct));
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("model-a", stream: true);
+        var json = JsonSerializer.Serialize(request);
+        using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
+
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var reader = new StreamReader(stream);
+        var dataLines = new List<string>();
+        string? line;
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
+            var data = line.Substring("data: ".Length).Trim();
+            if (data == "[DONE]") { dataLines.Add("[DONE]"); break; }
+            dataLines.Add(data);
+        }
+
+        Assert.True(dataLines.Count >= 2);
+        Assert.Equal("[DONE]", dataLines[^1]);
+        using var errorDoc = JsonDocument.Parse(dataLines[^2]);
+        var errorObj = errorDoc.RootElement.GetProperty("error");
+        Assert.Contains("timed out", errorObj.GetProperty("message").GetString());
+        Assert.Equal("timeout", errorObj.GetProperty("type").GetString());
+        Assert.Equal("TIMEOUT", errorObj.GetProperty("code").GetString());
+    }
+
+    /// <summary>
+    /// 流式超出 MaxResponseStreamBytes → RESPONSE_TOO_LARGE（不可重试类别）。
+    /// </summary>
+    [Fact]
+    public async Task Post_Streaming_MidStreamSizeLimit_InjectsResponseTooLargeCode()
+    {
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        var endpoint = CreateEndpoint("model-a");
+        factory.MockClients["model-a"] = new MockModelClient(endpoint,
+            streamRawFunc: (req, ct) => CreateMidStreamFailingStream(
+                new ResponseSizeLimitExceededException(110, "Response size limit exceeded (110 bytes)."), ct));
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("model-a", stream: true);
+        var json = JsonSerializer.Serialize(request);
+        using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
+
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var reader = new StreamReader(stream);
+        var dataLines = new List<string>();
+        string? line;
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
+            var data = line.Substring("data: ".Length).Trim();
+            if (data == "[DONE]") { dataLines.Add("[DONE]"); break; }
+            dataLines.Add(data);
+        }
+
+        Assert.True(dataLines.Count >= 2);
+        Assert.Equal("[DONE]", dataLines[^1]);
+        using var errorDoc = JsonDocument.Parse(dataLines[^2]);
+        var errorObj = errorDoc.RootElement.GetProperty("error");
+        Assert.Contains("Response size limit exceeded", errorObj.GetProperty("message").GetString());
+        Assert.Equal("response_too_large", errorObj.GetProperty("type").GetString());
+        Assert.Equal("RESPONSE_TOO_LARGE", errorObj.GetProperty("code").GetString());
+    }
+
+    /// <summary>
+    /// 流式中途抛通用 InvalidOperationException（代理真内部 bug，非 size limit）→ INTERNAL_ERROR，
+    /// 不再误标 RESPONSE_TOO_LARGE（专用 ResponseSizeLimitExceededException 才归类为 size limit）。
+    /// </summary>
+    [Fact]
+    public async Task Post_Streaming_MidStreamGenericInvalidOperation_InjectsInternalErrorCode()
+    {
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        var endpoint = CreateEndpoint("model-a");
+        factory.MockClients["model-a"] = new MockModelClient(endpoint,
+            streamRawFunc: (req, ct) => CreateMidStreamFailingStream(
+                new InvalidOperationException("unexpected internal state"), ct));
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("model-a", stream: true);
+        var json = JsonSerializer.Serialize(request);
+        using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
+
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        await using var stream = await response.Content.ReadAsStreamAsync();
+        using var reader = new StreamReader(stream);
+        var dataLines = new List<string>();
+        string? line;
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
+            var data = line.Substring("data: ".Length).Trim();
+            if (data == "[DONE]") { dataLines.Add("[DONE]"); break; }
+            dataLines.Add(data);
+        }
+
+        Assert.True(dataLines.Count >= 2);
+        Assert.Equal("[DONE]", dataLines[^1]);
+        using var errorDoc = JsonDocument.Parse(dataLines[^2]);
+        var errorObj = errorDoc.RootElement.GetProperty("error");
+        Assert.Equal("server_error", errorObj.GetProperty("type").GetString());
+        Assert.Equal("INTERNAL_ERROR", errorObj.GetProperty("code").GetString());
     }
 
     [Fact]

@@ -181,6 +181,18 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
 });
 
 // t4: 注册降级重试编排器。
+// 构造依赖（RouterEngine/IOptionsMonitor/ModelHealthTracker/OutcomeRecorder/ILogger）由 DI 自动注入。
+builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
+    sp.GetRequiredService<IRequestAuditStore>(),
+    sp.GetRequiredService<OptiRouter.Metrics.RouterMetrics>(),
+    sp.GetRequiredService<CostLedger>(),
+    sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
+    sp.GetRequiredService<IMemoryCache>(),
+    sp.GetRequiredService<ThompsonStateStore>(),
+    sp.GetRequiredService<ILogger<OutcomeRecorder>>()));
+builder.Services.AddSingleton<CascadeUpgradeHandler>();
+builder.Services.AddSingleton<FusionRouter>();
+builder.Services.AddSingleton<RaceOrchestrator>();
 builder.Services.AddSingleton<ProxyOrchestrator>();
 
 // Prometheus 指标集合（单例，ProxyOrchestrator 经 DI 注入）。
