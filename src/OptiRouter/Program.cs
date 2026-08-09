@@ -246,6 +246,15 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+// 配置热重载时清理 Thompson 采样状态：剔除已删除/改名的模型条目，防 _states 无界泄漏。
+// OnChange 在 models-config.json 写入触发 IConfigurationRoot.Reload 后派发。
+var tsStoreForReload = app.Services.GetRequiredService<ThompsonStateStore>();
+var routerOptionsMonitor = app.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>();
+routerOptionsMonitor.OnChange(options =>
+{
+    tsStoreForReload.Retain(options.Models.Select(m => m.Name));
+});
+
 app.Use(async (context, next) =>
 {
     if (!context.Request.Headers.TryGetValue("X-Request-Id", out var requestId) || string.IsNullOrEmpty(requestId))

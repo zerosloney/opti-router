@@ -1,5 +1,6 @@
 @page "/models"
 @inject ApiService Api
+@implements IDisposable
 
 <PageTitle>OptiRouter - 模型配置</PageTitle>
 
@@ -175,6 +176,7 @@
     private string? ErrorMsg;
     private string? ToastMsg;
     private bool ToastIsError = false;
+    private Timer? _toastTimer;
 
     // New model form — use a mutable object to support binding
     private NewModelForm NewModel = new();
@@ -297,8 +299,25 @@
     {
         ToastMsg = msg;
         ToastIsError = isError;
-        _ = Task.Delay(3000).ContinueWith(_ => InvokeAsync(() => { ToastMsg = null; StateHasChanged(); }));
+        // 用 Timer 替代 fire-and-forget Task.Delay：circuit 销毁时 Dispose 释放，
+        // 回调经 InvokeAsync 路由到 circuit，异常不逃逸。新 toast 替换旧计时器。
+        _toastTimer?.Dispose();
+        _toastTimer = new Timer(_ => _ = OnToastTimeout(), null, 3000, Timeout.Infinite);
     }
+
+    private async Task OnToastTimeout()
+    {
+        try
+        {
+            await InvokeAsync(() => { ToastMsg = null; StateHasChanged(); });
+        }
+        catch
+        {
+            // circuit 已销毁等情形：静默，避免未观察异常。
+        }
+    }
+
+    public void Dispose() => _toastTimer?.Dispose();
 
     private static string Truncate(string? s, int len) => s != null && s.Length > len ? s[..len] + "..." : s ?? "-";
 

@@ -13,13 +13,25 @@ public static class ThompsonSampler
 
     /// <summary>
     /// 从 Beta(alpha, beta) 概率分布中抽取随机数，取值范围在 (0, 1) 之间。
+    /// 生产路径：用线程本地 Random，无锁高吞吐。
     /// </summary>
     /// <param name="alpha">先验 Alpha 计数（代表正向质量反馈数），必须为正数。</param>
     /// <param name="beta">先验 Beta 计数（代表负向延迟/可用性故障反馈数），必须为正数。</param>
     /// <returns>Beta 随机分布采样样本。</returns>
     public static double SampleBeta(double alpha, double beta)
+        => SampleBeta(alpha, beta, ThreadLocalRng.Value!);
+
+    /// <summary>
+    /// 用指定 <see cref="Random"/> 抽取 Beta 样本。供测试注入确定性种子；
+    /// 调用方需保证 <paramref name="rng"/> 的线程安全（生产路径请用无参重载）。
+    /// </summary>
+    /// <param name="alpha">先验 Alpha 计数，必须为正数。</param>
+    /// <param name="beta">先验 Beta 计数，必须为正数。</param>
+    /// <param name="rng">随机数生成器（测试注入 seeded 实例）。</param>
+    /// <returns>Beta 随机分布采样样本。</returns>
+    public static double SampleBeta(double alpha, double beta, Random rng)
     {
-        var rng = ThreadLocalRng.Value ?? Random.Shared;
+        ArgumentNullException.ThrowIfNull(rng);
 
         // 极限极小值防护
         double a = Math.Max(alpha, 1e-5);

@@ -41,6 +41,32 @@ public sealed class ThompsonStateStore
     }
 
     /// <summary>
+    /// 移除指定模型的采样参数。用于模型被删除/改名后的热清理，避免条目永久泄漏。
+    /// </summary>
+    /// <returns>是否实际移除（不存在返回 false）。</returns>
+    public bool Remove(string modelName)
+        => !string.IsNullOrEmpty(modelName) && _states.TryRemove(modelName, out _);
+
+    /// <summary>
+    /// 仅保留指定名称集合对应的模型参数，移除其余条目。
+    /// 供配置热重载时调用，剔除已删除/改名的模型，防止 _states 无界增长。
+    /// </summary>
+    /// <param name="retainNames">当前配置中存在的模型名集合（null 视为空，清空全部）。</param>
+    public int Retain(IEnumerable<string>? retainNames)
+    {
+        var keep = retainNames is null
+            ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(retainNames, StringComparer.OrdinalIgnoreCase);
+        int removed = 0;
+        foreach (var key in _states.Keys)
+        {
+            if (!keep.Contains(key) && _states.TryRemove(key, out _))
+                removed++;
+        }
+        return removed;
+    }
+
+    /// <summary>
     /// 记录一次端点请求表现。
     /// </summary>
     /// <param name="modelName">模型唯一标识。</param>
