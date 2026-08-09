@@ -1,6 +1,7 @@
 @page "/dashboard"
 @inject ApiService Api
 @inject IJSRuntime JS
+@implements IDisposable
 
 <PageTitle>OptiRouter - 监控面板</PageTitle>
 
@@ -238,6 +239,7 @@
     private List<ApiService.AuditItem> AuditItems = new();
     private ElementReference ChartCanvas;
     private Timer? _refreshTimer;
+    private bool _firstRendered;
 
     private double BudgetPercent =>
         (Metrics?.System.Budget.DailyBudgetUsd ?? 0) > 0
@@ -247,11 +249,21 @@
     protected override async Task OnInitializedAsync()
     {
         await RefreshAll();
-        _refreshTimer = new Timer(async _ =>
+        // Timer 回调用 OnTimerTick 包装：捕获同步上下文、try/catch 防异常逃逸、await InvokeAsync 而非丢弃。
+        _refreshTimer = new Timer(_ => _ = OnTimerTick(), null, 2000, 2000);
+    }
+
+    private async Task OnTimerTick()
+    {
+        try
         {
             await RefreshMetrics();
-            _ = InvokeAsync(StateHasChanged);
-        }, null, 2000, 2000);
+            await InvokeAsync(StateHasChanged);
+        }
+        catch
+        {
+            // 刷新失败静默：避免 Timer 回调内未观察异常。
+        }
     }
 
     private async Task RefreshAll()
@@ -287,11 +299,22 @@
     private async Task DrawChart()
     {
         if (Trends.Count == 0) return;
+        if (!_firstRendered) return; // prerender 阶段无 canvas，JS 调用必抛；首次渲染后再画。
         try
         {
             await JS.InvokeVoidAsync("drawTrendChart", ChartCanvas, Trends);
         }
         catch { /* chart init may be delayed */ }
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _firstRendered = true;
+            if (Trends.Count > 0)
+                await DrawChart();
+        }
     }
 
     private static string IsEnabled(bool? v) => v == true ? "toggle-on" : "toggle-off";
