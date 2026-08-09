@@ -257,7 +257,10 @@ public class AlertEngineTests
 
         var failureAlert = Assert.Single(alerts, a => a.Id == "high-failure-rate");
         Assert.Equal("critical", failureAlert.Level);
-        Assert.Contains("80%", failureAlert.Message);
+        // P0 格式受 CurrentCulture 影响（Linux CI invariant 文化下为 "80 %"，en-US 为 "80%"）。
+        // 断言百分比符号存在即可，不强依赖空格分隔。
+        Assert.Contains("%", failureAlert.Message);
+        Assert.Contains("80", failureAlert.Message);
     }
 
     [Fact]
