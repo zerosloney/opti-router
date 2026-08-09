@@ -57,6 +57,32 @@ public class RequestAuditStoreTests
 
     [Theory]
     [MemberData(nameof(StoreFactories))]
+    public void Append_RoundTripsTtftAndCacheBreakdown(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var record = SampleRecord() with
+        {
+            RequestId = null,
+            TimeToFirstTokenMs = 42,
+            CachedInputTokens = 50,
+            CacheWriteInputTokens = 10,
+            UncachedInputTokens = 20,
+            QuotaLimited = true
+        };
+
+        store.Append(record);
+        var roundTrip = Assert.Single(store.GetRecent(1));
+
+        Assert.Equal(42, roundTrip.TimeToFirstTokenMs);
+        Assert.Null(roundTrip.RequestId);
+        Assert.Equal(50, roundTrip.CachedInputTokens);
+        Assert.Equal(10, roundTrip.CacheWriteInputTokens);
+        Assert.Equal(20, roundTrip.UncachedInputTokens);
+        Assert.True(roundTrip.QuotaLimited);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
     public void GetRecent_RespectsLimit(Func<IRequestAuditStore> factory)
     {
         using var store = factory();

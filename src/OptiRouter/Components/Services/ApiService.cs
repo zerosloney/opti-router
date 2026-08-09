@@ -128,7 +128,10 @@ public class ApiService
         int TotalRequests,
         long TotalTokens,
         double AvgLatencyMs,
-        List<AlertInfo> Alerts);
+        List<AlertInfo> Alerts,
+        double? AvgTtftMs = null,
+        long CachedInputTokens = 0,
+        long CacheWriteInputTokens = 0);
 
     public record RoutingPolicyInfo(
         bool EnableFailover,
@@ -165,7 +168,11 @@ public class ApiService
         int FailureCount,
         int ActiveProbes,
         double? AvgLatencyMs,
-        int LatencySamples);
+        int LatencySamples,
+        string Provider = "",
+        string Family = "",
+        decimal? CachedInputPricePerMillion = null,
+        decimal? CacheWriteInputPricePerMillion = null);
 
     public record DailySpend(string Date, decimal Amount);
 
@@ -180,7 +187,12 @@ public class ApiService
         double LatencyMs,
         bool Success,
         bool IsStreaming,
-        bool IsEstimated);
+        bool IsEstimated,
+        double? TimeToFirstTokenMs = null,
+        int CachedInputTokens = 0,
+        int CacheWriteInputTokens = 0,
+        int UncachedInputTokens = 0,
+        bool QuotaLimited = false);
 
     public record ModelDto(
         string Name,
@@ -193,7 +205,11 @@ public class ApiService
         decimal InputPricePerMillion,
         decimal OutputPricePerMillion,
         List<string> Tags,
-        bool HasApiKey);
+        bool HasApiKey,
+        string Provider = "",
+        string Family = "",
+        decimal? CachedInputPricePerMillion = null,
+        decimal? CacheWriteInputPricePerMillion = null);
 
     public record CreateModelRequest(
         string Name,
@@ -206,7 +222,11 @@ public class ApiService
         bool Enabled,
         decimal InputPricePerMillion,
         decimal OutputPricePerMillion,
-        List<string>? Tags);
+        List<string>? Tags,
+        string? Provider = null,
+        string? Family = null,
+        decimal? CachedInputPricePerMillion = null,
+        decimal? CacheWriteInputPricePerMillion = null);
 
     public record UpdateModelRequest(
         string? BaseUrl,
@@ -217,5 +237,9 @@ public class ApiService
         int? MaxRetries,
         bool? Enabled,
         decimal? InputPricePerMillion,
-        decimal? OutputPricePerMillion);
+        decimal? OutputPricePerMillion,
+        string? Provider = null,
+        string? Family = null,
+        decimal? CachedInputPricePerMillion = null,
+        decimal? CacheWriteInputPricePerMillion = null);
 }

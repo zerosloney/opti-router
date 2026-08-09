@@ -154,6 +154,9 @@ builder.Services.AddSingleton<ITokenEstimator>(sp =>
 
 builder.Services.AddSingleton<ISemanticVectorEngine, TfIdfSemanticVectorEngine>();
 builder.Services.AddSingleton<ThompsonStateStore>();
+builder.Services.AddSingleton<UpstreamQuotaStateStore>();
+builder.Services.AddSingleton<PromptCacheAffinityStore>();
+builder.Services.AddSingleton<FusionPanelSelector>();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
@@ -173,7 +176,9 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new SemanticRouterPolicy(vectorEngine),
         new LongInputPolicy(),
         new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore),
+        new PromptCacheAffinityPolicy(sp.GetRequiredService<PromptCacheAffinityStore>()),
         new BudgetGuardPolicy(ledger),
+        new QuotaAwarePolicy(sp.GetRequiredService<UpstreamQuotaStateStore>()),
         new FailoverPolicy(healthTracker),
         new LoadBalancePolicy()
     };
@@ -189,6 +194,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
     sp.GetRequiredService<IMemoryCache>(),
     sp.GetRequiredService<ThompsonStateStore>(),
+    sp.GetRequiredService<PromptCacheAffinityStore>(),
+    sp.GetRequiredService<UpstreamQuotaStateStore>(),
     sp.GetRequiredService<ILogger<OutcomeRecorder>>()));
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
@@ -274,10 +281,12 @@ var app = builder.Build();
 // 配置热重载时清理 Thompson 采样状态：剔除已删除/改名的模型条目，防 _states 无界泄漏。
 // OnChange 在 models-config.json 写入触发 IConfigurationRoot.Reload 后派发。
 var tsStoreForReload = app.Services.GetRequiredService<ThompsonStateStore>();
+var quotaStoreForReload = app.Services.GetRequiredService<UpstreamQuotaStateStore>();
 var routerOptionsMonitor = app.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>();
 routerOptionsMonitor.OnChange(options =>
 {
     tsStoreForReload.Retain(options.Models.Select(m => m.Name));
+    quotaStoreForReload.Retain(options.Models.Select(m => m.Name));
 });
 
 // Serve the Blazor boot script and the dashboard's CSS/JavaScript before the

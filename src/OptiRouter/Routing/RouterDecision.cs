@@ -33,4 +33,10 @@ public sealed record RouterDecision
     /// 估算的输入 token 数。
     /// </summary>
     public int EstimatedInputTokens { get; init; }
+
+    /// <summary>
+    /// Structured complexity signal. Behavioral consumers must use this field and
+    /// never parse <see cref="Reason"/>.
+    /// </summary>
+    public RequestComplexity RequestComplexity { get; init; } = RequestComplexity.Unknown;
 }

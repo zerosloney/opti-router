@@ -7,7 +7,7 @@
 ## 1. Scope / Trigger
 
 - Routing engine (`RouterEngine`) orchestrates a chain of `IRouterPolicy` policies to produce a ranked candidate list.
-- Policy chain order (defined in `Program.cs`): CapabilityFilter → RuleClassifier → SessionAffinity → SemanticRouter → LongInput → LatencyAware → BudgetGuard → Failover → LoadBalance.
+- Policy chain order (defined in `Program.cs`): CapabilityFilter → RuleClassifier → SessionAffinity → SemanticRouter → LongInput → LatencyAware → PromptCacheAffinity → BudgetGuard → QuotaAware → Failover → LoadBalance.
 - Multi-dimensional routing (`EnableMultiDimensionalRouting`) weights request dimensions against model capability scores.
 - Thompson Sampling MAB (`EnableThompsonSampling`) adaptively reorders candidates by Beta-distribution sampling from historical latency/success data.
 
@@ -26,6 +26,7 @@ public sealed record RouterDecision
     public required string Reason { get; init; }
     public bool BudgetExhausted { get; init; }
     public int EstimatedInputTokens { get; init; }
+    public RequestComplexity RequestComplexity { get; init; } = RequestComplexity.Unknown;
 }
 
 // Policy input context (immutable record)
@@ -131,11 +132,17 @@ public sealed class LatencyStatsCache : ILatencyStatsProvider;
 | `EnableLatencyAware` | bool | `false` | — |
 | `LatencyMinSamples` | int | `10` | — |
 | `LatencyStatsWindowMinutes` | int | `60` | — |
+| `EnablePromptCacheAffinity` | bool | `false` | — |
+| `PromptCacheAffinityTtlSeconds` | int | `600` | `> 0` |
+| `EnableQuotaAwareRouting` | bool | `false` | — |
+| `EnableDynamicFusionPanelSize` | bool | `false` | — |
+| `FusionRouterMinPanelSize` | int | `2` | `[2, 5]` and `<= FusionRouterPanelSize` |
+| `EnableFusionDiversity` | bool | `false` | — |
 
 ### Thompson Outcome Recording
 
 ```csharp
-// Called in ProxyOrchestrator on every model attempt (success or failure):
+// Called on every adopted success and every non-429 failure:
 // isGood = success AND (elapsedMs < ThompsonLatencyTargetMs)
 RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
 // → calls _tsStore.RecordOutcome(modelName, isGood, routing.ThompsonDiscountFactor)
@@ -180,9 +187,11 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 | 4 | `SemanticRouterPolicy` | `EnableSemanticRouter` | Override tier by cosine similarity to semantic route phrases |
 | 5 | `LongInputPolicy` | `EnableTokenEstimator` | Exclude models with insufficient context window |
 | 6 | `LatencyAwarePolicy` | `EnableLatencyAware` / `EnableThompsonSampling` | Reorder within tier by latency or Thompson Beta sampling |
-| 7 | `BudgetGuardPolicy` | `EnableBudgetGuard` | Degrade to Cheap on budget exhaustion; or reject |
-| 8 | `FailoverPolicy` | `EnableFailover` | Exclude circuit-broken models |
-| 9 | `LoadBalancePolicy` | — | Round-robin across remaining candidates |
+| 7 | `PromptCacheAffinityPolicy` | `EnablePromptCacheAffinity` | Softly promote a successful model for the same privacy-safe stable-prefix SHA-256 |
+| 8 | `BudgetGuardPolicy` | `EnableBudgetGuard` | Degrade to Cheap on budget exhaustion; or reject |
+| 9 | `QuotaAwarePolicy` | `EnableQuotaAwareRouting` | Exclude known active exhaustion; demote insufficient request/token headroom |
+| 10 | `FailoverPolicy` | `EnableFailover` | Exclude circuit-broken models |
+| 11 | `LoadBalancePolicy` | — | Round-robin across remaining candidates |
 
 ---
 
@@ -197,6 +206,9 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 | `EnableThompsonSampling` + `ThompsonDiscountFactor` outside `[0.5, 0.99]` | Validation fail | `RouterOptionsValidator` |
 | `AuditRetentionHours < 1` | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterTemperature` outside `[0, 2]` | Validation fail | `RouterOptionsValidator` |
+| `FusionRouterMinPanelSize` outside `[2, 5]` or above max panel size | Validation fail | `RouterOptionsValidator` |
+| `PromptCacheAffinityTtlSeconds <= 0` | Validation fail | `RouterOptionsValidator` |
+| Cached/cache-write price below zero | Validation fail per model | `RouterOptionsValidator` |
 | `MaxResponseStreamBytes <= 0` | Validation fail | `RouterOptionsValidator` |
 | Unknown `Tags` value | Warning only (not blocking) | `RouterOptionsValidator` |
 | No candidate model satisfies capability requirements | Warning + keep original candidates (not empty) | `CapabilityFilterPolicy` |
@@ -307,27 +319,28 @@ scored.Sort((a, b) =>
 // Result: cheap model picked when capability difference is negligible
 ```
 
-### Wrong: Preventing failure recording in Thompson state (fear of double-counting)
+### Wrong: Preventing all non-quota failure recording in Thompson state
 
 ```csharp
-// Do NOT record failures into Thompson state (supposedly redundant with circuit breaker):
+// Do NOT record non-429 failures into Thompson state (supposedly redundant with circuit breaker):
 // (skip RecordThompsonOutcome in catch blocks)
 // Result: Beta never accumulates for failing models, Thompson sampling has no
 // signal to deprioritize them. Circuit breaker (seconds-timescale) and Thompson
 // (hours-timescale with discount factor) are complementary, not redundant.
 ```
 
-### Correct: Record Thompson outcome on every attempt (success and failure)
+### Correct: Record successes and non-429 failures; keep quota separate
 
 ```csharp
 // Recorded on success (fast→Alpha, slow→Beta):
 RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
 
-// Recorded on failure/timeout (Beta += 1):
-RecordThompsonOutcome(candidate.Name, false);
+// Recorded on non-429 failure/timeout (Beta += 1):
+if (!UpstreamFailureClassifier.IsQuotaLimited(error))
+    RecordThompsonOutcome(candidate.Name, false);
 ```
 
-> **Warning**: Thompson state and circuit breaker (`ModelHealthTracker`) serve complementary timescales — circuit breaker excludes failed models for seconds/minutes (cooldown), while Thompson Beta accumulates over hours (discount-weighted). Both record failures. This is intentional: removing Thompson failure recording would deprive the MAB of long-term signal, making it unable to deprioritize consistently failing models. The circuit breaker handles short-term exclusion; Thompson handles long-term adaptive ranking.
+> **Warning**: Thompson state and circuit breaker (`ModelHealthTracker`) serve complementary timescales for availability failures — circuit breaker excludes failed models for seconds/minutes, while Thompson Beta accumulates a discounted long-term signal. Both record non-429 failures. HTTP 429 belongs only to quota state and must not poison either availability signal.
 
 ### Wrong: CapabilityFilter returns empty candidate list on no-match
 
@@ -348,6 +361,114 @@ if (filtered.Count == 0) {
 ```
 
 ---
+
+## Scenario: Provider-aware routing foundation
+
+### 1. Scope / Trigger
+
+- Applies when adding or changing upstream metadata capture, prompt-cache-aware cost accounting, quota-aware routing, stable-prefix affinity, or Fusion panel selection.
+- Candidate-order-changing features are opt-in and default off. Metadata capture, normalization, audit persistence, and dashboard projection remain active so operators can evaluate a feature before enabling it.
+- Routing policies are synchronous and memory-only. HTTP/header parsing belongs in `OpenAICompatibleModelClient`; persistence belongs in audit stores; policies must never perform network or database I/O.
+
+### 2. Signatures
+
+```csharp
+public sealed record UpstreamResponseMetadata
+{
+    public long? RequestsRemaining { get; init; }
+    public long? TokensRemaining { get; init; }
+    public DateTimeOffset? RequestsResetAt { get; init; }
+    public DateTimeOffset? TokensResetAt { get; init; }
+    public DateTimeOffset? RetryAfterAt { get; init; }
+    public long? ResponseHeaderLatencyMs { get; init; }
+    public long? TimeToFirstTokenMs { get; init; }
+}
+
+public sealed record ChatUsage
+{
+    public int PromptTokens { get; init; }
+    public int CompletionTokens { get; init; }
+    public int CachedInputTokens { get; init; }
+    public int CacheWriteInputTokens { get; init; }
+    public int UncachedInputTokens { get; init; }
+}
+
+public static string? StablePromptFingerprint.Compute(ChatRequest request);
+public void PromptCacheAffinityStore.Record(string fingerprint, string modelName, TimeSpan ttl);
+public bool PromptCacheAffinityStore.TryGetModel(string fingerprint, out string? modelName);
+public void UpstreamQuotaStateStore.Record(
+    string modelName, UpstreamResponseMetadata? metadata, bool rateLimited);
+public FusionPanelSelection FusionPanelSelector.Select(
+    RouterDecision decision, RoutingOptions options);
+```
+
+`ModelEndpointOptions` adds `Provider`, `Family`, nullable `CachedInputPricePerMillion`, and nullable `CacheWriteInputPricePerMillion`. A null cache price falls back to the ordinary input price. `RouterDecision.RequestComplexity` is the only behavioral complexity signal; consumers must not parse `Reason`.
+
+### 3. Contracts
+
+- Normalize only known rate-limit fields. Never retain or log raw headers, API keys, response bodies, prompts, or session content as routing state.
+- Cache usage must be nonnegative and internally consistent: `cached + cacheWrite + uncached == prompt`. Malformed, oversized, or contradictory provider fields are clamped to the safe prompt remainder.
+- Cache-aware input cost is `(cached * cachedPrice + cacheWrite * cacheWritePrice + uncached * inputPrice) / 1_000_000`; output pricing is unchanged.
+- Stable-prefix material is canonical JSON containing system messages plus `functions`, `parallel_tool_calls`, `response_format`, `tool_choice`, and `tools`. The store accepts only 64-character SHA-256 hexadecimal keys, stores only fingerprint/model/TTL metadata, is bounded, and overwrites the affinity with the latest successful downstream model.
+- Active session affinity takes precedence only when `EnableSessionAffinity=true` and a session id exists. Merely carrying a session id must not disable prompt-cache affinity.
+- Quota state is process-local and hot-reload-pruned. A known future reset permits exclusion while exhausted; insufficient token/request headroom is a soft demotion. Unknown/malformed metadata preserves the original order.
+- HTTP 429 updates quota state but is not a model-health or Thompson failure. Non-429 upstream failures continue to update health and Thompson state. This applies equally to serial, streaming, Race, Fusion, Cascade, and health-probe paths.
+- Dynamic Fusion panel size maps `Simple` to min, `Standard` to `min + 1` capped at max, and `Complex`/`Unknown` to max. Diversity is soft, preserves the primary model, scores only provider/family dimensions known on the primary, and preserves original order on ties or incomplete metadata.
+
+### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|-----------|----------|
+| Missing or malformed rate-limit/cache usage field | Ignore field; keep safe defaults and candidate order |
+| Cache count exceeds prompt count | Clamp components to prompt remainder before costing/auditing |
+| Affinity input is not a SHA-256 hex digest | `ArgumentException`; never store arbitrary prompt material |
+| Affinity TTL is non-positive | Startup validation failure or `ArgumentOutOfRangeException` at store boundary |
+| Quota snapshot has active exhaustion reset | Exclude candidate until reset |
+| Quota snapshot lacks enough estimated token headroom | Demote candidate after viable candidates |
+| All quota candidates are exhausted | Empty candidate list is allowed to flow to the established all-candidates failure path |
+| Upstream status is 429 | `QuotaLimited=true`; quota update only; no circuit/Thompson penalty |
+| Upstream status is 5xx/network/timeout | Health and Thompson failure; normal failover behavior |
+| Fusion min outside `[2,5]` or above max | Startup validation failure |
+| Provider/family missing on primary | No diversity bonus for that dimension |
+
+### 5. Good/Base/Bad Cases
+
+- **Good**: A repeated system/tool prefix succeeds on model B; the SHA-256 affinity promotes B on the next eligible request, and cached tokens use B's discounted cache price.
+- **Base**: No cache/rate headers are returned; usage falls back to ordinary prompt pricing and every opt-in policy preserves the existing candidate order.
+- **Bad**: A 429 is sent to `ModelHealthTracker.RecordFailure`; the circuit opens for a healthy but temporarily quota-limited endpoint and double-punishes it. Record quota exhaustion only.
+
+### 6. Tests Required
+
+- Provider-specific cache usage parsing, malformed numeric fields, contradictory totals, missing usage, response-header latency, and streaming first-data TTFT.
+- Cache price fallback and split-token cost math.
+- SHA-256 canonicalization, stable-field selection, TTL/size eviction, invalid fingerprint rejection, downstream overwrite, session precedence, and failed-model filtering.
+- Quota reset formats, 429 without headers, insufficient headroom, reset expiry, hot-reload pruning, and unchanged-order fallback.
+- Serial/streaming/Race/Fusion/Cascade/probe regression matrix proving 429 is quota-only while 5xx still records health/Thompson failure.
+- Dynamic panel sizes for all `RequestComplexity` values; primary preservation, provider/family diversity, tie stability, and incomplete metadata.
+- Configuration binding/hot reload and management API/dashboard round trips for all new model metadata and prices.
+
+### 7. Wrong vs Correct
+
+```csharp
+// Wrong: behavior depends on diagnostic prose and raw prompt storage.
+if (decision.Reason.Contains("simple")) panelSize = 2;
+affinity[prompt] = model.Name;
+
+// Correct: typed behavior plus privacy-safe stable material.
+panelSize = decision.RequestComplexity == RequestComplexity.Simple ? min : max;
+string? fingerprint = StablePromptFingerprint.Compute(request);
+if (fingerprint is not null) affinity.Record(fingerprint, model.Name, ttl);
+```
+
+```csharp
+// Wrong: all upstream failures poison health state.
+health.RecordFailure(model.Name); // includes 429
+
+// Correct: classify once and keep quota separate from availability.
+bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(error);
+outcomes.RecordQuota(model.Name, metadata, quotaLimited);
+if (!quotaLimited) outcomes.RecordFailure(model.Name, error);
+```
 
 ## Design Decisions
 

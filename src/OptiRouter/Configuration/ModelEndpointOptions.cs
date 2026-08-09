@@ -7,6 +7,8 @@ namespace OptiRouter.Configuration;
 /// </summary>
 public sealed class ModelEndpointOptions
 {
+    private IList<string> _tags = new Collection<string>();
+
     /// <summary>
     /// 模型唯一标识，如 "gpt-4o"、"deepseek-chat"。
     /// </summary>
@@ -38,6 +40,30 @@ public sealed class ModelEndpointOptions
     public decimal InputPricePerMillion { get; set; }
 
     /// <summary>
+    /// Provider identifier used only for soft routing diversity. Empty means unknown;
+    /// custom values are supported.
+    /// </summary>
+    public string Provider { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Model family identifier used only for soft routing diversity. Empty means unknown;
+    /// custom values are supported.
+    /// </summary>
+    public string Family { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Cached-input token price (USD / million tokens). Null falls back to
+    /// <see cref="InputPricePerMillion"/>.
+    /// </summary>
+    public decimal? CachedInputPricePerMillion { get; set; }
+
+    /// <summary>
+    /// Cache-write input token price (USD / million tokens). Null falls back to
+    /// <see cref="InputPricePerMillion"/>.
+    /// </summary>
+    public decimal? CacheWriteInputPricePerMillion { get; set; }
+
+    /// <summary>
     /// 输出 token 价格（USD / 百万 token）。
     /// </summary>
     public decimal OutputPricePerMillion { get; set; }
@@ -60,7 +86,11 @@ public sealed class ModelEndpointOptions
     /// <summary>
     /// 可选能力标签，如 ["vision","tool-use"]。
     /// </summary>
-    public IList<string> Tags { get; } = new Collection<string>();
+    public IList<string> Tags
+    {
+        get => _tags;
+        set => _tags = value ?? new Collection<string>();
+    }
 
     /// <summary>
     /// 模型在各维度的能力评分（0.0 至 1.0），如 "coding": 0.95, "reasoning": 0.90。

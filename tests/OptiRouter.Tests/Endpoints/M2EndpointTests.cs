@@ -101,7 +101,7 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
             {
                 var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
                 var endpoint = options.Models[0];
-                var mockClient = new M2MockModelClient(endpoint, OnCompleteRaw ?? ((_, _) => 
+                var mockClient = new M2MockModelClient(endpoint, OnCompleteRaw ?? ((_, _) =>
                     Task.FromResult(new RawChatResponse("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}", null))));
                 return new M2ModelClientProvider(mockClient);
             });

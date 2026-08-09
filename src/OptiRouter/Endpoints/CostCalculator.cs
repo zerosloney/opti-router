@@ -19,8 +19,18 @@ public static class CostCalculator
         ArgumentNullException.ThrowIfNull(usage);
         ArgumentNullException.ThrowIfNull(endpoint);
 
-        var inputCost = usage.PromptTokens * endpoint.InputPricePerMillion / 1_000_000m;
-        var outputCost = usage.CompletionTokens * endpoint.OutputPricePerMillion / 1_000_000m;
+        int promptTokens = Math.Max(0, usage.PromptTokens);
+        int cachedTokens = Math.Clamp(usage.CachedInputTokens, 0, promptTokens);
+        int cacheWriteTokens = Math.Clamp(usage.CacheWriteInputTokens, 0, promptTokens - cachedTokens);
+        int uncachedTokens = Math.Max(0, promptTokens - cachedTokens - cacheWriteTokens);
+
+        decimal cachedPrice = endpoint.CachedInputPricePerMillion ?? endpoint.InputPricePerMillion;
+        decimal cacheWritePrice = endpoint.CacheWriteInputPricePerMillion ?? endpoint.InputPricePerMillion;
+        var inputCost = (
+            cachedTokens * cachedPrice
+            + cacheWriteTokens * cacheWritePrice
+            + uncachedTokens * endpoint.InputPricePerMillion) / 1_000_000m;
+        var outputCost = Math.Max(0, usage.CompletionTokens) * endpoint.OutputPricePerMillion / 1_000_000m;
         return inputCost + outputCost;
     }
 }

@@ -86,6 +86,10 @@ public static class DashboardHandler
         int totalRequests = recent.Count;
         long totalTokens = recent.Sum(r => (long)r.PromptTokens + r.CompletionTokens);
         double avgLatencyMs = totalRequests > 0 ? recent.Average(r => r.LatencyMs) : 0;
+        var ttftSamples = recent.Where(r => r.TimeToFirstTokenMs is not null).ToList();
+        double? avgTtftMs = ttftSamples.Count > 0 ? ttftSamples.Average(r => r.TimeToFirstTokenMs!.Value) : null;
+        long cachedInputTokens = recent.Sum(r => (long)r.CachedInputTokens);
+        long cacheWriteInputTokens = recent.Sum(r => (long)r.CacheWriteInputTokens);
 
         var modelsList = options.Models.Select(m =>
         {
@@ -95,8 +99,12 @@ public static class DashboardHandler
             {
                 m.Name,
                 m.BaseUrl,
+                m.Provider,
+                m.Family,
                 m.Tier,
                 m.InputPricePerMillion,
+                m.CachedInputPricePerMillion,
+                m.CacheWriteInputPricePerMillion,
                 m.OutputPricePerMillion,
                 m.MaxContextTokens,
                 m.Enabled,
@@ -127,6 +135,9 @@ public static class DashboardHandler
                 TotalRequests = totalRequests,
                 TotalTokens = totalTokens,
                 AvgLatencyMs = Math.Round(avgLatencyMs, 1),
+                AvgTtftMs = avgTtftMs is null ? (double?)null : Math.Round(avgTtftMs.Value, 1),
+                CachedInputTokens = cachedInputTokens,
+                CacheWriteInputTokens = cacheWriteInputTokens,
                 Alerts = alerts.Select(a => new { a.Id, a.Level, a.Category, a.Message, a.Timestamp })
             },
             Models = modelsList

@@ -128,7 +128,7 @@ public class CostLedgerStoreTests
         Assert.Equal(20m, store.GetDaily(yesterday));
     }
 
-[Theory]
+    [Theory]
     [MemberData(nameof(StoreFactories))]
     public async Task ConcurrentAdds_AccumulateCorrectly(Func<ICostLedgerStore> factory)
     {
@@ -331,9 +331,9 @@ public class CostLedgerStoreTests
             }
 
             using var b = new SqliteCostLedgerStore(path);
-                var history = b.GetDailyHistory(1);
-                Assert.Single(history);
-                Assert.Equal(6.0m, history[0].Amount);
+            var history = b.GetDailyHistory(1);
+            Assert.Single(history);
+            Assert.Equal(6.0m, history[0].Amount);
         }
         finally
         {

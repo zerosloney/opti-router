@@ -5,3 +5,4 @@
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"Zero-I/O policy, immutable records, validation, and deterministic tests."}
 {"file":".trellis/spec/backend/directory-structure.md","reason":"Placement and dependency direction for Clients, Routing, Endpoints, and Configuration."}
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Response metadata flows through transport, routing, storage, metrics, and dashboard boundaries."}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Dashboard and ApiService DTOs must preserve immutable records, JSON shape, and numeric type contracts."}

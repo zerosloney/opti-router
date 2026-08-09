@@ -5,3 +5,4 @@
 {"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify tests, determinism, immutable contracts, and hot-path rules."}
 {"file":".trellis/spec/backend/directory-structure.md","reason":"Verify file placement and dependency direction."}
 {"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify complete metadata data flow and typed projections."}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Verify Dashboard/ApiService DTO JSON compatibility and decimal/double type safety."}

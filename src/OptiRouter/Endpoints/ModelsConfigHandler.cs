@@ -22,12 +22,16 @@ public static class ModelsConfigHandler
             {
                 m.Name,
                 m.BaseUrl,
+                m.Provider,
+                m.Family,
                 m.Tier,
                 m.MaxContextTokens,
                 m.TimeoutSeconds,
                 m.MaxRetries,
                 m.Enabled,
                 m.InputPricePerMillion,
+                m.CachedInputPricePerMillion,
+                m.CacheWriteInputPricePerMillion,
                 m.OutputPricePerMillion,
                 m.Tags,
                 HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
@@ -40,8 +44,20 @@ public static class ModelsConfigHandler
         {
             var models = cfg.LoadModels().Select(m => new
             {
-                m.Name, m.BaseUrl, m.Tier, m.MaxContextTokens, m.TimeoutSeconds,
-                m.MaxRetries, m.Enabled, m.InputPricePerMillion, m.OutputPricePerMillion, m.Tags,
+                m.Name,
+                m.BaseUrl,
+                m.Tier,
+                m.MaxContextTokens,
+                m.TimeoutSeconds,
+                m.MaxRetries,
+                m.Enabled,
+                m.Provider,
+                m.Family,
+                m.InputPricePerMillion,
+                m.CachedInputPricePerMillion,
+                m.CacheWriteInputPricePerMillion,
+                m.OutputPricePerMillion,
+                m.Tags,
                 HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
             });
             return Results.Json(new { models, configFile = cfg.ConfigFilePath });
@@ -64,11 +80,15 @@ public static class ModelsConfigHandler
                 Name = req.Name.Trim(),
                 BaseUrl = req.BaseUrl.Trim().TrimEnd('/'),
                 ApiKey = req.ApiKey,
+                Provider = req.Provider?.Trim() ?? string.Empty,
+                Family = req.Family?.Trim() ?? string.Empty,
                 Tier = req.Tier ?? ModelTier.Medium,
                 // 数值 clamp：镜像 RouterOptionsValidator 边界，防止坏值落盘导致重启 ValidateOnStart 失败。
                 MaxContextTokens = (req.MaxContextTokens is > 0) ? req.MaxContextTokens.Value : 8192,
                 InputPricePerMillion = (req.InputPricePerMillion ?? 0) < 0 ? 0 : req.InputPricePerMillion!.Value,
                 OutputPricePerMillion = (req.OutputPricePerMillion ?? 0) < 0 ? 0 : req.OutputPricePerMillion!.Value,
+                CachedInputPricePerMillion = req.CachedInputPricePerMillion is >= 0 ? req.CachedInputPricePerMillion : null,
+                CacheWriteInputPricePerMillion = req.CacheWriteInputPricePerMillion is >= 0 ? req.CacheWriteInputPricePerMillion : null,
                 TimeoutSeconds = (req.TimeoutSeconds is > 0) ? req.TimeoutSeconds.Value : 120,
                 MaxRetries = (req.MaxRetries is >= 0) ? req.MaxRetries.Value : 0,
                 Enabled = req.Enabled ?? true
@@ -103,8 +123,12 @@ public static class ModelsConfigHandler
             if (req.TimeoutSeconds is > 0) model.TimeoutSeconds = req.TimeoutSeconds.Value;
             if (req.MaxRetries is >= 0) model.MaxRetries = req.MaxRetries.Value;
             if (req.Enabled is not null) model.Enabled = req.Enabled.Value;
+            if (req.Provider is not null) model.Provider = req.Provider.Trim();
+            if (req.Family is not null) model.Family = req.Family.Trim();
             if (req.InputPricePerMillion >= 0) model.InputPricePerMillion = req.InputPricePerMillion.Value;
             if (req.OutputPricePerMillion >= 0) model.OutputPricePerMillion = req.OutputPricePerMillion.Value;
+            if (req.CachedInputPricePerMillion >= 0) model.CachedInputPricePerMillion = req.CachedInputPricePerMillion.Value;
+            if (req.CacheWriteInputPricePerMillion >= 0) model.CacheWriteInputPricePerMillion = req.CacheWriteInputPricePerMillion.Value;
 
             try
             {
@@ -136,7 +160,11 @@ public static class ModelsConfigHandler
         int? MaxRetries,
         bool? Enabled,
         decimal? InputPricePerMillion,
-        decimal? OutputPricePerMillion);
+        decimal? OutputPricePerMillion,
+        string? Provider = null,
+        string? Family = null,
+        decimal? CachedInputPricePerMillion = null,
+        decimal? CacheWriteInputPricePerMillion = null);
 
     private record CreateModelRequest(
         string Name,
@@ -149,5 +177,9 @@ public static class ModelsConfigHandler
         bool? Enabled,
         decimal? InputPricePerMillion,
         decimal? OutputPricePerMillion,
-        List<string>? Tags);
+        List<string>? Tags,
+        string? Provider = null,
+        string? Family = null,
+        decimal? CachedInputPricePerMillion = null,
+        decimal? CacheWriteInputPricePerMillion = null);
 }

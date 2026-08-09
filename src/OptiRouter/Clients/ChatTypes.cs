@@ -179,6 +179,15 @@ public sealed record ChatUsage
     /// 总 token 数。
     /// </summary>
     public int TotalTokens { get; init; }
+
+    /// <summary>Prompt tokens served from an upstream prompt cache.</summary>
+    public int CachedInputTokens { get; init; }
+
+    /// <summary>Prompt tokens written to an upstream prompt cache.</summary>
+    public int CacheWriteInputTokens { get; init; }
+
+    /// <summary>Explicit or safely derived uncached prompt tokens.</summary>
+    public int UncachedInputTokens { get; init; }
 }
 
 /// <summary>
@@ -227,11 +236,19 @@ internal sealed record RawStreamDelta(
 /// </summary>
 /// <param name="Body">上游原始 JSON 字符串，原样回传客户端。</param>
 /// <param name="Usage">从 Body 提取的 token 用量；上游未返回时为 null。</param>
-public sealed record RawChatResponse(string Body, ChatUsage? Usage);
+/// <param name="Metadata">规范化响应元数据；未知时为 null。</param>
+public sealed record RawChatResponse(
+    string Body,
+    ChatUsage? Usage,
+    UpstreamResponseMetadata? Metadata = null);
 
 /// <summary>
 /// 流式原始响应行：单条 SSE <c>data:</c> 后的原始内容 + 从中提取的 token 用量。
 /// </summary>
 /// <param name="Data">原始 data 内容（JSON 或 <c>[DONE]</c>）。</param>
 /// <param name="Usage">从 Data 提取的 token 用量；该行未携带或非 JSON 时为 null。</param>
-public sealed record RawStreamLine(string Data, ChatUsage? Usage);
+/// <param name="Metadata">仅首个 data 行携带的规范化响应元数据。</param>
+public sealed record RawStreamLine(
+    string Data,
+    ChatUsage? Usage,
+    UpstreamResponseMetadata? Metadata = null);

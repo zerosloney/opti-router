@@ -47,6 +47,14 @@
                 <span class="stat-row-label">平均延迟</span>
                 <span class="stat-row-val">@((Metrics?.System.AvgLatencyMs ?? 0).ToString("F1")) ms</span>
             </div>
+            <div class="stat-row">
+                <span class="stat-row-label">平均 TTFT</span>
+                <span class="stat-row-val">@(Metrics?.System.AvgTtftMs is { } ttft ? $"{ttft:F1} ms" : "--")</span>
+            </div>
+            <div class="stat-row">
+                <span class="stat-row-label">缓存命中/写入</span>
+                <span class="stat-row-val">@((Metrics?.System.CachedInputTokens ?? 0).ToString("N0")) / @((Metrics?.System.CacheWriteInputTokens ?? 0).ToString("N0"))</span>
+            </div>
         </div>
 
         <!-- 路由引擎 -->
@@ -136,8 +144,12 @@
                         <div class="info-grid">
                             <span class="info-label">BaseUrl</span>
                             <span class="info-val" title="@m.BaseUrl">@Truncate(m.BaseUrl, 25)</span>
+                            <span class="info-label">Provider / Family</span>
+                            <span class="info-val">@(string.IsNullOrWhiteSpace(m.Provider) ? "-" : m.Provider) / @(string.IsNullOrWhiteSpace(m.Family) ? "-" : m.Family)</span>
                             <span class="info-label">输入 $/M</span>
                             <span class="info-val">$@m.InputPricePerMillion.ToString("F2")</span>
+                            <span class="info-label">缓存命中 / 写入 $/M</span>
+                            <span class="info-val">@(m.CachedInputPricePerMillion?.ToString("F2") ?? "回退") / @(m.CacheWriteInputPricePerMillion?.ToString("F2") ?? "回退")</span>
                             <span class="info-label">输出 $/M</span>
                             <span class="info-val">$@m.OutputPricePerMillion.ToString("F2")</span>
                             <span class="info-label">最大上下文</span>
@@ -184,7 +196,7 @@
                 <table class="log-table">
                     <thead>
                         <tr>
-                            <th>时间</th><th>模型</th><th>Token</th><th>费用</th><th>延迟</th><th>状态</th><th>流式</th>
+                            <th>时间</th><th>模型</th><th>Token</th><th>缓存 hit/write/uncached</th><th>费用</th><th>延迟</th><th>TTFT</th><th>状态</th><th>流式</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -196,6 +208,7 @@
                                     <td>@item.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
                                     <td>@item.Model</td>
                                     <td>@(item.PromptTokens + item.CompletionTokens)</td>
+                                    <td>@item.CachedInputTokens / @item.CacheWriteInputTokens / @item.UncachedInputTokens</td>
                                     <td>
                                         $@item.Cost.ToString("F6")
                                         @if (item.IsEstimated)
@@ -204,14 +217,17 @@
                                         }
                                     </td>
                                     <td>@item.LatencyMs.ToString("F0") ms</td>
-                                    <td class="@(item.Success ? "text-success" : "text-danger")">@(item.Success ? "成功" : "失败")</td>
+                                    <td>@(item.TimeToFirstTokenMs is { } auditTtft ? $"{auditTtft:F0} ms" : "--")</td>
+                                    <td class="@(item.Success ? "text-success" : "text-danger")">
+                                        @(item.Success ? "成功" : item.QuotaLimited ? "配额受限" : "失败")
+                                    </td>
                                     <td>@(item.IsStreaming ? "是" : "否")</td>
                                 </tr>
                             }
                         }
                         else
                         {
-                            <tr><td colspan="7" class="text-center text-secondary">暂无数据</td></tr>
+                            <tr><td colspan="9" class="text-center text-secondary">暂无数据</td></tr>
                         }
                     </tbody>
                 </table>

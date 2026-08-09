@@ -21,6 +21,8 @@ public sealed class OutcomeRecorder
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly IMemoryCache _affinityCache;
     private readonly ThompsonStateStore _tsStore;
+    private readonly PromptCacheAffinityStore _promptAffinityStore;
+    private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly ILogger<OutcomeRecorder> _logger;
 
     public OutcomeRecorder(
@@ -30,6 +32,8 @@ public sealed class OutcomeRecorder
         IOptionsMonitor<RouterOptions> options,
         IMemoryCache affinityCache,
         ThompsonStateStore tsStore,
+        PromptCacheAffinityStore promptAffinityStore,
+        UpstreamQuotaStateStore quotaStore,
         ILogger<OutcomeRecorder> logger)
     {
         _auditStore = auditStore;
@@ -38,6 +42,8 @@ public sealed class OutcomeRecorder
         _options = options;
         _affinityCache = affinityCache;
         _tsStore = tsStore;
+        _promptAffinityStore = promptAffinityStore;
+        _quotaStore = quotaStore;
         _logger = logger;
     }
 
@@ -64,7 +70,9 @@ public sealed class OutcomeRecorder
         bool isAdopted = true,
         string? parallelGroupId = null,
         bool isEstimated = false,
-        string? fusionRole = null)
+        string? fusionRole = null,
+        long? timeToFirstTokenMs = null,
+        bool quotaLimited = false)
     {
         try
         {
@@ -88,7 +96,12 @@ public sealed class OutcomeRecorder
                 IsAdopted: isAdopted,
                 ParallelGroupId: parallelGroupId,
                 IsEstimated: isEstimated,
-                FusionRole: fusionRole));
+                FusionRole: fusionRole,
+                TimeToFirstTokenMs: timeToFirstTokenMs,
+                CachedInputTokens: usage?.CachedInputTokens ?? 0,
+                CacheWriteInputTokens: usage?.CacheWriteInputTokens ?? 0,
+                UncachedInputTokens: usage?.UncachedInputTokens ?? 0,
+                QuotaLimited: quotaLimited));
         }
         catch
         {
@@ -108,7 +121,12 @@ public sealed class OutcomeRecorder
                 latencyMs,
                 usage?.PromptTokens ?? 0,
                 usage?.CompletionTokens ?? 0,
-                cost);
+                cost,
+                timeToFirstTokenMs,
+                usage?.CachedInputTokens ?? 0,
+                usage?.CacheWriteInputTokens ?? 0,
+                usage?.UncachedInputTokens ?? 0,
+                quotaLimited);
         }
         catch
         {
@@ -154,6 +172,30 @@ public sealed class OutcomeRecorder
             // 粘性记录失败不应影响已成功的请求。
         }
     }
+
+    /// <summary>Records stable-prefix affinity using only the SHA-256 fingerprint.</summary>
+    public void RecordPromptCacheAffinity(ChatRequest request, string modelName)
+    {
+        var routing = _options.CurrentValue.Routing;
+        if (!routing.EnablePromptCacheAffinity) return;
+        string? fingerprint = StablePromptFingerprint.Compute(request);
+        if (fingerprint is null) return;
+        try
+        {
+            _promptAffinityStore.Record(
+                fingerprint,
+                modelName,
+                TimeSpan.FromSeconds(routing.PromptCacheAffinityTtlSeconds));
+        }
+        catch
+        {
+            // Affinity is advisory and must not affect a successful response.
+        }
+    }
+
+    /// <summary>Updates process-local normalized quota state.</summary>
+    public void RecordQuota(string modelName, UpstreamResponseMetadata? metadata, bool rateLimited = false)
+        => _quotaStore.Record(modelName, metadata, rateLimited);
 
     /// <summary>
     /// 上报 Thompson 采样反馈，读 <see cref="RoutingOptions.ThompsonDiscountFactor"/> 作衰减。

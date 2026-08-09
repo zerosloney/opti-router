@@ -108,12 +108,12 @@ public sealed class ModelClientProviderTests
         string baseUrl = "https://api.openai.com/v1",
         string apiKey = "sk-test",
         int timeoutSeconds = 120) => new()
-    {
-        Name = name,
-        BaseUrl = baseUrl,
-        ApiKey = apiKey,
-        TimeoutSeconds = timeoutSeconds
-    };
+        {
+            Name = name,
+            BaseUrl = baseUrl,
+            ApiKey = apiKey,
+            TimeoutSeconds = timeoutSeconds
+        };
 
     private static RouterOptions OptionsWith(params ModelEndpointOptions[] models)
     {

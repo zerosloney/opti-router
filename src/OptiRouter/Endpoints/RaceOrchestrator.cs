@@ -138,12 +138,15 @@ public sealed class RaceOrchestrator
                 if (usage is not null)
                     _recorder.RecordCost(cost, sessionId);
 
+                _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
                 _recorder.RecordThompsonOutcome(model.Name, elapsedMs < options.Routing.ThompsonLatencyTargetMs);
                 _recorder.RecordAffinity(sessionId, model.Name);
+                _recorder.RecordPromptCacheAffinity(request, model.Name);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,
-                    isAdopted: true, parallelGroupId: groupId);
+                    isAdopted: true, parallelGroupId: groupId,
+                    timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
                 accounted.Add(model.Name);
 
                 adopted = response;
@@ -186,8 +189,19 @@ public sealed class RaceOrchestrator
             // 真实失败：记断路器 + 审计，标记进入 failedInThisRequest（让串行降级排除它）。
             failedInThisRequest.Add(model.Name);
             lastModelName = model.Name;
-            bool tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
-            _recorder.RecordThompsonOutcome(model.Name, false);
+            bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(error);
+            bool tripped = false;
+            if (quotaLimited)
+            {
+                var quotaError = (ModelClientException)error!;
+                _recorder.RecordQuota(model.Name, quotaError.Metadata, rateLimited: true);
+                _healthTracker.ReleaseProbe(model.Name);
+            }
+            else
+            {
+                tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
+                _recorder.RecordThompsonOutcome(model.Name, false);
+            }
 
             int status = error switch
             {
@@ -197,16 +211,17 @@ public sealed class RaceOrchestrator
                 _ => lastStatusCode ?? 500
             };
             lastStatusCode = status;
-            lastErrorMessage = error?.Message ?? "unknown";
+            lastErrorMessage = UpstreamFailureClassifier.SafeMessage(error, quotaLimited);
 
             // 真实失败同样预估入账：请求已到上游，上游按已处理 input 计费。
-            decimal failedEstCost = OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
+            decimal failedEstCost = quotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
             if (failedEstCost > 0m)
                 _recorder.RecordCost(failedEstCost, sessionId);
             _recorder.RecordAudit(null, model.Name, estimatedTokens, null, failedEstCost, elapsedMs, sessionId,
                 decision.Reason + "; fusion: failed" + (tripped ? " (circuit tripped)" : ""),
-                false, error?.Message, false, routedTier,
-                isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m);
+                false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited), false, routedTier,
+                isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m,
+                quotaLimited: quotaLimited);
             accounted.Add(model.Name);
         }
 
@@ -243,11 +258,13 @@ public sealed class RaceOrchestrator
                 decimal cost = usage is not null ? CostCalculator.Compute(usage, m) : 0m;
                 if (usage is not null)
                     _recorder.RecordCost(cost, sessionId);
+                _recorder.RecordQuota(m.Name, response.Metadata);
                 _healthTracker.RecordSuccess(m.Name, requiredSuccesses);
                 _recorder.RecordThompsonOutcome(m.Name, elapsedMs < options.Routing.ThompsonLatencyTargetMs);
                 _recorder.RecordAudit(null, m.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
-                    isAdopted: false, parallelGroupId: groupId);
+                    isAdopted: false, parallelGroupId: groupId,
+                    timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
                 accounted.Add(m.Name);
                 continue;
             }
@@ -255,14 +272,25 @@ public sealed class RaceOrchestrator
             // 真正被取消：释放探测槽位 + 预估成本入账。
             // 前提假设：请求已发出到上游，上游按已处理的 input 计费（本地拿不到 Usage）。
             // 该估算标 IsEstimated=true，区分于真实成本；若在 cancel 传播前请求未发出，此项可能高估。
+            bool postBreakQuotaLimited = UpstreamFailureClassifier.IsQuotaLimited(error);
             _healthTracker.ReleaseProbe(m.Name);
-            _recorder.RecordThompsonOutcome(m.Name, false);
-            decimal estCost = OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
+            if (postBreakQuotaLimited)
+            {
+                var quotaError = (ModelClientException)error!;
+                _recorder.RecordQuota(m.Name, quotaError.Metadata, rateLimited: true);
+            }
+            else
+            {
+                _recorder.RecordThompsonOutcome(m.Name, false);
+            }
+            decimal estCost = postBreakQuotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
             if (estCost > 0m)
                 _recorder.RecordCost(estCost, sessionId);
             _recorder.RecordAudit(null, m.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
-                decision.Reason + "; fusion: cancelled-by-race (post-break)", false, "cancelled", false, routedTier,
-                isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m);
+                decision.Reason + "; fusion: cancelled-by-race (post-break)", false,
+                postBreakQuotaLimited ? "quota-exhausted" : "cancelled", false, routedTier,
+                isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
+                quotaLimited: postBreakQuotaLimited);
             accounted.Add(m.Name);
         }
 
@@ -285,4 +313,5 @@ public sealed class RaceOrchestrator
         // 若全部是 cancelled-by-race（无真实失败），说明采纳者实际存在——不可能走到这。
         return new FusionAttemptResult(adopted, lastModelName, lastStatusCode, lastErrorMessage);
     }
+
 }

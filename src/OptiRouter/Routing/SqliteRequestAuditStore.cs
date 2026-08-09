@@ -62,6 +62,11 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         EnsureColumn("is_estimated", "INTEGER NOT NULL DEFAULT 0");
         // 融合路由角色（向后兼容：旧记录/普通请求为 NULL）。
         EnsureColumn("fusion_role", "TEXT");
+        EnsureColumn("ttft_ms", "INTEGER");
+        EnsureColumn("cached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("cache_write_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("uncached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("quota_limited", "INTEGER NOT NULL DEFAULT 0");
     }
 
     private void EnsureColumn(string columnName, string definition)
@@ -100,13 +105,15 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                     (timestamp, request_id, model, estimated_tokens, prompt_tokens,
                      completion_tokens, cost, latency_ms, session_id, routing_reason,
                      success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                     is_adopted, parallel_group_id, is_estimated, fusion_role)
+                     is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
+                     cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited)
                 VALUES
                     (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
-                     @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole);
+                     @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
+                     @cached, @cachewrite, @uncached, @quota);
                 """;
             cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
-            cmd.Parameters.AddWithValue("@rid", record.RequestId);
+            cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
             cmd.Parameters.AddWithValue("@model", record.Model);
             cmd.Parameters.AddWithValue("@est", record.EstimatedInputTokens);
             cmd.Parameters.AddWithValue("@ptok", record.PromptTokens);
@@ -125,6 +132,11 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.Parameters.AddWithValue("@pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@estim", record.IsEstimated ? 1 : 0);
             cmd.Parameters.AddWithValue("@frole", (object?)record.FusionRole ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@ttft", (object?)record.TimeToFirstTokenMs ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@cached", record.CachedInputTokens);
+            cmd.Parameters.AddWithValue("@cachewrite", record.CacheWriteInputTokens);
+            cmd.Parameters.AddWithValue("@uncached", record.UncachedInputTokens);
+            cmd.Parameters.AddWithValue("@quota", record.QuotaLimited ? 1 : 0);
             cmd.ExecuteNonQuery();
             tx.Commit();
         }
@@ -143,7 +155,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                       is_adopted, parallel_group_id, is_estimated, fusion_role
+                       is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
+                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited
                 FROM request_audit
                 ORDER BY id DESC
                 LIMIT @limit;
@@ -167,7 +180,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                       is_adopted, parallel_group_id, is_estimated, fusion_role
+                       is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
+                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited
                 FROM request_audit
                 WHERE model = @model
                 ORDER BY id DESC
@@ -204,7 +218,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                       is_adopted, parallel_group_id, is_estimated, fusion_role
+                       is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
+                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited
                 FROM request_audit
                 WHERE timestamp >= @from AND timestamp <= @to
                 ORDER BY id DESC
@@ -310,7 +325,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         {
             list.Add(new RequestAuditRecord(
                 Timestamp: DateTime.ParseExact(reader.GetString(0), "o", CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal),
-                RequestId: reader.GetString(1),
+                RequestId: string.IsNullOrEmpty(reader.GetString(1)) ? null : reader.GetString(1),
                 Model: reader.GetString(2),
                 EstimatedInputTokens: reader.GetInt32(3),
                 PromptTokens: reader.GetInt32(4),
@@ -328,7 +343,12 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 IsAdopted: reader.IsDBNull(16) ? true : reader.GetInt32(16) != 0,
                 ParallelGroupId: reader.IsDBNull(17) ? null : reader.GetString(17),
                 IsEstimated: reader.IsDBNull(18) ? false : reader.GetInt32(18) != 0,
-                FusionRole: reader.IsDBNull(19) ? null : reader.GetString(19)));
+                FusionRole: reader.IsDBNull(19) ? null : reader.GetString(19),
+                TimeToFirstTokenMs: reader.IsDBNull(20) ? null : reader.GetInt64(20),
+                CachedInputTokens: reader.IsDBNull(21) ? 0 : reader.GetInt32(21),
+                CacheWriteInputTokens: reader.IsDBNull(22) ? 0 : reader.GetInt32(22),
+                UncachedInputTokens: reader.IsDBNull(23) ? 0 : reader.GetInt32(23),
+                QuotaLimited: !reader.IsDBNull(24) && reader.GetInt32(24) != 0));
         }
         return list;
     }

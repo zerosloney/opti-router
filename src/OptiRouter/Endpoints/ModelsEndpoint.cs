@@ -32,6 +32,8 @@ public static class ModelsEndpoint
                     owned_by = "opti-router",
                     // 扩展字段：帮助客户端按能力/上下文选择。OpenAI 客户端会忽略未知字段。
                     tier = m.Tier.ToString().ToLowerInvariant(),
+                    provider = m.Provider,
+                    family = m.Family,
                     max_context_tokens = m.MaxContextTokens,
                     tags = m.Tags
                 })

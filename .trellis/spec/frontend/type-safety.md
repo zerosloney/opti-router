@@ -31,7 +31,12 @@ public record AuditItem(
     double LatencyMs,
     bool Success,
     bool IsStreaming,
-    bool IsEstimated);
+    bool IsEstimated,
+    double? TimeToFirstTokenMs = null,
+    int CachedInputTokens = 0,
+    int CacheWriteInputTokens = 0,
+    int UncachedInputTokens = 0,
+    bool QuotaLimited = false);
 ```
 
 ### JSON Property Naming
@@ -136,6 +141,7 @@ public class AuditItem { public string? Model { get; set; } }  // mutable, no va
 ## 6. Tests Required
 
 - DTO deserialization round-trip tests (match backend JSON shape)
+- Dashboard/model DTO round trips for `Provider`, `Family`, nullable cache prices, TTFT, cache token counts, and `QuotaLimited`
 - `ApiService` URL construction with `?key=` parameter
 - Null-coalescing behavior for all API responses
 
@@ -168,3 +174,10 @@ public class ModelDto { public string? Name { get; set; } }
 public record ModelDto(string Name, string BaseUrl, ...);
 // Immutable, structural equality, concise, JSON-deserializable.
 ```
+
+### Routing foundation DTO contract
+
+- Model read/create/update DTOs carry `Provider`, `Family`, `CachedInputPricePerMillion`, and `CacheWriteInputPricePerMillion` end to end. Nullable cache prices mean "use ordinary input price"; they must not be coerced to zero by the UI.
+- Dashboard system metrics expose nullable average TTFT plus aggregate cache-hit/cache-write tokens. Audit rows expose nullable TTFT, split cache token counts, and `QuotaLimited`.
+- New positional record fields that are absent from older JSON payloads require trailing defaults, preserving deserialization compatibility during rolling upgrades.
+- Mutable Blazor form fields mirror the DTO nullability. Provider/family default to empty strings; cache prices remain nullable until explicitly entered.

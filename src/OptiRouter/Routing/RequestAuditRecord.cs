@@ -30,6 +30,11 @@ namespace OptiRouter.Routing;
 /// 标注此字段以区分真实成本。串行模式/采纳的成功响应恒为 false（默认值）。</param>
 /// <param name="FusionRole">融合路由中的角色：<c>panel</c>（并行 panel 调用）、<c>analyst</c>（结构化分析）、
 /// <c>outer</c>（最终答案撰写）。非融合路由为 null（默认值）。</param>
+/// <param name="TimeToFirstTokenMs">流式首个 data 项 TTFT；非流式为响应头延迟代理。</param>
+/// <param name="CachedInputTokens">缓存命中输入 token。</param>
+/// <param name="CacheWriteInputTokens">缓存写入输入 token。</param>
+/// <param name="UncachedInputTokens">未缓存输入 token。</param>
+/// <param name="QuotaLimited">是否为上游配额拒绝。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -50,4 +55,9 @@ public sealed record RequestAuditRecord(
     bool IsAdopted = true,
     string? ParallelGroupId = null,
     bool IsEstimated = false,
-    string? FusionRole = null);
+    string? FusionRole = null,
+    long? TimeToFirstTokenMs = null,
+    int CachedInputTokens = 0,
+    int CacheWriteInputTokens = 0,
+    int UncachedInputTokens = 0,
+    bool QuotaLimited = false);

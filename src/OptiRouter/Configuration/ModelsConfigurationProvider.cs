@@ -64,22 +64,28 @@ public sealed class ModelsJsonConfigurationProvider : ConfigurationProvider
 
     private static void SetModel(IDictionary<string, string?> data, string prefix, ModelEndpointOptions m)
     {
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
         data[$"{prefix}Name"] = m.Name;
         data[$"{prefix}BaseUrl"] = m.BaseUrl;
         data[$"{prefix}ApiKey"] = m.ApiKey;
+        data[$"{prefix}Provider"] = m.Provider;
+        data[$"{prefix}Family"] = m.Family;
         data[$"{prefix}Tier"] = m.Tier.ToString();
-        data[$"{prefix}MaxContextTokens"] = m.MaxContextTokens.ToString();
-        data[$"{prefix}InputPricePerMillion"] = m.InputPricePerMillion.ToString();
-        data[$"{prefix}OutputPricePerMillion"] = m.OutputPricePerMillion.ToString();
-        data[$"{prefix}TimeoutSeconds"] = m.TimeoutSeconds.ToString();
-        data[$"{prefix}MaxRetries"] = m.MaxRetries.ToString();
+        data[$"{prefix}MaxContextTokens"] = m.MaxContextTokens.ToString(invariant);
+        data[$"{prefix}InputPricePerMillion"] = m.InputPricePerMillion.ToString(invariant);
+        data[$"{prefix}CachedInputPricePerMillion"] = m.CachedInputPricePerMillion?.ToString(invariant);
+        data[$"{prefix}CacheWriteInputPricePerMillion"] = m.CacheWriteInputPricePerMillion?.ToString(invariant);
+        data[$"{prefix}OutputPricePerMillion"] = m.OutputPricePerMillion.ToString(invariant);
+        data[$"{prefix}TimeoutSeconds"] = m.TimeoutSeconds.ToString(invariant);
+        data[$"{prefix}MaxRetries"] = m.MaxRetries.ToString(invariant);
         data[$"{prefix}Enabled"] = m.Enabled.ToString();
-        // Tags 暂不映射为分段配置项（Dashboard UI 通过 ModelsConfigService API 读取完整 JSON）
+        for (int i = 0; i < m.Tags.Count; i++)
+            data[$"{prefix}Tags:{i}"] = m.Tags[i];
         if (m.Capabilities is not null)
         {
             foreach (var kvp in m.Capabilities)
             {
-                data[$"{prefix}Capabilities:{kvp.Key}"] = kvp.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                data[$"{prefix}Capabilities:{kvp.Key}"] = kvp.Value.ToString(invariant);
             }
         }
     }

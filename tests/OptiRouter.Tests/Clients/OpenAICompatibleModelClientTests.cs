@@ -175,7 +175,8 @@ public class OpenAICompatibleModelClientTests
         // Act & Assert
         var ex = await Assert.ThrowsAsync<ModelClientException>(async () => await client.CompleteAsync(request));
         Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
-        Assert.Contains("server error", ex.Message);
+        Assert.Contains("server error", ex.ResponseBody);
+        Assert.DoesNotContain("server error", ex.Message);
     }
 
     #endregion
@@ -487,6 +488,130 @@ public class OpenAICompatibleModelClientTests
                 // 不应到达此处
             }
         });
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_NormalizesOpenAiCacheUsageAndKnownHeaders()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                {"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,
+                "prompt_tokens_details":{"cached_tokens":60,"cache_write_tokens":10}}}
+                """, Encoding.UTF8, "application/json")
+        };
+        response.Headers.TryAddWithoutValidation("x-ratelimit-remaining-requests", "7");
+        response.Headers.TryAddWithoutValidation("x-ratelimit-remaining-tokens", "900");
+        response.Headers.TryAddWithoutValidation("x-ratelimit-reset-requests", "2s");
+        response.Headers.TryAddWithoutValidation("x-unknown-secret-header", "must-not-be-retained");
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var result = await client.CompleteRawAsync(new ChatRequest());
+
+        Assert.NotNull(result.Usage);
+        Assert.Equal(60, result.Usage!.CachedInputTokens);
+        Assert.Equal(10, result.Usage.CacheWriteInputTokens);
+        Assert.Equal(30, result.Usage.UncachedInputTokens);
+        Assert.Equal(7, result.Metadata!.RequestsRemaining);
+        Assert.Equal(900, result.Metadata.TokensRemaining);
+        Assert.NotNull(result.Metadata.RequestsResetAt);
+        Assert.NotNull(result.Metadata.ResponseHeaderLatencyMs);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_NormalizesDeepSeekHitMissAndIgnoresMalformedOptionalUsage()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                {"usage":{"prompt_tokens":80,"completion_tokens":4,
+                "prompt_cache_hit_tokens":50,"prompt_cache_miss_tokens":30,
+                "cache_creation_input_tokens":"bad"}}
+                """, Encoding.UTF8, "application/json")
+        };
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var result = await client.CompleteRawAsync(new ChatRequest());
+
+        Assert.Equal(50, result.Usage!.CachedInputTokens);
+        Assert.Equal(30, result.Usage.UncachedInputTokens);
+        Assert.Equal(0, result.Usage.CacheWriteInputTokens);
+        Assert.Null(result.Metadata!.RequestsRemaining);
+        Assert.Null(result.Metadata.TokensRemaining);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_InconsistentCacheCountsUseSafeUncachedRemainder()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                {"usage":{"prompt_tokens":100,"completion_tokens":4,
+                "prompt_cache_hit_tokens":20,"prompt_cache_miss_tokens":30}}
+                """, Encoding.UTF8, "application/json")
+        };
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var result = await client.CompleteRawAsync(new ChatRequest());
+
+        Assert.Equal(20, result.Usage!.CachedInputTokens);
+        Assert.Equal(80, result.Usage.UncachedInputTokens);
+        Assert.Equal(result.Usage.PromptTokens,
+            result.Usage.CachedInputTokens + result.Usage.CacheWriteInputTokens + result.Usage.UncachedInputTokens);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_MalformedUsageShapeDoesNotFailResponse()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"id\":\"ok\",\"usage\":\"malformed\"}", Encoding.UTF8, "application/json")
+        };
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var result = await client.CompleteRawAsync(new ChatRequest());
+
+        Assert.Null(result.Usage);
+        Assert.Contains("\"id\":\"ok\"", result.Body);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_AttachesTtftMetadataOnlyToFirstDataItem()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                "data: {\"id\":\"a\",\"choices\":[]}\n\n" +
+                "data: {\"id\":\"b\",\"choices\":[]}\n\n" +
+                "data: [DONE]\n\n", Encoding.UTF8, "text/event-stream")
+        };
+        response.Headers.TryAddWithoutValidation("x-ratelimit-remaining-requests", "4");
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+        var lines = new List<RawStreamLine>();
+
+        await foreach (var line in client.StreamRawAsync(new ChatRequest { Stream = true }))
+            lines.Add(line);
+
+        Assert.NotNull(lines[0].Metadata?.TimeToFirstTokenMs);
+        Assert.Equal(4, lines[0].Metadata!.RequestsRemaining);
+        Assert.Null(lines[1].Metadata);
+        Assert.Null(lines[2].Metadata);
+    }
+
+    [Fact]
+    public void MetadataNormalizer_ParsesRetryAfterAndIgnoresMalformedReset()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+        response.Headers.TryAddWithoutValidation("retry-after", "120");
+        response.Headers.TryAddWithoutValidation("x-ratelimit-reset-requests", "secret-or-malformed");
+        var observedAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+
+        var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, 12, observedAt);
+
+        Assert.Equal(TimeSpan.FromSeconds(120), metadata.RetryAfter);
+        Assert.Equal(observedAt.AddSeconds(120), metadata.RetryAfterAt);
+        Assert.Null(metadata.RequestsResetAt);
+        Assert.Null(metadata.RequestsResetAfter);
     }
 
     #endregion

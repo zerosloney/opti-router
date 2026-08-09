@@ -116,6 +116,22 @@ public sealed class RoutingOptions
     public int SessionAffinityTtlSeconds { get; set; } = 600;
 
     /// <summary>
+    /// Enables privacy-safe stable-prefix cache affinity. The policy stores only a
+    /// SHA-256 fingerprint and softly promotes the previously successful model.
+    /// Candidate-order changing behavior is disabled by default.
+    /// </summary>
+    public bool EnablePromptCacheAffinity { get; set; } = false;
+
+    /// <summary>Stable-prefix affinity entry TTL in seconds.</summary>
+    public int PromptCacheAffinityTtlSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Enables quota-aware candidate reordering from process-local response metadata.
+    /// Disabled by default; policies perform memory-only reads.
+    /// </summary>
+    public bool EnableQuotaAwareRouting { get; set; } = false;
+
+    /// <summary>
     /// 是否启用同 tier 负载均衡。开启后，候选链中同一 tier 段内的模型按 MaxContextTokens 加权随机重排，
     /// 避免同 tier 首模型承担全部流量。跨 tier 顺序不变（保留能力择优）。默认 false。
     /// 放在策略链末（Failover 之后），仅对熔断排除后的存活候选生效。
@@ -199,6 +215,15 @@ public sealed class RoutingOptions
     /// panel 取路由决策候选链前 N 个（策略链已过滤可用模型）。值越大答案越多样但成本/延迟越高。
     /// </summary>
     public int FusionRouterPanelSize { get; set; } = 3;
+
+    /// <summary>Enables typed-complexity-based Fusion panel sizing. Disabled by default.</summary>
+    public bool EnableDynamicFusionPanelSize { get; set; } = false;
+
+    /// <summary>Minimum Fusion panel size when dynamic sizing is enabled.</summary>
+    public int FusionRouterMinPanelSize { get; set; } = 2;
+
+    /// <summary>Enables soft provider/family diversity for Fusion panels. Disabled by default.</summary>
+    public bool EnableFusionDiversity { get; set; } = false;
 
     /// <summary>
     /// 融合路由 analyst 模型名。留空（默认）则用主候选（候选链首）担任 analyst。

@@ -16,6 +16,72 @@
 
 ---
 
+## Upstream quota versus availability contract
+
+### 1. Scope / Trigger
+
+- Applies to every upstream call site: serial and streaming proxy attempts, Race, Fusion panel/analyst/outer, Cascade verification/upgrade, and background health probes.
+- The purpose is to prevent an HTTP 429 capacity signal from being treated as endpoint unavailability while retaining ordinary 5xx/network/timeout failover behavior.
+
+### 2. Signatures
+
+```csharp
+internal static bool UpstreamFailureClassifier.IsQuotaLimited(Exception? error);
+internal static string UpstreamFailureClassifier.SafeMessage(Exception? error, bool quotaLimited);
+internal static int UpstreamFailureClassifier.GetStatus(Exception error);
+
+public void OutcomeRecorder.RecordQuota(
+    string modelName, UpstreamResponseMetadata? metadata, bool rateLimited = false);
+```
+
+### 3. Contracts
+
+- `ModelClientException` with status 429 is quota-limited: update `UpstreamQuotaStateStore`, write a safe audit failure with `QuotaLimited=true`, then continue the applicable fallback path.
+- A 429 must not call model-health failure or Thompson failure recording. Quota exhaustion and endpoint availability are separate state machines.
+- Non-429 `ModelClientException`, `HttpRequestException`, timeout, and other upstream failures retain health/Thompson feedback and failure audit metrics.
+- `SafeMessage` exposes only normalized categories/status codes. Never propagate or log raw response bodies, headers, keys, or prompt content from this classifier.
+
+### 4. Validation & Error Matrix
+
+| Failure | Quota state | Health/Thompson | Safe category |
+|---------|-------------|-----------------|---------------|
+| HTTP 429 with reset metadata | exhausted until normalized reset | unchanged | `quota-exhausted` |
+| HTTP 429 without reset metadata | quota event recorded, no invented reset | unchanged | `quota-exhausted` |
+| HTTP 500/502/503 | metadata may still be observed | failure recorded | `upstream-status-NNN` |
+| Network exception | unchanged | failure recorded | `network-error` |
+| Timeout/cancellation owned by upstream attempt | unchanged | failure recorded | `timeout` |
+
+### 5. Good/Base/Bad Cases
+
+- **Good**: Race receives 429 from A and 200 from B; A is marked quota-limited only, B is adopted, and A's circuit remains closed.
+- **Base**: A returns 503; the shared classifier records health/Thompson failure and normal failover selects B.
+- **Bad**: Fusion analyst catches 429 in a generic catch that calls `RecordFailure`; this makes auxiliary calls behave differently from the main proxy and opens the circuit incorrectly.
+
+### 6. Tests Required
+
+- For streaming, Race, Fusion, Cascade, and probe paths, assert 429 updates quota/audit state without health/Thompson failure.
+- For the same paths, assert 5xx still updates health/Thompson failure and returns/falls back according to the existing API contract.
+- Assert safe messages never contain the upstream response body, raw header values, API keys, or prompt text.
+
+### 7. Wrong vs Correct
+
+```csharp
+// Wrong: quota is treated as availability failure.
+catch (Exception ex)
+{
+    health.RecordFailure(modelName);
+    thompson.RecordOutcome(modelName, false, discount);
+}
+
+// Correct: classify once at every orchestration boundary.
+catch (Exception ex)
+{
+    bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
+    recorder.RecordQuota(modelName, metadata, quotaLimited);
+if (!quotaLimited) recorder.RecordFailure(modelName, ex);
+}
+```
+
 ## Error Handling Patterns
 
 ### Failover Chain
@@ -46,12 +112,12 @@
 ### Thompson Sampling Outcome Recording
 
 ```csharp
-// Recorded on every attempt (success or failure) in ProxyOrchestrator:
+// Recorded on every adopted success and every non-429 failure:
 // isGood = success AND (elapsedMs < ThompsonLatencyTargetMs)
 //   → Alpha += 1 (fast success)
 // isGood = false on:
 //   - success but slow (elapsedMs >= target)
-//   - ModelClientException (non-200, auth failure, parse failure)
+//   - ModelClientException except HTTP 429 (auth failure, parse failure, other non-200)
 //   - HttpRequestException (network failure)
 //   - OperationCanceledException (timeout)
 //   - Fusion candidate cancelled (not adopted)
@@ -60,7 +126,8 @@
 // Circuit breaker and Thompson state are complementary:
 //   ModelHealthTracker: short-term exclusion (seconds/minutes cooldown)
 //   Thompson Beta: long-term signal (hours, discount-weighted)
-// Both record failures — this is intentional, not double-counting.
+// Both record non-429 availability failures — this is intentional, not double-counting.
+// HTTP 429 updates quota state only.
 ```
 
 ---
@@ -180,11 +247,11 @@ var payload = new { error = new { message, type, code } };
 
 **Fix**: Use `decision.BudgetExhausted` boolean property — the dedicated contract.
 
-### Mistake: Swallowing `ModelClientException` without logging model name
+### Mistake: Logging raw `ModelClientException.ResponseBody`
 
-**Symptom**: Cannot identify which upstream model is failing in production.
+**Symptom**: Provider payloads can contain prompt fragments, identifiers, or other sensitive data and leak through logs.
 
-**Fix**: Always log model name + status code + truncated response body.
+**Fix**: Log model name, normalized status/category, and request correlation only. Keep `ResponseBody` available for internal passthrough/error mapping where required, but never write it to logs, audit messages, or metrics.
 
 ### Mistake: Not catching `HttpRequestException` for network-level failures
 

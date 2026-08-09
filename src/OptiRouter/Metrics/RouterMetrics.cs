@@ -48,6 +48,25 @@ public sealed class RouterMetrics
             Buckets = Histogram.ExponentialBuckets(50, 2, 12) // 50ms .. ~200s
         });
 
+    private readonly Histogram _ttftMs = Prometheus.Metrics.CreateHistogram(
+        "optirouter_time_to_first_token_ms",
+        "Time to first upstream SSE data item, or response-header proxy for non-streaming attempts.",
+        new HistogramConfiguration
+        {
+            LabelNames = new[] { "model", "streaming" },
+            Buckets = Histogram.ExponentialBuckets(25, 2, 13)
+        });
+
+    private readonly Counter _cacheTokensTotal = Prometheus.Metrics.CreateCounter(
+        "optirouter_cache_tokens_total",
+        "Input token breakdown by normalized cache kind.",
+        new CounterConfiguration { LabelNames = new[] { "model", "kind" } });
+
+    private readonly Counter _quotaLimitedTotal = Prometheus.Metrics.CreateCounter(
+        "optirouter_quota_limited_total",
+        "Upstream attempts rejected because of provider quota.",
+        new CounterConfiguration { LabelNames = new[] { "model" } });
+
     /// <summary>断路器累计失败数（gauge，按模型）。</summary>
     private readonly Gauge _circuitFailureCount = Prometheus.Metrics.CreateGauge(
         "optirouter_circuit_failure_count",
@@ -79,6 +98,11 @@ public sealed class RouterMetrics
     /// <param name="promptTokens">输入 token 数（成功时有真实值，失败时为 0）。</param>
     /// <param name="completionTokens">输出 token 数（成功时有真实值，失败时为 0）。</param>
     /// <param name="cost">本次成本（美元）。</param>
+    /// <param name="timeToFirstTokenMs">TTFT 或非流式响应头延迟代理。</param>
+    /// <param name="cachedInputTokens">缓存命中输入 token。</param>
+    /// <param name="cacheWriteInputTokens">缓存写入输入 token。</param>
+    /// <param name="uncachedInputTokens">未缓存输入 token。</param>
+    /// <param name="quotaLimited">是否为上游 429 配额拒绝。</param>
     public void RecordAttempt(
         string model,
         ModelTier tier,
@@ -88,13 +112,20 @@ public sealed class RouterMetrics
         long latencyMs,
         int promptTokens,
         int completionTokens,
-        decimal cost)
+        decimal cost,
+        long? timeToFirstTokenMs = null,
+        int cachedInputTokens = 0,
+        int cacheWriteInputTokens = 0,
+        int uncachedInputTokens = 0,
+        bool quotaLimited = false)
     {
         string outcome = DeriveOutcome(success, errorMessage);
         string streamingLabel = isStreaming ? "true" : "false";
 
         _requestsTotal.WithLabels(model, tier.ToString(), outcome, streamingLabel).Inc();
         _durationMs.WithLabels(model, streamingLabel).Observe(latencyMs);
+        if (timeToFirstTokenMs is >= 0)
+            _ttftMs.WithLabels(model, streamingLabel).Observe(timeToFirstTokenMs.Value);
 
         if (promptTokens > 0)
             _tokensTotal.WithLabels(model, "input").Inc(promptTokens);
@@ -102,6 +133,14 @@ public sealed class RouterMetrics
             _tokensTotal.WithLabels(model, "output").Inc(completionTokens);
         if (cost > 0m)
             _costUsdTotal.WithLabels(model).Inc((double)cost);
+        if (cachedInputTokens > 0)
+            _cacheTokensTotal.WithLabels(model, "hit").Inc(cachedInputTokens);
+        if (cacheWriteInputTokens > 0)
+            _cacheTokensTotal.WithLabels(model, "write").Inc(cacheWriteInputTokens);
+        if (uncachedInputTokens > 0)
+            _cacheTokensTotal.WithLabels(model, "uncached").Inc(uncachedInputTokens);
+        if (quotaLimited)
+            _quotaLimitedTotal.WithLabels(model).Inc();
     }
 
     /// <summary>
@@ -127,6 +166,7 @@ public sealed class RouterMetrics
     {
         if (success) return "success";
         if (string.IsNullOrEmpty(errorMessage)) return "error";
+        if (errorMessage.Contains("quota", StringComparison.OrdinalIgnoreCase)) return "quota_exhausted";
         // 与审计 errorMessage 关键词对齐：timeout / network / stream-faulted / HTTP 状态等。
         if (errorMessage.Contains("timeout", StringComparison.OrdinalIgnoreCase)) return "timeout";
         if (errorMessage.Contains("stream-faulted", StringComparison.OrdinalIgnoreCase)) return "stream_error";

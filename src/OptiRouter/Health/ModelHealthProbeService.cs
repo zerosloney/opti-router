@@ -25,6 +25,7 @@ public sealed class ModelHealthProbeService : BackgroundService
     private readonly IModelClientProvider _clientProvider;
     private readonly ModelHealthTracker _healthTracker;
     private readonly IOptionsMonitor<RouterOptions> _options;
+    private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly ILogger<ModelHealthProbeService> _logger;
 
     /// <summary>
@@ -32,16 +33,19 @@ public sealed class ModelHealthProbeService : BackgroundService
     /// </summary>
     /// <param name="clientProvider">模型客户端提供者，用于按端点取客户端发探测。</param>
     /// <param name="healthTracker">跨请求模型健康跟踪器，探活结果上报至此。</param>
+    /// <param name="quotaStore">进程内上游配额状态。</param>
     /// <param name="options">路由配置监视器，读取探活开关/间隔/熔断参数（支持 reload）。</param>
     /// <param name="logger">日志记录器。</param>
     public ModelHealthProbeService(
         IModelClientProvider clientProvider,
         ModelHealthTracker healthTracker,
+        UpstreamQuotaStateStore quotaStore,
         IOptionsMonitor<RouterOptions> options,
         ILogger<ModelHealthProbeService> logger)
     {
         _clientProvider = clientProvider ?? throw new ArgumentNullException(nameof(clientProvider));
         _healthTracker = healthTracker ?? throw new ArgumentNullException(nameof(healthTracker));
+        _quotaStore = quotaStore ?? throw new ArgumentNullException(nameof(quotaStore));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
@@ -100,6 +104,13 @@ public sealed class ModelHealthProbeService : BackgroundService
                 }
                 else
                 {
+                    if (result.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                    {
+                        _quotaStore.Record(endpoint.Name, result.Metadata, rateLimited: true);
+                        _logger.LogWarning("Health probe quota limited: {Name} (status {Status})",
+                            endpoint.Name, 429);
+                        continue;
+                    }
                     bool tripped = _healthTracker.RecordFailure(endpoint.Name, threshold, cooldown);
                     _logger.LogWarning("Health probe FAILED: {Name} ({Reason}){Tripped}",
                         endpoint.Name, result.Error ?? "unknown", tripped ? " (circuit tripped)" : "");

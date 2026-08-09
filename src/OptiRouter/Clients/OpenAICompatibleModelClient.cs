@@ -63,12 +63,15 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         httpRequest.Content = new StringContent(json, Encoding.UTF8);
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-        using var response = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+        var responseSw = System.Diagnostics.Stopwatch.StartNew();
+        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        responseSw.Stop();
+        var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
         var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
-            throw new ModelClientException(response.StatusCode, responseBody);
+            throw new ModelClientException(response.StatusCode, responseBody, metadata: metadata);
         }
 
         return JsonSerializer.Deserialize<ChatResponse>(responseBody, _deserializeOptions)
@@ -87,12 +90,15 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         httpRequest.Content = new StringContent(json, Encoding.UTF8);
         httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
+        var responseSw = System.Diagnostics.Stopwatch.StartNew();
         using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        responseSw.Stop();
+        var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
 
         if (!response.IsSuccessStatusCode)
         {
             var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            throw new ModelClientException(response.StatusCode, errorBody);
+            throw new ModelClientException(response.StatusCode, errorBody, metadata: metadata);
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -143,13 +149,13 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 if (raw is null)
                     continue;
 
-            var chunk = new ChatStreamChunk
-            {
-                Id = raw.Id,
-                DeltaContent = raw.Choices.Count > 0 ? raw.Choices[0].Delta.Content : null,
-                FinishReason = raw.Choices.Count > 0 ? raw.Choices[0].FinishReason : null,
-                Usage = raw.Usage
-            };
+                var chunk = new ChatStreamChunk
+                {
+                    Id = raw.Id,
+                    DeltaContent = raw.Choices.Count > 0 ? raw.Choices[0].Delta.Content : null,
+                    FinishReason = raw.Choices.Count > 0 ? raw.Choices[0].FinishReason : null,
+                    Usage = raw.Usage
+                };
 
                 yield return chunk;
             }
@@ -203,7 +209,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         catch (ModelClientException ex)
         {
             sw.Stop();
-            return new ModelHealthResult(false, (int)sw.Elapsed.TotalMilliseconds, ex.Message);
+            return new ModelHealthResult(false, (int)sw.Elapsed.TotalMilliseconds, ex.Message, ex.StatusCode, ex.Metadata);
         }
         catch (Exception ex)
         {
@@ -231,12 +237,15 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 httpRequest.Content = new StringContent(json, Encoding.UTF8);
                 httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-                using var response = await _httpClient.SendAsync(httpRequest, cancellationToken).ConfigureAwait(false);
+                var responseSw = System.Diagnostics.Stopwatch.StartNew();
+                using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                responseSw.Stop();
+                var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
                 var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
-                    var exception = new ModelClientException(response.StatusCode, responseBody);
+                    var exception = new ModelClientException(response.StatusCode, responseBody, metadata: metadata);
                     if (IsRetryable(response.StatusCode) && attempt < maxRetries)
                     {
                         attempt++;
@@ -246,7 +255,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     throw exception;
                 }
 
-                return new RawChatResponse(responseBody, TryExtractUsage(responseBody));
+                return new RawChatResponse(responseBody, TryExtractUsage(responseBody), metadata);
             }
             catch (Exception ex) when (IsExceptionRetryable(ex) && attempt < maxRetries)
             {
@@ -265,6 +274,8 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         HttpResponseMessage? response = null;
+        UpstreamResponseMetadata? responseMetadata = null;
+        System.Diagnostics.Stopwatch? responseSw = null;
         int maxRetries = _endpoint.MaxRetries;
         int attempt = 0;
 
@@ -276,13 +287,15 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 httpRequest.Content = new StringContent(json, Encoding.UTF8);
                 httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
+                responseSw = System.Diagnostics.Stopwatch.StartNew();
                 response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                responseMetadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
 
                 if (!response.IsSuccessStatusCode)
                 {
                     var statusCode = response.StatusCode;
                     var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                    var exception = new ModelClientException(statusCode, errorBody);
+                    var exception = new ModelClientException(statusCode, errorBody, metadata: responseMetadata);
                     response.Dispose();
                     response = null;
 
@@ -308,6 +321,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
 
         try
         {
+            bool isFirstDataItem = true;
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
             // PipeReader 逐行扫描，单行累计字节超 MaxStreamLineBytes 则中断，防恶意上游发超长单行撑爆内存
             // （StreamReader.ReadLineAsync 无单行上限，先读入再检查为时已晚）。
@@ -341,12 +355,32 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     if (dataSpan.SequenceEqual("[DONE]"u8))
                     {
                         await reader.CompleteAsync().ConfigureAwait(false);
-                        yield return new RawStreamLine("[DONE]", null);
+                        UpstreamResponseMetadata? firstMetadata = null;
+                        if (isFirstDataItem && responseMetadata is not null)
+                        {
+                            responseSw?.Stop();
+                            firstMetadata = responseMetadata with
+                            {
+                                TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds
+                            };
+                            isFirstDataItem = false;
+                        }
+                        yield return new RawStreamLine("[DONE]", null, firstMetadata);
                         yield break;
                     }
 
                     var data = System.Text.Encoding.UTF8.GetString(dataSpan);
-                    yield return new RawStreamLine(data, TryExtractUsage(data));
+                    UpstreamResponseMetadata? lineMetadata = null;
+                    if (isFirstDataItem && responseMetadata is not null)
+                    {
+                        responseSw?.Stop();
+                        lineMetadata = responseMetadata with
+                        {
+                            TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds
+                        };
+                        isFirstDataItem = false;
+                    }
+                    yield return new RawStreamLine(data, TryExtractUsage(data), lineMetadata);
                 }
 
                 // 剩余未遇换行的字节：累计，超限则中断。
@@ -391,7 +425,9 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     private static bool IsRetryable(System.Net.HttpStatusCode statusCode)
     {
         int code = (int)statusCode;
-        return code is 408 or 429 or >= 500 and <= 599;
+        // 429 is intentionally surfaced to request-level orchestration so quota
+        // state is updated and another candidate can be selected immediately.
+        return code is 408 or >= 500 and <= 599;
     }
 
     private static bool IsExceptionRetryable(Exception ex)
@@ -427,16 +463,63 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         try
         {
             using var doc = JsonDocument.Parse(json);
-            if (!doc.RootElement.TryGetProperty("usage", out var usage)) return null;
+            if (!doc.RootElement.TryGetProperty("usage", out var usage)
+                || usage.ValueKind != JsonValueKind.Object)
+                return null;
 
-            int prompt = usage.TryGetProperty("prompt_tokens", out var p) && p.TryGetInt32(out int pv) ? pv : 0;
-            int completion = usage.TryGetProperty("completion_tokens", out var c) && c.TryGetInt32(out int cv) ? cv : 0;
-            int total = usage.TryGetProperty("total_tokens", out var t) && t.TryGetInt32(out int tv) ? tv : prompt + completion;
-            return new ChatUsage { PromptTokens = prompt, CompletionTokens = completion, TotalTokens = total };
+            int prompt = GetNonNegativeInt32(usage, "prompt_tokens") ?? 0;
+            int completion = GetNonNegativeInt32(usage, "completion_tokens") ?? 0;
+            int inferredTotal = prompt > int.MaxValue - completion ? int.MaxValue : prompt + completion;
+            int total = GetNonNegativeInt32(usage, "total_tokens") ?? inferredTotal;
+
+            int? cachedRaw = null;
+            int? writeRaw = null;
+            if (usage.TryGetProperty("prompt_tokens_details", out var details)
+                && details.ValueKind == JsonValueKind.Object)
+            {
+                cachedRaw = GetNonNegativeInt32(details, "cached_tokens");
+                writeRaw = GetNonNegativeInt32(details, "cache_write_tokens")
+                    ?? GetNonNegativeInt32(details, "cache_creation_tokens");
+            }
+
+            cachedRaw ??= GetNonNegativeInt32(usage, "prompt_cache_hit_tokens");
+            writeRaw ??= GetNonNegativeInt32(usage, "cache_write_input_tokens")
+                ?? GetNonNegativeInt32(usage, "cache_creation_input_tokens");
+            int? missRaw = GetNonNegativeInt32(usage, "prompt_cache_miss_tokens");
+
+            int cached = Math.Min(cachedRaw ?? 0, prompt);
+            int write = Math.Min(writeRaw ?? 0, Math.Max(0, prompt - cached));
+            int availableUncached = Math.Max(0, prompt - cached - write);
+            bool hasBreakdown = cachedRaw is not null || writeRaw is not null || missRaw is not null;
+            // A provider-reported miss count is trustworthy only when the complete
+            // normalized breakdown agrees with prompt_tokens. Otherwise charge and
+            // audit the safe remainder so inconsistent optional fields cannot make
+            // input tokens disappear (or become negative).
+            int uncached = hasBreakdown ? availableUncached : 0;
+
+            return new ChatUsage
+            {
+                PromptTokens = prompt,
+                CompletionTokens = completion,
+                TotalTokens = Math.Max(total, inferredTotal),
+                CachedInputTokens = cached,
+                CacheWriteInputTokens = write,
+                UncachedInputTokens = uncached
+            };
         }
         catch (JsonException)
         {
             return null;
         }
+    }
+
+    private static int? GetNonNegativeInt32(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value)) return null;
+        return value.ValueKind == JsonValueKind.Number
+            && value.TryGetInt32(out int parsed)
+            && parsed >= 0
+            ? parsed
+            : null;
     }
 }

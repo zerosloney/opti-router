@@ -81,6 +81,11 @@ public sealed class CascadeUpgradeHandler
             if (verifyResponse.Usage is not null)
                 _recorder.RecordCost(verifyCost, sessionId);
 
+            _healthTracker.RecordSuccess(cheapModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
+            _recorder.RecordThompsonOutcome(
+                cheapModel.Name,
+                verifySw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
+
             _recorder.RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
                 true, null, false, routedTier, cascadeTriggered: true);
@@ -109,14 +114,20 @@ public sealed class CascadeUpgradeHandler
                     var cost = CostCalculator.Compute(strongResponse.Usage, upgradeTarget);
                     _recorder.RecordCost(cost, sessionId);
                 }
+                _recorder.RecordQuota(upgradeTarget.Name, strongResponse.Metadata);
                 _healthTracker.RecordSuccess(upgradeTarget.Name,
                     routing.FailoverHalfOpenRequiredSuccesses);
+                _recorder.RecordThompsonOutcome(
+                    upgradeTarget.Name,
+                    strongSw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
                 _recorder.RecordAffinity(sessionId, upgradeTarget.Name);
+                _recorder.RecordPromptCacheAffinity(originalRequest, upgradeTarget.Name);
 
                 _recorder.RecordAudit(null, upgradeTarget.Name, estimatedTokens, strongResponse.Usage,
                     strongResponse.Usage is not null ? CostCalculator.Compute(strongResponse.Usage, upgradeTarget) : 0m,
                     strongSw.ElapsedMilliseconds, sessionId, decision.Reason + "; cascade: upgraded from " + cheapModel.Name,
-                    true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name);
+                    true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name,
+                    timeToFirstTokenMs: strongResponse.Metadata?.ResponseHeaderLatencyMs);
 
                 _logger.LogInformation("Cascade upgrade: {Cheap} -> {Strong} (self-verify uncertain)",
                     cheapModel.Name, upgradeTarget.Name);
@@ -125,6 +136,18 @@ public sealed class CascadeUpgradeHandler
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
+                if (ex is ModelClientException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } quotaError)
+                {
+                    _recorder.RecordQuota(upgradeTarget.Name, quotaError.Metadata, rateLimited: true);
+                }
+                else
+                {
+                    _healthTracker.RecordFailure(
+                        upgradeTarget.Name,
+                        routing.FailoverFailureThreshold,
+                        routing.FailoverCooldownSeconds);
+                    _recorder.RecordThompsonOutcome(upgradeTarget.Name, false);
+                }
                 // 升级调用失败（含客户端内部超时）：记录但不抛，返回 null 让调用方用原 Cheap 答案（已有，质量兜底不优于崩溃）。
                 // 仅放行外界取消；内部超时不破坏已成功的 Cheap 请求，也不污染 Cheap 熔断。
                 _logger.LogWarning(ex, "Cascade upgrade to {Strong} failed, returning cheap answer", upgradeTarget.Name);
@@ -133,6 +156,18 @@ public sealed class CascadeUpgradeHandler
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            if (ex is ModelClientException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } quotaError)
+            {
+                _recorder.RecordQuota(cheapModel.Name, quotaError.Metadata, rateLimited: true);
+            }
+            else
+            {
+                _healthTracker.RecordFailure(
+                    cheapModel.Name,
+                    routing.FailoverFailureThreshold,
+                    routing.FailoverCooldownSeconds);
+                _recorder.RecordThompsonOutcome(cheapModel.Name, false);
+            }
             // 自校验本身失败（含客户端内部超时）：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。
             // 仅放行外界取消，避免内部超时破坏已成功的 Cheap 请求。
             _logger.LogDebug(ex, "Cascade self-verify failed for {Cheap}, skipping upgrade", cheapModel.Name);

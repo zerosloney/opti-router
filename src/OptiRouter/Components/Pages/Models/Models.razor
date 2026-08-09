@@ -45,6 +45,14 @@
                         </select>
                     </div>
                     <div class="form-field">
+                        <label>Provider</label>
+                        <input type="text" @bind="NewModel.Provider" placeholder="如 openai" />
+                    </div>
+                    <div class="form-field">
+                        <label>Family</label>
+                        <input type="text" @bind="NewModel.Family" placeholder="如 gpt-4o" />
+                    </div>
+                    <div class="form-field">
                         <label>最大上下文 Token</label>
                         <input type="number" @bind="NewModel.MaxContextTokens" min="1" />
                     </div>
@@ -63,6 +71,14 @@
                     <div class="form-field">
                         <label>输出价格 $/M</label>
                         <input type="number" @bind="NewModel.OutputPricePerMillion" min="0" step="0.001" />
+                    </div>
+                    <div class="form-field">
+                        <label>缓存命中价格 $/M（留空回退）</label>
+                        <input type="number" @bind="NewModel.CachedInputPricePerMillion" min="0" step="0.001" />
+                    </div>
+                    <div class="form-field">
+                        <label>缓存写入价格 $/M（留空回退）</label>
+                        <input type="number" @bind="NewModel.CacheWriteInputPricePerMillion" min="0" step="0.001" />
                     </div>
                     <div class="form-field">
                         <label>启用</label>
@@ -88,14 +104,14 @@
             <table class="config-table">
                 <thead>
                     <tr>
-                        <th>名称</th><th>BaseUrl</th><th>ApiKey</th><th>Tier</th><th>上下文</th>
-                        <th>超时</th><th>重试</th><th>启用</th><th>输入$/M</th><th>输出$/M</th><th>操作</th>
+                        <th>名称</th><th>BaseUrl</th><th>ApiKey</th><th>Tier</th><th>Provider</th><th>Family</th><th>上下文</th>
+                        <th>超时</th><th>重试</th><th>启用</th><th>输入$/M</th><th>缓存命中$/M</th><th>缓存写入$/M</th><th>输出$/M</th><th>操作</th>
                     </tr>
                 </thead>
                 <tbody>
                     @if (!ModelList.Any())
                     {
-                        <tr><td colspan="11" class="text-center text-secondary">暂无模型配置，点击上方"+ 添加模型"开始添加。</td></tr>
+                        <tr><td colspan="15" class="text-center text-secondary">暂无模型配置，点击上方"+ 添加模型"开始添加。</td></tr>
                     }
                     else
                     {
@@ -115,6 +131,8 @@
                                             <option value="Cheap">Cheap</option>
                                         </select>
                                     </td>
+                                    <td><input type="text" @bind="EditModel.Provider" /></td>
+                                    <td><input type="text" @bind="EditModel.Family" /></td>
                                     <td><input type="number" @bind="EditModel.MaxContextTokens" min="1" /></td>
                                     <td><input type="number" @bind="EditModel.TimeoutSeconds" min="1" /></td>
                                     <td><input type="number" @bind="EditModel.MaxRetries" min="0" /></td>
@@ -125,6 +143,8 @@
                                         </select>
                                     </td>
                                     <td><input type="number" @bind="EditModel.InputPricePerMillion" step="0.001" /></td>
+                                    <td><input type="number" @bind="EditModel.CachedInputPricePerMillion" min="0" step="0.001" /></td>
+                                    <td><input type="number" @bind="EditModel.CacheWriteInputPricePerMillion" min="0" step="0.001" /></td>
                                     <td><input type="number" @bind="EditModel.OutputPricePerMillion" step="0.001" /></td>
                                     <td>
                                         <button class="btn-primary btn-sm" @onclick="() => SubmitEdit(m.Name)">保存</button>
@@ -139,11 +159,15 @@
                                     <td title="@m.BaseUrl">@Truncate(m.BaseUrl, 25)</td>
                                     <td>@(m.HasApiKey ? (MarkupString)"••••••" : (MarkupString)"<span class='text-danger'>未配置</span>")</td>
                                     <td>@m.Tier</td>
+                                    <td>@(string.IsNullOrWhiteSpace(m.Provider) ? "-" : m.Provider)</td>
+                                    <td>@(string.IsNullOrWhiteSpace(m.Family) ? "-" : m.Family)</td>
                                     <td>@(m.MaxContextTokens / 1000)K</td>
                                     <td>@m.TimeoutSeconds s</td>
                                     <td>@m.MaxRetries</td>
                                     <td class="@(m.Enabled ? "text-success" : "text-secondary")">@(m.Enabled ? "是" : "否")</td>
                                     <td>$@m.InputPricePerMillion.ToString("F3")</td>
+                                    <td>@(m.CachedInputPricePerMillion is { } cached ? $"${cached:F3}" : "回退")</td>
+                                    <td>@(m.CacheWriteInputPricePerMillion is { } write ? $"${write:F3}" : "回退")</td>
                                     <td>$@m.OutputPricePerMillion.ToString("F3")</td>
                                     <td>
                                         <button class="btn-primary btn-sm" @onclick="() => StartEdit(m)">编辑</button>
@@ -221,7 +245,11 @@
             bool.Parse(NewModel.EnabledStr),
             Math.Max(0, NewModel.InputPricePerMillion),
             Math.Max(0, NewModel.OutputPricePerMillion),
-            null);
+            null,
+            string.IsNullOrWhiteSpace(NewModel.Provider) ? null : NewModel.Provider.Trim(),
+            string.IsNullOrWhiteSpace(NewModel.Family) ? null : NewModel.Family.Trim(),
+            NewModel.CachedInputPricePerMillion,
+            NewModel.CacheWriteInputPricePerMillion);
 
         var ok = await Api.CreateModelAsync(req);
         if (ok)
@@ -248,8 +276,12 @@
             TimeoutSeconds = m.TimeoutSeconds,
             MaxRetries = m.MaxRetries,
             EnabledStr = m.Enabled.ToString().ToLower(),
+            Provider = m.Provider,
+            Family = m.Family,
             InputPricePerMillion = m.InputPricePerMillion,
-            OutputPricePerMillion = m.OutputPricePerMillion
+            OutputPricePerMillion = m.OutputPricePerMillion,
+            CachedInputPricePerMillion = m.CachedInputPricePerMillion,
+            CacheWriteInputPricePerMillion = m.CacheWriteInputPricePerMillion
         };
     }
 
@@ -269,7 +301,11 @@
             EditModel.MaxRetries >= 0 ? EditModel.MaxRetries : null,
             bool.TryParse(EditModel.EnabledStr, out var en) ? en : null,
             EditModel.InputPricePerMillion >= 0 ? EditModel.InputPricePerMillion : null,
-            EditModel.OutputPricePerMillion >= 0 ? EditModel.OutputPricePerMillion : null);
+            EditModel.OutputPricePerMillion >= 0 ? EditModel.OutputPricePerMillion : null,
+            string.IsNullOrWhiteSpace(EditModel.Provider) ? "" : EditModel.Provider.Trim(),
+            string.IsNullOrWhiteSpace(EditModel.Family) ? "" : EditModel.Family.Trim(),
+            EditModel.CachedInputPricePerMillion,
+            EditModel.CacheWriteInputPricePerMillion);
 
         var ok = await Api.UpdateModelAsync(name, req);
         if (ok)
@@ -328,12 +364,16 @@
         public string BaseUrl { get; set; } = "";
         public string? ApiKey { get; set; }
         public string Tier { get; set; } = "Medium";
+        public string Provider { get; set; } = "";
+        public string Family { get; set; } = "";
         public int MaxContextTokens { get; set; } = 8192;
         public int TimeoutSeconds { get; set; } = 120;
         public int MaxRetries { get; set; } = 0;
         public bool Enabled { get; set; } = true;
         public decimal InputPricePerMillion { get; set; } = 0;
         public decimal OutputPricePerMillion { get; set; } = 0;
+        public decimal? CachedInputPricePerMillion { get; set; }
+        public decimal? CacheWriteInputPricePerMillion { get; set; }
         public string EnabledStr { get; set; } = "true";
     }
 
@@ -342,11 +382,15 @@
         public string BaseUrl { get; set; } = "";
         public string? ApiKey { get; set; }
         public string Tier { get; set; } = "Medium";
+        public string Provider { get; set; } = "";
+        public string Family { get; set; } = "";
         public int MaxContextTokens { get; set; } = 8192;
         public int TimeoutSeconds { get; set; } = 120;
         public int MaxRetries { get; set; } = 0;
         public string EnabledStr { get; set; } = "true";
         public decimal InputPricePerMillion { get; set; } = 0;
         public decimal OutputPricePerMillion { get; set; } = 0;
+        public decimal? CachedInputPricePerMillion { get; set; }
+        public decimal? CacheWriteInputPricePerMillion { get; set; }
     }
 }

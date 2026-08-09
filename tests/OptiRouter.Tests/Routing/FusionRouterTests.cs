@@ -28,6 +28,7 @@ public class FusionRouterTests
         public Dictionary<string, IModelClient> MockClients { get; } = new();
         public bool EnableFusionMode { get; set; }
         public double FusionRouterTemperature { get; set; }
+        public int FusionRouterPanelSize { get; set; } = 3;
         public string? FusionRouterAnalystPrompt { get; set; }
         public string? CascadeUpgradeSelfVerifyPrompt { get; set; }
 
@@ -86,7 +87,7 @@ public class FusionRouterTests
                     opt.Routing.EnableLoadBalance = false;
                     opt.Routing.EnableFusionMode = EnableFusionMode;
                     opt.Routing.EnableFusionRouter = true;
-                    opt.Routing.FusionRouterPanelSize = 3;
+                    opt.Routing.FusionRouterPanelSize = FusionRouterPanelSize;
                     opt.Routing.FusionRouterTemperature = FusionRouterTemperature;
                     opt.Routing.FusionRouterAnalystPrompt = FusionRouterAnalystPrompt;
                     if (CascadeUpgradeSelfVerifyPrompt is not null)
@@ -366,6 +367,103 @@ public class FusionRouterTests
 
         // model-a 被调用了 3 次（panel + analyst + outer）
         Assert.Equal(3, callCountA);
+    }
+
+    [Fact]
+    public async Task FusionRouter_OccupiedHalfOpenCandidate_ScansToFillPanel()
+    {
+        using var factory = new FusionRouterFactory { FusionRouterPanelSize = 2 };
+        int callsA = 0, callsB = 0, callsC = 0;
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            (req, ct) =>
+            {
+                callsA++;
+                return Task.FromResult(callsA switch
+                {
+                    1 => MakeResponse("model-a", 10, 5, "panel-A-answer"),
+                    2 => MakeAnalystResponse("model-a", 50, 30, AnalystJson),
+                    _ => MakeResponse("model-a", 100, 20, "final-answer")
+                });
+            });
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            (req, ct) =>
+            {
+                callsB++;
+                return Task.FromResult(MakeResponse("model-b", 10, 5));
+            });
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            (req, ct) =>
+            {
+                callsC++;
+                return Task.FromResult(MakeResponse("model-c", 10, 5, "panel-C-answer"));
+            });
+
+        var health = factory.Services.GetRequiredService<ModelHealthTracker>();
+        health.RecordFailure("model-b", threshold: 1, cooldownSeconds: 0);
+        Assert.True(health.TryBeginProbe("model-b", 1));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var content = new StringContent(
+            JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(3, callsA);
+        Assert.Equal(0, callsB);
+        Assert.Equal(1, callsC);
+        health.ReleaseProbe("model-b");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests, false)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, true)]
+    public async Task FusionRouter_PanelFailure_Only5xxUpdatesHealthAndThompson(
+        HttpStatusCode statusCode,
+        bool expectHealthFailure)
+    {
+        using var factory = new FusionRouterFactory();
+        int callsA = 0;
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            (_, _) => Task.FromResult(++callsA switch
+            {
+                1 => MakeResponse("model-a", 10, 5, "panel-a"),
+                2 => MakeAnalystResponse("model-a", 10, 5, AnalystJson),
+                _ => MakeResponse("model-a", 10, 5, "final")
+            }));
+        var reset = DateTimeOffset.UtcNow.AddMinutes(1);
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            (_, _) => throw new ModelClientException(statusCode, "secret", metadata:
+                statusCode == HttpStatusCode.TooManyRequests
+                    ? new UpstreamResponseMetadata { RequestsRemaining = 0, RequestsResetAt = reset }
+                    : null));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            (_, _) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var content = new StringContent(
+            JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var health = factory.Services.GetRequiredService<ModelHealthTracker>();
+        bool hasFailure = health.GetCircuitsSnapshot().TryGetValue("model-b", out var circuit)
+            && circuit.FailureCount > 0;
+        Assert.Equal(expectHealthFailure, hasFailure);
+        Assert.Equal(expectHealthFailure,
+            factory.Services.GetRequiredService<ThompsonStateStore>().GetOrAdd("model-b").Beta > 1.0);
+        if (!expectHealthFailure)
+        {
+            Assert.True(factory.Services.GetRequiredService<UpstreamQuotaStateStore>()
+                .GetSnapshot("model-b")!.IsExhausted(DateTimeOffset.UtcNow));
+        }
     }
 
     [Fact]

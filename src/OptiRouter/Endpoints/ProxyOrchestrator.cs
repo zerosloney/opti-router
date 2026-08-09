@@ -191,16 +191,20 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         var cost = CostCalculator.Compute(response.Usage, candidate);
                         _recorder.RecordCost(cost, sessionId);
-                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
+                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
+                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
                     }
                     else
                     {
-                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier);
+                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
+                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
                     }
+                    _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
                     outcomeReported = true;
                     _recorder.RecordAffinity(sessionId, candidate.Name);
+                    _recorder.RecordPromptCacheAffinity(request, candidate.Name);
 
                     // 级联自校验：Cheap 首选 + 启用 + 采样命中 → 自校验，低置信升级 Strong。
                     // 仅非流式（流式首 chunk 已透传无法切模型）。失败不影响主流程，返回原 Cheap 答案。
@@ -219,16 +223,32 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                     return response;
                 }
+                catch (ModelClientException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                {
+                    attemptSw.Stop();
+                    lastModelName = candidate.Name;
+                    lastStatusCode = 429;
+                    lastErrorMessage = "quota-exhausted";
+                    _recorder.RecordQuota(candidate.Name, ex.Metadata, rateLimited: true);
+                    _healthTracker.ReleaseProbe(candidate.Name);
+                    outcomeReported = true;
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m,
+                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "quota-exhausted", false,
+                        routedTier, quotaLimited: true);
+                    _logger.LogWarning("Model {Name} quota exhausted (status {Status}), trying next candidate",
+                        candidate.Name, 429);
+                }
                 catch (ModelClientException ex) when (IsRetryable(ex))
                 {
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
                     lastStatusCode = (int)ex.StatusCode;
-                    lastErrorMessage = ex.Message;
+                    lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     _recorder.RecordThompsonOutcome(candidate.Name, false);
                     outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
+                        $"upstream-status-{(int)ex.StatusCode}", false, routedTier);
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 }
@@ -237,11 +257,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
                     lastStatusCode = 503;
-                    lastErrorMessage = ex.Message;
+                    lastErrorMessage = "network-error";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     _recorder.RecordThompsonOutcome(candidate.Name, false);
                     outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, ex.Message, false, routedTier);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -354,6 +374,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         if (await enumerator.MoveNextAsync().ConfigureAwait(false))
                         {
                             firstLine = enumerator.Current;
+                            _recorder.RecordQuota(candidate.Name, firstLine.Metadata);
                             if (firstLine.Usage is not null)
                                 finalUsage = firstLine.Usage;
                             hasFirstLine = true;
@@ -372,14 +393,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         preStreamFailure = ex;
                         lastModelName = candidate.Name;
                         lastStatusCode = (int)ex.StatusCode;
-                        lastErrorMessage = ex.Message;
+                        lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
                     }
                     catch (HttpRequestException ex)
                     {
                         preStreamFailure = ex;
                         lastModelName = candidate.Name;
                         lastStatusCode = 503;
-                        lastErrorMessage = ex.Message;
+                        lastErrorMessage = "network-error";
                     }
                     catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
                     {
@@ -399,14 +420,29 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (preStreamFailure is not null)
                     {
                         attemptSw.Stop();
-                        bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                        _recorder.RecordThompsonOutcome(candidate.Name, false);
+                        bool quotaLimited = preStreamFailure is ModelClientException
+                        { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+                        bool tripped = false;
+                        if (quotaLimited)
+                        {
+                            var quotaError = (ModelClientException)preStreamFailure;
+                            _recorder.RecordQuota(candidate.Name, quotaError.Metadata, rateLimited: true);
+                            _healthTracker.ReleaseProbe(candidate.Name);
+                        }
+                        else
+                        {
+                            tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+                            _recorder.RecordThompsonOutcome(candidate.Name, false);
+                        }
                         probeResolved = true;
-                        string failure = preStreamFailure is ModelClientException modelFailure
-                            ? $"status {(int)modelFailure.StatusCode}"
+                        string failure = quotaLimited
+                            ? "quota-exhausted"
+                            : preStreamFailure is ModelClientException modelFailure
+                            ? $"upstream-status-{(int)modelFailure.StatusCode}"
                             : preStreamFailure.Message;
                         _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                            attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier);
+                            attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier,
+                            quotaLimited: quotaLimited);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
                         continue;
@@ -470,11 +506,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
                     _recorder.RecordAffinity(sessionId, candidate.Name);
+                    _recorder.RecordPromptCacheAffinity(request, candidate.Name);
                     probeResolved = true;
                     attemptSw.Stop();
                     _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
                         finalUsage is not null ? CostCalculator.Compute(finalUsage, candidate) : 0m,
-                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier);
+                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier,
+                        timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, finalUsage is not null
                             ? CostCalculator.Compute(finalUsage, candidate).ToString("F6")

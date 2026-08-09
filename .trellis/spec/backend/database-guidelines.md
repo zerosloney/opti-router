@@ -78,7 +78,12 @@ public sealed record RequestAuditRecord(
     bool IsAdopted = true,          // parallel: only the adopted attempt is true
     string? ParallelGroupId = null, // parallel: shared across one SendAsync group
     bool IsEstimated = false,       // true = proxied cost, not upstream Usage
-    string? FusionRole = null);     // "panel" | "analyst" | "outer" | null
+    string? FusionRole = null,      // "panel" | "analyst" | "outer" | null
+    long? TimeToFirstTokenMs = null,
+    int CachedInputTokens = 0,
+    int CacheWriteInputTokens = 0,
+    int UncachedInputTokens = 0,
+    bool QuotaLimited = false);
 ```
 
 ---
@@ -150,6 +155,9 @@ private void EnsureColumn(string columnName, string definition)
 //   routed_tier TEXT | cascade_triggered INTEGER DEFAULT 0 | upgraded_from TEXT
 //   is_adopted INTEGER DEFAULT 1 | parallel_group_id TEXT
 //   is_estimated INTEGER DEFAULT 0 | fusion_role TEXT
+//   ttft_ms INTEGER | cached_input_tokens INTEGER DEFAULT 0
+//   cache_write_input_tokens INTEGER DEFAULT 0 | uncached_input_tokens INTEGER DEFAULT 0
+//   quota_limited INTEGER DEFAULT 0
 ```
 
 ---
@@ -213,6 +221,7 @@ var ledger = new CostLedger(sessionEvictionHours: null);
 | `GetFailureStats` | Returns `(failures, total)` where failure = `success=0`; used by `AlertEngine` (must not materialize all rows) |
 | In-memory vs SQLite parity | Same interface behavior across both implementations (existing dual impls) |
 | `GetLatencyStatsSince` | Excludes failed/retry requests (would pollute latency distribution) |
+| Routing foundation audit fields | Round-trips nullable TTFT, cache hit/write/uncached token counts, and `QuotaLimited` through in-memory and SQLite stores |
 
 ### DI Wiring Test
 
@@ -257,6 +266,11 @@ var (failures, total) = store.GetFailureStats(from, to);
 // In SqliteRequestAuditStore constructor:
 EnsureColumn("is_adopted", "INTEGER NOT NULL DEFAULT 1"); // old rows default to adopted=true
 EnsureColumn("parallel_group_id", "TEXT");               // nullable, old rows = NULL
+EnsureColumn("ttft_ms", "INTEGER");                      // nullable, old rows = unknown
+EnsureColumn("cached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+EnsureColumn("cache_write_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+EnsureColumn("uncached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+EnsureColumn("quota_limited", "INTEGER NOT NULL DEFAULT 0");
 // Update the INSERT statement to include the field.
 ```
 

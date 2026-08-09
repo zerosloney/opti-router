@@ -314,4 +314,48 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
             $"Daily spend {daily} must include verify cost beyond cheap. Expected {cheapCost + verifyCost}.");
         Assert.Equal(cheapCost + verifyCost, daily);
     }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests, false)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, true)]
+    public async Task Cascade_VerificationFailure_Only5xxUpdatesHealthAndThompson(
+        HttpStatusCode statusCode,
+        bool expectHealthFailure)
+    {
+        using var factory = new CascadeFactory();
+        var cheapEp = factory.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue
+            .Models.First(m => m.Name == "cheap-model");
+        var reset = DateTimeOffset.UtcNow.AddMinutes(1);
+        factory.MockClients["cheap-model"] = new MockClient(
+            cheapEp,
+            raw: (_, _) => Task.FromResult(Raw("cheap answer", 10, 5)),
+            complete: (_, _) => throw new ModelClientException(statusCode, "secret", metadata:
+                statusCode == HttpStatusCode.TooManyRequests
+                    ? new UpstreamResponseMetadata { RequestsRemaining = 0, RequestsResetAt = reset }
+                    : null));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CascadeFactory.Key);
+        var request = new ChatRequest
+        {
+            Model = "any",
+            Messages = [ChatMessage.FromText("user", "Hi")]
+        };
+        using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var health = factory.Services.GetRequiredService<ModelHealthTracker>();
+        bool hasFailure = health.GetCircuitsSnapshot().TryGetValue("cheap-model", out var circuit)
+            && circuit.FailureCount > 0;
+        Assert.Equal(expectHealthFailure, hasFailure);
+        double beta = factory.Services.GetRequiredService<ThompsonStateStore>()
+            .GetOrAdd("cheap-model").Beta;
+        Assert.Equal(expectHealthFailure, beta > 1.0);
+        if (!expectHealthFailure)
+        {
+            Assert.True(factory.Services.GetRequiredService<UpstreamQuotaStateStore>()
+                .GetSnapshot("cheap-model")!.IsExhausted(DateTimeOffset.UtcNow));
+        }
+    }
 }

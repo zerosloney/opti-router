@@ -208,11 +208,12 @@ public class ChatCompletionsEndpointTests
     private static async IAsyncEnumerable<RawStreamLine> CreateFailingStream(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default,
         HttpStatusCode statusCode = HttpStatusCode.ServiceUnavailable,
-        string responseBody = "failed before first chunk")
+        string responseBody = "failed before first chunk",
+        UpstreamResponseMetadata? metadata = null)
     {
         ct.ThrowIfCancellationRequested();
         yield return await Task.FromException<RawStreamLine>(
-            new ModelClientException(statusCode, responseBody));
+            new ModelClientException(statusCode, responseBody, metadata: metadata));
     }
 
     /// <summary>
@@ -516,6 +517,169 @@ public class ChatCompletionsEndpointTests
         using var doc = JsonDocument.Parse(body);
         Assert.Equal("model-b", doc.RootElement.GetProperty("model").GetString());
         Assert.Equal("From B", doc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
+    }
+
+    [Fact]
+    public async Task Post_NonStreaming_Upstream429UpdatesQuotaWithoutHealthOrThompsonFailure()
+    {
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Models.Add(endpointB);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+            opt.Routing.EnableFailover = true;
+            opt.Routing.FailoverFailureThreshold = 1;
+        });
+        var reset = DateTimeOffset.UtcNow.AddMinutes(1);
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, (_, _) =>
+            throw new ModelClientException(HttpStatusCode.TooManyRequests, "sensitive-body", metadata:
+                new UpstreamResponseMetadata
+                {
+                    RequestsRemaining = 0,
+                    RequestsResetAt = reset,
+                    RetryAfterAt = reset
+                }));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, (_, _) =>
+            Task.FromResult(new RawChatResponse("{\"model\":\"model-b\",\"choices\":[]}", new ChatUsage())));
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var health = factory.Services.GetRequiredService<ModelHealthTracker>();
+        Assert.Equal(CircuitState.Closed, health.GetState("model-a"));
+        Assert.False(health.GetCircuitsSnapshot().TryGetValue("model-a", out var circuit) && circuit.FailureCount > 0);
+        var thompson = factory.Services.GetRequiredService<ThompsonStateStore>().GetOrAdd("model-a");
+        Assert.Equal(1.0, thompson.Beta);
+        var quota = factory.Services.GetRequiredService<UpstreamQuotaStateStore>().GetSnapshot("model-a");
+        Assert.NotNull(quota);
+        Assert.True(quota!.IsExhausted(DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public async Task Post_NonStreaming_Upstream5xxStillIncrementsHealthAndThompsonFailure()
+    {
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Models.Add(endpointB);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+            opt.Routing.EnableFailover = true;
+            opt.Routing.FailoverFailureThreshold = 1;
+        });
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, (_, _) =>
+            throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "down"));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, (_, _) =>
+            Task.FromResult(new RawChatResponse("{\"model\":\"model-b\",\"choices\":[]}", new ChatUsage())));
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(CircuitState.Open, factory.Services.GetRequiredService<ModelHealthTracker>().GetState("model-a"));
+        Assert.True(factory.Services.GetRequiredService<ThompsonStateStore>().GetOrAdd("model-a").Beta > 1.0);
+    }
+
+    [Fact]
+    public async Task Post_Streaming_Upstream429FailsOverWithoutHealthOrThompsonFailure()
+    {
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Models.Add(endpointB);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+            opt.Routing.EnableFailover = true;
+            opt.Routing.FailoverFailureThreshold = 1;
+        });
+        var reset = DateTimeOffset.UtcNow.AddMinutes(1);
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, streamRawFunc: (_, ct) =>
+            CreateFailingStream(ct, HttpStatusCode.TooManyRequests, "secret", new UpstreamResponseMetadata
+            {
+                RequestsRemaining = 0,
+                RequestsResetAt = reset,
+                RetryAfterAt = reset
+            }));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, streamRawFunc: (_, ct) =>
+            CreateStreamChunks("fallback", ct));
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(
+            JsonSerializer.Serialize(BuildRequest("model-a", stream: true)), Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(CircuitState.Closed,
+            factory.Services.GetRequiredService<ModelHealthTracker>().GetState("model-a"));
+        Assert.Equal(1.0,
+            factory.Services.GetRequiredService<ThompsonStateStore>().GetOrAdd("model-a").Beta);
+        Assert.True(factory.Services.GetRequiredService<UpstreamQuotaStateStore>()
+            .GetSnapshot("model-a")!.IsExhausted(DateTimeOffset.UtcNow));
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TooManyRequests, false)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, true)]
+    public async Task Post_RaceFailure_Only5xxUpdatesHealthAndThompson(
+        HttpStatusCode statusCode,
+        bool expectHealthFailure)
+    {
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Models.Add(endpointB);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+            opt.Routing.EnableFailover = true;
+            opt.Routing.EnableFusionMode = true;
+            opt.Routing.FusionMaxParallel = 2;
+            opt.Routing.FailoverFailureThreshold = 1;
+        });
+        var reset = DateTimeOffset.UtcNow.AddMinutes(1);
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, (_, _) =>
+            throw new ModelClientException(statusCode, "secret", metadata: statusCode == HttpStatusCode.TooManyRequests
+                ? new UpstreamResponseMetadata { RequestsRemaining = 0, RequestsResetAt = reset }
+                : null));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, async (_, ct) =>
+        {
+            await Task.Delay(50, ct);
+            return new RawChatResponse("{\"model\":\"model-b\",\"choices\":[]}", new ChatUsage());
+        });
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(
+            JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(expectHealthFailure ? CircuitState.Open : CircuitState.Closed,
+            factory.Services.GetRequiredService<ModelHealthTracker>().GetState("model-a"));
+        Assert.Equal(expectHealthFailure,
+            factory.Services.GetRequiredService<ThompsonStateStore>().GetOrAdd("model-a").Beta > 1.0);
     }
 
     [Fact]

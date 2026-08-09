@@ -18,6 +18,10 @@ public class RouterOptionsBindingTests
             ["OptiRouter:Models:0:Tier"] = "Strong",
             ["OptiRouter:Models:0:MaxContextTokens"] = "128000",
             ["OptiRouter:Models:0:InputPricePerMillion"] = "2.5",
+            ["OptiRouter:Models:0:Provider"] = "openai",
+            ["OptiRouter:Models:0:Family"] = "gpt-4o",
+            ["OptiRouter:Models:0:CachedInputPricePerMillion"] = "1.25",
+            ["OptiRouter:Models:0:CacheWriteInputPricePerMillion"] = "3.0",
             ["OptiRouter:Models:0:OutputPricePerMillion"] = "10.0",
             ["OptiRouter:Models:0:TimeoutSeconds"] = "120",
             ["OptiRouter:Models:0:MaxRetries"] = "0",
@@ -51,6 +55,18 @@ public class RouterOptionsBindingTests
             ["OptiRouter:Routing:FusionRouterOuterModel"] = "outer-model",
             ["OptiRouter:Routing:FusionRouterMaxOutputTokens"] = "12000",
             ["OptiRouter:Routing:FusionRouterTemperature"] = "0.4"
+            ,
+            ["OptiRouter:Routing:EnablePromptCacheAffinity"] = "true"
+            ,
+            ["OptiRouter:Routing:PromptCacheAffinityTtlSeconds"] = "900"
+            ,
+            ["OptiRouter:Routing:EnableQuotaAwareRouting"] = "true"
+            ,
+            ["OptiRouter:Routing:EnableDynamicFusionPanelSize"] = "true"
+            ,
+            ["OptiRouter:Routing:FusionRouterMinPanelSize"] = "2"
+            ,
+            ["OptiRouter:Routing:EnableFusionDiversity"] = "true"
         };
 
         var configuration = new ConfigurationBuilder()
@@ -69,6 +85,10 @@ public class RouterOptionsBindingTests
         Assert.Equal(ModelTier.Strong, model.Tier);
         Assert.Equal(128000, model.MaxContextTokens);
         Assert.Equal(2.5m, model.InputPricePerMillion);
+        Assert.Equal("openai", model.Provider);
+        Assert.Equal("gpt-4o", model.Family);
+        Assert.Equal(1.25m, model.CachedInputPricePerMillion);
+        Assert.Equal(3.0m, model.CacheWriteInputPricePerMillion);
         Assert.Equal(10.0m, model.OutputPricePerMillion);
         Assert.Equal(120, model.TimeoutSeconds);
         Assert.Equal(0, model.MaxRetries);
@@ -105,5 +125,49 @@ public class RouterOptionsBindingTests
         Assert.Equal("outer-model", options.Value.Routing.FusionRouterOuterModel);
         Assert.Equal(12000, options.Value.Routing.FusionRouterMaxOutputTokens);
         Assert.Equal(0.4, options.Value.Routing.FusionRouterTemperature);
+        Assert.True(options.Value.Routing.EnablePromptCacheAffinity);
+        Assert.Equal(900, options.Value.Routing.PromptCacheAffinityTtlSeconds);
+        Assert.True(options.Value.Routing.EnableQuotaAwareRouting);
+        Assert.True(options.Value.Routing.EnableDynamicFusionPanelSize);
+        Assert.Equal(2, options.Value.Routing.FusionRouterMinPanelSize);
+        Assert.True(options.Value.Routing.EnableFusionDiversity);
+    }
+
+    [Fact]
+    public void ModelsJsonProvider_PreservesRoutingMetadataPricesAndTags()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "optirouter-model-provider-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, "models-config.json");
+        try
+        {
+            File.WriteAllText(path, """
+                [{
+                  "name":"model-a","baseUrl":"https://example.test/v1","tier":"medium",
+                  "provider":"custom-provider","family":"custom-family",
+                  "maxContextTokens":8192,"inputPricePerMillion":2.5,
+                  "cachedInputPricePerMillion":1.25,"cacheWriteInputPricePerMillion":3.0,
+                  "outputPricePerMillion":10,"timeoutSeconds":120,"maxRetries":0,
+                  "enabled":true,"tags":["vision","custom-tag"]
+                }]
+                """);
+
+            var configuration = new ConfigurationBuilder()
+                .Add(new ModelsJsonConfigurationSource { FilePath = path })
+                .Build();
+            var options = new RouterOptions();
+            configuration.GetSection("OptiRouter").Bind(options);
+
+            var model = Assert.Single(options.Models);
+            Assert.Equal("custom-provider", model.Provider);
+            Assert.Equal("custom-family", model.Family);
+            Assert.Equal(1.25m, model.CachedInputPricePerMillion);
+            Assert.Equal(3.0m, model.CacheWriteInputPricePerMillion);
+            Assert.Equal(["vision", "custom-tag"], model.Tags);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 }

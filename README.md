@@ -102,7 +102,11 @@ curl http://localhost:5000/health
 | `Tier` | 能力分档：`Strong` / `Medium` / `Cheap` | `Strong` |
 | `MaxContextTokens` | 最大上下文长度 | `128000` |
 | `InputPricePerMillion` | 输入价格（美元/百万 token） | `2.5` |
+| `CachedInputPricePerMillion` | 缓存命中输入价格（美元/百万 token）；省略/null 时回退普通输入价格 | `1.25` |
+| `CacheWriteInputPricePerMillion` | 缓存写入输入价格（美元/百万 token）；省略/null 时回退普通输入价格 | `3.0` |
 | `OutputPricePerMillion` | 输出价格（美元/百万 token） | `10.0` |
+| `Provider` | 可选 provider 标识（自由字符串），仅用于 Fusion 软多样性；空表示未知 | `openai` |
+| `Family` | 可选模型家族标识（自由字符串），仅用于 Fusion 软多样性；空表示未知 | `gpt-4o` |
 | `TimeoutSeconds` | 单次请求超时秒数 | `120` |
 | `MaxRetries` | 失败后最大重试次数 | `0` |
 | `Enabled` | 是否启用该模型 | `true` |
@@ -140,6 +144,11 @@ curl http://localhost:5000/health
 | `EnableSemanticRouter` | 是否启用向量空间语义路由（离线词袋模型，余弦相似度匹配） | `true` |
 | `SemanticSimilarityThreshold` | 语义匹配余弦相似度阈值 `[0.0, 1.0]`，低于此值不命中 | `0.25` |
 | `SemanticRoutes` | 语义路由规则列表，每条含 `Name`/`TargetTier`/`Phrases` | `[]` |
+| `EnableSessionAffinity` | 显式 `X-Session-Id` 会话粘性 | `false` |
+| `SessionAffinityTtlSeconds` | 会话粘性 TTL（秒） | `600` |
+| `EnablePromptCacheAffinity` | 稳定前缀缓存粘性：仅保存 SHA-256 指纹，软提升上次成功模型 | `false` |
+| `PromptCacheAffinityTtlSeconds` | 稳定前缀指纹粘性 TTL（秒，必须 > 0） | `600` |
+| `EnableQuotaAwareRouting` | 读取进程内上游配额快照，软降级低余量并在已知 reset 窗口内排除耗尽模型 | `false` |
 | `MaxResponseStreamBytes` | 流式响应累计字节硬上限，防 OOM/恶意无限流 | `20971520`(20MB) |
 | `EnableCascadeUpgrade` | Cheap→Strong 级联自校验（采样，低置信升级重答） | `false` |
 | `CascadeUpgradeSampleRate` | 级联采样率 `[0.0, 1.0]`，0=关闭，1=全量 | `0.1` |
@@ -151,6 +160,9 @@ curl http://localhost:5000/health
 | `FusionMaxParallel` | 并行首试首轮并发数，范围 `[2, 5]` | `2` |
 | `EnableFusionRouter` | **融合路由**（OpenRouter Fusion 式）：非流式首轮并行 panel → analyst 结构化分析 → outer 写最终答案。质量技术，成本 N+2 调用，生产默认关 | `false` |
 | `FusionRouterPanelSize` | 融合路由 panel 并行模型数，范围 `[2, 5]` | `3` |
+| `EnableDynamicFusionPanelSize` | 按 typed request complexity 在最小/最大范围内动态选 panel 数；不解析 reason 文本 | `false` |
+| `FusionRouterMinPanelSize` | 动态 Fusion panel 最小数，范围 `[2, 5]` 且不得大于 `FusionRouterPanelSize` | `2` |
+| `EnableFusionDiversity` | 软优先不同 `Provider`/`Family`，元数据不足时按原候选顺序补齐 | `false` |
 | `FusionRouterAnalystModel` | 融合路由 analyst 模型名（留空=主候选）；只产结构化 JSON | `null` |
 | `FusionRouterAnalystPrompt` | 融合路由 analyst 专用 JSON 分析提示词（留空=内置提示词；不复用级联自校验提示词） | `null` |
 | `FusionRouterOuterModel` | 融合路由 outer 模型名（留空=主候选）；读分析写最终答案 | `null` |
@@ -172,6 +184,10 @@ curl http://localhost:5000/health
 9. **并行首试**（`EnableFusionMode`，默认关，仅非流式）：首轮并行尝试候选链前 `FusionMaxParallel` 个模型，取最快成功响应，取消其余。成本语义见下方「已知限制」。流式不支持（首 chunk 锁定模型无法切换）。全失败/取消回退串行降级链。
 10. **级联自校验**（`EnableCascadeUpgrade`，默认关，仅非流式）：路由到 Cheap 的请求按 `CascadeUpgradeSampleRate` 采样，用同 Cheap 模型判定 CONFIDENT/UNCERTAIN，低置信则升级首个 Strong 模型重答。复核调用的 token 成本计入账本。
 11. **融合路由**（`EnableFusionRouter`，默认关，仅非流式）：参照 OpenRouter Fusion Router / Mixture-of-Agents——首轮并行叫候选链前 `FusionRouterPanelSize` 个模型（panel）独立作答并**全部收集**（非取最快），`analyst` 模型（默认主候选）读全部回答产出结构化 JSON（共识/矛盾/覆盖缺口/独特洞察），`outer` 模型（默认主候选）再依分析撰写最终答案。成本 ≈ N panel + 1 analyst + 1 outer 次调用，是质量技术。panel 全程按真实/预估成本入账（`ParallelGroupId` 共享，审计 `FusionRole` 区分 panel/analyst/outer）。panel 全失败或 analyst 解析失败自动降级；与 `EnableFusionMode`（并行 race）同开时，质量 Fusion Router 优先，失败后再尝试 race，否则回退串行链。
+12. **上游配额感知**（`QuotaAwarePolicy`，默认关）：客户端只规范化已知 rate-limit/reset/retry headers，未知 header 忽略且不保存原始值。策略只读进程内不可变快照、无网络/磁盘 I/O；429 触发本次请求 failover 和已知 reset 冷却，但不计断路器失败或 Thompson 坏反馈。网络、超时与 5xx 保持原健康失败语义。
+13. **稳定前缀缓存粘性**（`PromptCacheAffinityPolicy`，默认关）：按有序 system messages 与稳定的 `tools`/`functions`/`tool_choice`/`response_format` 字段计算 SHA-256，仅缓存哈希与模型名。显式 Session affinity 优先；预算、配额、上下文与健康约束仍可覆盖缓存偏好。
+
+缓存成本按 `cache hit`、`cache write`、剩余 uncached prompt token 分别计价。审计记录保存三类 token、总延迟与 TTFT。流式 TTFT 是首个上游 SSE `data:` 项的实际时间；非流式无法看到首 token，故保存的是“上游响应头可用延迟代理”，不要把它解读为字面首 token 延迟。
 
 ## curl 示例
 
@@ -309,6 +325,9 @@ curl http://localhost:5000/metrics   # → Prometheus 指标（无需 API Key）
 | `optirouter_tokens_total` | counter | model, direction | token 消耗（direction: input/output） |
 | `optirouter_cost_usd_total` | counter | model | 累计美元成本 |
 | `optirouter_request_duration_ms` | histogram | model, streaming | 单次尝试延迟（50ms~200s 指数桶） |
+| `optirouter_time_to_first_token_ms` | histogram | model, streaming | 流式首 data 项 TTFT；非流式为响应头延迟代理 |
+| `optirouter_cache_tokens_total` | counter | model, kind | 缓存 token（kind: hit/write/uncached） |
+| `optirouter_quota_limited_total` | counter | model | 上游 429 配额拒绝次数 |
 | `optirouter_circuit_failure_count` | gauge | model | 断路器当前连续失败数 |
 | `optirouter_daily_spend_usd` | gauge | — | 当日 UTC 花费 |
 | `optirouter_total_spend_usd` | gauge | — | 进程生命周期累计花费 |
@@ -348,6 +367,7 @@ scrape_configs:
 - **成本账本持久化**：`Budget.UsePersistentStore=true`（默认）时落 SQLite 文件（`Budget.StorePath`），跨进程重启保留日/会话花费，使预算真正生效。设为 `false` 用内存实现（重启归零，仅适合测试）。
 - **并行首试成本语义**：`EnableFusionMode=true` 时，被取消/失败的并行尝试拿不到上游真实 Usage（响应未完整返回），但上游对已发出的请求仍计费。OptiRouter 按 `EstimatedInputTokens × 模型 input 价格` 记一笔预估成本到账本，审计记录标注 `IsEstimated=true` 以区分真实成本。预估为下限（仅 input，未含已生成的部分 output），实际偏差随 `FusionMaxParallel` 增大；采纳的成功响应记真实成本（`IsEstimated=false`）。
 - **融合路由成本语义**：`EnableFusionRouter=true` 时，panel 调用全部按真实/预估成本入账（同并行首试），analyst 与 outer 调用记真实成本。总成本 ≈ N panel + 1 analyst + 1 outer，随 `FusionRouterPanelSize` 线性增长。panel 全失败或 analyst 解析失败自动回退串行，不浪费已成功的 panel 调用的成本。仅非流式（流式首 chunk 锁定模型无法切换 panel）。
+- **配额状态仅进程内**：规范化的请求/token 余量与 reset 窗口不会写 SQLite，也不会跨 OptiRouter 副本协调；进程重启后回到未知余量，多个副本各自学习上游配额。原始 rate-limit headers 不存储、不记录日志。
 - **延迟感知冷启动**：`EnableLatencyAware=true` 时，新模型或低流量模型样本数不足 `LatencyMinSamples`，不参与延迟排序，退回 `MaxContextTokens` 排序；聚合服务复用 `HealthProbeIntervalSeconds` 周期，首次请求前预热一轮。
 - **流式中途失败契约**：流式响应（SSE）一旦首 chunk 已透传，HTTP 状态码（200）与 header 无法回退，代理不能像非流式那样 failover 切换模型。故流式中途失败（上游断连、超时、超出 `MaxResponseStreamBytes` 上限）的信号**内嵌于 SSE 流**而非 HTTP 层：代理在已透传的 chunk 之后注入一个 OpenAI 兼容的 error event，再以 `data: [DONE]` 干净终止，连接正常关闭而非硬断。客户端 SDK 必须解析这种内嵌错误。error event 形如：
   ```

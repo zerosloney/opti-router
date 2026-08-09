@@ -112,6 +112,21 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FusionRouterPanelSize 必须在 [2, 5] 范围内。");
         }
 
+        if (options.Routing.FusionRouterMinPanelSize < 2 || options.Routing.FusionRouterMinPanelSize > 5)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterMinPanelSize 必须在 [2, 5] 范围内。");
+        }
+
+        if (options.Routing.FusionRouterMinPanelSize > options.Routing.FusionRouterPanelSize)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterMinPanelSize 不能大于 FusionRouterPanelSize。");
+        }
+
+        if (options.Routing.PromptCacheAffinityTtlSeconds <= 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.PromptCacheAffinityTtlSeconds 必须大于 0。");
+        }
+
         if (options.Routing.EnableFusionRouter && options.Routing.FusionRouterMaxOutputTokens <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.FusionRouterMaxOutputTokens 必须大于 0（启用融合路由时）。");
@@ -184,6 +199,12 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
 
         if (model.OutputPricePerMillion < 0)
             return $"模型 {model.Name} 的 OutputPricePerMillion 不能为负数。";
+
+        if (model.CachedInputPricePerMillion < 0)
+            return $"模型 {model.Name} 的 CachedInputPricePerMillion 不能为负数。";
+
+        if (model.CacheWriteInputPricePerMillion < 0)
+            return $"模型 {model.Name} 的 CacheWriteInputPricePerMillion 不能为负数。";
 
         if (model.MaxContextTokens <= 0)
             return $"模型 {model.Name} 的 MaxContextTokens 必须大于 0。";

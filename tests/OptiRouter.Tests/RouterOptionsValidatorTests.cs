@@ -258,6 +258,54 @@ public class RouterOptionsValidatorTests
         Assert.True(result.Succeeded);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void PromptCacheAffinityTtlMustBePositive(int value)
+    {
+        var options = CreateValidOptions();
+        options.Routing.PromptCacheAffinityTtlSeconds = value;
+        var result = CreateValidator().Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("PromptCacheAffinityTtlSeconds", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(6)]
+    public void FusionRouterMinPanelSizeMustBeBounded(int value)
+    {
+        var options = CreateValidOptions();
+        options.Routing.FusionRouterMinPanelSize = value;
+        var result = CreateValidator().Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("FusionRouterMinPanelSize", result.FailureMessage);
+    }
+
+    [Fact]
+    public void FusionRouterMinPanelSizeCannotExceedMaximum()
+    {
+        var options = CreateValidOptions();
+        options.Routing.FusionRouterPanelSize = 2;
+        options.Routing.FusionRouterMinPanelSize = 3;
+        var result = CreateValidator().Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("不能大于 FusionRouterPanelSize", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData("cached")]
+    [InlineData("write")]
+    public void CachePricesCannotBeNegative(string field)
+    {
+        var options = CreateValidOptions();
+        if (field == "cached") options.Models[0].CachedInputPricePerMillion = -1;
+        else options.Models[0].CacheWriteInputPricePerMillion = -1;
+        var result = CreateValidator().Validate(null, options);
+        Assert.False(result.Succeeded);
+        Assert.Contains("PricePerMillion", result.FailureMessage);
+    }
+
     [Fact]
     public void UnknownTags_WarnsButSucceeds()
     {

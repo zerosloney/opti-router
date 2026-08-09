@@ -89,7 +89,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
             return previous with { Reason = $"{previous.Reason}; rule-classifier: disabled" };
         }
 
-        var (targetTier, targetReason) = ClassifyRequest(context);
+        var (targetTier, targetReason, complexity) = ClassifyRequest(context);
 
         if (context.Options.Routing.EnableMultiDimensionalRouting)
         {
@@ -116,7 +116,8 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
             return previous with
             {
                 Candidates = reordered,
-                Reason = $"{previous.Reason}; {mdReason}"
+                Reason = $"{previous.Reason}; {mdReason}",
+                RequestComplexity = complexity
             };
         }
 
@@ -140,7 +141,8 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         return previous with
         {
             Candidates = candidates,
-            Reason = $"{previous.Reason}; {reason}"
+            Reason = $"{previous.Reason}; {reason}",
+            RequestComplexity = complexity
         };
     }
 
@@ -189,7 +191,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         return score;
     }
 
-    private static (ModelTier Tier, string Reason) ClassifyRequest(RouterContext context)
+    private static (ModelTier Tier, string Reason, RequestComplexity Complexity) ClassifyRequest(RouterContext context)
     {
         var request = context.Request;
         bool hasCode = false;
@@ -216,34 +218,34 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
 
         if (hasCode)
         {
-            return (ModelTier.Strong, ReasonCodeDetected);
+            return (ModelTier.Strong, ReasonCodeDetected, RequestComplexity.Complex);
         }
 
         // 数学/公式：优先级仅次于代码。需 Strong 模型（符号推理、LaTeX 生成准确）。
         // 拼接全部文本后正则匹配，避免跨消息公式被截断漏检。
         if (ContainsMathIndicators(request))
         {
-            return (ModelTier.Strong, ReasonMathDetected);
+            return (ModelTier.Strong, ReasonMathDetected, RequestComplexity.Complex);
         }
 
         if (totalMessageCount > 1 && hasLongSystemPrompt)
         {
-            return (ModelTier.Strong, ReasonComplexInstruction);
+            return (ModelTier.Strong, ReasonComplexInstruction, RequestComplexity.Complex);
         }
 
         // 翻译：Medium 足够（现代中等模型翻译质量已达实用水平，Strong 边际收益低）。
         // 放在 simple-qa 检测之前——翻译请求即使单轮短消息也应走 Medium 而非 Cheap。
         if (ContainsTranslationPattern(request))
         {
-            return (ModelTier.Medium, ReasonTranslationRequest);
+            return (ModelTier.Medium, ReasonTranslationRequest, RequestComplexity.Standard);
         }
 
         if (isSingleShortMessage)
         {
-            return (ModelTier.Cheap, ReasonSimpleQA);
+            return (ModelTier.Cheap, ReasonSimpleQA, RequestComplexity.Simple);
         }
 
-        return (context.Options.Routing.DefaultTier, ReasonDefault);
+        return (context.Options.Routing.DefaultTier, ReasonDefault, RequestComplexity.Standard);
     }
 
     /// <summary>将所有消息文本用换行拼接，供跨消息正则匹配使用。</summary>
