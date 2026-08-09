@@ -60,6 +60,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         EnsureColumn("parallel_group_id", "TEXT");
         // 预估成本标记（向后兼容：旧记录 is_estimated=0）。
         EnsureColumn("is_estimated", "INTEGER NOT NULL DEFAULT 0");
+        // 融合路由角色（向后兼容：旧记录/普通请求为 NULL）。
+        EnsureColumn("fusion_role", "TEXT");
     }
 
     private void EnsureColumn(string columnName, string definition)
@@ -98,10 +100,10 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                     (timestamp, request_id, model, estimated_tokens, prompt_tokens,
                      completion_tokens, cost, latency_ms, session_id, routing_reason,
                      success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                     is_adopted, parallel_group_id, is_estimated)
+                     is_adopted, parallel_group_id, is_estimated, fusion_role)
                 VALUES
                     (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
-                     @rtier, @cascade, @upg, @adopted, @pgid, @estim);
+                     @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole);
                 """;
             cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
             cmd.Parameters.AddWithValue("@rid", record.RequestId);
@@ -122,6 +124,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             cmd.Parameters.AddWithValue("@adopted", record.IsAdopted ? 1 : 0);
             cmd.Parameters.AddWithValue("@pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@estim", record.IsEstimated ? 1 : 0);
+            cmd.Parameters.AddWithValue("@frole", (object?)record.FusionRole ?? DBNull.Value);
             cmd.ExecuteNonQuery();
             tx.Commit();
         }
@@ -140,7 +143,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                       is_adopted, parallel_group_id, is_estimated
+                       is_adopted, parallel_group_id, is_estimated, fusion_role
                 FROM request_audit
                 ORDER BY id DESC
                 LIMIT @limit;
@@ -164,7 +167,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                       is_adopted, parallel_group_id, is_estimated
+                       is_adopted, parallel_group_id, is_estimated, fusion_role
                 FROM request_audit
                 WHERE model = @model
                 ORDER BY id DESC
@@ -201,7 +204,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                       is_adopted, parallel_group_id, is_estimated
+                       is_adopted, parallel_group_id, is_estimated, fusion_role
                 FROM request_audit
                 WHERE timestamp >= @from AND timestamp <= @to
                 ORDER BY id DESC
@@ -324,7 +327,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 UpgradedFrom: reader.IsDBNull(15) ? null : reader.GetString(15),
                 IsAdopted: reader.IsDBNull(16) ? true : reader.GetInt32(16) != 0,
                 ParallelGroupId: reader.IsDBNull(17) ? null : reader.GetString(17),
-                IsEstimated: reader.IsDBNull(18) ? false : reader.GetInt32(18) != 0));
+                IsEstimated: reader.IsDBNull(18) ? false : reader.GetInt32(18) != 0,
+                FusionRole: reader.IsDBNull(19) ? null : reader.GetString(19)));
         }
         return list;
     }

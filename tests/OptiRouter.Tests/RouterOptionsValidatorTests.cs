@@ -232,6 +232,20 @@ public class RouterOptionsValidatorTests
         Assert.Contains("FusionMaxParallel 必须在 [2, 5]", result.FailureMessage);
     }
 
+    [Theory]
+    [InlineData(-0.01)]
+    [InlineData(2.01)]
+    public void FusionRouterTemperatureOutOfRange_ShouldReturnFailure(double value)
+    {
+        var options = CreateValidOptions();
+        options.Routing.FusionRouterTemperature = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("FusionRouterTemperature 必须在 [0, 2]", result.FailureMessage);
+    }
+
     [Fact]
     public void DefaultNewOptions_ShouldValidateSuccessfully()
     {

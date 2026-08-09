@@ -149,6 +149,13 @@ curl http://localhost:5000/health
 | `EnableCapabilityFilter` | 按请求能力需求（vision/tool-use/json-mode）排除 Tags 不含的模型 | `false` |
 | `EnableFusionMode` | 并行首试：非流式首轮并行前 N 候选取最快成功，取消其余 | `false` |
 | `FusionMaxParallel` | 并行首试首轮并发数，范围 `[2, 5]` | `2` |
+| `EnableFusionRouter` | **融合路由**（OpenRouter Fusion 式）：非流式首轮并行 panel → analyst 结构化分析 → outer 写最终答案。质量技术，成本 N+2 调用，生产默认关 | `false` |
+| `FusionRouterPanelSize` | 融合路由 panel 并行模型数，范围 `[2, 5]` | `3` |
+| `FusionRouterAnalystModel` | 融合路由 analyst 模型名（留空=主候选）；只产结构化 JSON | `null` |
+| `FusionRouterAnalystPrompt` | 融合路由 analyst 专用 JSON 分析提示词（留空=内置提示词；不复用级联自校验提示词） | `null` |
+| `FusionRouterOuterModel` | 融合路由 outer 模型名（留空=主候选）；读分析写最终答案 | `null` |
+| `FusionRouterMaxOutputTokens` | 融合路由 outer 答案最大输出 token 数 | `16000` |
+| `FusionRouterTemperature` | 融合路由 panel/analyst 采样温度，范围 `[0, 2]`；原请求显式温度优先 | `0.0` |
 | `EnableMetrics` | 启用 Prometheus `/metrics` 端点（无鉴权，仅聚合数+模型名） | `true` |
 | `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
 
@@ -164,6 +171,7 @@ curl http://localhost:5000/health
 8. **延迟感知**（`LatencyAwarePolicy`，默认关）：后台 `LatencyStatsAggregatorService` 周期聚合审计表成功请求延迟（窗口 `LatencyStatsWindowMinutes`，默认 60 分钟），写入内存快照。策略同 tier 段内按 `1/(avgMs+50ms)` 排序（快模型优先），样本数不足 `LatencyMinSamples` 的尾部保留，冷启动透传。决策层零 I/O、零锁。
 9. **并行首试**（`EnableFusionMode`，默认关，仅非流式）：首轮并行尝试候选链前 `FusionMaxParallel` 个模型，取最快成功响应，取消其余。成本语义见下方「已知限制」。流式不支持（首 chunk 锁定模型无法切换）。全失败/取消回退串行降级链。
 10. **级联自校验**（`EnableCascadeUpgrade`，默认关，仅非流式）：路由到 Cheap 的请求按 `CascadeUpgradeSampleRate` 采样，用同 Cheap 模型判定 CONFIDENT/UNCERTAIN，低置信则升级首个 Strong 模型重答。复核调用的 token 成本计入账本。
+11. **融合路由**（`EnableFusionRouter`，默认关，仅非流式）：参照 OpenRouter Fusion Router / Mixture-of-Agents——首轮并行叫候选链前 `FusionRouterPanelSize` 个模型（panel）独立作答并**全部收集**（非取最快），`analyst` 模型（默认主候选）读全部回答产出结构化 JSON（共识/矛盾/覆盖缺口/独特洞察），`outer` 模型（默认主候选）再依分析撰写最终答案。成本 ≈ N panel + 1 analyst + 1 outer 次调用，是质量技术。panel 全程按真实/预估成本入账（`ParallelGroupId` 共享，审计 `FusionRole` 区分 panel/analyst/outer）。panel 全失败或 analyst 解析失败自动降级；与 `EnableFusionMode`（并行 race）同开时，质量 Fusion Router 优先，失败后再尝试 race，否则回退串行链。
 
 ## curl 示例
 
@@ -339,4 +347,5 @@ scrape_configs:
 - **限流阈值分区定型**：`RequestsPerMinute` 每请求读取，但 `FixedWindowRateLimiter` 的 `PermitLimit` 在分区首次创建时定型——运行时改配置仅对新建分区生效，既有分区沿用创建时的值。变更全局生效需重启进程。`MaxConcurrentRequestsPerPartition` 同理。
 - **成本账本持久化**：`Budget.UsePersistentStore=true`（默认）时落 SQLite 文件（`Budget.StorePath`），跨进程重启保留日/会话花费，使预算真正生效。设为 `false` 用内存实现（重启归零，仅适合测试）。
 - **并行首试成本语义**：`EnableFusionMode=true` 时，被取消/失败的并行尝试拿不到上游真实 Usage（响应未完整返回），但上游对已发出的请求仍计费。OptiRouter 按 `EstimatedInputTokens × 模型 input 价格` 记一笔预估成本到账本，审计记录标注 `IsEstimated=true` 以区分真实成本。预估为下限（仅 input，未含已生成的部分 output），实际偏差随 `FusionMaxParallel` 增大；采纳的成功响应记真实成本（`IsEstimated=false`）。
+- **融合路由成本语义**：`EnableFusionRouter=true` 时，panel 调用全部按真实/预估成本入账（同并行首试），analyst 与 outer 调用记真实成本。总成本 ≈ N panel + 1 analyst + 1 outer，随 `FusionRouterPanelSize` 线性增长。panel 全失败或 analyst 解析失败自动回退串行，不浪费已成功的 panel 调用的成本。仅非流式（流式首 chunk 锁定模型无法切换 panel）。
 - **延迟感知冷启动**：`EnableLatencyAware=true` 时，新模型或低流量模型样本数不足 `LatencyMinSamples`，不参与延迟排序，退回 `MaxContextTokens` 排序；聚合服务复用 `HealthProbeIntervalSeconds` 周期，首次请求前预热一轮。

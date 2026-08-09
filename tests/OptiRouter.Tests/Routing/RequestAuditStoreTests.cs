@@ -450,6 +450,19 @@ public class RequestAuditStoreTests
         Assert.Equal(0.0005m, slow.Cost);
     }
 
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_WithFusionRole_RoundTrips(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        store.Append(SampleRecord("panel-model") with { FusionRole = "panel", ParallelGroupId = "fusion-1" });
+
+        var record = Assert.Single(store.GetRecent(1));
+
+        Assert.Equal("panel", record.FusionRole);
+        Assert.Equal("fusion-1", record.ParallelGroupId);
+    }
+
     [Fact]
     public void SqliteStore_MigratesOldDb_AddsIsEstimatedColumn()
     {
@@ -499,14 +512,16 @@ public class RequestAuditStoreTests
             var old = store.GetRecent(10);
             Assert.Single(old);
             Assert.False(old[0].IsEstimated);
+            Assert.Null(old[0].FusionRole);
 
             // 新记录可写入读回。
-            store.Append(SampleRecord("new") with { IsEstimated = true, Cost = 0.002m });
+            store.Append(SampleRecord("new") with { IsEstimated = true, Cost = 0.002m, FusionRole = "outer" });
             var all = store.GetRecent(10);
             Assert.Equal(2, all.Count);
             var rec = all.First(r => r.Model == "new");
             Assert.True(rec.IsEstimated);
             Assert.Equal(0.002m, rec.Cost);
+            Assert.Equal("outer", rec.FusionRole);
         }
         finally
         {

@@ -268,6 +268,10 @@ routerOptionsMonitor.OnChange(options =>
     tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 });
 
+// Serve the Blazor boot script and the dashboard's CSS/JavaScript before the
+// authentication middleware. Framework asset requests cannot carry the admin key.
+app.UseStaticFiles();
+
 app.Use(async (context, next) =>
 {
     if (!context.Request.Headers.TryGetValue("X-Request-Id", out var requestId) || string.IsNullOrEmpty(requestId))
@@ -293,7 +297,7 @@ static bool IsBlazorFrameworkPath(PathString path) =>
 
 app.Use(async (context, next) =>
 {
-    // Blazor Server 框架端点（静态资源 _framework/blazor.web.js、SignalR /_blazor negotiate）由浏览器
+    // Blazor Server 框架端点（静态资源 _framework/blazor.server.js、SignalR /_blazor negotiate）由浏览器
     // 在页面加载后自动发起，无法携带 ?key= 查询参数，必须放行。页面 HTML 自身仍走下面的鉴权。
     if (IsBlazorFrameworkPath(context.Request.Path))
     {

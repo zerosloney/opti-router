@@ -43,7 +43,14 @@ public class RouterOptionsBindingTests
             ["OptiRouter:Routing:LatencyStatsWindowMinutes"] = "30",
             ["OptiRouter:Routing:EnableCapabilityFilter"] = "true",
             ["OptiRouter:Routing:EnableFusionMode"] = "true",
-            ["OptiRouter:Routing:FusionMaxParallel"] = "3"
+            ["OptiRouter:Routing:FusionMaxParallel"] = "3",
+            ["OptiRouter:Routing:EnableFusionRouter"] = "true",
+            ["OptiRouter:Routing:FusionRouterPanelSize"] = "4",
+            ["OptiRouter:Routing:FusionRouterAnalystModel"] = "analyst-model",
+            ["OptiRouter:Routing:FusionRouterAnalystPrompt"] = "json only",
+            ["OptiRouter:Routing:FusionRouterOuterModel"] = "outer-model",
+            ["OptiRouter:Routing:FusionRouterMaxOutputTokens"] = "12000",
+            ["OptiRouter:Routing:FusionRouterTemperature"] = "0.4"
         };
 
         var configuration = new ConfigurationBuilder()
@@ -91,5 +98,12 @@ public class RouterOptionsBindingTests
         Assert.True(options.Value.Routing.EnableCapabilityFilter);
         Assert.True(options.Value.Routing.EnableFusionMode);
         Assert.Equal(3, options.Value.Routing.FusionMaxParallel);
+        Assert.True(options.Value.Routing.EnableFusionRouter);
+        Assert.Equal(4, options.Value.Routing.FusionRouterPanelSize);
+        Assert.Equal("analyst-model", options.Value.Routing.FusionRouterAnalystModel);
+        Assert.Equal("json only", options.Value.Routing.FusionRouterAnalystPrompt);
+        Assert.Equal("outer-model", options.Value.Routing.FusionRouterOuterModel);
+        Assert.Equal(12000, options.Value.Routing.FusionRouterMaxOutputTokens);
+        Assert.Equal(0.4, options.Value.Routing.FusionRouterTemperature);
     }
 }
