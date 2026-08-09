@@ -1,6 +1,6 @@
 # OptiRouter
 
-多模型智能路由 HTTP 代理（.NET 10）。OpenAI 兼容接口，自动选模型，省 token 降成本。
+多模型智能路由 HTTP 代理（.NET 8）。OpenAI 兼容接口，自动选模型，省 token 降成本。
 
 ## 架构
 
