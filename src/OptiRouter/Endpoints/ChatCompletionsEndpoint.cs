@@ -68,7 +68,13 @@ public static class ChatCompletionsEndpoint
                         }
                         catch (Exception ex)
                         {
-                            await WriteErrorAsync(stream, ex.Message, "INTERNAL_ERROR", ct).ConfigureAwait(false);
+                            // 中途失败 code 按异常类型细分，客户端据此判定是否值得重试：
+                            // - OperationCanceledException（非外部 ct 取消）：HttpClient 内部超时 → TIMEOUT（可重试）
+                            // - HttpRequestException / IOException：上游断连/IO 错误 → UPSTREAM_ERROR（可重试）
+                            // - InvalidOperationException：size limit（MaxResponseStreamBytes/MaxStreamLineBytes）→ RESPONSE_TOO_LARGE（不可重试）
+                            // - 其余：INTERNAL_ERROR（不可重试）
+                            string code = ClassifyMidStreamError(ex);
+                            await WriteErrorAsync(stream, ex.Message, code, ct).ConfigureAwait(false);
                         }
                         finally
                         {
@@ -210,11 +216,43 @@ public static class ChatCompletionsEndpoint
         await stream.WriteAsync(Encoding.UTF8.GetBytes($"data: {line.Data}\n\n"), ct).ConfigureAwait(false);
     }
 
-    private static async Task WriteErrorAsync(Stream stream, string error, string code, CancellationToken ct)
+    private static async Task WriteErrorAsync(Stream stream, string message, string code, CancellationToken ct)
     {
-        var json = JsonSerializer.Serialize(new { error });
+        // OpenAI 兼容嵌套 error 结构：{"error":{"message":...,"type":...,"code":...}}
+        // type 映射自 code，客户端按 OpenAI SDK 的 error.type 字段机读错误类别。
+        // 旧实现 {"error":"<string>"} 为裸串，非 OpenAI 规范，OpenAI SDK 解析失败——故改为嵌套对象。
+        string type = code switch
+        {
+            "BUDGET_EXHAUSTED" => "budget_exceeded",
+            "ALL_CANDIDATES_FAILED" => "all_candidates_failed",
+            "INTERNAL_ERROR" => "server_error",
+            "UPSTREAM_ERROR" => "upstream_error",
+            "TIMEOUT" => "timeout",
+            "RESPONSE_TOO_LARGE" => "response_too_large",
+            _ => "server_error"
+        };
+        var errorPayload = new { error = new { message, type, code } };
+        var json = JsonSerializer.Serialize(errorPayload);
         await stream.WriteAsync(Encoding.UTF8.GetBytes($"data: {json}\n\n"), ct).ConfigureAwait(false);
         await WriteDoneAsync(stream, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 按异常类型把流式中途失败分类为机读 code。
+    /// 外部 ct 取消（客户端主动断开）不归类——此时响应流已不可写，调用方不会进 catch。
+    /// </summary>
+    private static string ClassifyMidStreamError(Exception ex)
+    {
+        // OperationCanceledException：HttpClient 内部超时（外部 ct 取消时连接已不可写，理论不进 catch）。
+        if (ex is OperationCanceledException)
+            return "TIMEOUT";
+        if (ex is HttpRequestException or IOException)
+            return "UPSTREAM_ERROR";
+        // size limit（MaxResponseStreamBytes / MaxStreamLineBytes）专用异常，精确分类。
+        if (ex is ResponseSizeLimitExceededException)
+            return "RESPONSE_TOO_LARGE";
+        // 其余（含通用 InvalidOperationException，即代理真内部 bug）。
+        return "INTERNAL_ERROR";
     }
 
     private static Task WriteDoneAsync(Stream stream, CancellationToken ct)

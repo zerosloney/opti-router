@@ -349,3 +349,20 @@ scrape_configs:
 - **并行首试成本语义**：`EnableFusionMode=true` 时，被取消/失败的并行尝试拿不到上游真实 Usage（响应未完整返回），但上游对已发出的请求仍计费。OptiRouter 按 `EstimatedInputTokens × 模型 input 价格` 记一笔预估成本到账本，审计记录标注 `IsEstimated=true` 以区分真实成本。预估为下限（仅 input，未含已生成的部分 output），实际偏差随 `FusionMaxParallel` 增大；采纳的成功响应记真实成本（`IsEstimated=false`）。
 - **融合路由成本语义**：`EnableFusionRouter=true` 时，panel 调用全部按真实/预估成本入账（同并行首试），analyst 与 outer 调用记真实成本。总成本 ≈ N panel + 1 analyst + 1 outer，随 `FusionRouterPanelSize` 线性增长。panel 全失败或 analyst 解析失败自动回退串行，不浪费已成功的 panel 调用的成本。仅非流式（流式首 chunk 锁定模型无法切换 panel）。
 - **延迟感知冷启动**：`EnableLatencyAware=true` 时，新模型或低流量模型样本数不足 `LatencyMinSamples`，不参与延迟排序，退回 `MaxContextTokens` 排序；聚合服务复用 `HealthProbeIntervalSeconds` 周期，首次请求前预热一轮。
+- **流式中途失败契约**：流式响应（SSE）一旦首 chunk 已透传，HTTP 状态码（200）与 header 无法回退，代理不能像非流式那样 failover 切换模型。故流式中途失败（上游断连、超时、超出 `MaxResponseStreamBytes` 上限）的信号**内嵌于 SSE 流**而非 HTTP 层：代理在已透传的 chunk 之后注入一个 OpenAI 兼容的 error event，再以 `data: [DONE]` 干净终止，连接正常关闭而非硬断。客户端 SDK 必须解析这种内嵌错误。error event 形如：
+  ```
+  data: {"error":{"message":"upstream connection reset mid-stream","type":"upstream_error","code":"UPSTREAM_ERROR"}}
+
+  data: [DONE]
+  ```
+  `type` / `code` 字段供机读，按错误来源区分：
+  | code | type | 含义 | 客户端重试建议 |
+  |------|------|------|---------------|
+  | `UPSTREAM_ERROR` | `upstream_error` | 上游断连/IO 错误（首 chunk 后） | 可重试（换请求或换模型） |
+  | `TIMEOUT` | `timeout` | HttpClient 内部超时（首 chunk 后） | 可重试（调高超时或换模型） |
+  | `RESPONSE_TOO_LARGE` | `response_too_large` | 超出 `MaxResponseStreamBytes` / 单行字节上限 | 不可重试，排查上游输出或调高上限 |
+  | `INTERNAL_ERROR` | `server_error` | 代理内部错误 | 不可重试，排查日志/配置 |
+  | `BUDGET_EXHAUSTED` | `budget_exceeded` | 预算耗尽 | 等预算重置或调高预算 |
+  | `ALL_CANDIDATES_FAILED` | `all_candidates_failed` | 首 chunk 前所有候选均失败 | 检查模型健康/熔断状态 |
+
+  客户端实现要点：流式 reader 收到 `data:` 行后先尝试解析 JSON；若含 `error` 对象字段即按上表判定。收到 `[DONE]` 才视为流结束；若连接在 `[DONE]` 前断开且未收到 error event，按传输层错误重试。
