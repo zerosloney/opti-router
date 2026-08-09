@@ -11,6 +11,7 @@
 | `AllCandidatesFailedException` | All candidate models in the chain failed (timeout, error, or empty response) | 502 | Includes `Attempts` list with per-model error details. Never thrown when at least one candidate succeeds. |
 | `BudgetExhaustedException` | Daily/session budget exhausted and `EnforceOnExhausted == Reject` | 429 | Contains `Message` with budget state. Never thrown when `EnforceOnExhausted == Degrade` (policy downgrades to Cheap tier instead). |
 | `ModelClientException` | Upstream model API returned an error (non-200, auth failure, parse failure) | — | Internal. Includes `ModelName`, `StatusCode`, `ResponseBody`. Caught by `ProxyOrchestrator` during failover. |
+| `ResponseSizeLimitExceededException` | Streaming response exceeded `MaxResponseStreamBytes` (cumulative) or `MaxStreamLineBytes` (single line) | 200 (in-band SSE error event) | `Clients/` ns. Carries `LimitBytes`. Thrown mid-stream by `ProxyOrchestrator` + `OpenAICompatibleModelClient`. Mapped to `RESPONSE_TOO_LARGE` code — NOT retryable. Use this dedicated type, not `InvalidOperationException`. |
 | `RouterOptionsValidator` validation failures | Config validation at startup | — | Returns `ValidateOptionsResult.Fail(reason)`. All validation errors are blocking (startup fails) except unknown Tags (warning only). |
 
 ---
@@ -64,15 +65,110 @@
 
 ---
 
+## SSE Mid-Stream Error Contract
+
+### 1. Scope / Trigger
+- **Trigger**: Streaming responses (`stream: true`). Once the first chunk is yielded, HTTP status (200) and headers are flushed and cannot be rolled back — failover to another model is impossible.
+- **Why code-spec depth**: This is a cross-layer contract (orchestrator exception → endpoint in-band error event → client retry decision). Any new exception type or error source must flow through `ClassifyMidStreamError` or clients silently get the wrong retry signal.
+
+### 2. Signatures
+```csharp
+// Endpoints/ChatCompletionsEndpoint.cs — mid-stream exception → code classification
+private static string ClassifyMidStreamError(Exception ex)
+
+// Endpoints/ChatCompletionsEndpoint.cs — writes the in-band error event + [DONE]
+private static async Task WriteErrorAsync(Stream stream, string message, string code, CancellationToken ct)
+// Emits: data: {"error":{"message":...,"type":...,"code":...}}\n\n  then  data: [DONE]\n\n
+```
+
+### 3. Contracts
+- **HTTP**: always 200 + `text/event-stream` once first chunk flushed. Error is in-band, not in HTTP status.
+- **Error event shape**: `data: {"error":{"message":<string>,"type":<string>,"code":<string>}}` — OpenAI-compatible nested object. The legacy `{"error":"<string>"}` (bare string) is forbidden; OpenAI SDKs fail to parse it.
+- **`code` ↔ `type` mapping** (must stay in sync):
+
+| `code` | `type` | Exception source | Retryable |
+|--------|--------|------------------|-----------|
+| `UPSTREAM_ERROR` | `upstream_error` | `HttpRequestException` / `IOException` | yes |
+| `TIMEOUT` | `timeout` | `OperationCanceledException` (HttpClient internal timeout, not external ct) | yes |
+| `RESPONSE_TOO_LARGE` | `response_too_large` | `ResponseSizeLimitExceededException` | no |
+| `INTERNAL_ERROR` | `server_error` | any other (incl. generic `InvalidOperationException`) | no |
+| `BUDGET_EXHAUSTED` | `budget_exceeded` | `BudgetExhaustedException` | wait for reset |
+| `ALL_CANDIDATES_FAILED` | `all_candidates_failed` | `AllCandidatesFailedException` (pre-first-chunk only) | check health |
+
+- **Terminator**: every error event is followed by `data: [DONE]`. Clients must treat `[DONE]` as stream end; a connection drop before `[DONE]` without an error event is a transport-level failure (retry).
+
+### 4. Validation & Error Matrix
+| Condition | Classified as | Notes |
+|-----------|---------------|-------|
+| Upstream socket reset mid-stream | `UPSTREAM_ERROR` | `IOException` from PipeReader |
+| HttpClient timeout mid-stream | `TIMEOUT` | `OperationCanceledException`, `!ct.IsCancellationRequested` |
+| Cumulative bytes > `MaxResponseStreamBytes` | `RESPONSE_TOO_LARGE` | `ResponseSizeLimitExceededException` from orchestrator |
+| Single SSE line > `MaxStreamLineBytes` (1MB) | `RESPONSE_TOO_LARGE` | `ResponseSizeLimitExceededException` from client |
+| External ct cancelled (client disconnect) | n/a | Connection unwritable; catch block not reached |
+| Generic `InvalidOperationException` (proxy bug) | `INTERNAL_ERROR` | NOT `RESPONSE_TOO_LARGE` — do not use IOE for size limits |
+
+### 5. Good/Base/Bad Cases
+- **Good**: `ResponseSizeLimitExceededException` thrown at size limit → client reads `RESPONSE_TOO_LARGE`, raises limit or inspects upstream output.
+- **Base**: `IOException` mid-stream → `UPSTREAM_ERROR`, client retries same request.
+- **Bad**: Throw `InvalidOperationException("size exceeded")` at a new size check → misclassified as `INTERNAL_ERROR` (client told not-retryable, but it actually is a size issue). Use the dedicated exception type.
+
+### 6. Tests Required
+- `tests/.../ChatCompletionsEndpointTests.cs::Post_Streaming_MidStreamFailure_InjectsErrorEventAndDone` — IOException → UPSTREAM_ERROR, asserts first chunk + error event + [DONE], nested error object shape.
+- `...::Post_Streaming_MidStreamTimeout_InjectsTimeoutCode` — `OperationCanceledException` → TIMEOUT.
+- `...::Post_Streaming_MidStreamSizeLimit_InjectsResponseTooLargeCode` — `ResponseSizeLimitExceededException` → RESPONSE_TOO_LARGE.
+- `...::Post_Streaming_MidStreamGenericInvalidOperation_InjectsInternalErrorCode` — generic `InvalidOperationException` → INTERNAL_ERROR (regression lock: confirms IOE is NOT mapped to RESPONSE_TOO_LARGE).
+- Assertion points: status 200, `text/event-stream`, `dataLines.Count >= 3` (first chunk + error + DONE), `error.code`/`error.type`/`error.message` exact match.
+
+### 7. Wrong vs Correct
+#### Wrong: bare-string error + dropped code
+```csharp
+var json = JsonSerializer.Serialize(new { error }); // code param ignored
+// Emits: data: {"error":"<message>"}  — non-spec, OpenAI SDK parse failure, no retry signal
+```
+#### Correct: nested object with code/type
+```csharp
+string type = code switch { "TIMEOUT" => "timeout", "UPSTREAM_ERROR" => "upstream_error", ... };
+var payload = new { error = new { message, type, code } };
+// Emits: data: {"error":{"message":...,"type":...,"code":...}} — SDK-parseable, machine-readable retry signal
+```
+
+---
+
+## Spec: Use ResponseSizeLimitExceededException for size limits (NOT InvalidOperationException)
+
+**Problem**: `ProxyOrchestrator` (MaxResponseStreamBytes) and `OpenAICompatibleModelClient` (MaxStreamLineBytes) both enforce byte limits. Originally threw `InvalidOperationException`, which the endpoint approximated as `RESPONSE_TOO_LARGE` — but any *other* `InvalidOperationException` (proxy internal bug) would be mislabeled as a size limit.
+
+**Convention**: All size-limit throw sites MUST use `ResponseSizeLimitExceededException` (carries `LimitBytes`). The endpoint's `ClassifyMidStreamError` matches this exact type → `RESPONSE_TOO_LARGE`. Generic `InvalidOperationException` falls through to `INTERNAL_ERROR`.
+
+**Throw sites** (keep in sync if adding new limits):
+- `ProxyOrchestrator.StreamAsync` — first-line check + per-line cumulative check (MaxResponseStreamBytes)
+- `OpenAICompatibleModelClient.StreamAsync` — single-line check (MaxStreamLineBytes)
+- `OpenAICompatibleModelClient.StreamRawAsync` — single-line check (MaxStreamLineBytes)
+
+---
+
 ## API Error Responses
+
+### Non-streaming (RFC 7807 ProblemDetails, `application/problem+json`)
 
 | Scenario | Status | Body |
 |----------|--------|------|
-| Missing/invalid `ProxyApiKey` | 401 | `{ "error": "Unauthorized" }` |
-| Budget exhausted (Reject mode) | 429 | `{ "error": "Budget exhausted. Please try again later." }` |
-| All models failed | 502 | `{ "error": "All candidate models failed.", "details": { "attempts": [...] } }` |
-| Rate limit exceeded | 429 | `{ "error": "Rate limit exceeded. Retry after X seconds." }` |
-| Request too large (streaming) | 413 | `{ "error": "Response stream exceeded maximum allowed bytes." }` |
+| Missing/invalid `ProxyApiKey` | 401 | auth middleware response |
+| Budget exhausted (Reject mode) | 429 | `ProblemDetails` with `code=BUDGET_EXHAUSTED`, `Retry-After: 3600`, `retryAfterSeconds` extension |
+| All models failed | 503 | `ProblemDetails` with attempted models + last failure detail |
+| Upstream 4xx (pre-stream) | passthrough | `CreateUpstreamRejection` — returns upstream status + `application/problem+json` (no failover on 4xx) |
+
+### Streaming (200 + `text/event-stream`, error in-band)
+
+| Scenario | Status | SSE event |
+|----------|--------|-----------|
+| Mid-stream upstream failure | 200 | `data: {"error":{"message":...,"type":"upstream_error","code":"UPSTREAM_ERROR"}}` + `[DONE]` |
+| Mid-stream timeout | 200 | `... "type":"timeout","code":"TIMEOUT"` ... |
+| Size limit exceeded | 200 | `... "type":"response_too_large","code":"RESPONSE_TOO_LARGE"` ... |
+| All candidates failed (pre-first-chunk) | 200 | `... "type":"all_candidates_failed","code":"ALL_CANDIDATES_FAILED"` ... |
+| Budget exhausted (pre-first-chunk) | 200 | `... "type":"budget_exceeded","code":"BUDGET_EXHAUSTED"` ... |
+
+> **Note**: Streaming errors are NEVER signaled via HTTP status — headers are flushed at first chunk. See "SSE Mid-Stream Error Contract" above for the full code/type matrix and client retry guidance.
 
 ---
 
@@ -95,3 +191,9 @@
 **Symptom**: DNS failure / connection reset crashes the request instead of triggering failover.
 
 **Fix**: `ProxyOrchestrator` catches both `ModelClientException` and `HttpRequestException` in the failover loop.
+
+### Mistake: Throwing `InvalidOperationException` for size limits
+
+**Symptom**: Size-limit errors get misclassified as `INTERNAL_ERROR` (not-retryable) by the streaming endpoint, because `ClassifyMidStreamError` only maps the dedicated `ResponseSizeLimitExceededException` to `RESPONSE_TOO_LARGE`. Generic `InvalidOperationException` falls through to `INTERNAL_ERROR`, hiding the real cause (upstream output too large) from the client.
+
+**Fix**: All size-limit throw sites use `ResponseSizeLimitExceededException(maxBytes, message)`. See the spec section above. Never reuse `InvalidOperationException` for size limits — a future proxy bug throwing IOE would be mislabeled as a size issue (or vice versa).

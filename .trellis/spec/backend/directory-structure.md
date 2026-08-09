@@ -42,9 +42,14 @@ src/OptiRouter/
 │   └── *Engine.cs             # TfIdfSemanticVectorEngine, etc.
 ├── Endpoints/                 # namespace OptiRouter.Endpoints  (HTTP boundary)
 │   ├── ChatCompletionsEndpoint.cs  # /v1/chat/completions
-│   ├── ModelsEndpoint.cs          # /v1/models
+│   ├── ModelsEndpoint.cs          # /api/models
 │   ├── ModelsConfigHandler.cs / DashboardHandler.cs  # /api/* management
-│   ├── ProxyOrchestrator.cs       # failover/fusion orchestration
+│   ├── ProxyOrchestrator.cs       # candidate-chain traversal + SendAsync/StreamAsync main loop
+│   ├── OutcomeRecorder.cs         # audit/cost/metrics/affinity/Thompson side-effect sink
+│   ├── CascadeUpgradeHandler.cs   # Cheap→Strong cascade self-verify
+│   ├── FusionRouter.cs            # panel→analyst→outer quality routing
+│   ├── RaceOrchestrator.cs        # parallel-first (Fusion-lite) racing
+│   ├── FusionAttemptResult.cs     # shared result record (FusionRouter + RaceOrchestrator)
 │   ├── ModelClientProvider.cs     # client cache + hot reload
 │   └── *Exception.cs              # AllCandidatesFailedException, BudgetExhaustedException
 ├── Clients/                   # namespace OptiRouter.Clients  (upstream I/O)
@@ -52,7 +57,8 @@ src/OptiRouter/
 │   ├── OpenAICompatibleModelClient.cs
 │   ├── ModelClientFactory.cs
 │   ├── ChatTypes.cs           # ChatRequest/ChatMessage/response DTOs
-│   └── ModelClientException.cs
+│   ├── ModelClientException.cs
+│   └── ResponseSizeLimitExceededException.cs  # size-limit signal (LimitBytes field)
 ├── Health/                    # namespace OptiRouter.Health  (background + checks)
 │   ├── AuditRetentionService.cs
 │   ├── LatencyStatsAggregatorService.cs
@@ -188,3 +194,17 @@ src/OptiRouter/
 **Context**: Tests need in-memory stores; production needs SQLite persistence.
 
 **Decision**: Each store interface (`IRequestAuditStore`, `ICostLedgerStore`) has a `Sqlite*` (prod) and `InMemory*` (test/default) implementation, selected by config in `Program.cs`. This gives test parity without a mocking framework for storage.
+
+### Decision: ProxyOrchestrator split by strategy, not by layer
+
+**Context**: `ProxyOrchestrator.cs` grew to 1307 lines mixing HTTP proxy passthrough, SSE streaming, Race parallel-racing, MoA fusion routing, cascade verification, and fallback retry loops.
+
+**Decision**: Split into 5 collaborating classes, all in `Endpoints/` (same layer — they are request-handling strategies, not domain):
+- `OutcomeRecorder` — the 5 side-effect sinks (audit/cost/metrics/affinity/Thompson). Injected into all other orchestrator components; they call `_recorder.RecordXxx(...)` instead of owning the side effects.
+- `CascadeUpgradeHandler` / `FusionRouter` / `RaceOrchestrator` — each owns one strategy (`TryUpgradeAsync` / `ExecuteAsync`). `ProxyOrchestrator` delegates via `_cascadeHandler` / `_fusionRouter` / `_raceOrchestrator`.
+- `FusionAttemptResult` — shared result record (promoted from nested private).
+- `ProxyOrchestrator` shrunk to ~540 lines: candidate-chain traversal + `SendAsync`/`StreamAsync` main loops + probe-slot settlement.
+
+**Extraction rule**: method bodies are moved verbatim; only `this`-references become `_recorder`/`_clientProvider`/etc. The three-state machine (`probeResolved`/`streamFaulted`/`hasFirstLine`) in `StreamAsync` is deliberately left in `ProxyOrchestrator` — it is too coupled to the yield/finally structure to extract safely; a future `SseStreamForwarder` would own it.
+
+**DI wiring**: all 5 are `AddSingleton` in `Program.cs`. `ProxyOrchestrator`'s constructor takes the other 4 as params (DI auto-injects). `OutcomeRecorder` is constructed via factory lambda (needs 7 deps).
