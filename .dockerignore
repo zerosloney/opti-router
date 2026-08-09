@@ -1,0 +1,56 @@
+# 构建上下文排除：减小上下文体积、加速 build、避免产物/密钥泄露进镜像。
+# 仅保留 Dockerfile 中 COPY 需要的：OptiRouter.sln, src/, tests/。
+
+# 构建产物
+**/bin/
+**/obj/
+
+# 版本控制
+.git/
+.gitignore
+.gitattributes
+
+# IDE / 工具配置（不入镜像）
+.vs/
+.vscode/
+.idea/
+**/*.user
+**/*.suo
+
+# AI 工作区与工具配置（开发侧，非运行时）
+.agent/
+.agents/
+.claude/
+.codebuddy/
+.codegraph/
+.codex/
+.gemini/
+.kilocode/
+.kiro/
+.omp/
+.opencode/
+.trellis/
+.zcode/
+
+# 文档（运行时不需要）
+*.md
+LICENSE
+
+# 脚本与示例数据（非发布物）
+scripts/
+tests/OptiRouter.Tests/bin/
+tests/OptiRouter.Tests/obj/
+
+# 运行时数据（容器内由 VOLUME 管理，不从宿主拷入）
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# 本地配置（含密钥，绝不入镜像；运行时由环境变量注入）
+**/appsettings.Development.json
+**/models-config.json
+
+# Docker 自身
+Dockerfile
+.dockerignore

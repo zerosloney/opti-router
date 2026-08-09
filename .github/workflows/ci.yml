@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch: # 允许手动触发
+
+# 同分支并发时取消旧运行，省 CI 配额。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & Test (Linux)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore OptiRouter.sln
+
+      - name: Build
+        # -warnaserror 在 CI 层强制零警告（与 csproj TreatWarningsAsErrors 一致）。
+        run: dotnet build OptiRouter.sln -c Release --no-restore -warnaserror
+
+      - name: Test
+        # coverlet（已在测试项目引用）收集 XPlat 覆盖率，结果在 TestResults/*/coverage.cobertura.xml。
+        run: dotnet test OptiRouter.sln -c Release --no-build --verbosity minimal --collect:"XPlat Code Coverage"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: '**/TestResults/**/coverage.cobertura.xml'
+          if-no-files-found: warn
+          retention-days: 14
+
+  docker-build:
+    name: Docker Image Build
+    runs-on: ubuntu-latest
+    # 仅 push 到 master 时构建镜像（PR 单独由 build-test 覆盖，省配额）。
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    needs: build-test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        # 仅验证 Dockerfile 可构建，不打 tag 推送（无 registry 凭据配置）。
+        run: docker build -t optirouter:ci .
