@@ -129,6 +129,11 @@ data/
 *.db-wal
 
 # Others
+.claude/
+.gemini/
+.kilocode/
+.kiro/
+.agent/
 .zcode/
 .codegraph/
 # Agent tooling working dirs (local-only)
