@@ -1,0 +1,7 @@
+{"file":".trellis/spec/backend/routing.md","reason":"Policy-chain, routing contracts, Fusion, Thompson, and configuration requirements."}
+{"file":".trellis/spec/backend/database-guidelines.md","reason":"Additive SQLite migration and audit store round-trip requirements."}
+{"file":".trellis/spec/backend/error-handling.md","reason":"429 failover versus model-health error semantics."}
+{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Structured logging and secret/header redaction rules."}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Zero-I/O policy, immutable records, validation, and deterministic tests."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Placement and dependency direction for Clients, Routing, Endpoints, and Configuration."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Response metadata flows through transport, routing, storage, metrics, and dashboard boundaries."}
