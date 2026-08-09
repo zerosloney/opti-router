@@ -4,18 +4,27 @@ namespace OptiRouter.Routing;
 
 /// <summary>
 /// 延迟感知路由策略：同 tier 段内按历史平均延迟升序重排（快模型优先），跨 tier 顺序不变。
+/// 当 <see cref="RoutingOptions.EnableThompsonSampling"/> 启用时，段内改用 Thompson Sampling 重排。
 /// </summary>
 /// <remarks>
 /// 策略链位置在 LongInput 之后、BudgetGuard/Failover 之前：
 /// 先排除装不下/熔断的模型，再按延迟择优。
 /// <para>
-/// 样本数低于 <see cref="RoutingOptions.LatencyMinSamples"/> 的模型不参与排序（噪声大），
+/// 两个开关各自独立 gate：
+/// <list type="bullet">
+/// <item><see cref="RoutingOptions.EnableLatencyAware"/>：段内按历史平均延迟升序。</item>
+/// <item><see cref="RoutingOptions.EnableThompsonSampling"/>：段内按 Beta 分布采样重排（自适应探索）。</item>
+/// </list>
+/// 两者皆关时整段透传。两者都开时 Thompson 优先（ReorderSegment 内判断）。
+/// </para>
+/// <para>
+/// 延迟路径下，样本数低于 <see cref="RoutingOptions.LatencyMinSamples"/> 的模型不参与排序（噪声大），
 /// 追加到该 tier 段尾部（保留原顺序），让有统计的模型优先。
 /// 冷启动（无任何模型有统计）时整段透传，退回 MaxContextTokens 排序。
 /// </para>
 /// <para>
-/// 策略只读 <see cref="ILatencyStatsProvider"/> 内存快照，零 I/O、零锁。
-/// 后台 <c>LatencyStatsAggregatorService</c> 周期刷新快照。
+/// 策略只读 <see cref="ILatencyStatsProvider"/> 内存快照与 <see cref="ThompsonStateStore"/>，零 I/O、零外部锁。
+/// 后台 <c>LatencyStatsAggregatorService</c> 周期刷新延迟快照。
 /// </para>
 /// </remarks>
 public sealed class LatencyAwarePolicy : IRouterPolicy
@@ -40,7 +49,12 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     /// <inheritdoc />
     public RouterDecision Apply(RouterContext context, RouterDecision previous)
     {
-        if (!context.Options.Routing.EnableLatencyAware)
+        bool latencyEnabled = context.Options.Routing.EnableLatencyAware;
+        bool thompsonEnabled = context.Options.Routing.EnableThompsonSampling;
+
+        // Thompson Sampling 不再隐式依赖 EnableLatencyAware：两者各自 gate。
+        // 仅当两者都关闭时整体跳过（保持原 reason 文案对延迟感知的描述）。
+        if (!latencyEnabled && !thompsonEnabled)
         {
             return previous with { Reason = $"{previous.Reason}; latency-aware: disabled" };
         }

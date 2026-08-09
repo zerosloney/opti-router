@@ -112,6 +112,20 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.MaxResponseStreamBytes 必须大于 0。");
         }
 
+        // Thompson Sampling 参数校验：target<=0 会把所有成功判为坏（Beta-only），饿死全部模型；
+        // discount 越界导致衰减失效或过激。文档承诺范围 [0.5, 0.99]。
+        if (options.Routing.EnableThompsonSampling)
+        {
+            if (options.Routing.ThompsonLatencyTargetMs <= 0)
+            {
+                return ValidateOptionsResult.Fail("Routing.ThompsonLatencyTargetMs 必须大于 0（启用 Thompson Sampling 时）。");
+            }
+            if (options.Routing.ThompsonDiscountFactor < 0.5 || options.Routing.ThompsonDiscountFactor > 0.99)
+            {
+                return ValidateOptionsResult.Fail("Routing.ThompsonDiscountFactor 必须在 [0.5, 0.99] 范围内（启用 Thompson Sampling 时）。");
+            }
+        }
+
         // Tags 软校验：未识别的 tag 仅 warning，不阻断启动。
         // 允许自定义 tag（未来扩展），但提示拼写错误（如 "vison" 应为 "vision"）。
         // 仅当启用能力过滤时有意义，但始终提示——配置错误在启用前就应发现。

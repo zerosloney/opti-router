@@ -207,6 +207,9 @@ builder.Services.AddHealthChecks()
     .AddCheck<CostLedgerHealthCheck>("cost-ledger", failureStatus: HealthStatus.Unhealthy);
 
 // Blazor Server：组件化 Dashboard + 模型配置 UI。
+// _Host.cshtml 是 Razor Page（用 <component render-mode="ServerPrerendered">），
+// 需 AddRazorPages 提供 PersistentComponentState 等预渲染服务，否则 AntiforgeryStateProvider 解析失败。
+builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 builder.Services.AddHttpClient<ApiService>();
 
@@ -261,8 +264,21 @@ static bool IsProtectedPath(PathString path) =>
     || path.StartsWithSegments("/api/dashboard")
     || path.StartsWithSegments("/api/models");
 
+static bool IsBlazorFrameworkPath(PathString path) =>
+    path.StartsWithSegments("/_framework")
+    || path.StartsWithSegments("/_blazor")
+    || path.StartsWithSegments("/_content");
+
 app.Use(async (context, next) =>
 {
+    // Blazor Server 框架端点（静态资源 _framework/blazor.web.js、SignalR /_blazor negotiate）由浏览器
+    // 在页面加载后自动发起，无法携带 ?key= 查询参数，必须放行。页面 HTML 自身仍走下面的鉴权。
+    if (IsBlazorFrameworkPath(context.Request.Path))
+    {
+        await next(context).ConfigureAwait(false);
+        return;
+    }
+
     if (!IsProtectedPath(context.Request.Path))
     {
         await next(context).ConfigureAwait(false);
@@ -370,10 +386,17 @@ app.MapChatCompletions();
 app.MapModelsEndpoint();
 
 // 注册可视化监控 Dashboard 与模型配置页（两页职责分离）
-// Blazor Server UI routes: /dashboard and /models are served by _Host.cshtml Razor Pages.
+// Blazor Server UI routes: /dashboard and /models are served by _Host.cshtml Razor Pages。
+// _Host.cshtml 位于 Pages/Dashboard 和 Pages/Models 子目录，各有 @page，无 Pages/_Host.cshtml 根页，
+// 故 MapFallbackToPage 不能指向 /_Host（不存在，会 500）。根路径重定向到 dashboard 作为入口。
+app.MapGet("/", context =>
+{
+    context.Response.Redirect("/dashboard");
+    return Task.CompletedTask;
+});
 app.MapRazorPages();
 app.MapBlazorHub();
-app.MapFallbackToPage("/_Host");
+app.MapFallbackToPage("/Dashboard/_Host");
 
 app.MapDashboardEndpoints();
 app.MapModelsConfigEndpoints();
