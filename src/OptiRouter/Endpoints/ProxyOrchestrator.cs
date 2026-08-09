@@ -840,6 +840,7 @@ catch (Exception ex) when (!ct.IsCancellationRequested)
                     RecordCost(cost, sessionId);
 
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
+                RecordThompsonOutcome(model.Name, elapsedMs < options.Routing.ThompsonLatencyTargetMs);
                 RecordAffinity(sessionId, model.Name);
                 RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,
@@ -869,6 +870,8 @@ catch (Exception ex) when (!ct.IsCancellationRequested)
             {
                 // 被取消（非自身失败）：仅释放探测槽位，不计断路器失败。
                 _healthTracker.ReleaseProbe(model.Name);
+                // Thompson：被取消意味着未在竞速中胜出（延迟更高或故障），计为坏反馈，与串行超时语义一致。
+                RecordThompsonOutcome(model.Name, false);
                 // 预估成本入账：请求已发出到上游，上游对已接收的请求计费，但本地拿不到 Usage（响应未完整返回）。
                 // 按 EstimatedInputTokens × input 价格估算，标注 IsEstimated=true 以区分真实成本。
                 decimal estCost = EstimateInputCost(model, estimatedTokens);
@@ -885,6 +888,7 @@ catch (Exception ex) when (!ct.IsCancellationRequested)
             failedInThisRequest.Add(model.Name);
             lastModelName = model.Name;
             bool tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
+            RecordThompsonOutcome(model.Name, false);
 
             int status = error switch
             {
@@ -941,6 +945,7 @@ catch (Exception ex) when (!ct.IsCancellationRequested)
                 if (usage is not null)
                     RecordCost(cost, sessionId);
                 _healthTracker.RecordSuccess(m.Name, requiredSuccesses);
+                RecordThompsonOutcome(m.Name, elapsedMs < options.Routing.ThompsonLatencyTargetMs);
                 RecordAudit(null, m.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId);
@@ -952,6 +957,7 @@ catch (Exception ex) when (!ct.IsCancellationRequested)
             // 前提假设：请求已发出到上游，上游按已处理的 input 计费（本地拿不到 Usage）。
             // 该估算标 IsEstimated=true，区分于真实成本；若在 cancel 传播前请求未发出，此项可能高估。
             _healthTracker.ReleaseProbe(m.Name);
+            RecordThompsonOutcome(m.Name, false);
             decimal estCost = EstimateInputCost(m, estimatedTokens);
             if (estCost > 0m)
                 RecordCost(estCost, sessionId);

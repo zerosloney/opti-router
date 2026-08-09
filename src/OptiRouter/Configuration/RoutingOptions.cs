@@ -191,17 +191,20 @@ public sealed class RoutingOptions
     public bool EnableMultiDimensionalRouting { get; set; } = false;
 
     /// <summary>
-    /// 是否启用 Thompson 采样自适应延迟感知路由。
+    /// 是否启用 Thompson 采样自适应重排。与 <see cref="EnableLatencyAware"/> 各自独立 gate，
+    /// 无需同时开启即可生效。段内按 Beta 分布采样重排，自适应探索延迟更优的模型。
     /// </summary>
     public bool EnableThompsonSampling { get; set; } = false;
 
     /// <summary>
-    /// Thompson 采样的历史折扣/衰减因子（0.5 至 0.99）。值越小，系统对端点性能变化的反应越灵敏。
+    /// Thompson 采样的历史折扣/衰减因子（取值范围 [0.5, 0.99]，由 RouterOptionsValidator 强制）。
+    /// 值越小，系统对端点性能变化的反应越灵敏。
     /// </summary>
     public double ThompsonDiscountFactor { get; set; } = 0.95;
 
     /// <summary>
-    /// 理想平均延迟目标（毫秒）。实际成功延迟小于该值计为 Alpha 自适应成功增量，否则（超时、大延迟或故障）计为 Beta 惩罚。
+    /// 理想平均延迟目标（毫秒，必须 &gt; 0，由 RouterOptionsValidator 强制）。
+    /// 实际成功延迟小于该值计为 Alpha 自适应成功增量，否则（超时、大延迟或故障）计为 Beta 惩罚。
     /// </summary>
     public double ThompsonLatencyTargetMs { get; set; } = 800.0;
 }

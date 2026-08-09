@@ -58,7 +58,10 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         @"\bpublic\s+(?:class|interface|enum|struct|static|void|int|string|bool|double|float|long|var|async|override|virtual|sealed|abstract|event|delegate|[A-Z]\w*\s+\w+\s*[\(;=])\b|" +
         @"\bimport\s+(?:[""']|\{[\s\w,]+\}\s+from\b|\w+\s+from\s+[""']|\w+\s+as\s+\w+|\w+(?:\.\w+)*\s*;|(?:sys|os|json|re|math|datetime|typing|collections|asyncio|time|pathlib|subprocess)\b)|" +
         @"\bfrom\s+\w+\s+import\b|" +
-        @"\bselect\b[\s\S]{1,200}?\bfrom\b|" +
+        // SQL select：要求 select 与 from 之间或之后出现 SQL 子句关键词/分号，
+        // 以排除自然语言 "select a dress from the catalog"（与注释 L50 误判防护一致）。
+        // [\s\S]{1,200}? 不跨过远；(?=...) 锚定 from 后续关键词。
+        @"\bselect\b[\s\S]{1,200}?\bfrom\b[\s\S]{0,300}?(?:\b(?:where|group|order|having|union|join|left|right|inner|outer|on|limit|offset|values|into|distinct)\b|;|"")|" +
         @"\bcreate\s+table\b|" +
         @"\binsert\s+into\b|" +
         @"\bsudo\s+(?:apt|apt-get|yum|dnf|pacman|systemctl|service|docker|netstat|chmod|chown|mkdir|rm|cp|mv|systemd|zypper|apk)\b|" +
