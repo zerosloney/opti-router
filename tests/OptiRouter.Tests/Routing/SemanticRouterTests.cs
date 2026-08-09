@@ -291,6 +291,10 @@ public class SemanticRouterTests
         // 从而不覆盖 previousCandidates（不带回无 vision 标签的 model-cheap-no-vision）。
         Assert.Single(decision.Candidates);
         Assert.Equal("model-strong-vision", decision.Candidates[0].Name);
+        // 锁定 fallback 路径：匹配命中 casual-chat 但 zero tier 候选 → unchanged，
+        // 区别于真正无匹配（no-match）。防止误判为「未触发策略」的假绿。
+        Assert.Contains("but 0 tier candidates, unchanged", decision.Reason);
+        Assert.DoesNotContain("no-match", decision.Reason);
     }
 
     [Fact]

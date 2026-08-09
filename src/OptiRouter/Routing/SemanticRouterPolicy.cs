@@ -50,6 +50,13 @@ public sealed class SemanticRouterPolicy : IRouterPolicy
                     Reason = $"{previous.Reason}; {reason}"
                 };
             }
+
+            // 匹配命中但 previous.Candidates 无目标 tier 候选：不覆盖上游过滤结果，
+            // 记独立 reason 区分于真正无匹配（no-match 误导：实际匹配了但零 tier 候选）。
+            return previous with
+            {
+                Reason = $"{previous.Reason}; semantic-router: matched={matchedRoute.Name}(sim={maxSimilarity:F4}, tier={matchedRoute.TargetTier}) but 0 tier candidates, unchanged"
+            };
         }
 
         return previous with { Reason = $"{previous.Reason}; semantic-router: no-match(max_sim={maxSimilarity:F4})" };
