@@ -81,7 +81,7 @@ public sealed class MultiDimensionalAndBanditTests
 
         // 期待排序：
         // "custom-coder" (coding = 0.95) 第一
-        // "cheap-coder" (coding = 0.70) 第二
+        // "cheap-coder" (coding = 0.90) 第二
         // "fallback-medium" (fallback coding = 0.6) 第三
         Assert.Equal("custom-coder", result.Candidates[0].Name);
         Assert.Equal("cheap-coder", result.Candidates[1].Name);

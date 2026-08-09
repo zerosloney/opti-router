@@ -6,6 +6,8 @@ window.drawTrendChart = function(canvas, data) {
     var dpr = window.devicePixelRatio || 1;
     var rect = canvas.parentElement.getBoundingClientRect();
     canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+    // setTransform 重置后再 scale，避免多次调用累积缩放（图表越刷越小）。
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.scale(dpr, dpr);
     var W = rect.width, H = rect.height;
     var pad = {t:20,r:20,b:30,l:60};
