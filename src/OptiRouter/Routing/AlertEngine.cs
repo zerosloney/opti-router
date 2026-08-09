@@ -124,15 +124,12 @@ public sealed class AlertEngine
         if (!_routerOptions.CurrentValue.Routing.EnableFailover) return;
 
         DateTime from = now.AddMinutes(-5);
-        // 分子(failures)与分母(totalCount)必须同源：limit 截断 items 但不截 totalCount，
-        // 大流量下分子被压低、分母不缩，失败率被系统性低估，故障越大越不报警。
-        // intentional-simple: 拉全量进内存计数。5 分钟窗口 + Dashboard 1s 缓存下内存压力可忽略。
-        // 若窗口内请求量增长到数万级，升级为 IRequestAuditStore.GetFailureCount/GetTotalCount 专用聚合接口。
-        var (items, totalCount) = _auditStore.GetByTimeRange(from, now, int.MaxValue, 0);
+        // 聚合查询：单条 COUNT/SUM，O(1) 内存。替代 GetByTimeRange(int.MaxValue) 全量物化——
+        // 后者每秒（Dashboard 1s 缓存）把窗口内全量行拉进内存，大流量下 CPU/内存尖峰。
+        var (failures, totalCount) = _auditStore.GetFailureStats(from, now);
 
         if (totalCount < 10) return; // Need enough samples.
 
-        int failures = items.Count(r => !r.Success);
         if (failures == 0) return;
 
         double failureRate = (double)failures / totalCount;

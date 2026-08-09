@@ -217,6 +217,36 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     }
 
     /// <inheritdoc />
+    public (int Failures, int Total) GetFailureStats(DateTime from, DateTime to)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_lock)
+        {
+            using var cmd = _connection.CreateCommand();
+            // 单条聚合：SUM(CASE...) 统计失败数，COUNT(*) 统计总数。
+            // 替代 GetByTimeRange(int.MaxValue) 全量物化，O(1) 内存。
+            cmd.CommandText = """
+                SELECT COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0),
+                       COUNT(*)
+                FROM request_audit
+                WHERE timestamp >= @from AND timestamp <= @to;
+                """;
+            cmd.Parameters.AddWithValue("@from", FormatTimestamp(from));
+            cmd.Parameters.AddWithValue("@to", FormatTimestamp(to));
+
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                int failures = reader.IsDBNull(0) ? 0 : Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+                int total = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture);
+                return (failures, total);
+            }
+            return (0, 0);
+        }
+    }
+
+    /// <inheritdoc />
     public int EvictBefore(DateTime cutoff)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

@@ -35,6 +35,15 @@ public interface IRequestAuditStore : IDisposable
     (IReadOnlyList<RequestAuditRecord> Items, int TotalCount) GetByTimeRange(DateTime from, DateTime to, int limit, int offset);
 
     /// <summary>
+    /// 按时间范围聚合失败统计：返回 (失败数, 总数)。供 AlertEngine 失败率检查用，
+    /// 替代 GetByTimeRange(int.MaxValue) 全量物化——O(1) 内存、单条聚合查询。
+    /// </summary>
+    /// <param name="from">起始 UTC 时间（含）。</param>
+    /// <param name="to">结束 UTC 时间（含）。</param>
+    /// <returns>(失败请求数, 总请求数)，失败 = success=0。</returns>
+    (int Failures, int Total) GetFailureStats(DateTime from, DateTime to);
+
+    /// <summary>
     /// 淘汰早于指定时间的审计记录，返回实际淘汰条数。
     /// </summary>
     int EvictBefore(DateTime cutoff);

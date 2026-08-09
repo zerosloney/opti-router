@@ -128,6 +128,29 @@ public sealed class InMemoryRequestAuditStore : IRequestAuditStore, IDisposable
     }
 
     /// <inheritdoc />
+    public (int Failures, int Total) GetFailureStats(DateTime from, DateTime to)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        int failures = 0, total = 0;
+        lock (_lock)
+        {
+            // 单次遍历计数，O(n)，与 GetLatencyStatsSince 同模式。替代全量物化。
+            for (int i = 0; i < _count; i++)
+            {
+                int idx = (_head + i) % _buffer.Length;
+                var r = _buffer[idx];
+                if (r.Timestamp >= from && r.Timestamp <= to)
+                {
+                    total++;
+                    if (!r.Success) failures++;
+                }
+            }
+        }
+        return (failures, total);
+    }
+
+    /// <inheritdoc />
     public int EvictBefore(DateTime cutoff)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

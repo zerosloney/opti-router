@@ -126,6 +126,12 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             }
         }
 
+        // 审计保留时长校验：<=0 会让后台服务每次循环淘汰全部审计（AlertEngine 失去数据源）。
+        if (options.Routing.AuditRetentionHours < 1)
+        {
+            return ValidateOptionsResult.Fail("Routing.AuditRetentionHours 必须 >= 1。");
+        }
+
         // Tags 软校验：未识别的 tag 仅 warning，不阻断启动。
         // 允许自定义 tag（未来扩展），但提示拼写错误（如 "vison" 应为 "vision"）。
         // 仅当启用能力过滤时有意义，但始终提示——配置错误在启用前就应发现。

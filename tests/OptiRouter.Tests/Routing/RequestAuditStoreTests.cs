@@ -353,6 +353,50 @@ public class RequestAuditStoreTests
 
     [Theory]
     [MemberData(nameof(StoreFactories))]
+    public void GetFailureStats_EmptyStore_ReturnsZero(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var (failures, total) = store.GetFailureStats(DateTime.UtcNow.AddHours(-1), DateTime.UtcNow);
+        Assert.Equal(0, failures);
+        Assert.Equal(0, total);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetFailureStats_CountsFailuresAndTotal(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        // 3 失败 + 5 成功 = 8 总。
+        for (int i = 0; i < 3; i++)
+            store.Append(SampleRecord("fail-model", success: false));
+        for (int i = 0; i < 5; i++)
+            store.Append(SampleRecord("ok-model", success: true));
+
+        var (failures, total) = store.GetFailureStats(DateTime.UtcNow.AddMinutes(-5), DateTime.UtcNow);
+
+        Assert.Equal(3, failures);
+        Assert.Equal(8, total);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetFailureStats_RespectsTimeRange(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        // old（2h 前，失败）+ recent（now，失败）+ recent（now，成功）。
+        store.Append(SampleRecord("m", success: false, ts: DateTime.UtcNow.AddHours(-2)));
+        store.Append(SampleRecord("m", success: false, ts: DateTime.UtcNow));
+        store.Append(SampleRecord("m", success: true, ts: DateTime.UtcNow));
+
+        // 窗口 = 最近 1h → 仅 2 条 recent 计入，old 排除。
+        var (failures, total) = store.GetFailureStats(DateTime.UtcNow.AddHours(-1), DateTime.UtcNow);
+
+        Assert.Equal(1, failures);
+        Assert.Equal(2, total);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
     public void Append_WithParallelFields_RoundTrips(Func<IRequestAuditStore> factory)
     {
         using var store = factory();
