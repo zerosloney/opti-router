@@ -120,7 +120,7 @@ public sealed class CascadeUpgradeHandler
                 _recorder.RecordThompsonOutcome(
                     upgradeTarget.Name,
                     strongSw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
-                _recorder.RecordAffinity(sessionId, upgradeTarget.Name);
+                _recorder.RecordAffinity(sessionId, upgradeTarget.Name, AffinitySignal.Weak);
                 _recorder.RecordPromptCacheAffinity(originalRequest, upgradeTarget.Name);
 
                 _recorder.RecordAudit(null, upgradeTarget.Name, estimatedTokens, strongResponse.Usage,

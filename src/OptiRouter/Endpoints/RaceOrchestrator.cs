@@ -141,7 +141,7 @@ public sealed class RaceOrchestrator
                 _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
                 _recorder.RecordThompsonOutcome(model.Name, elapsedMs < options.Routing.ThompsonLatencyTargetMs);
-                _recorder.RecordAffinity(sessionId, model.Name);
+                _recorder.RecordAffinity(sessionId, model.Name, AffinitySignal.Weak);
                 _recorder.RecordPromptCacheAffinity(request, model.Name);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,

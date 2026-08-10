@@ -1,6 +1,8 @@
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
+using OptiRouter.Endpoints;
 using OptiRouter.Routing;
 using Xunit;
 
@@ -33,7 +35,7 @@ public class SessionAffinityPolicyTests
     public void Affinity_PromotesRememberedModelToFirst()
     {
         var cache = new MemoryCache(new MemoryCacheOptions());
-        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", "medium-b");
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
 
         var policy = new SessionAffinityPolicy(cache);
         var previous = new RouterDecision
@@ -69,7 +71,7 @@ public class SessionAffinityPolicyTests
     public void Affinity_RememberedModelFailed_Skipped()
     {
         var cache = new MemoryCache(new MemoryCacheOptions());
-        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", "medium-b");
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
 
         var policy = new SessionAffinityPolicy(cache);
         var previous = new RouterDecision
@@ -89,7 +91,7 @@ public class SessionAffinityPolicyTests
     public void Affinity_RememberedModelNotInCandidates_Passthrough()
     {
         var cache = new MemoryCache(new MemoryCacheOptions());
-        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", "strong-a");
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", new AffinityRecord("strong-a", DateTimeOffset.UtcNow));
 
         var policy = new SessionAffinityPolicy(cache);
         // 候选链只有 medium 模型，strong-a 不在其中
@@ -109,7 +111,7 @@ public class SessionAffinityPolicyTests
     public void Affinity_Disabled_Passthrough()
     {
         var cache = new MemoryCache(new MemoryCacheOptions());
-        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", "medium-b");
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
 
         var policy = new SessionAffinityPolicy(cache);
         var previous = new RouterDecision
@@ -143,7 +145,7 @@ public class SessionAffinityPolicyTests
     public void Affinity_AlreadyPrimary_NoReorder()
     {
         var cache = new MemoryCache(new MemoryCacheOptions());
-        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", "medium-a");
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess1", new AffinityRecord("medium-a", DateTimeOffset.UtcNow));
 
         var policy = new SessionAffinityPolicy(cache);
         var models = GetModels();
@@ -158,5 +160,108 @@ public class SessionAffinityPolicyTests
 
         Assert.Contains("already primary", result.Reason);
         Assert.Equal("medium-a", result.Candidates[0].Name);
+    }
+}
+
+/// <summary>可推进的假时钟，用于验证粘性时间戳的新鲜度判断。</summary>
+public sealed class MutableTimeProvider : TimeProvider
+{
+    public DateTimeOffset Now { get; set; } = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    public override DateTimeOffset GetUtcNow() => Now;
+}
+
+/// <summary>返回固定 RouterOptions 的 IOptionsMonitor stub。</summary>
+public sealed class StubOptionsMonitor : IOptionsMonitor<RouterOptions>
+{
+    private readonly RouterOptions _value;
+    public StubOptionsMonitor(RouterOptions value) => _value = value;
+    public RouterOptions CurrentValue => _value;
+    public RouterOptions Get(string? name) => _value;
+    public IDisposable? OnChange(Action<RouterOptions, string?> listener) => null;
+}
+
+public sealed class RecordAffinityTests
+{
+    private static OutcomeRecorder MakeRecorder(IMemoryCache cache, MutableTimeProvider clock, RouterOptions opts)
+    {
+        // RecordAffinity 只触碰 _options/_affinityCache/_timeProvider，其余依赖传 null?。
+        return new OutcomeRecorder(
+            auditStore: null!,
+            metrics: null!,
+            ledger: null!,
+            options: new StubOptionsMonitor(opts),
+            affinityCache: cache,
+            tsStore: null!,
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: null!,
+            timeProvider: clock);
+    }
+
+    private static RouterOptions AffinityOpts(int ttlSeconds = 600) => new()
+    {
+        Routing = { EnableSessionAffinity = true, SessionAffinityTtlSeconds = ttlSeconds }
+    };
+
+    [Fact]
+    public void WeakSignal_DoesNotOverrideFreshStrong()
+    {
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var clock = new MutableTimeProvider();
+        var recorder = MakeRecorder(cache, clock, AffinityOpts());
+
+        recorder.RecordAffinity("sess1", "main-model", AffinitySignal.Strong);
+        // 旁路（Cascade/Fusion/Race）紧接着写弱信号，不应覆盖主链新鲜偏好。
+        recorder.RecordAffinity("sess1", "side-model", AffinitySignal.Weak);
+
+        var stored = cache.Get<AffinityRecord>(SessionAffinityPolicy.CacheKeyPrefix + "sess1");
+        Assert.NotNull(stored);
+        Assert.Equal("main-model", stored!.ModelName);
+    }
+
+    [Fact]
+    public void WeakSignal_TakesOverWhenStrongIsStale()
+    {
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var clock = new MutableTimeProvider();
+        var recorder = MakeRecorder(cache, clock, AffinityOpts());
+
+        recorder.RecordAffinity("sess1", "main-model", AffinitySignal.Strong);
+        // 时间推进超过一个 TTL 周期 → 主链粘性视为不新鲜，弱信号可接管。
+        clock.Now = clock.Now.AddSeconds(600);
+        recorder.RecordAffinity("sess1", "side-model", AffinitySignal.Weak);
+
+        var stored = cache.Get<AffinityRecord>(SessionAffinityPolicy.CacheKeyPrefix + "sess1");
+        Assert.NotNull(stored);
+        Assert.Equal("side-model", stored!.ModelName);
+    }
+
+    [Fact]
+    public void WeakSignal_WritesWhenNoExistingAffinity()
+    {
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var clock = new MutableTimeProvider();
+        var recorder = MakeRecorder(cache, clock, AffinityOpts());
+
+        recorder.RecordAffinity("sess1", "side-model", AffinitySignal.Weak);
+
+        var stored = cache.Get<AffinityRecord>(SessionAffinityPolicy.CacheKeyPrefix + "sess1");
+        Assert.NotNull(stored);
+        Assert.Equal("side-model", stored!.ModelName);
+    }
+
+    [Fact]
+    public void StrongSignal_AlwaysOverridesWeak()
+    {
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var clock = new MutableTimeProvider();
+        var recorder = MakeRecorder(cache, clock, AffinityOpts());
+
+        recorder.RecordAffinity("sess1", "side-model", AffinitySignal.Weak);
+        recorder.RecordAffinity("sess1", "main-model", AffinitySignal.Strong);
+
+        var stored = cache.Get<AffinityRecord>(SessionAffinityPolicy.CacheKeyPrefix + "sess1");
+        Assert.NotNull(stored);
+        Assert.Equal("main-model", stored!.ModelName);
     }
 }

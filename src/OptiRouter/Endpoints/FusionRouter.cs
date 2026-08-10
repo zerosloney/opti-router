@@ -318,7 +318,7 @@ public sealed class FusionRouter
             _recorder.RecordQuota(outerModel.Name, outerResponse.Metadata);
             _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses);
             _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
-            _recorder.RecordAffinity(sessionId, outerModel.Name);
+            _recorder.RecordAffinity(sessionId, outerModel.Name, AffinitySignal.Weak);
             _recorder.RecordPromptCacheAffinity(request, outerModel.Name);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, outerUsage, outerCost, outerSw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; fusion-router: outer", true, null, false, routedTier,

@@ -24,6 +24,7 @@ public sealed class OutcomeRecorder
     private readonly PromptCacheAffinityStore _promptAffinityStore;
     private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly ILogger<OutcomeRecorder> _logger;
+    private readonly TimeProvider _timeProvider;
 
     public OutcomeRecorder(
         IRequestAuditStore auditStore,
@@ -34,7 +35,8 @@ public sealed class OutcomeRecorder
         ThompsonStateStore tsStore,
         PromptCacheAffinityStore promptAffinityStore,
         UpstreamQuotaStateStore quotaStore,
-        ILogger<OutcomeRecorder> logger)
+        ILogger<OutcomeRecorder> logger,
+        TimeProvider? timeProvider = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -45,6 +47,7 @@ public sealed class OutcomeRecorder
         _promptAffinityStore = promptAffinityStore;
         _quotaStore = quotaStore;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
@@ -154,7 +157,15 @@ public sealed class OutcomeRecorder
     /// 记录会话粘性：成功命中某模型后写入内存缓存，供 <see cref="SessionAffinityPolicy"/> 下次决策提升该模型。
     /// 仅在启用会话粘性且存在 sessionId 时写。写失败（理论上 IMemoryCache 不会抛）不影响主流程。
     /// </summary>
-    public void RecordAffinity(string? sessionId, string modelName)
+    /// <param name="sessionId">会话 ID。</param>
+    /// <param name="modelName">成功命中的模型名。</param>
+    /// <param name="signal">
+    /// 信号强度。主链成功传 <see cref="AffinitySignal.Strong"/>（总是覆盖）；
+    /// Cascade/Fusion/Race 等旁路成功传 <see cref="AffinitySignal.Weak"/>——
+    /// 仅当无现有粘性或现有粘性已超过一个 TTL 周期（视为不新鲜）时才接管，避免旁路的
+    /// 偶发/升级路径覆盖主链刚建立的稳定偏好。
+    /// </param>
+    public void RecordAffinity(string? sessionId, string modelName, AffinitySignal signal = AffinitySignal.Strong)
     {
         if (string.IsNullOrEmpty(sessionId))
             return;
@@ -163,9 +174,21 @@ public sealed class OutcomeRecorder
             return;
 
         int ttl = routing.SessionAffinityTtlSeconds > 0 ? routing.SessionAffinityTtlSeconds : 600;
+        string key = SessionAffinityPolicy.CacheKeyPrefix + sessionId;
+        var now = _timeProvider.GetUtcNow();
+
         try
         {
-            _affinityCache.Set(SessionAffinityPolicy.CacheKeyPrefix + sessionId, modelName, TimeSpan.FromSeconds(ttl));
+            // 弱信号：若已存在新鲜的主链偏好则保留，不覆盖。
+            if (signal == AffinitySignal.Weak
+                && _affinityCache.TryGetValue<AffinityRecord>(key, out var existing)
+                && existing is not null
+                && now - existing.UpdatedAt < TimeSpan.FromSeconds(ttl))
+            {
+                return;
+            }
+
+            _affinityCache.Set(key, new AffinityRecord(modelName, now), TimeSpan.FromSeconds(ttl));
         }
         catch
         {

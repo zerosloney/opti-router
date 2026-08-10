@@ -4,6 +4,29 @@ using OptiRouter.Configuration;
 namespace OptiRouter.Routing;
 
 /// <summary>
+/// 粘性信号强度：决定写入端是否应覆盖已有粘性记录。
+/// <list type="bullet">
+/// <item><see cref="Strong"/>：主链成功（明确的会话偏好），总是覆盖写入。</item>
+/// <item><see cref="Weak"/>：旁路成功（Cascade/Fusion/Race），仅当已有粘性缺失或过期时才写入，
+/// 避免旁路的偶发/升级路径覆盖主链的稳定偏好。</item>
+/// </list>
+/// </summary>
+public enum AffinitySignal
+{
+    /// <summary>主链成功：明确的会话偏好，覆盖已有记录。</summary>
+    Strong,
+
+    /// <summary>旁路成功：仅在无有效粘性或已过期时接管，避免破坏主链偏好。</summary>
+    Weak
+}
+
+/// <summary>
+/// 会话粘性的存储值：模型名 + 最近成功写入时间。
+/// 时间戳用于写入端判断粘性是否"新鲜"——弱信号不能在主链刚写入的粘性上覆盖。
+/// </summary>
+public sealed record AffinityRecord(string ModelName, DateTimeOffset UpdatedAt);
+
+/// <summary>
 /// 会话粘性路由策略：同 X-Session-Id 的多轮对话尽量命中上次成功的模型，避免风格/能力割裂。
 /// </summary>
 /// <remarks>
@@ -39,10 +62,11 @@ public sealed class SessionAffinityPolicy : IRouterPolicy
         }
 
         string key = CacheKeyPrefix + context.SessionId;
-        if (!_cache.TryGetValue<string>(key, out var remembered) || string.IsNullOrEmpty(remembered))
+        if (!_cache.TryGetValue<AffinityRecord>(key, out var record) || record is null || string.IsNullOrEmpty(record.ModelName))
         {
             return previous with { Reason = $"{previous.Reason}; session-affinity: no-record" };
         }
+        string remembered = record.ModelName;
 
         // 记忆模型已在本请求失败 → 不强推，交给 Failover。
         if (context.FailedModels.Contains(remembered))
