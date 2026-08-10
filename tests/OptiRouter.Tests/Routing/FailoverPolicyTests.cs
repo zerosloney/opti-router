@@ -151,4 +151,58 @@ public class FailoverPolicyTests
         Assert.Contains("half-open probing", halfOpen.Reason);
         Assert.Contains("gpt-4o", string.Join(",", halfOpen.Candidates.Select(c => c.Name)));
     }
+
+    [Fact]
+    public void Apply_CheapFailed_FallsBackToMediumBeforeStrong()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = NewPolicy();
+        var candidates = options.Models.Where(m => m.Enabled && m.Tier == ModelTier.Cheap).ToList();
+        var failed = new HashSet<string> { "cheap" };
+        var result = Apply(policy, options, candidates, failed);
+
+        Assert.Single(result.Candidates);
+        Assert.Equal("gpt-4o-mini", result.Candidates[0].Name);
+        Assert.Equal(ModelTier.Medium, result.Candidates[0].Tier);
+    }
+
+    [Fact]
+    public void Apply_MediumFailed_FallsBackToStrongBeforeCheap()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = NewPolicy();
+        var candidates = options.Models.Where(m => m.Enabled && m.Tier == ModelTier.Medium).ToList();
+        var failed = new HashSet<string> { "gpt-4o-mini" };
+        var result = Apply(policy, options, candidates, failed);
+
+        Assert.Single(result.Candidates);
+        Assert.Equal("gpt-4o", result.Candidates[0].Name);
+        Assert.Equal(ModelTier.Strong, result.Candidates[0].Tier);
+    }
+
+    [Fact]
+    public void Apply_StrongFailed_FallsBackToMediumBeforeCheap()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = NewPolicy();
+        var candidates = options.Models.Where(m => m.Enabled && m.Tier == ModelTier.Strong).ToList();
+        var failed = new HashSet<string> { "gpt-4o" };
+        var result = Apply(policy, options, candidates, failed);
+
+        Assert.Single(result.Candidates);
+        Assert.Equal("gpt-4o-mini", result.Candidates[0].Name);
+        Assert.Equal(ModelTier.Medium, result.Candidates[0].Tier);
+    }
 }

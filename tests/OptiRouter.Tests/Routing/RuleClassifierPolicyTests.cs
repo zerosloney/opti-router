@@ -208,4 +208,56 @@ public class RuleClassifierPolicyTests
         // 但翻译/数学/代码不应触发，避免误升档）。这里断言：不应是 Strong（无代码）。
         Assert.All(result.Candidates, m => Assert.NotEqual(ModelTier.Strong, m.Tier));
     }
+
+    [Fact]
+    public void Apply_TargetAndDefaultTierBothEmpty_KeepsOriginalCandidates()
+    {
+        // 配置只有 Strong + Cheap，无 Medium。翻译请求目标 tier = Medium，
+        // DefaultTier 默认也是 Medium → 两级过滤都空。应保留原候选而非清空（避免 503）。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "translate this book to French"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.Equal(2, result.Candidates.Count);
+        Assert.Contains("keeping original", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_TargetTierEmpty_DefaultTierHasModels_SelectsDefaultTier()
+    {
+        // 目标 tier 空但 DefaultTier 有模型：应回落到 DefaultTier，不保留原候选。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "```csharp\npublic class Foo {}\n```"));
+
+        var models = options.Models.Where(m => m.Enabled).ToList();
+        var context = new RouterContext
+        {
+            Request = request,
+            AllModels = models,
+            Options = options,
+            EstimatedInputTokens = 0
+        };
+        var previous = new RouterDecision
+        {
+            Candidates = models.Where(m => m.Tier != ModelTier.Strong).ToList(),
+            Reason = "initial",
+            EstimatedInputTokens = 0
+        };
+
+        var result = policy.Apply(context, previous);
+
+        Assert.Single(result.Candidates);
+        Assert.Equal(ModelTier.Medium, result.Candidates[0].Tier);
+        Assert.Contains("fallback-to-default", result.Reason);
+    }
 }

@@ -70,8 +70,11 @@ public sealed class FailoverPolicy : IRouterPolicy
             };
         }
 
-        // 全部排除，需要补充降级链
-        var fallback = BuildFallbackChain(context.AllModels, previous.Candidates, excluded);
+        // 全部排除，需要补充降级链。
+        // 感知原决策 tier：原 tier 失败后优先升档（如 Cheap 失败先试 Medium 再 Strong），
+        // 而非固定 Strong->Medium->Cheap 顺序（否则 Cheap 失败会跳到最贵的 Strong，跳过 Medium）。
+        var originalTier = previous.Candidates.Count > 0 ? previous.Candidates[0].Tier : ModelTier.Medium;
+        var fallback = BuildFallbackChain(context.AllModels, previous.Candidates, excluded, originalTier);
         string fallbackReason = $"failover: all candidates failed, fallback to [{string.Join(", ", fallback.Select(m => m.Name))}]";
         return previous with
         {
@@ -83,11 +86,19 @@ public sealed class FailoverPolicy : IRouterPolicy
     private static List<ModelEndpointOptions> BuildFallbackChain(
         IReadOnlyList<ModelEndpointOptions> allModels,
         IReadOnlyList<ModelEndpointOptions> previousCandidates,
-        IReadOnlySet<string> excludedModels)
+        IReadOnlySet<string> excludedModels,
+        ModelTier originalTier)
     {
-        // intentional-simple: 降级顺序 Strong -> Medium -> Cheap，同 tier 按 MaxContextTokens 降序。
-        // 顺序真源见 TierOrder.FallbackChain，避免与 RouterEngine 初始排序假设不一致。
-        foreach (var tier in TierOrder.FallbackChain)
+        // 降级顺序感知原决策 tier：原 tier 失败后优先升档（Cheap 失败先试 Medium 再 Strong），
+        // 而非固定 Strong->Medium->Cheap。这样 Cheap 失败不会直接跳到最贵的 Strong 跳过 Medium。
+        // 同 tier 按 MaxContextTokens 降序。
+        var originalRank = TierOrder.Rank(originalTier);
+        var orderedTiers = TierOrder.FallbackChain
+            .Where(t => t != originalTier)
+            .OrderBy(t => Math.Abs(TierOrder.Rank(t) - originalRank))
+            .ToList();
+
+        foreach (var tier in orderedTiers)
         {
             var sameTierFallback = allModels
                 .Where(m => m.Enabled && m.Tier == tier && !excludedModels.Contains(m.Name))

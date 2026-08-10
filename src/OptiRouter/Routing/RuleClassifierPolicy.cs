@@ -133,6 +133,18 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
             candidates = FilterByTier(previous.Candidates, targetTier);
         }
 
+        // 目标 tier 与 DefaultTier 均无候选：保留原候选而非清空。
+        // 与 LongInputPolicy/CapabilityFilterPolicy 的兜底语义一致——tier 不匹配不应
+        // 让唯一可用模型（如 Strong+Cheap 配置下的翻译请求）被排除成空候选直接 503。
+        if (candidates.Count == 0)
+        {
+            return previous with
+            {
+                Reason = $"{previous.Reason}; rule-classifier: no {targetTier}({targetReason}) candidates, keeping original {previous.Candidates.Count}",
+                RequestComplexity = complexity
+            };
+        }
+
         // 按 MaxContextTokens 降序
         candidates = candidates.OrderByDescending(m => m.MaxContextTokens).ToList();
 
