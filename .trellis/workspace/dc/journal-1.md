@@ -71,3 +71,36 @@ Implemented cache-aware upstream metadata and pricing, quota-only 429 handling, 
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: Code-intent sub-classification for single-model routing
+
+**Date**: 2026-08-10
+**Task**: Code-intent sub-classification for single-model routing
+**Branch**: `master`
+
+### Summary
+
+Split blanket code→Strong into intent-aware routing (complex→Strong, simple→Medium, no-intent→Strong); also record estimated cost for null-usage success responses. 435 tests pass.
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `0615055` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
