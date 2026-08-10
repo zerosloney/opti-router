@@ -258,6 +258,7 @@ def build_by_reason(conn: sqlite3.Connection, where: str, params: list) -> str:
         "simple-qa", "complex-instruction",
         "semantic-router: matched", "long-input: filtered", "fallback-to-default",
         "session-affinity: promoted",
+        "cancelled-by-race",  # 竞速失败（并行 racing 中被更快者比下去而取消）
     ]
     for r in rows:
         reason = r["routing_reason"] or ""

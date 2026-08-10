@@ -159,6 +159,10 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             {
                 return ValidateOptionsResult.Fail("Routing.ThompsonDiscountFactor 必须在 [0.5, 0.99] 范围内（启用 Thompson Sampling 时）。");
             }
+            if (options.Routing.ThompsonRaceCancelledReward < 0.0 || options.Routing.ThompsonRaceCancelledReward > 1.0)
+            {
+                return ValidateOptionsResult.Fail("Routing.ThompsonRaceCancelledReward 必须在 [0.0, 1.0] 范围内（启用 Thompson Sampling 时）。");
+            }
         }
 
         // 审计保留时长校验：<=0 会让后台服务每次循环淘汰全部审计（AlertEngine 失去数据源）。

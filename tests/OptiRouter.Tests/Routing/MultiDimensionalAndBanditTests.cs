@@ -496,6 +496,33 @@ public sealed class MultiDimensionalAndBanditTests
     }
 
     [Fact]
+    public void RecordThompsonRaceCancelled_UsesConfigurableReward()
+    {
+        // 竞速失败奖励应为运行时配置项（Reload 生效），而非编译期常量。
+        // 设 ThompsonRaceCancelledReward=0.7，验证 store 状态反映配置值而非默认 0.5。
+        var store = new ThompsonStateStore();
+        var opts = new RouterOptions();
+        opts.Routing.ThompsonRaceCancelledReward = 0.7;
+        var recorder = new OutcomeRecorder(
+            auditStore: null!,
+            metrics: null!,
+            ledger: null!,
+            options: new StubOptionsMonitor(opts),
+            affinityCache: new MemoryCache(new MemoryCacheOptions()),
+            tsStore: store,
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: null!);
+
+        recorder.RecordThompsonRaceCancelled("cfg-model");
+        var stats = store.GetOrAdd("cfg-model");
+
+        // reward=0.7（配置值，非默认 0.5）：Alpha = 1.0×0.95 + 0.7 = 1.65；Beta = 1.0×0.95 + 0.3 = 1.25
+        Assert.Equal(1.0 * 0.95 + 0.7, stats.Alpha);
+        Assert.Equal(1.0 * 0.95 + 0.3, stats.Beta);
+    }
+
+    [Fact]
     public void LatencyAwarePolicy_WithThompsonSampling_ReordersCorrectly()
     {
         // 先定义 m-bad 后定义 m-good，初始顺序为 [m-bad, m-good]

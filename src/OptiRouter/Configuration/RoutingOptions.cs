@@ -285,6 +285,13 @@ public sealed class RoutingOptions
     public double ThompsonLatencyTargetMs { get; set; } = 800.0;
 
     /// <summary>
+    /// 竞速失败（并行 racing 中被更快模型比下去而取消）的 Thompson 部分奖励。
+    /// 取值范围 [0.0, 1.0]（由 RouterOptionsValidator 强制）；0.0=等效硬失败，1.0=等效快成功。
+    /// 默认 0.5：高于慢成功 0.3、低于快成功 1.0。可独立调参，按观测效果（如模型取消率 vs 采纳后成功率）调整。
+    /// </summary>
+    public double ThompsonRaceCancelledReward { get; set; } = 0.5;
+
+    /// <summary>
     /// 审计记录保留时长（小时）。超出后由后台 AuditRetentionService 周期淘汰，
     /// 防止 request_audit 无界增长。默认 168（7 天）。必须 &gt;= 1，由 RouterOptionsValidator 强制。
     /// </summary>

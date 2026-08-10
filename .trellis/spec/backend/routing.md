@@ -138,6 +138,7 @@ public sealed class LatencyStatsCache : ILatencyStatsProvider;
 | `EnableThompsonSampling` | bool | `false` | — |
 | `ThompsonDiscountFactor` | double | `0.95` | `[0.5, 0.99]` when `EnableThompsonSampling=true` |
 | `ThompsonLatencyTargetMs` | double | `800.0` | `> 0` when `EnableThompsonSampling=true` |
+| `ThompsonRaceCancelledReward` | double | `0.5` | `[0.0, 1.0]` when `EnableThompsonSampling=true` |
 | `EnableLatencyAware` | bool | `false` | — |
 | `LatencyMinSamples` | int | `10` | — |
 | `LatencyStatsWindowMinutes` | int | `60` | — |
@@ -165,7 +166,7 @@ RecordThompsonRaceCancelled(candidate.Name);
   - `elapsedMs == null`（硬失败：网络/超时/上游错误）→ reward `0.0`
   - `elapsedMs < ThompsonLatencyTargetMs`（快成功）→ reward `1.0`
   - `elapsedMs >= ThompsonLatencyTargetMs`（慢成功）→ reward `0.3`（部分正反馈，成功但偏慢）
-- 竞速失败（`RecordThompsonRaceCancelled(string, ...)`）→ reward `0.5`：模型在并行竞速中被更快模型比下去而取消，非自身故障——计独立部分奖励（高于慢成功 0.3、低于快成功 1.0），不完全惩罚。`RaceCancelledReward` 命名常量，独立可调。
+- 竞速失败（`RecordThompsonRaceCancelled(string, ...)`）→ reward `RoutingOptions.ThompsonRaceCancelledReward`（默认 0.5）：模型在并行竞速中被更快模型比下去而取消，非自身故障——计独立部分奖励（高于慢成功 0.3、低于快成功 1.0），不完全惩罚。值为运行时配置项（`[0,1]` 校验，reload 热生效），可按观测效果独立调参。
 - `ThompsonStateStore.RecordOutcome(string, double reward, double discountFactor)`：
   - `Alpha = Alpha * discount + reward`
   - `Beta  = Beta  * discount + (1.0 - reward)`

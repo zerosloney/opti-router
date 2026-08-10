@@ -341,6 +341,38 @@ public class RouterOptionsValidatorTests
         Assert.DoesNotContain(capture.Logs, l => l.LogLevel == LogLevel.Warning);
     }
 
+    [Theory]
+    [InlineData(-0.1)]
+    [InlineData(1.1)]
+    public void ThompsonRaceCancelledRewardOutOfRange_ShouldReturnFailure(double value)
+    {
+        // 竞速失败奖励越界：[0,1] 之外应被校验拦截（仅启用 Thompson Sampling 时）。
+        var options = CreateValidOptions();
+        options.Routing.EnableThompsonSampling = true;
+        options.Routing.ThompsonRaceCancelledReward = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("ThompsonRaceCancelledReward", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(0.5)]
+    [InlineData(1.0)]
+    public void ThompsonRaceCancelledRewardInRange_ShouldSucceed(double value)
+    {
+        // 边界值 [0,1] 均应通过。
+        var options = CreateValidOptions();
+        options.Routing.EnableThompsonSampling = true;
+        options.Routing.ThompsonRaceCancelledReward = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
     /// <summary>捕获日志条目用于断言。</summary>
     private sealed class CaptureLogger : ILogger<RouterOptionsValidator>
     {

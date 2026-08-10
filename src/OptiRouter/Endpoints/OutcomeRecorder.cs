@@ -240,18 +240,16 @@ public sealed class OutcomeRecorder
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
     }
 
-    /// <summary>竞速失败（并行竞速中被更快模型比下去而取消）的部分奖励。独立于慢成功(0.3)与硬失败(0.0)。</summary>
-    private const double RaceCancelledReward = 0.5;
-
     /// <summary>
     /// 上报竞速失败反馈：模型在并行竞速中被更快者比下去而取消，非自身故障。
-    /// 计部分正奖励（<see cref="RaceCancelledReward"/>），不完全惩罚——模型可能只是慢/运气差，未必坏。
+    /// 计部分正奖励（<see cref="RoutingOptions.ThompsonRaceCancelledReward"/>，默认 0.5），
+    /// 不完全惩罚——模型可能只是慢/运气差，未必坏。值可运行时配置，按观测效果调参。
     /// </summary>
     /// <param name="modelName">模型名。</param>
     public void RecordThompsonRaceCancelled(string modelName)
     {
         var routing = _options.CurrentValue.Routing;
-        _tsStore.RecordOutcome(modelName, RaceCancelledReward, routing.ThompsonDiscountFactor);
+        _tsStore.RecordOutcome(modelName, routing.ThompsonRaceCancelledReward, routing.ThompsonDiscountFactor);
     }
 
     /// <summary>
