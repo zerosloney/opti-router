@@ -138,6 +138,7 @@ public sealed class LatencyStatsCache : ILatencyStatsProvider;
 | `EnableDynamicFusionPanelSize` | bool | `false` | — |
 | `FusionRouterMinPanelSize` | int | `2` | `[2, 5]` and `<= FusionRouterPanelSize` |
 | `EnableFusionDiversity` | bool | `false` | — |
+| `FusionRouterPanelTimeoutSeconds` | int | `0` | `>= 0` (`0` = disabled, backward-compatible) |
 
 ### Thompson Outcome Recording
 
@@ -206,6 +207,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 | `EnableThompsonSampling` + `ThompsonDiscountFactor` outside `[0.5, 0.99]` | Validation fail | `RouterOptionsValidator` |
 | `AuditRetentionHours < 1` | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterTemperature` outside `[0, 2]` | Validation fail | `RouterOptionsValidator` |
+| `FusionRouterPanelTimeoutSeconds < 0` | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterMinPanelSize` outside `[2, 5]` or above max panel size | Validation fail | `RouterOptionsValidator` |
 | `PromptCacheAffinityTtlSeconds <= 0` | Validation fail | `RouterOptionsValidator` |
 | Cached/cache-write price below zero | Validation fail per model | `RouterOptionsValidator` |
@@ -470,6 +472,104 @@ outcomes.RecordQuota(model.Name, metadata, quotaLimited);
 if (!quotaLimited) outcomes.RecordFailure(model.Name, error);
 ```
 
+## Scenario: Fusion panel-level timeout
+
+### 1. Scope / Trigger
+
+- Applies when changing `FusionRouter` panel orchestration, panel cancellation, or the `FusionRouterPanelTimeoutSeconds` config.
+- Trigger: `EnableFusionRouter=true` and `FusionRouterPanelTimeoutSeconds > 0`. Default `0` preserves the legacy `Task.WhenAll` behavior (wait for all panels) — backward-compatible.
+
+### 2. Signatures
+
+```csharp
+// Config (RoutingOptions):
+public int FusionRouterPanelTimeoutSeconds { get; set; } = 0; // 0 = disabled
+
+// FusionRouter.ExecuteAsync creates one independent linked CTS per admitted panel:
+CancellationTokenSource panelCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+if (panelTimeoutMs > 0) panelCts.CancelAfter(panelTimeoutMs);
+// Passed to client.CompleteRawAsync(panelRequest, panelCts.Token)
+```
+
+### 3. Contracts
+
+- Each panel gets its **own** linked CTS. One panel timing out must not cancel siblings.
+- Panel timeout fires `OperationCanceledException` inside `InvokePanelAsync`, caught by its existing `catch (Exception ex)` and returned as `(model, null, ex, elapsedMs)` — no exception escapes the task.
+- After `Task.WhenAll(panelTasks)` returns, **all** panel CTS are Disposed in a `finally` block (CTS.Dispose is idempotent; safe across normal and external-cancel paths).
+- Timed-out panel is treated as a **failure**: added to `failedInThisRequest`, recorded via `RecordFailure` (circuit breaker) + `RecordThompsonOutcome(false)`, audited with `lastErrorMessage="panel-timeout"`, status `408`.
+- `PickUnfailedFallback` skips timed-out models when selecting analyst/outer — the fallback model will differ from the timed-out panel.
+- External `ct` cancellation remains the highest-priority cancel: it throws out of `WhenAll`, releases probe slots, and does **not** record failure/Thompson/cost/audit (unchanged pre-timeout behavior).
+
+### 4. Validation & Error Matrix
+
+| Condition | Behavior |
+|-----------|----------|
+| `FusionRouterPanelTimeoutSeconds == 0` | Panel-level timeout disabled; `Task.WhenAll` waits for all panels (legacy) |
+| `FusionRouterPanelTimeoutSeconds > 0` + 1 slow panel | Slow panel cancels at threshold, recorded as failure (408); remaining panels proceed to analyst |
+| All panels time out | `panelAnswers.Count == 0` → fall back to serial (existing path) |
+| External `ct` cancels during panel wait | Release probe slots, no failure recorded, propagate cancel |
+| `FusionRouterPanelTimeoutSeconds < 0` | Startup validation fail |
+
+### 5. Good/Base/Bad Cases
+
+- **Good**: 3 panels configured, timeout=1s. Model A sleeps 10s (cancelled at 1s), B/C return instantly. Analyst runs on B (fallback skips A), outer returns 200 with final answer.
+- **Base**: timeout=0 (disabled). One panel sleeps 200ms; `WhenAll` waits for it, all panels succeed, 200 returned. Proves backward compatibility.
+- **Bad**: timeout=1s but all panels sleep 10s and serial path has no timeout guard → serial calls hang until external ct. Mitigation: serial-path mocks must fail fast on 2nd call; production relies on per-model HTTP timeout.
+
+### 6. Tests Required
+
+| Test | Assertion points |
+|------|------------------|
+| `FusionRouter_PanelTimeout_SlowPanelDoesNotBlockAnalyst` | HTTP 200; response contains final answer; `panel=2, analyst≠timed-out-model` in logs |
+| `FusionRouter_PanelTimeout_AllTimeoutFallsBackToSerial` | HTTP ≠ 200; test completes within 15s safety window (proves timeout fired, no deadlock) |
+| `FusionRouter_PanelTimeout_ZeroKeepsBackwardCompatible` | HTTP 200 with timeout=0; slow (200ms) panel is waited for, not cancelled |
+
+Test setup notes:
+- Slow panel mock: `async (req, ct) => { await Task.Delay(TimeSpan.FromSeconds(10), ct); ... }` — the `ct` here is the panel's linked token, cancelled at timeout.
+- All-timeout test must make serial-path calls (2nd+) fail fast, otherwise serial path hangs on `Task.Delay` (panel timeout does not protect serial path — by design).
+- Wrap each test in `CancellationTokenSource(TimeSpan.FromSeconds(15))` as a deadlock-regression guard.
+
+### 7. Wrong vs Correct
+
+```csharp
+// Wrong: one shared CTS for all panels — first timeout cancels everyone.
+var sharedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+sharedCts.CancelAfter(panelTimeoutMs);
+foreach (var model in admitted)
+    panelTasks.Add(InvokePanelAsync(model, sharedCts.Token));
+// Result: one slow panel cancels fast siblings, defeating parallel panel diversity.
+```
+
+```csharp
+// Correct: one independent linked CTS per panel.
+foreach (var model in admitted)
+{
+    var panelCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+    if (panelTimeoutMs > 0) panelCts.CancelAfter(panelTimeoutMs);
+    panelCtsList.Add(panelCts);
+    panelTasks.Add(InvokePanelAsync(model, panelCts.Token));
+}
+// Collected in panelCtsList, Disposed in the WhenAll finally block.
+```
+
+```csharp
+// Wrong: treat any OperationCanceledException as external cancel.
+catch (OperationCanceledException) { _healthTracker.ReleaseProbe(model.Name); throw; }
+// Result: panel timeouts are silently swallowed — slow models never get circuit-broken,
+// and WhenAll never sees the timeout because the exception escaped the task.
+```
+
+```csharp
+// Correct: distinguish panel timeout from external cancel.
+// In InvokePanelAsync, catch external ct cancel and rethrow; everything else (incl. panel
+// timeout) is caught by catch (Exception ex) and returned as a failure tuple.
+// In the result loop, identify timeout:
+bool panelTimedOut = error is OperationCanceledException && !ct.IsCancellationRequested;
+// → status 408, reason "panel timeout", RecordFailure + Thompson(false)
+```
+
+> **Warning**: Panel timeout protects **only the Fusion panel segment**. Serial fallback path (`ProxyOrchestrator.SendAsync` candidate loop) has no panel-level timeout — it relies on per-model HTTP timeout (`TimeoutSeconds` on `ModelEndpointOptions`). Tests that simulate slow serial-path models must fail fast on the 2nd call, or the test will hang.
+
 ## Design Decisions
 
 ### Decision: Independent gates for Thompson Sampling and Latency-Aware
@@ -489,3 +589,18 @@ if (!quotaLimited) outcomes.RecordFailure(model.Name, error);
 **Context**: Without tolerance, the Strong tier fallback (0.9) would always beat Cheap (0.3) on every dimension, making multi-dimensional routing degenerate to tier-only sorting.
 
 **Decision**: When capability score difference <= 0.15, cheaper model wins. This allows cheap models with sufficient capability to serve requests cost-effectively.
+
+### Decision: Per-panel independent CTS for Fusion panel timeout
+
+**Context**: `FusionRouter` used `Task.WhenAll(panelTasks)` with only the global request `ct` as cancellation. A single slow panel (e.g., 30s stall) blocked the analyst stage even when other panels finished in 1s. Considered a shared panel-timeout CTS, or a `WhenAny`-style early-exit.
+
+**Options Considered**:
+1. Shared CTS for all panels — first timeout cancels all siblings.
+2. `WhenAny`-style: advance to analyst as soon as ≥1 panel succeeds — rejected because analyst needs **all** panel answers for consensus/contradiction analysis; partial input degrades analysis quality.
+3. Per-panel independent CTS with `CancelAfter` (chosen).
+
+**Decision**: One independent `CancellationTokenSource.CreateLinkedTokenSource(ct)` per panel, each with its own `CancelAfter(panelTimeoutMs)`. A timed-out panel is recorded as a failure (408, `RecordFailure`, Thompson penalty) and excluded from analyst/outer fallback selection via `PickUnfailedFallback`. `Task.WhenAll` is preserved so analyst still waits for all non-timed-out panels.
+
+**Default off**: `FusionRouterPanelTimeoutSeconds = 0` keeps the legacy wait-for-all behavior, making the feature opt-in and backward-compatible.
+
+**Extensibility**: A future analyst/outer-level timeout could reuse the same per-stage CTS pattern if those stages exhibit similar tail-latency problems.

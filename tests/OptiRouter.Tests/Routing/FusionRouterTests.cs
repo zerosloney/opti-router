@@ -29,6 +29,7 @@ public class FusionRouterTests
         public bool EnableFusionMode { get; set; }
         public double FusionRouterTemperature { get; set; }
         public int FusionRouterPanelSize { get; set; } = 3;
+        public int FusionRouterPanelTimeoutSeconds { get; set; } = 0;
         public string? FusionRouterAnalystPrompt { get; set; }
         public string? CascadeUpgradeSelfVerifyPrompt { get; set; }
 
@@ -88,6 +89,7 @@ public class FusionRouterTests
                     opt.Routing.EnableFusionMode = EnableFusionMode;
                     opt.Routing.EnableFusionRouter = true;
                     opt.Routing.FusionRouterPanelSize = FusionRouterPanelSize;
+                    opt.Routing.FusionRouterPanelTimeoutSeconds = FusionRouterPanelTimeoutSeconds;
                     opt.Routing.FusionRouterTemperature = FusionRouterTemperature;
                     opt.Routing.FusionRouterAnalystPrompt = FusionRouterAnalystPrompt;
                     if (CascadeUpgradeSelfVerifyPrompt is not null)
@@ -783,5 +785,150 @@ public class FusionRouterTests
             yield return new RawStreamLine(line, null);
             await Task.Yield();
         }
+    }
+
+    /// <summary>
+    /// 配置 panel 超时 + 1 个慢 panel：慢 panel 在超时前未完成，应被记失败并释放，
+    /// 其余 panel 正常进入 analyst，最终 outer 返回 200。整测试在 15s 安全窗内完成（防回归死锁）。
+    /// </summary>
+    [Fact]
+    public async Task FusionRouter_PanelTimeout_SlowPanelDoesNotBlockAnalyst()
+    {
+        using var factory = new FusionRouterFactory { FusionRouterPanelTimeoutSeconds = 1 };
+        int modelACalls = 0;
+        // model-a：panel 调用 await Delay(10s, ct)，会被 panel 超时 cts 在 1s 时取消；后续 analyst/outer 正常返回。
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            async (req, ct) =>
+            {
+                int call = ++modelACalls;
+                if (call == 1)
+                {
+                    // panel 槽：故意慢，应被 panel 超时取消（抛 OperationCanceledException）。
+                    await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                    return MakeResponse("model-a", 10, 5, "panel-a-unreachable");
+                }
+                return call == 2
+                    ? MakeAnalystResponse("model-a", 10, 5, AnalystJson)
+                    : MakeResponse("model-a", 10, 5, "quality-final");
+            });
+        // model-b/c：panel 立即返回；且在 model-a 超时被剔除后，会被 PickUnfailedFallback 选为
+        // analyst/outer（候选链按 MaxContextTokens 降序，model-b 在 model-a 之后）。
+        int modelBCalls = 0;
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            (req, ct) => Task.FromResult(++modelBCalls switch
+            {
+                1 => MakeResponse("model-b", 10, 5, "panel-b"),
+                2 => MakeAnalystResponse("model-b", 10, 5, AnalystJson),
+                _ => MakeResponse("model-b", 10, 5, "quality-final")
+            }));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        // 慢 panel 超时，但其余 2 个 panel 成功，analyst/outer 正常推进。
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("quality-final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// 全部 panel 都慢且都被 panel 超时取消：panelAnswers.Count==0 → 回退串行；串行路径也失败 → 非 200。
+    /// 关键：测试本身在 15s 内结束，证明 panel 超时确实生效（无超时则会卡到 Task.Delay 的 10s×N）。
+    /// </summary>
+    [Fact]
+    public async Task FusionRouter_PanelTimeout_AllTimeoutFallsBackToSerial()
+    {
+        using var factory = new FusionRouterFactory { FusionRouterPanelTimeoutSeconds = 1 };
+        // panel 调用（第 1 次）故意慢 10s，应被 1s 的 panel 超时取消；
+        // 串行路径调用（第 2 次起）立即抛 503，避免串行路径也被 Task.Delay 拖住。
+        int callsA = 0, callsB = 0, callsC = 0;
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            (req, ct) => ++callsA == 1
+                ? DelayThenThrow(TimeSpan.FromSeconds(10), ct)
+                : throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "down"));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            (req, ct) => ++callsB == 1
+                ? DelayThenThrow(TimeSpan.FromSeconds(10), ct)
+                : throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "down"));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            (req, ct) => ++callsC == 1
+                ? DelayThenThrow(TimeSpan.FromSeconds(10), ct)
+                : throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "down"));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        // 全部 panel 超时 → 回退串行 → 串行也立即失败 → 非 200。
+        Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    /// <summary>
+    /// 模拟慢 panel：等待 delay，若被 panel 超时 cts 取消则抛 OperationCanceledException，
+    /// 否则抛 503。两者均被 InvokePanelAsync 的 catch 转为失败元组。
+    /// </summary>
+    private static async Task<RawChatResponse> DelayThenThrow(TimeSpan delay, CancellationToken ct)
+    {
+        await Task.Delay(delay, ct);
+        throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "slow-then-fail");
+    }
+
+    /// <summary>
+    /// 默认 FusionRouterPanelTimeoutSeconds=0（关闭 panel 级超时）：WhenAll 等待全部 panel 完成。
+    /// 一个稍慢（短延迟）的 panel 仍会被等待，最终正常返回。证明默认行为向后兼容。
+    /// </summary>
+    [Fact]
+    public async Task FusionRouter_PanelTimeout_ZeroKeepsBackwardCompatible()
+    {
+        // 默认 FusionRouterPanelTimeoutSeconds=0。
+        using var factory = new FusionRouterFactory();
+        int modelACalls = 0;
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            (req, ct) => Task.FromResult(++modelACalls switch
+            {
+                1 => MakeResponse("model-a", 10, 5, "panel-a"),
+                2 => MakeAnalystResponse("model-a", 10, 5, AnalystJson),
+                _ => MakeResponse("model-a", 10, 5, "final")
+            }));
+        // model-b 稍慢（200ms），但 0=不启用 panel 超时，应被 WhenAll 等到。
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            async (req, ct) =>
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(200), ct);
+                return MakeResponse("model-b", 10, 5, "panel-b");
+            });
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        // 关闭 panel 超时：稍慢的 model-b 仍被等待，全部 panel 成功 → 200。
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
 }

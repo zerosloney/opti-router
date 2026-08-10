@@ -77,27 +77,37 @@ public sealed class FusionRouter
             return new FusionAttemptResult(null, null, null, null);
         }
 
-        // 2. 并行 fire panel，收集全部回答。
+        // 2. 并行 fire panel，收集全部回答。每个 panel 绑定独立超时 CTS（若配置）。
         ChatRequest panelRequest = request with
         {
             Temperature = request.Temperature ?? routing.FusionRouterTemperature
         };
         var panelResults = new List<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)>();
         var panelTasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)>>();
+        var panelCtsList = new List<CancellationTokenSource>();
+        int panelTimeoutMs = routing.FusionRouterPanelTimeoutSeconds * 1000;
 
         foreach (var model in admitted)
         {
             var modelCopy = model;
-            panelTasks.Add(InvokePanelAsync(modelCopy));
+            // 每 panel 一个独立 linked CTS：panel 超时只取消自己，不影响其他 panel。
+            // 0 = 不启用 panel 级超时，linkedToken 即 ct 本身（CreateLinkedTokenSource 单 token 仍可安全 Dispose）。
+            CancellationTokenSource panelCts = panelTimeoutMs > 0
+                ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+                : CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (panelTimeoutMs > 0)
+                panelCts.CancelAfter(panelTimeoutMs);
+            panelCtsList.Add(panelCts);
+            panelTasks.Add(InvokePanelAsync(modelCopy, panelCts.Token));
 
             async Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)> InvokePanelAsync(
-                ModelEndpointOptions panelModel)
+                ModelEndpointOptions panelModel, CancellationToken panelToken)
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
                     var client = _clientProvider.GetClient(panelModel);
-                    var resp = await client.CompleteRawAsync(panelRequest, ct).ConfigureAwait(false);
+                    var resp = await client.CompleteRawAsync(panelRequest, panelToken).ConfigureAwait(false);
                     sw.Stop();
                     return (panelModel, resp, (Exception?)null, sw.ElapsedMilliseconds);
                 }
@@ -114,7 +124,7 @@ public sealed class FusionRouter
             }
         }
 
-        // 3. 等待全部 panel 完成，逐条处理。
+        // 3. 等待全部 panel 完成，逐条处理。panel 超时 CTS 统一在 finally 释放（CTS.Dispose 幂等）。
         try
         {
             await Task.WhenAll(panelTasks).ConfigureAwait(false);
@@ -127,6 +137,12 @@ public sealed class FusionRouter
             foreach (var model in admitted)
                 _healthTracker.ReleaseProbe(model.Name);
             throw;
+        }
+        finally
+        {
+            // WhenAll 返回（正常或外部取消）后，所有 panel task 已结束，panel 超时 CTS 不再被引用。
+            foreach (var ctsItem in panelCtsList)
+                ctsItem.Dispose();
         }
 
         foreach (var task in panelTasks)
@@ -190,14 +206,17 @@ public sealed class FusionRouter
                     _ => 500
                 };
                 lastStatusCode = status;
-                lastErrorMessage = UpstreamFailureClassifier.SafeMessage(error, quotaLimited);
+                // panel 超时（panelTimeoutMs>0 且非外部 ct 取消）→ status 408，reason 显式标注便于审计区分。
+                bool panelTimedOut = error is OperationCanceledException && !ct.IsCancellationRequested;
+                lastErrorMessage = panelTimedOut ? "panel-timeout" : UpstreamFailureClassifier.SafeMessage(error, quotaLimited);
 
                 decimal estCost = quotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
                 if (estCost > 0m)
                     _recorder.RecordCost(estCost, sessionId);
+                string failureKind = panelTimedOut ? "panel timeout" : "panel failed";
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
-                    decision.Reason + "; fusion-router: panel failed" + (tripped ? " (circuit tripped)" : ""),
-                    false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited), false, routedTier,
+                    decision.Reason + $"; fusion-router: {failureKind}" + (tripped ? " (circuit tripped)" : ""),
+                    false, lastErrorMessage, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m, fusionRole: "panel",
                     quotaLimited: quotaLimited);
             }

@@ -137,6 +137,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FusionRouterTemperature 必须在 [0, 2] 范围内。");
         }
 
+        if (options.Routing.FusionRouterPanelTimeoutSeconds < 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterPanelTimeoutSeconds 不能为负数。");
+        }
+
         if (options.Routing.MaxResponseStreamBytes <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.MaxResponseStreamBytes 必须大于 0。");
