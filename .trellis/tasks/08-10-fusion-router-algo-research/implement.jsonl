@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/routing.md", "reason": "融合路由既有契约（panel 超时、diversity、动态 size、audit/FusionRole 语义、测试矩阵）。改进提案必须与之保持一致，不得破坏向后兼容。"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "request_audit SQLite 表结构。实证分析扩展 generate/analyze 脚本时需遵循数据库写入与只读约定。"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "脚本与报告的错误处理/降级约定；analyze_audit 列缺失需优雅降级，不吞异常、不崩。"}

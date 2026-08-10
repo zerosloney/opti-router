@@ -104,6 +104,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Fraction of Cheap-tier requests with cascade_triggered (Cheap->Strong) in [0,1]")
     p.add_argument("--parallel-rate", type=float, default=0.0,
                    help="Fraction of rows generated as parallel-race/fusion (is_adopted/group/fusion_role)")
+    p.add_argument("--fusion-rate", type=float, default=0.0,
+                   help="Fraction of requests generated as full fusion groups (panel+analyst+outer, shared group) in [0,1]")
+    p.add_argument("--fusion-analyst-fail-rate", type=float, default=0.1,
+                   help="Fraction of fusion groups where analyst fails (no outer produced) in [0,1]")
     p.add_argument("--models-json", default=None, help="Optional JSON file with model profiles override")
     return p.parse_args(argv)
 
@@ -119,6 +123,84 @@ def build_model_weights(models: list[dict]) -> dict[str, dict]:
     for m in models:
         by_tier.setdefault(m["tier"], []).append(m)
     return by_tier
+
+
+def _model_cost(model: dict, prompt: int, completion: int) -> float:
+    """按模型单价计算成本（USD）。"""
+    return (prompt * model["in_price"] + completion * model["out_price"]) / 1_000_000.0
+
+
+def generate_fusion_group(
+        args: argparse.Namespace, rng: random.Random, models: list[dict],
+        group_id: str, base_ts: datetime, idx: int) -> list[tuple]:
+    """生成一个自洽的融合路由组：N 个 panel + 1 个 analyst +（成功时）1 个 outer。
+
+    组内所有行共享 parallel_group_id；panel/analyst 为 is_adopted=0（未采纳），
+    outer 为 is_adopted=1（采纳）。panel 数在 [2,3] 模拟动态 panel size；
+    panel 从不同模型（不同 provider/family，模拟多样性）选取。
+    analyst 失败（--fusion-analyst-fail-rate）时无 outer，组内只含 panel+analyst。
+    """
+    # 从全部模型里随机取 2-3 个不同模型作 panel（模拟 diversity）。
+    panel_count = rng.randint(2, 3)
+    pool = models[:]
+    rng.shuffle(pool)
+    panels = pool[:panel_count]
+
+    rows: list[tuple] = []
+    prompt = int(lognormal(rng, 6.2, 0.8))
+    completion = int(lognormal(rng, 5.3, 0.9))
+    tier = "Strong"  # 融合路由用于高质量场景，routed_tier 记为主档
+    routing_reason = "rule-classifier: target=Strong(complex-instruction); fusion-router: panel"
+
+    # Panel 行（并行作答，全部未采纳）。成本按预估入账（模拟真实实现：panel 消耗 token）。
+    for j, model in enumerate(panels):
+        est_cost = _model_cost(model, prompt, completion)
+        latency = int(max(20, model["latency_base"] + rng.gauss(0, 150)))
+        success = rng.random() < model["success_rate"]
+        error = None if success else rng.choice(["upstream-status-500", "network-error", "timeout"])
+        ts = (base_ts - timedelta(seconds=int(rng.uniform(0, 86400)))).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        rows.append((
+            ts, f"{idx}-panel{j}", model["name"], prompt, 0, 0, round(est_cost, 8),
+            latency, "sess-fusion", routing_reason + f"; dlv{j}", 1 if success else 0, error,
+            0, tier, 0, None, 0, group_id, 1, "panel",
+            int(latency * rng.uniform(0.3, 0.6)), 0, 0, prompt, 0,
+        ))
+
+    # Analyst 行（结构化分析，未采纳）。失败概率由 --fusion-analyst-fail-rate 控制。
+    analyst_model = rng.choice(models)
+    analyst_success = rng.random() >= args.fusion_analyst_fail_rate
+    analyst_cost = _model_cost(analyst_model, prompt, completion)
+    analyst_latency = int(max(20, analyst_model["latency_base"] + rng.gauss(0, 150)))
+    # analyst 失败 = 解析失败（HTTP 200 但 JSON 坏）或上游失败，用 error_message 区分。
+    if analyst_success:
+        analyst_error = None
+        analyst_ok = 1
+    else:
+        analyst_error = rng.choice(["analyst parse failed", "upstream-status-500"])
+        analyst_ok = 0
+    ts = (base_ts - timedelta(seconds=int(rng.uniform(0, 86400)))).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    rows.append((
+        ts, f"{idx}-analyst", analyst_model["name"], prompt, 0, 0, round(analyst_cost, 8),
+        analyst_latency, "sess-fusion", "rule-classifier: target=Strong(complex-instruction); fusion-router: analyst",
+        1 if analyst_success else 0, analyst_error, 0, tier, 0, None, 0, group_id,
+        1 if not analyst_success else 0, "analyst",
+        int(analyst_latency * rng.uniform(0.3, 0.6)), 0, 0, prompt, 0,
+    ))
+
+    # Outer 行（最终答案，采纳者）。仅 analyst 成功时存在。
+    if analyst_success:
+        outer_model = rng.choice(models)
+        outer_cost = _model_cost(outer_model, prompt, completion)
+        outer_latency = int(max(20, outer_model["latency_base"] + rng.gauss(0, 150)))
+        ts = (base_ts - timedelta(seconds=int(rng.uniform(0, 86400)))).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        rows.append((
+            ts, f"{idx}-outer", outer_model["name"], prompt, prompt, completion, round(outer_cost, 8),
+            outer_latency, "sess-fusion", "rule-classifier: target=Strong(complex-instruction); fusion-router: outer",
+            1, None, 0, tier, 0, None, 1, group_id, 0, "outer",
+            int(outer_latency * rng.uniform(0.3, 0.6)), 0, 0, prompt, 0,
+        ))
+
+    return rows
 
 
 def generate_rows(args: argparse.Namespace, rng: random.Random) -> list[tuple]:
@@ -142,6 +224,13 @@ def generate_rows(args: argparse.Namespace, rng: random.Random) -> list[tuple]:
     group_counter = 0
 
     for i in range(args.rows):
+        # 融合路由组：命中 fusion_rate 时生成整组（panel+analyst+outer），跳过单行逻辑。
+        if args.fusion_rate > 0 and rng.random() < args.fusion_rate:
+            group_counter += 1
+            rows.extend(generate_fusion_group(
+                args, rng, models, f"fg{group_counter}", now, i))
+            continue
+
         # 选信号（按权重）。
         r = rng.random()
         acc = 0.0

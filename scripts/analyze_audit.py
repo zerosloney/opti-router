@@ -239,6 +239,113 @@ def build_cascade(conn: sqlite3.Connection, where: str, params: list, has_cascad
     return "\n".join(lines) + "\n"
 
 
+def build_fusion(conn: sqlite3.Connection, where: str, params: list,
+                 has_fusion_role: bool, has_group: bool) -> str:
+    """融合路由（panel→analyst→outer）实证分析。
+
+    回答设计文档的 Q1-Q5：
+      Q1 panel 多样性（组内不同模型/provider 数）——质量收益代理
+      Q2 融合组总成本 vs 非融合基线成本（成本倍数）
+      Q3 analyst 解析失败率
+      Q4 融合延迟惩罚（outer 采纳行 vs 非融合）
+      Q5 panel 全失败回退串行（组内无 outer 且 panel 全失败）
+    列缺失时优雅降级（向后兼容，AC6）。
+    """
+    lines = ["## Fusion Router\n"]
+    if not (has_fusion_role and has_group):
+        lines.append("(fusion_role / parallel_group_id column absent — legacy DB)\n")
+        return "\n".join(lines) + "\n"
+
+    cur = conn.execute(f"SELECT * FROM request_audit{where}", params)
+    rows = cur.fetchall()
+    fusion_rows = [r for r in rows if r["fusion_role"] is not None]
+    if not fusion_rows:
+        lines.append("(no fusion rows in range)\n")
+        return "\n".join(lines) + "\n"
+
+    # By FusionRole。
+    by_role: dict[str, list[sqlite3.Row]] = {}
+    for r in fusion_rows:
+        by_role.setdefault(r["fusion_role"], []).append(r)
+    lines.append("### By FusionRole\n")
+    role_rows = []
+    for role in sorted(by_role.keys()):
+        a = aggregate(by_role[role])
+        role_rows.append([
+            role, a["count"], fmt_pct(a["success_rate"]),
+            fmt_f(a["latency_p95"], 0), fmt_f(a["total_cost"], 6),
+        ])
+    lines.append(table(
+        ["Role", "Count", "Success", "p95 ms", "Total $"], role_rows))
+
+    # 组级聚合：按 parallel_group_id 分组。
+    groups: dict[str, list[sqlite3.Row]] = {}
+    for r in fusion_rows:
+        gid = r["parallel_group_id"] or "unknown"
+        groups.setdefault(gid, []).append(r)
+
+    # Q2: 融合组总成本 vs 非融合基线（融合组内 outer 采纳行成本 vs 同 prompt 单模型成本近似）。
+    # 用"非融合请求平均成本"作基线。
+    non_fusion = [r for r in rows if r["fusion_role"] is None]
+    baseline_avg = aggregate(non_fusion)["total_cost"] / aggregate(non_fusion)["count"] if non_fusion else 0.0
+    group_total_cost = sum(r["cost"] for r in fusion_rows)
+    fusion_requests = len(groups)
+    fusion_avg_cost = group_total_cost / fusion_requests if fusion_requests else 0.0
+    cost_multiplier = fusion_avg_cost / baseline_avg if baseline_avg else 0.0
+
+    # Q1: panel 多样性 = 组内不同模型数（provider 用模型名前缀近似）。
+    def _provider(model: str) -> str:
+        return model.split("-")[0] if "-" in model else model
+
+    panel_rows = by_role.get("panel", [])
+    panel_groups: dict[str, set] = {}
+    for r in panel_rows:
+        gid = r["parallel_group_id"] or "unknown"
+        panel_groups.setdefault(gid, set()).add(r["model"])
+    diversity_counts = [len(s) for s in panel_groups.values()]
+    avg_models_per_group = statistics.mean(diversity_counts) if diversity_counts else 0.0
+
+    # Q3: analyst 失败率。
+    analyst_rows = by_role.get("analyst", [])
+    analyst_fail = sum(1 for r in analyst_rows if not r["success"])
+    analyst_fail_rate = analyst_fail / len(analyst_rows) if analyst_rows else 0.0
+
+    # Q5: panel 全失败且无 outer 的组（回退串行）。
+    outer_groups = {r["parallel_group_id"] for r in by_role.get("outer", [])}
+    all_panel_fail = 0
+    for gid, gs in panel_groups.items():
+        g_rows = [r for r in fusion_rows if r["parallel_group_id"] == gid]
+        panels = [r for r in g_rows if r["fusion_role"] == "panel"]
+        if panels and all(not r["success"] for r in panels) and gid not in outer_groups:
+            all_panel_fail += 1
+
+    # Q4: 融合延迟惩罚 = outer 采纳行 p95 vs 非融合 p95。
+    outer_p95 = by_role.get("outer", []) and aggregate(by_role["outer"])["latency_p95"] or 0.0
+    non_fusion_p95 = aggregate(non_fusion)["latency_p95"] if non_fusion else 0.0
+
+    lines.append("### Group-level metrics\n")
+    lines.append(table(
+        ["Metric", "Value"],
+        [
+            ["Fusion groups", fusion_requests],
+            ["Fusion total cost (USD)", fmt_f(group_total_cost, 6)],
+            ["Avg cost / fusion request (USD)", fmt_f(fusion_avg_cost, 6)],
+            ["Non-fusion avg cost (USD)", fmt_f(baseline_avg, 6)],
+            ["Cost multiplier (fusion / non-fusion)", fmt_f(cost_multiplier, 2)],
+            ["Avg distinct models / panel group", fmt_f(avg_models_per_group, 1)],
+            ["Analyst fail rate", fmt_pct(analyst_fail_rate)],
+            ["Panel-all-fail groups (serial fallback)", all_panel_fail],
+            ["Outer adopted p95 (ms)", fmt_f(outer_p95, 0)],
+            ["Non-fusion p95 (ms)", fmt_f(non_fusion_p95, 0)],
+        ]
+    ))
+    lines.append(
+        "\n_注：panel 多样性按模型名前缀推断 provider（合成数据可靠；真实数据为近似）。"
+        "质量收益无法用合成数据证真，仅作机制性代理。_\n"
+    )
+    return "\n".join(lines) + "\n"
+
+
 def build_by_reason(conn: sqlite3.Connection, where: str, params: list) -> str:
     """按 routing_reason 分组聚合，作为规则误判率的代理指标。
 
@@ -324,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
         where, params = where_clause(args)
         has_tier = column_exists(conn, "routed_tier")
         has_cascade = column_exists(conn, "cascade_triggered")
+        has_fusion_role = column_exists(conn, "fusion_role")
+        has_group = column_exists(conn, "parallel_group_id")
 
         total = conn.execute(f"SELECT COUNT(*) FROM request_audit{where}", params).fetchone()[0]
         if total == 0:
@@ -335,6 +444,7 @@ def main(argv: list[str] | None = None) -> int:
                 build_by_model(conn, where, params),
                 build_by_tier(conn, where, params, has_tier),
                 build_cascade(conn, where, params, has_cascade),
+                build_fusion(conn, where, params, has_fusion_role, has_group),
                 build_by_reason(conn, where, params),
                 build_daily_trend(conn, where, params),
             ]
