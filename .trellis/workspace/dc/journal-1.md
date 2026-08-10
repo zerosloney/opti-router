@@ -197,3 +197,34 @@ ThompsonRaceCancelledReward从const提为RoutingOptions配置项(默认0.5,校�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 7: 合成审计数据生成器打通数据闭环
+
+**Date**: 2026-08-10
+**Task**: 合成审计数据生成器打通数据闭环
+**Branch**: `master`
+
+### Summary
+
+新增scripts/generate_audit_data.py：合成request_audit数据(分档成本/延迟/成功率梯度、8类分类信号、受控误判注入、级联/并行字段)，0依赖、默认独立库、同seed可复现。验证analyze_audit六维报告有数据、分档差异与误判信号可见。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
