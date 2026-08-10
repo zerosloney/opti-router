@@ -255,6 +255,13 @@ public sealed class RoutingOptions
     public double FusionRouterTemperature { get; set; } = 0.0;
 
     /// <summary>
+    /// 融合路由单个 panel 调用的超时秒数。0 = 不启用 panel 级超时（向后兼容，仅靠全局请求 ct 兜底）。
+    /// &gt;0 时，每个 panel 绑定一个独立超时 CTS；超时的 panel 视同失败（记断路器 RecordFailure），
+    /// 不阻塞 analyst——其余成功 panel 即可推进分析。全部 panel 超时/失败则回退串行。建议 30-120s。
+    /// </summary>
+    public int FusionRouterPanelTimeoutSeconds { get; set; } = 0;
+
+    /// <summary>
     /// 是否启用多维能力评估路由。
     /// </summary>
     public bool EnableMultiDimensionalRouting { get; set; } = false;
