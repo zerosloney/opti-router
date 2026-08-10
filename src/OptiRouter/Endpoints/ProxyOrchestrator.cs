@@ -196,7 +196,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
                     else
                     {
-                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
+                        // 上游未返回 usage：无法精确计费。按估算 input 成本入账并标 IsEstimated，
+                        // 与失败/取消路径（RaceOrchestrator/FusionRouter）的估算口径一致，
+                        // 避免成功请求被记 0 成本导致日/会话预算低估。
+                        decimal estCost = OutcomeRecorder.EstimateInputCost(candidate, estimatedTokens);
+                        if (estCost > 0m)
+                            _recorder.RecordCost(estCost, sessionId);
+                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
+                            isEstimated: estCost > 0m,
                             timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
                     }
                     _recorder.RecordQuota(candidate.Name, response.Metadata);

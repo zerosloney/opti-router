@@ -173,7 +173,7 @@ curl http://localhost:5000/health
 
 ## 路由策略说明
 
-1. **规则分级**（`RuleClassifierPolicy`）：按请求特征推断 Tier——代码请求→Strong，单条短问答→Cheap，复杂指令→Strong，其余→`DefaultTier`。
+1. **规则分级**（`RuleClassifierPolicy`）：按请求特征推断 Tier——代码请求按意图细分（复杂代码 debug/fix/重构/算法→Strong，简单代码 hello world/解释/脚手架→Medium，无明确意图→Strong 保守处理），数学/公式→Strong，翻译→Medium，单条短问答→Cheap，复杂指令→Strong，其余→`DefaultTier`。
 2. **语义路由**（`SemanticRouterPolicy`）：向量空间词袋模型（VSM），100% 离线、零依赖。对最近一条 user 消息做 token 化与 L2 归一化，与各 `SemanticRoutes[].Phrases` 的归一化向量算余弦相似度（归一化后退化为点积），最高相似度 ≥ `SemanticSimilarityThreshold` 则覆盖候选为目标 `TargetTier`。适合「代码助手→Strong」「闲聊→Cheap」等意图分流，配置变更热生效。
 3. **Token 估算**（`ITokenEstimator` + `LongInputPolicy`）：默认 `Tiktoken` 模式，用 SharpToken（tiktoken 的 C# 移植，词表内嵌、离线可用）按真实 BPE 精确计数，每条消息另计 3 token 开销，编码由 `TiktokenEncoding` 指定（默认 `o200k_base`）；计数异常时自动回退到分桶粗估。`Bucket` 模式按 rune 分桶加权估算——CJK 按 1.5 字符/token、ASCII 按 4 字符/token、其他按 2.5。超 `LongInputThresholdTokens` 时过滤掉上下文不够的模型。
 4. **成本预算**（`BudgetGuardPolicy`）：日/会话预算耗尽时，`Degrade` 模式降级到 Cheap tier，`Reject` 模式返回 429。

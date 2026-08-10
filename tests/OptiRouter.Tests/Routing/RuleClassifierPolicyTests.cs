@@ -260,4 +260,123 @@ public class RuleClassifierPolicyTests
         Assert.Equal(ModelTier.Medium, result.Candidates[0].Tier);
         Assert.Contains("fallback-to-default", result.Reason);
     }
+
+    [Theory]
+    [InlineData("帮我 debug 这段代码，为什么报错？\n```python\ndef f():\n    return 1/0\n```")]
+    [InlineData("fix this bug: \n```js\nlet x = null; x.y;\n```")]
+    [InlineData("重构下面的函数，让它更清晰\n```csharp\npublic void A(int x){ if(x>0){...} }\n```")]
+    [InlineData("优化这个算法的性能\n```python\ndef sort(arr): ...\n```")]
+    [InlineData("这个程序崩溃了，异常在哪？\n```java\ntry{}catch(Exception e){}\n```")]
+    public void Apply_ComplexCodeIntent_SelectsStrongTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("code-complex", result.Reason);
+        Assert.Equal(RequestComplexity.Complex, result.RequestComplexity);
+    }
+
+    [Theory]
+    [InlineData("一个 hello world 示例\n```python\nprint('hello')\n```")]
+    [InlineData("给一个简单的示例代码\n```go\npackage main\nfunc main(){}\n```")]
+    [InlineData("解释一下这段代码的含义\n```python\na = [i for i in range(10)]\n```")]
+    [InlineData("写一个脚手架项目\n```bash\nmkdir -p src\n```")]
+    public void Apply_SimpleCodeIntent_SelectsMediumTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Medium, m.Tier));
+        Assert.Contains("code-simple", result.Reason);
+        Assert.Equal(RequestComplexity.Standard, result.RequestComplexity);
+    }
+
+    [Fact]
+    public void Apply_BareCodeBlockNoIntent_KeepsStrongTier()
+    {
+        // 裸代码块（无复杂/简单意图词）：保守 Strong，代码能力优先不降级。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "```python\ndef quicksort(arr):\n    return arr\n```"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("code-detected", result.Reason);
+        Assert.Equal(RequestComplexity.Complex, result.RequestComplexity);
+    }
+
+    [Fact]
+    public void Apply_CodeClassNamedExample_NotDowngradedToSimple()
+    {
+        // 回归保护：裸代码类名含 "Example" 不应触发 simple 意图被降级到 Medium
+        // （\bexample\b 会误配 "public class Example {}"）。复杂/简单信号均无 → 保守 Strong。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "public class Example {}"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("code-detected", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_CodeNamedBasicAuth_NotDowngradedToSimple()
+    {
+        // 回归保护：\bbasic\b 会误配 "BasicAuth" 等标识符 → 应保持 Strong。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "class BasicAuth { string token; }"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("code-detected", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_ComplexAndSimpleSignalsTogether_ComplexWins()
+    {
+        // 复杂+简单信号同现：complex 优先，不降级到 Medium。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "explain and fix this bug\n```python\ndef f():\n    return 1/0\n```"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("code-complex", result.Reason);
+    }
 }

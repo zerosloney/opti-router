@@ -39,6 +39,8 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
 
     /// <summary>分类原因常量，ClassifyRequest 与 GetWeightsForClassification 共用，避免字符串漂移。</summary>
     private const string ReasonCodeDetected = "code-detected";
+    private const string ReasonCodeComplex = "code-complex";
+    private const string ReasonCodeSimple = "code-simple";
     private const string ReasonMathDetected = "math-detected";
     private const string ReasonComplexInstruction = "complex-instruction";
     private const string ReasonTranslationRequest = "translation-request";
@@ -81,6 +83,34 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         @"\bcargo\s+(?:build|run|test|check|clean|install|update|publish|bench|new|init)\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
+    /// <summary>
+    /// 复杂代码意图：调试/修复/重构/优化/崩溃/报错/算法/性能/复杂度。
+    /// 命中 → Strong（这类任务需要强推理与深层代码理解）。
+    /// 与 <see cref="SimpleCodeIntentRegex"/> 同现时，复杂优先（代码能力优先，不降级）。
+    /// </summary>
+    /// <remarks>
+    /// intentional-simple: 覆盖常见中英文代码任务动词，非穷尽；用于「是否值得上 Strong」的粗分。
+    /// </remarks>
+    private static readonly Regex ComplexCodeIntentRegex = new(
+        @"\b(?:debug(?:ging)?|fix(?:ing)?|refactor(?:ing)?|optimize?|troubleshoot|bug|crash|exception|algorithm|complexity|performance)\b|" +
+        @"修复|调试|重构|优化|崩溃|报错|异常|算法|性能|复杂度|为什么.*(?:报错|失败|不起作用|抛异常)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// 简单代码意图：hello world / 简单示例 / 脚手架 / 解释代码含义 / 入门。
+    /// 命中 → Medium（简单代码生成/解释不需要 Strong 的深度能力）。
+    /// 仅用明确、低歧义的信号：英文裸名词 example/simple/basic 会误配代码里的
+    /// 类名/注释（如 "public class Example {}" / "BasicAuth"），故排除，只保留
+    /// 具体动词与中文意图词。
+    /// </summary>
+    /// <remarks>
+    /// intentional-simple: 触发词限定明确「简单/解释」语义，避免把含代码的复杂请求误降级。
+    /// </remarks>
+    private static readonly Regex SimpleCodeIntentRegex = new(
+        @"\bhello\s*world\b|\b(?:scaffold|boilerplate|explain)\b|" +
+        @"hello ?world|示例|简单|脚手架|模板|解释|讲解|入门|这段代码.*(?:什么意思|含义|做什么)",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     /// <inheritdoc />
     public RouterDecision Apply(RouterContext context, RouterDecision previous)
     {
@@ -94,23 +124,21 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         if (context.Options.Routing.EnableMultiDimensionalRouting)
         {
             var weights = GetWeightsForClassification(targetReason);
-            // 多维路由修复：原实现纯按 capability score 降序、仅 score 相等才看价格。
-            // tier 回退（Strong=0.9/Medium=0.6/Cheap=0.3）使 simple-qa 等仅靠 language 维度
-            // 的查询里 Cheap 模型系统性垫底，Strong 必胜——成本分层被反转。
-            // 修复语义：capability 是硬门槛，但 capability「相近」（差距 ≤ 阈值）时按价格择廉，
-            // 让 cheap 模型在能力足够（分数不显著落后）时胜出。
+            // 多维路由语义：capability 是硬门槛，但 capability「相近」（差距 ≤ 阈值）时按价格择廉，
+            // 让 cheap 模型在能力足够（分数不显著落后）时胜出，避免 tier 回退值让简单查询系统性选昂贵模型。
+            // 实现：原比较器按「分差 ≤ 阈值则比价」成对排序，非传递（A~B、B~C 各自相近按价格排，
+            // 但 A、C 分差跨过阈值按能力排，与价格序冲突），List.Sort 对非传递比较器结果是实现相关的。
+            // 改为先把能力分数量化到 tolerance 桶（floor），同桶视为「能力相近」，
+            // 再按 (桶降序, 价格升序) 排序：两段定序键传递且确定。
             var scored = previous.Candidates
                 .Select(m => (Model: m, Score: CalculateMatchScore(m, weights)))
                 .ToList();
-            scored.Sort((a, b) =>
-            {
-                double diff = b.Score - a.Score; // 降序
-                if (Math.Abs(diff) > CapabilityScoreTolerance)
-                    return diff.CompareTo(0);
-                // 分数相近：便宜优先，避免为微弱能力差距多付成本。
-                return a.Model.InputPricePerMillion.CompareTo(b.Model.InputPricePerMillion);
-            });
-            var reordered = scored.Select(s => s.Model).ToList();
+            var reordered = scored
+                .Select(s => (s.Model, Bucket: (int)Math.Floor(s.Score / CapabilityScoreTolerance)))
+                .OrderByDescending(x => x.Bucket)
+                .ThenBy(x => x.Model.InputPricePerMillion)
+                .Select(x => x.Model)
+                .ToList();
 
             string mdReason = $"rule-classifier: multi-dimensional active ({targetReason}), weights=[{string.Join(", ", weights.Select(kv => $"{kv.Key}:{kv.Value:F1}"))}], {reordered.Count} candidates";
             return previous with
@@ -167,6 +195,18 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
                 weights["coding"] = 1.0;
                 weights["reasoning"] = 0.6;
                 weights["language"] = 0.3;
+                break;
+            case ReasonCodeComplex:
+                // 调试/修复/重构/算法：coding 主导 + 更高 reasoning（深层代码理解）。
+                weights["coding"] = 1.0;
+                weights["reasoning"] = 0.8;
+                weights["language"] = 0.2;
+                break;
+            case ReasonCodeSimple:
+                // 简单代码生成/解释：coding 主导但 reasoning 需求低，能力相近时允许择廉。
+                weights["coding"] = 1.0;
+                weights["reasoning"] = 0.3;
+                weights["language"] = 0.4;
                 break;
             case ReasonMathDetected:
                 weights["reasoning"] = 1.0;
@@ -230,7 +270,9 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
 
         if (hasCode)
         {
-            return (ModelTier.Strong, ReasonCodeDetected, RequestComplexity.Complex);
+            // 代码意图细分：不再一律 Strong。复杂代码（调试/修复/重构/算法）→ Strong；
+            // 简单代码（hello world/示例/解释）→ Medium；无明确意图 → 保守 Strong（代码能力优先）。
+            return ClassifyCodeIntent(ConcatMessages(request));
         }
 
         // 数学/公式：优先级仅次于代码。需 Strong 模型（符号推理、LaTeX 生成准确）。
@@ -295,6 +337,21 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     {
         if (string.IsNullOrEmpty(content)) return false;
         return CodeIndicatorRegex.IsMatch(content);
+    }
+
+    /// <summary>
+    /// 对含代码的请求做意图子分类。优先级：复杂 > 简单 > 默认 Strong。
+    /// 复杂信号命中即 Strong（不降级）；简单信号命中才 Medium；均未命中保守 Strong（代码能力优先）。
+    /// </summary>
+    private static (ModelTier Tier, string Reason, RequestComplexity Complexity) ClassifyCodeIntent(string text)
+    {
+        if (ComplexCodeIntentRegex.IsMatch(text))
+            return (ModelTier.Strong, ReasonCodeComplex, RequestComplexity.Complex);
+
+        if (SimpleCodeIntentRegex.IsMatch(text))
+            return (ModelTier.Medium, ReasonCodeSimple, RequestComplexity.Standard);
+
+        return (ModelTier.Strong, ReasonCodeDetected, RequestComplexity.Complex);
     }
 
     private static List<ModelEndpointOptions> FilterByTier(

@@ -121,6 +121,52 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
         }
     }
 
+    /// <summary>
+    /// 上游不返回 usage 的 fixture（cascade 关闭）。用于验证成功请求在 null-usage 下
+    /// 按估算 input 成本入账并标 IsEstimated=true，而非记 0 成本。
+    /// </summary>
+    private sealed class NullUsageFactory : WebApplicationFactory<Program>
+    {
+        public const string Key = "null-usage-test-key";
+        public Dictionary<string, IModelClient> MockClients { get; } = new();
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
+            builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
+            builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+            builder.ConfigureServices(services =>
+            {
+                services.Configure<RouterOptions>(opt =>
+                {
+                    opt.Models.Clear();
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "cheap-model",
+                        BaseUrl = "https://example.com",
+                        ApiKey = "k",
+                        Tier = ModelTier.Cheap,
+                        MaxContextTokens = 128000,
+                        InputPricePerMillion = 0.1m,
+                        OutputPricePerMillion = 0.2m,
+                        Enabled = true
+                    });
+                    // 单模型：避免 failover/降级路径干扰成本断言。
+
+                    opt.Routing.EnableRuleClassifier = false;
+                    opt.Routing.EnableTokenEstimator = false;
+                    opt.Routing.EnableBudgetGuard = false;
+                    opt.Routing.EnableFailover = false;
+                    opt.Routing.EnableSemanticRouter = false;
+                    opt.Routing.EnableSessionAffinity = false;
+                    opt.Routing.EnableLoadBalance = false;
+                    opt.Routing.EnableCascadeUpgrade = false;
+                });
+                services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
+            });
+        }
+    }
+
     private sealed class TestProvider : IModelClientProvider
     {
         private readonly Dictionary<string, IModelClient> _clients;
@@ -357,5 +403,49 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
             Assert.True(factory.Services.GetRequiredService<UpstreamQuotaStateStore>()
                 .GetSnapshot("cheap-model")!.IsExhausted(DateTimeOffset.UtcNow));
         }
+    }
+
+    /// <summary>
+    /// 上游成功但未返回 usage：成本按估算 input 入账并标 IsEstimated=true，
+    /// 而非记 0 成本（避免成功请求导致日/会话预算低估）。
+    /// </summary>
+    [Fact]
+    public async Task NullUsage_Success_Records_Estimated_Cost()
+    {
+        using var factory = new NullUsageFactory();
+        var cheapEp = factory.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue
+            .Models.First(m => m.Name == "cheap-model");
+
+        // 成功响应但 usage = null（部分兼容上游省略 usage）。
+        factory.MockClients["cheap-model"] = new MockClient(cheapEp,
+            raw: (r, c) => Task.FromResult(new RawChatResponse(
+                """{"id":"1","model":"cheap-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}""",
+                null)));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", NullUsageFactory.Key);
+
+        var req = new ChatRequest
+        {
+            Model = "any",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
+            Stream = false
+        };
+        using var content = new StringContent(JsonSerializer.Serialize(req), Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("/v1/chat/completions", content);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        // 账本计入估算 input 成本（非 0）。"Hi" → 4 tokens × 0.1/1e6。
+        decimal estCost = 4m * 0.1m / 1_000_000m;
+        var ledger = factory.Services.GetRequiredService<CostLedger>();
+        Assert.True(ledger.GetDailySpend() > 0m,
+            $"Null-usage success must record estimated cost, got {ledger.GetDailySpend()}");
+
+        // 审计记录标 IsEstimated=true（区别于真实成本）。
+        var audit = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(10)
+            .Single(r => r.Model == "cheap-model");
+        Assert.True(audit.IsEstimated);
+        Assert.True(audit.Success);
+        Assert.Equal(estCost, audit.Cost);
     }
 }
