@@ -104,3 +104,34 @@ Split blanket code→Strong into intent-aware routing (complex→Strong, simple�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 4: 强化单模型智能选择路由（4 child）
+
+**Date**: 2026-08-10
+**Task**: 强化单模型智能选择路由（4 child）
+**Branch**: `master`
+
+### Summary
+
+多维能力评分维度化tier回退(语言扁平/推理陡)、Thompson连续奖励(快1.0/慢0.3/失败0)、延迟感知p95评分1/(avg+0.5p95+50)、analyze_audit补全新分类信号。447单测+3 smoke全绿。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

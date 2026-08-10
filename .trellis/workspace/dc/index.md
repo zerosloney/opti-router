@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 3
+- **Total Sessions**: 4
 - **Last Active**: 2026-08-10
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~106 | Active |
+| `journal-1.md` | ~137 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 4 | 2026-08-10 | 强化单模型智能选择路由（4 child） | - | `master` |
 | 3 | 2026-08-10 | Code-intent sub-classification for single-model routing | `0615055` | `master` |
 | 2 | 2026-08-10 | Routing Foundation MVP | `5061c67` | `master` |
 | 1 | 2026-08-08 | Implement multi-dimensional capability routing & adaptive Thompson Sampling MAB | `aa5f986` | `master` |
