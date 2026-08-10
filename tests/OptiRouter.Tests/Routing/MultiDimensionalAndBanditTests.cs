@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Microsoft.Extensions.Caching.Memory;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
+using OptiRouter.Endpoints;
 using OptiRouter.Routing;
 using Xunit;
 
@@ -434,6 +436,63 @@ public sealed class MultiDimensionalAndBanditTests
         store.RecordOutcome("bad", isGood: false, discountFactor: 0.9);
         Assert.Equal(1.0 * 0.9 + 0.0, bad.Alpha);
         Assert.Equal(1.0 * 0.9 + 1.0, bad.Beta);
+    }
+
+    [Fact]
+    public void RecordThompsonRaceCancelled_GivesPartialReward_BetweenFailureAndFastSuccess()
+    {
+        // 竞速失败（被更快模型比下去而取消）：应获独立部分奖励（0.5），
+        // 高于硬失败（0.0）、低于快成功（1.0），且与慢成功（0.3）区分。
+        var store = new ThompsonStateStore();
+        var opts = new RouterOptions(); // 默认 ThompsonDiscountFactor=0.95
+        var recorder = new OutcomeRecorder(
+            auditStore: null!,
+            metrics: null!,
+            ledger: null!,
+            options: new StubOptionsMonitor(opts),
+            affinityCache: new MemoryCache(new MemoryCacheOptions()),
+            tsStore: store,
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: null!);
+
+        recorder.RecordThompsonRaceCancelled("race-model");
+        var stats = store.GetOrAdd("race-model");
+
+        // reward=0.5：Alpha = 1.0×0.95 + 0.5 = 1.45；Beta = 1.0×0.95 + (1-0.5) = 1.45
+        Assert.Equal(1.0 * 0.95 + 0.5, stats.Alpha);
+        Assert.Equal(1.0 * 0.95 + 0.5, stats.Beta);
+    }
+
+    [Fact]
+    public void RecordThompsonRaceCancelled_Distinct_FromHardFailure()
+    {
+        // 竞速失败（0.5）与真失败（0.0）必须产生不同的 Alpha/Beta 状态，才能区分「慢但未必坏」与「真故障」。
+        var store = new ThompsonStateStore();
+        var opts = new RouterOptions();
+        var recorder = new OutcomeRecorder(
+            auditStore: null!,
+            metrics: null!,
+            ledger: null!,
+            options: new StubOptionsMonitor(opts),
+            affinityCache: new MemoryCache(new MemoryCacheOptions()),
+            tsStore: store,
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: null!);
+
+        recorder.RecordThompsonRaceCancelled("cancelled");
+        recorder.RecordThompsonOutcome("hard-fail", null); // 真失败 → 0.0
+
+        var cancelled = store.GetOrAdd("cancelled");
+        var hardFail = store.GetOrAdd("hard-fail");
+
+        // cancelled: Alpha=1.45, Beta=1.45；hard-fail: Alpha=0.95, Beta=1.95
+        Assert.NotEqual(hardFail.Alpha, cancelled.Alpha);
+        Assert.NotEqual(hardFail.Beta, cancelled.Beta);
+        // 竞速失败 Alpha 更高（更接近正反馈），真失败 Beta 更高（更多惩罚）。
+        Assert.True(cancelled.Alpha > hardFail.Alpha);
+        Assert.True(hardFail.Beta > cancelled.Beta);
     }
 
     [Fact]

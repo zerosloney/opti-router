@@ -172,8 +172,8 @@ public sealed class RaceOrchestrator
             {
                 // 被取消（非自身失败）：仅释放探测槽位，不计断路器失败。
                 _healthTracker.ReleaseProbe(model.Name);
-                // Thompson：被取消意味着未在竞速中胜出（延迟更高或故障），计为坏反馈，与串行超时语义一致。
-                _recorder.RecordThompsonOutcome(model.Name, null);
+                // Thompson：竞速失败（另一模型已胜出，本模型被取消）——模型仍在途、未必坏，计部分奖励而非硬失败。
+                _recorder.RecordThompsonRaceCancelled(model.Name);
                 // 预估成本入账：请求已发出到上游，上游对已接收的请求计费，但本地拿不到 Usage（响应未完整返回）。
                 // 按 EstimatedInputTokens × input 价格估算，标注 IsEstimated=true 以区分真实成本。
                 decimal estCost = OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
@@ -281,7 +281,7 @@ public sealed class RaceOrchestrator
             }
             else
             {
-                _recorder.RecordThompsonOutcome(m.Name, null);
+                _recorder.RecordThompsonRaceCancelled(m.Name);
             }
             decimal estCost = postBreakQuotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
             if (estCost > 0m)

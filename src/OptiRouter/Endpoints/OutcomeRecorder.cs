@@ -225,7 +225,7 @@ public sealed class OutcomeRecorder
     /// </summary>
     /// <param name="modelName">模型名。</param>
     /// <param name="elapsedMs">
-    /// 本次请求端到端延迟（毫秒）。<c>null</c> 表示硬失败（网络/超时/上游错误/被取消），奖励 0.0；
+    /// 本次请求端到端延迟（毫秒）。<c>null</c> 表示硬失败（网络/超时/上游错误），奖励 0.0；
     /// <c>&lt; ThompsonLatencyTargetMs</c> 为快成功，奖励 1.0；<c>&gt;= target</c> 为慢成功，奖励 0.3（部分正反馈）。
     /// </param>
     public void RecordThompsonOutcome(string modelName, long? elapsedMs)
@@ -238,6 +238,20 @@ public sealed class OutcomeRecorder
             _ => 0.3
         };
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
+    }
+
+    /// <summary>竞速失败（并行竞速中被更快模型比下去而取消）的部分奖励。独立于慢成功(0.3)与硬失败(0.0)。</summary>
+    private const double RaceCancelledReward = 0.5;
+
+    /// <summary>
+    /// 上报竞速失败反馈：模型在并行竞速中被更快者比下去而取消，非自身故障。
+    /// 计部分正奖励（<see cref="RaceCancelledReward"/>），不完全惩罚——模型可能只是慢/运气差，未必坏。
+    /// </summary>
+    /// <param name="modelName">模型名。</param>
+    public void RecordThompsonRaceCancelled(string modelName)
+    {
+        var routing = _options.CurrentValue.Routing;
+        _tsStore.RecordOutcome(modelName, RaceCancelledReward, routing.ThompsonDiscountFactor);
     }
 
     /// <summary>

@@ -152,23 +152,27 @@ public sealed class LatencyStatsCache : ILatencyStatsProvider;
 ### Thompson Outcome Recording
 
 ```csharp
-// Called on every adopted success (pass elapsedMs) and every non-429 failure (pass null):
-RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds);   // 成功路径
-RecordThompsonOutcome(candidate.Name, null);                            // 失败路径
+// 成功路径（快/慢成功）：传 elapsedMs
+RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds);
+// 真失败（网络/超时/上游错误/崩溃）：传 null
+RecordThompsonOutcome(candidate.Name, null);
+// 竞速失败（并行 racing 中被更快者比下去而取消）：专用方法
+RecordThompsonRaceCancelled(candidate.Name);
 // → OutcomeRecorder 映射 reward，再调 _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor)
 ```
 
 - 连续/分级奖励（`RecordThompsonOutcome(string, long? elapsedMs)` → reward）：
-  - `elapsedMs == null`（硬失败：网络/超时/上游错误/被取消）→ reward `0.0`
+  - `elapsedMs == null`（硬失败：网络/超时/上游错误）→ reward `0.0`
   - `elapsedMs < ThompsonLatencyTargetMs`（快成功）→ reward `1.0`
   - `elapsedMs >= ThompsonLatencyTargetMs`（慢成功）→ reward `0.3`（部分正反馈，成功但偏慢）
+- 竞速失败（`RecordThompsonRaceCancelled(string, ...)`）→ reward `0.5`：模型在并行竞速中被更快模型比下去而取消，非自身故障——计独立部分奖励（高于慢成功 0.3、低于快成功 1.0），不完全惩罚。`RaceCancelledReward` 命名常量，独立可调。
 - `ThompsonStateStore.RecordOutcome(string, double reward, double discountFactor)`：
   - `Alpha = Alpha * discount + reward`
   - `Beta  = Beta  * discount + (1.0 - reward)`
   - reward 与 discountFactor 均 `Math.Clamp` 到合法域（reward `[0,1]`，discount `[0.1,1.0]`）
 - 二值兼容重载 `RecordOutcome(string, bool, double)` 委托到 reward 重载（`true→1.0`，`false→0.0`）。
 - Start state: `Beta(1, 1)` uniform prior
-- 慢成功从旧二值语义的「Beta 惩罚」变为「部分 Alpha + 部分 Beta」——行为变化（根治型）。
+- 慢成功从旧二值语义的「Beta 惩罚」变为「部分 Alpha + 部分 Beta」；竞速失败从旧「硬失败 0.0」变为「0.5」——行为变化（根治型）。
 
 ### Hot-Reload Cleanup
 
