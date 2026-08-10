@@ -253,6 +253,32 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 // Startup blocked. Fix: set discount to 0.95.
 ```
 
+### Good/Base/Bad: Code-intent sub-classification (RuleClassifierPolicy)
+
+> 代码请求不再一律 `code→Strong`，按意图细分：复杂（debug/fix/refactor/algorithm）→ Strong `code-complex`；简单生成（hello world/scaffold/example）→ Medium `code-simple`；无明确意图/解释类 → 保守 Strong `code-detected`（代码能力优先，宁过度不低估）。
+
+```csharp
+// Good: 复杂代码意图 → Strong
+// "修复这个 bug\n```python\ndef f(): return 1/0\n```" → code-complex, Strong, Complex
+
+// Base: 简单代码生成 → Medium
+// "一个 hello world 示例\n```python\nprint('hi')\n```" → code-simple, Medium, Standard
+
+// Base: 无明确意图的裸代码块 → 保守 Strong
+// "```python\ndef quicksort(arr): return arr\n```" → code-detected, Strong
+
+// Bad: 解释类被误归简单 → 复杂解释任务降级到 Medium（质量劣化）
+// "解释一下这段代码\n```python\ndef quicksort(arr): ...\n```" → 必须 Strong，不得降级
+```
+
+#### 代码意图检测三大陷阱（本会话踩过，已修复并锁定测试）
+
+> **Warning (Gotcha 1)**: 意图正则只跑在**指令文本**（最后一条 user 消息、剔除 fenced code block），**绝不能**跑在 `ConcatMessages` 全量文本上。代码正文里的注释/字符串/标识符（`// simple`、`print("hello world")`）会泄漏意图词，把复杂代码误降级到 Medium。通过 `ExtractInstructionText` + `StripFencedCodeBlocks`（``` / ~~~）实现。
+
+> **Warning (Gotcha 2)**: 意图正则里的英文裸名词（`example`/`simple`/`basic`）会误配代码标识符（`public class Example {}`、`class BasicAuth`）。用明确动词（`scaffold`/`boilerplate`/`explain`）或中文意图词，不用裸名词。
+
+> **Warning (Gotcha 3)**: `explain`/`解释` **不是**简单意图——解释复杂代码需要 Strong 推理。删掉 `explain`/`解释`/`这段代码.*含义` 的 simple 归类，落到保守 Strong。复杂>简单>默认 Strong 的判定顺序保证 complex 信号不降级。
+
 ---
 
 ## 6. Tests Required
@@ -368,6 +394,22 @@ if (filtered.Count == 0) {
     return previous with { Reason = $"{previous.Reason}; capability-filter: no candidate has ..." };
     // Candidates unchanged, upstream AI model will return capability error
 }
+```
+
+### Wrong: Code-intent regex runs on full text including code body
+
+```csharp
+return ClassifyCodeIntent(ConcatMessages(request));
+// Code body leaks intent words: a comment "// simple" or string "hello world"
+// → wrongly downgrades a complex code request to Medium
+```
+
+### Correct: Code-intent regex runs on instruction text only (code blocks stripped)
+
+```csharp
+return ClassifyCodeIntent(ExtractInstructionText(request));
+// ExtractInstructionText = last non-empty user message, fenced blocks (```/~~~) stripped.
+// Intent signals come from the user's natural-language instruction, not the code body.
 ```
 
 ---
