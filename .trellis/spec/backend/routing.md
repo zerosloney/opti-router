@@ -165,7 +165,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 
 ```csharp
 // Score = sum(weight_i * model.GetEffectiveCapability(dimension_i)) for each dimension
-// Tolerance: 0.05 (CapabilityScoreTolerance)
+// Tolerance: 0.15 (CapabilityScoreTolerance)
 // Sorting: score descending; if |score_diff| <= tolerance, cheaper model wins
 
 // Weight profiles by classification:
@@ -228,7 +228,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 // Request: "write a Python sorting function" → code-detected
 // Weights: coding=1.0, reasoning=0.6
 // Scores: A=1.43, C=1.20, B=0.84
-// Sort: [A, C, B] (score gap > 0.05, so price tiebreaker not used)
+// Sort: [A, C, B] (score gap > 0.15, so price tiebreaker not used)
 ```
 
 ### Base: Multi-dimensional routing with close scores → price wins
@@ -237,7 +237,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 // Model A: language=0.95, price=0.5/M
 // Model B: language=0.93, price=0.05/M
 // Request: simple QA → language=1.0 weights
-// Scores: A=0.95, B=0.93 (diff=0.02 <= 0.05 tolerance)
+// Scores: A=0.95, B=0.93 (diff=0.02 <= 0.15 tolerance)
 // Sort: [B, A] (cheaper wins)
 ```
 
@@ -484,8 +484,8 @@ if (!quotaLimited) outcomes.RecordFailure(model.Name, error);
 
 **Decision**: `LatencyAwarePolicy` segments candidates by tier, reorders only within each segment. Cross-tier order preserved.
 
-### Decision: `CapabilityScoreTolerance = 0.05` for price tiebreaker
+### Decision: `CapabilityScoreTolerance = 0.15` for price tiebreaker
 
 **Context**: Without tolerance, the Strong tier fallback (0.9) would always beat Cheap (0.3) on every dimension, making multi-dimensional routing degenerate to tier-only sorting.
 
-**Decision**: When capability score difference <= 0.05, cheaper model wins. This allows cheap models with sufficient capability to serve requests cost-effectively.
+**Decision**: When capability score difference <= 0.15, cheaper model wins. This allows cheap models with sufficient capability to serve requests cost-effectively.

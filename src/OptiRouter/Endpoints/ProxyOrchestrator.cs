@@ -388,6 +388,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             continue;
                         }
                     }
+                    catch (ModelClientException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                    {
+                        preStreamFailure = ex;
+                        lastModelName = candidate.Name;
+                        lastStatusCode = 429;
+                        lastErrorMessage = "quota-exhausted";
+                    }
                     catch (ModelClientException ex) when (IsRetryable(ex))
                     {
                         preStreamFailure = ex;
@@ -571,10 +578,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>
+    /// 可重试的失败状态码。429 不在此列：流式与非流式路径都在 <c>ModelClientException</c>
+    /// 独立 catch 分支（<c>StatusCode == TooManyRequests</c>）先行捕获，走配额/健康隔离路径，
+    /// 不到达这里。本方法只处理真正的可重试上游故障（408 / 5xx）。
+    /// </summary>
     private static bool IsRetryable(ModelClientException exception)
     {
         int statusCode = (int)exception.StatusCode;
-        return statusCode is 408 or 429 or >= 500 and <= 599;
+        return statusCode is 408 or >= 500 and <= 599;
     }
 
 }

@@ -89,6 +89,88 @@ public sealed class MultiDimensionalAndBanditTests
     }
 
     [Fact]
+    public void MultiDimensionalRouting_CloseScores_CheaperWinsByTolerance()
+    {
+        // Spec "Base" case 的精确复现：能力分差落在容差内 → 价格择廉。
+        // 防止未来有人误改 CapabilityScoreTolerance 或排序比较器导致成本优化失效。
+        var options = new RouterOptions();
+        options.Routing.EnableRuleClassifier = true;
+        options.Routing.EnableMultiDimensionalRouting = true;
+
+        var expensive = new ModelEndpointOptions
+        {
+            Name = "stronger-language",
+            Tier = ModelTier.Medium,
+            Enabled = true,
+            InputPricePerMillion = 0.5m
+        };
+        expensive.Capabilities["language"] = 0.95;
+
+        var cheaper = new ModelEndpointOptions
+        {
+            Name = "cheaper-language",
+            Tier = ModelTier.Medium,
+            Enabled = true,
+            InputPricePerMillion = 0.05m
+        };
+        cheaper.Capabilities["language"] = 0.93;
+
+        options.Models.Add(expensive);
+        options.Models.Add(cheaper);
+
+        var policy = new RuleClassifierPolicy();
+
+        // 简单 QA → language=1.0 weights；Scores: expensive=0.95, cheaper=0.93（diff=0.02 <= 0.15 tolerance）
+        var (ctx, initial) = Setup(options, options.Models, "你好");
+        var result = policy.Apply(ctx, initial);
+
+        // 能力相近（diff <= 容差）：便宜模型应胜出
+        Assert.Equal("cheaper-language", result.Candidates[0].Name);
+        Assert.Equal("stronger-language", result.Candidates[1].Name);
+    }
+
+    [Fact]
+    public void MultiDimensionalRouting_LargeScoreGap_CapabilityWinsOverPrice()
+    {
+        // 容差边界另一侧：分差超过容差 → 能力主导排序，价格不参与。
+        // 与 CloseScores 一起锁定 CapabilityScoreTolerance 的边界语义。
+        var options = new RouterOptions();
+        options.Routing.EnableRuleClassifier = true;
+        options.Routing.EnableMultiDimensionalRouting = true;
+
+        var strong = new ModelEndpointOptions
+        {
+            Name = "much-better",
+            Tier = ModelTier.Medium,
+            Enabled = true,
+            InputPricePerMillion = 0.5m
+        };
+        strong.Capabilities["language"] = 0.95;
+
+        var weak = new ModelEndpointOptions
+        {
+            Name = "much-weaker-cheap",
+            Tier = ModelTier.Medium,
+            Enabled = true,
+            InputPricePerMillion = 0.01m
+        };
+        weak.Capabilities["language"] = 0.50;
+
+        options.Models.Add(strong);
+        options.Models.Add(weak);
+
+        var policy = new RuleClassifierPolicy();
+
+        // language weights → Scores: strong=0.95, weak=0.50（diff=0.45 > 0.15 tolerance）
+        var (ctx, initial) = Setup(options, options.Models, "你好");
+        var result = policy.Apply(ctx, initial);
+
+        // 能力显著领先：即使更贵也应排前
+        Assert.Equal("much-better", result.Candidates[0].Name);
+        Assert.Equal("much-weaker-cheap", result.Candidates[1].Name);
+    }
+
+    [Fact]
     public void ThompsonSampler_SamplesValidValues()
     {
         for (int i = 0; i < 50; i++)
