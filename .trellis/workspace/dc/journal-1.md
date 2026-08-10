@@ -166,3 +166,34 @@ Split blanket code→Strong into intent-aware routing (complex→Strong, simple�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 6: 竞速失败奖励提为运行时配置
+
+**Date**: 2026-08-10
+**Task**: 竞速失败奖励提为运行时配置
+**Branch**: `master`
+
+### Summary
+
+ThompsonRaceCancelledReward从const提为RoutingOptions配置项(默认0.5,校验[0,1],reload热生效)；analyze_audit补cancelled-by-race观测。455单测+3 smoke全绿。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
