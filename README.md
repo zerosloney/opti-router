@@ -261,6 +261,26 @@ python scripts/analyze_audit.py --db /path/to/optirouter-budget.db \
 
 报告只给统计与信号提示，规则误判的精确判定仍需人工结合 reason 文本复核。
 
+### 合成数据生成器（无真实流量时验证闭环）
+
+`scripts/generate_audit_data.py` 生成符合 `request_audit` schema 的合成数据，用于在没有真实生产流量时跑通「落盘 → analyze_audit → 人工看信号 → 调参」闭环，验证分析报告与路由假设。零外部依赖，默认写独立库（不碰真实 `optirouter-budget.db`），同 `--seed` 完全可复现。
+
+```bash
+# 生成 1000 行合成数据到独立演示库
+python scripts/generate_audit_data.py --rows 1000 --seed 42
+
+# 分析生成的演示库
+python scripts/analyze_audit.py --db data/audit-demo.db
+
+# 注入 50 条「本该 Strong 却被路由到 Cheap」的受控误判，验证报告能暴露误判信号
+python scripts/generate_audit_data.py --rows 500 --seed 42 --misclassify 50 --db data/audit-mc.db
+
+# 模拟级联自校验（Cheap 档 50% 触发）与并行竞速（30%），验证 Cascade/并行审计字段
+python scripts/generate_audit_data.py --rows 300 --seed 5 --cascade-rate 0.5 --parallel-rate 0.3 --db data/audit-cp.db
+```
+
+参数：`--rows`（行数）、`--seed`（可复现种子）、`--db`（默认 `data/audit-demo.db`）、`--append`（显式追加既有库）、`--misclassify`（注入误判条数）、`--cascade-rate`（级联触发比例）、`--parallel-rate`（并行竞速比例）、`--models-json`（可选模型画像覆盖）。
+
 ## 部署
 
 ### Docker（推荐容器化部署）

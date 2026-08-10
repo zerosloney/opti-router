@@ -116,6 +116,8 @@ CREATE INDEX idx_request_audit_timestamp ON request_audit(timestamp);
 CREATE INDEX idx_request_audit_model ON request_audit(model);
 ```
 
+> **离线工具**：`scripts/analyze_audit.py` 消费 `request_audit` 产出路由调优报告（只读）；`scripts/generate_audit_data.py` 生成符合本 schema 的合成数据（默认写独立库、同 seed 可复现），用于无真实流量时验证闭环。两者均零外部依赖。
+
 ### Config Keys (BudgetOptions)
 
 | Key | Type | Default | Validation |
