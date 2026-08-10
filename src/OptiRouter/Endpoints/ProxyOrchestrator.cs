@@ -122,8 +122,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             // 融合路由（quality router）优先于 Fusion-lite。单次请求最多尝试一次，失败后可继续
             // 走 Fusion-lite 或串行降级，避免 analyst 失败时重复执行同一套 panel。
+            // 复杂度门控（P3）：低于 FusionRouterMinComplexity 的请求（默认 Simple）不触发融合，省 ×N 成本。
             if (failoverEnabled && options.Routing.EnableFusionRouter && !fusionRouterAttempted
                 && failedInThisRequest.Count == 0 && !request.Stream
+                && decision.RequestComplexity >= options.Routing.FusionRouterMinComplexity
                 && decision.Candidates.Count >= 2)
             {
                 fusionRouterAttempted = true;

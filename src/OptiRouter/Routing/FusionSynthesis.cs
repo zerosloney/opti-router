@@ -37,7 +37,8 @@ public static class FusionSynthesis
         ChatRequest original,
         IReadOnlyList<(string Model, string Text)> panelAnswers,
         string analystPrompt,
-        double temperature)
+        double temperature,
+        bool requestJsonFormat = false)
     {
         ArgumentNullException.ThrowIfNull(original);
         ArgumentNullException.ThrowIfNull(analystPrompt);
@@ -45,7 +46,7 @@ public static class FusionSynthesis
         string question = GetLastUserText(original);
         string instruction = BuildAnalystInstruction(analystPrompt, panelAnswers);
 
-        return new ChatRequest
+        var request = new ChatRequest
         {
             Messages = new List<ChatMessage>
             {
@@ -53,8 +54,49 @@ public static class FusionSynthesis
                 ChatMessage.FromText("user", instruction)
             },
             Temperature = original.Temperature ?? temperature,
-            MaxTokens = null
+            MaxTokens = null,
+            ExtensionData = original.ExtensionData is null
+                ? null
+                : new Dictionary<string, JsonElement>(original.ExtensionData, StringComparer.Ordinal)
         };
+
+        // P2：解析失败重试时请求上游强制 JSON 输出（response_format 经 ExtensionData 透传，
+        // 上游不支持时忽略该字段，行为回退为普通输出）。
+        if (requestJsonFormat)
+        {
+            request = request with
+            {
+                ExtensionData = WithJsonFormat(request.ExtensionData)
+            };
+        }
+
+        return request;
+    }
+
+    /// <summary>
+    /// P2：analyst 解析失败且重试仍失败时的软降级——用 analyst 原始文本作 Recommendation，
+    /// 保住已付 panel 成本，不回退串行。其余字段留空，由 outer 读 Recommendation 写答案。
+    /// </summary>
+    public static FusionAnalysis BuildFallbackAnalysis(string rawText)
+    {
+        return new FusionAnalysis
+        {
+            Consensus = string.Empty,
+            Contradictions = string.Empty,
+            Gaps = string.Empty,
+            UniqueInsights = string.Empty,
+            Recommendation = rawText
+        };
+    }
+
+    private static IDictionary<string, JsonElement>? WithJsonFormat(IDictionary<string, JsonElement>? existing)
+    {
+        var dict = existing is null
+            ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            : new Dictionary<string, JsonElement>(existing, StringComparer.Ordinal);
+        using var doc = JsonDocument.Parse("{\"type\":\"json_object\"}");
+        dict["response_format"] = doc.RootElement.Clone();
+        return dict;
     }
 
     /// <summary>

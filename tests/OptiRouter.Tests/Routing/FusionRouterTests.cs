@@ -28,6 +28,9 @@ public class FusionRouterTests
         public Dictionary<string, IModelClient> MockClients { get; } = new();
         public bool EnableFusionMode { get; set; }
         public double FusionRouterTemperature { get; set; }
+        public double? FusionRouterPanelTemperature { get; set; }
+        public RequestComplexity FusionRouterMinComplexity { get; set; } = RequestComplexity.Unknown;
+        public bool EnableRuleClassifierInFactory { get; set; }
         public int FusionRouterPanelSize { get; set; } = 3;
         public int FusionRouterPanelTimeoutSeconds { get; set; } = 0;
         public string? FusionRouterAnalystPrompt { get; set; }
@@ -79,7 +82,7 @@ public class FusionRouterTests
                     });
 
                     // 关闭其他策略，确保走 fusion router 路径。
-                    opt.Routing.EnableRuleClassifier = false;
+                    opt.Routing.EnableRuleClassifier = EnableRuleClassifierInFactory;
                     opt.Routing.EnableTokenEstimator = false;
                     opt.Routing.EnableBudgetGuard = false;
                     opt.Routing.EnableFailover = true;
@@ -91,6 +94,8 @@ public class FusionRouterTests
                     opt.Routing.FusionRouterPanelSize = FusionRouterPanelSize;
                     opt.Routing.FusionRouterPanelTimeoutSeconds = FusionRouterPanelTimeoutSeconds;
                     opt.Routing.FusionRouterTemperature = FusionRouterTemperature;
+                    opt.Routing.FusionRouterPanelTemperature = FusionRouterPanelTemperature;
+                    opt.Routing.FusionRouterMinComplexity = FusionRouterMinComplexity;
                     opt.Routing.FusionRouterAnalystPrompt = FusionRouterAnalystPrompt;
                     if (CascadeUpgradeSelfVerifyPrompt is not null)
                         opt.Routing.CascadeUpgradeSelfVerifyPrompt = CascadeUpgradeSelfVerifyPrompt;
@@ -931,4 +936,214 @@ public class FusionRouterTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Contains("final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
     }
+
+    [Fact]
+        public async Task FusionRouter_PanelTemperature_UsesPanelTempForPanels_AnalystUsesFusionTemp()
+        {
+            // P1：panel 用 FusionRouterPanelTemperature，analyst 仍用 FusionRouterTemperature。
+            using var factory = new FusionRouterFactory
+            {
+                FusionRouterTemperature = 0.7,
+                FusionRouterPanelTemperature = 1.1
+            };
+            double? capturedPanelTemp = null;
+            double? capturedAnalystTemp = null;
+            int modelACalls = 0;
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) =>
+                {
+                    switch (++modelACalls)
+                    {
+                        case 1:
+                            return Task.FromResult(MakeResponse("model-a", 10, 5, "panel-a"));
+                        case 2:
+                            capturedAnalystTemp = req.Temperature;
+                            return Task.FromResult(MakeAnalystResponse("model-a", 10, 5, AnalystJson));
+                        default:
+                            return Task.FromResult(MakeResponse("model-a", 10, 5, "final"));
+                    }
+                });
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) =>
+                {
+                    capturedPanelTemp = req.Temperature;
+                    return Task.FromResult(MakeResponse("model-b", 10, 5, "panel-b"));
+                });
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(1.1, capturedPanelTemp);
+            Assert.Equal(0.7, capturedAnalystTemp);
+        }
+
+        [Fact]
+        public async Task FusionRouter_AnalystBrokenJson_RetriesWithJsonFormat_ThenSoftDegrades()
+        {
+            // P2：analyst 首次返回损坏 JSON → response_format 重试 → 重试仍坏 → 软降级用原始文本，不回退串行。
+            using var factory = new FusionRouterFactory();
+            const string brokenJson = "这不是 JSON";
+            int modelACalls = 0;
+            int analystRetries = 0;
+            bool retryHadJsonFormat = false;
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) =>
+                {
+                    var callNum = ++modelACalls;
+                    if (callNum == 1)
+                    {
+                        // panel call
+                        return Task.FromResult(MakeResponse("model-a", 10, 5, "panel-a"));
+                    }
+                    else if (callNum == 2)
+                    {
+                        // first analyst call (broken JSON)
+                        return Task.FromResult(MakeAnalystResponse("model-a", 10, 5, brokenJson));
+                    }
+                    else if (callNum == 3)
+                    {
+                        // analyst retry (should have response_format)
+                        analystRetries++;
+                        retryHadJsonFormat = req.ExtensionData is not null
+                            && req.ExtensionData.TryGetValue("response_format", out var rf)
+                            && rf.ValueKind == System.Text.Json.JsonValueKind.Object
+                            && rf.GetProperty("type").GetString() == "json_object";
+                        return Task.FromResult(MakeAnalystResponse("model-a", 10, 5, brokenJson));
+                    }
+                    else
+                    {
+                        // outer call
+                        return Task.FromResult(MakeResponse("model-a", 10, 5, "final"));
+                    }
+                });
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "panel-b")));
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(1, analystRetries);
+            Assert.True(retryHadJsonFormat, "analyst retry should carry response_format=json_object");
+            // 软降级：outer 仍产出最终答案（未回退串行）。
+            Assert.Contains("final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task FusionRouter_AnalystBrokenJson_RetrySucceeds_UsesRetryResult()
+        {
+            // P2：analyst 首次损坏 → response_format 重试 → 重试返回合法 JSON，用重试结果。
+            using var factory = new FusionRouterFactory();
+            int modelACalls = 0;
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) => Task.FromResult(++modelACalls switch
+                {
+                    1 => MakeResponse("model-a", 10, 5, "panel-a"),
+                    2 => MakeAnalystResponse("model-a", 10, 5, "这不是 JSON"),
+                    _ => MakeResponse("model-a", 10, 5, "final")
+                }));
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "panel-b")));
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeAnalystResponse("model-c", 10, 5, AnalystJson)));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Contains("final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task FusionRouter_SimpleRequest_SkipsFusion_WhenMinComplexityStandard()
+        {
+            // P3：MinComplexity=Standard + RuleClassifier 开启 → 单条短消息（Simple）不触发融合，走串行。
+            using var factory = new FusionRouterFactory
+            {
+                FusionRouterMinComplexity = RequestComplexity.Standard,
+                EnableRuleClassifierInFactory = true
+            };
+            int modelACalls = 0;
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) => Task.FromResult(++modelACalls switch
+                {
+                    1 => MakeResponse("model-a", 10, 5, "serial-answer"),
+                    _ => MakeResponse("model-a", 10, 5, "unexpected")
+                }));
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "panel-b")));
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            // 单条短消息 → RuleClassifier 判 Simple。
+            var request = BuildRequest() with { Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") } };
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(request), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            // 未走融合：model-a 只被串行调用一次（无 panel/analyst/outer 多段调用）。
+            Assert.Equal(1, modelACalls);
+            Assert.Contains("serial-answer", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task FusionRouter_UnknownComplexity_TriggersFusion_ByDefault()
+        {
+            // P3：默认 MinComplexity=Unknown（无门控）→ RuleClassifier 关（复杂度 Unknown）仍触发融合，向后兼容。
+            using var factory = new FusionRouterFactory();
+            int modelACalls = 0;
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) => Task.FromResult(++modelACalls switch
+                {
+                    1 => MakeResponse("model-a", 10, 5, "panel-a"),
+                    2 => MakeAnalystResponse("model-a", 10, 5, AnalystJson),
+                    _ => MakeResponse("model-a", 10, 5, "final")
+                }));
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "panel-b")));
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            // 融合触发：model-a 被调 3 次（panel + analyst + outer）。
+            Assert.Equal(3, modelACalls);
+        }
 }

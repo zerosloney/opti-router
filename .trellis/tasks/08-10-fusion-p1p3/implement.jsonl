@@ -1,0 +1,3 @@
+{"file": ".trellis/spec/backend/routing.md", "reason": "融合路由既有契约（panel 超时、diversity、动态 size、audit/FusionRole 语义）。P1-P3 新配置项与行为必须与之保持一致，向后兼容。"}
+{"file": ".trellis/tasks/08-10-fusion-router-algo-research/research/fusion-router-algo-research.md", "reason": "P1-P3 提案的原始出处（P1 温度多样性 / P2 analyst 解析加固 / P3 成本门控），含验收标准与设计意图。"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "P2 的解析容错与软降级需遵循错误处理约定（不吞异常、降级保留原因、日志含操作/对象/原因）。"}

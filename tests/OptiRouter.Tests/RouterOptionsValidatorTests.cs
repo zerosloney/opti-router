@@ -246,6 +246,64 @@ public class RouterOptionsValidatorTests
         Assert.Contains("FusionRouterTemperature 必须在 [0, 2]", result.FailureMessage);
     }
 
+    [Theory]
+    [InlineData(-0.01)]
+    [InlineData(2.01)]
+    public void FusionRouterPanelTemperatureOutOfRange_ShouldReturnFailure(double value)
+    {
+        var options = CreateValidOptions();
+        options.Routing.FusionRouterPanelTemperature = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("FusionRouterPanelTemperature 必须在 [0, 2]", result.FailureMessage);
+    }
+
+    [Fact]
+    public void FusionRouterPanelTemperatureNull_ShouldValidateSuccessfully()
+    {
+        // P1：null（默认）= 沿用 FusionRouterTemperature，合法。
+        var options = CreateValidOptions();
+        options.Routing.FusionRouterPanelTemperature = null;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public void FusionRouterMinComplexityInvalidEnum_ShouldReturnFailure()
+    {
+        // P3：非法枚举值校验失败。
+        var options = CreateValidOptions();
+        options.Routing.FusionRouterMinComplexity = (OptiRouter.Routing.RequestComplexity)99;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("FusionRouterMinComplexity", result.FailureMessage);
+    }
+
+    [Fact]
+    public void FusionRouterMinComplexityValid_ShouldValidateSuccessfully()
+    {
+        // P3：合法枚举值（Unknown..Complex）通过。
+        foreach (var v in new[]
+        {
+            OptiRouter.Routing.RequestComplexity.Unknown,
+            OptiRouter.Routing.RequestComplexity.Simple,
+            OptiRouter.Routing.RequestComplexity.Standard,
+            OptiRouter.Routing.RequestComplexity.Complex,
+        })
+        {
+            var options = CreateValidOptions();
+            options.Routing.FusionRouterMinComplexity = v;
+            var result = CreateValidator().Validate(null, options);
+            Assert.True(result.Succeeded, $"MinComplexity={v} should pass");
+        }
+    }
+
     [Fact]
     public void DefaultNewOptions_ShouldValidateSuccessfully()
     {

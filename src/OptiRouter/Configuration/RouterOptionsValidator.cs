@@ -137,6 +137,17 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FusionRouterTemperature 必须在 [0, 2] 范围内。");
         }
 
+        if (options.Routing.FusionRouterPanelTemperature is { } pt
+            && (pt < 0 || pt > 2))
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterPanelTemperature 必须在 [0, 2] 范围内（或为 null 沿用 FusionRouterTemperature）。");
+        }
+
+        if (!Enum.IsDefined(typeof(OptiRouter.Routing.RequestComplexity), options.Routing.FusionRouterMinComplexity))
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionRouterMinComplexity 必须是合法的 RequestComplexity 枚举值。");
+        }
+
         if (options.Routing.FusionRouterPanelTimeoutSeconds < 0)
         {
             return ValidateOptionsResult.Fail("Routing.FusionRouterPanelTimeoutSeconds 不能为负数。");

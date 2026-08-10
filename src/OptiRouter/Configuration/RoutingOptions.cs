@@ -255,6 +255,23 @@ public sealed class RoutingOptions
     public double FusionRouterTemperature { get; set; } = 0.0;
 
     /// <summary>
+    /// 融合路由 panel 专用采样温度。null（默认）= 沿用 <see cref="FusionRouterTemperature"/>，向后兼容。
+    /// panel 用于发散采样，建议配置 &gt;0 以引入多样性（对齐 Self-Consistency 的温度多样性收益）；
+    /// analyst/outer 仍用 <see cref="FusionRouterTemperature"/>（低温度保结构化 JSON 稳定）。
+    /// 仅当原请求未显式设置 Temperature 时生效。
+    /// </summary>
+    public double? FusionRouterPanelTemperature { get; set; }
+
+    /// <summary>
+    /// 融合路由最低复杂度门控。默认 <see cref="OptiRouter.Routing.RequestComplexity.Unknown"/>（0，无门控）：
+    /// 所有复杂度请求都触发融合，等同旧行为（向后兼容——RuleClassifier 关闭时复杂度为 Unknown，
+    /// 不应被跳过）。设为 <see cref="OptiRouter.Routing.RequestComplexity.Standard"/> 可让 Simple（及 Unknown）
+    /// 请求跳过融合，省去 ×N panel 成本。设为 <see cref="OptiRouter.Routing.RequestComplexity.Unknown"/> 即关闭门控。
+    /// 与 <see cref="EnableDynamicFusionPanelSize"/> 正交：前者 gate 是否融合，后者定 panel 数。
+    /// </summary>
+    public OptiRouter.Routing.RequestComplexity FusionRouterMinComplexity { get; set; } = OptiRouter.Routing.RequestComplexity.Unknown;
+
+    /// <summary>
     /// 融合路由单个 panel 调用的超时秒数。0 = 不启用 panel 级超时（向后兼容，仅靠全局请求 ct 兜底）。
     /// &gt;0 时，每个 panel 绑定一个独立超时 CTS；超时的 panel 视同失败（记断路器 RecordFailure），
     /// 不阻塞 analyst——其余成功 panel 即可推进分析。全部 panel 超时/失败则回退串行。建议 30-120s。

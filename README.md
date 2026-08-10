@@ -168,6 +168,8 @@ curl http://localhost:5000/health
 | `FusionRouterOuterModel` | 融合路由 outer 模型名（留空=主候选）；读分析写最终答案 | `null` |
 | `FusionRouterMaxOutputTokens` | 融合路由 outer 答案最大输出 token 数 | `16000` |
 | `FusionRouterTemperature` | 融合路由 panel/analyst 采样温度，范围 `[0, 2]`；原请求显式温度优先 | `0.0` |
+| `FusionRouterPanelTemperature` | panel 专用采样温度；`null`=沿用 `FusionRouterTemperature`。panel 发散建议 `>0`，analyst/outer 仍用 `FusionRouterTemperature` 保 JSON 稳定 | `null` |
+| `FusionRouterMinComplexity` | 融合路由最低复杂度门控（`Unknown`/`Simple`/`Standard`/`Complex`）；低于此值的请求不触发融合，省 ×N 成本。`Unknown`（默认）关闭门控=全量融合（向后兼容）；设 `Standard` 可让 Simple 请求跳过融合 | `Unknown` |
 | `EnableMetrics` | 启用 Prometheus `/metrics` 端点（无鉴权，仅聚合数+模型名） | `true` |
 | `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
 

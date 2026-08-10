@@ -78,9 +78,10 @@ public sealed class FusionRouter
         }
 
         // 2. 并行 fire panel，收集全部回答。每个 panel 绑定独立超时 CTS（若配置）。
+        // panel 专用温度（P1）：发散采样，优先 PanelTemperature，其次 FusionRouterTemperature。
         ChatRequest panelRequest = request with
         {
-            Temperature = request.Temperature ?? routing.FusionRouterTemperature
+            Temperature = request.Temperature ?? routing.FusionRouterPanelTemperature ?? routing.FusionRouterTemperature
         };
         var panelResults = new List<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)>();
         var panelTasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)>>();
@@ -303,11 +304,84 @@ public sealed class FusionRouter
                 UpstreamFailureClassifier.SafeMessage(ex, status == 429));
         }
 
-        // 分析解析失败（JSON 解析/格式不对）→ 回退串行。
+        // 分析解析失败（JSON 解析/格式不对）→ P2：response_format 重试一次，仍失败则软降级用原始文本。
         if (analysis is null)
         {
-            _logger.LogWarning("Fusion router analyst parse failed (model {Model}), falling back to serial", analystModel.Name);
-            return new FusionAttemptResult(null, analystModel.Name, 502, "analyst parse failed");
+            _logger.LogWarning(
+                "Fusion router analyst parse failed (model {Model}), retrying once with response_format=json_object",
+                analystModel.Name);
+            var retryRequest = FusionSynthesis.BuildAnalystRequest(
+                request, panelAnswers, analystPrompt, routing.FusionRouterTemperature, requestJsonFormat: true);
+
+            var retrySw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                var analystClient = _clientProvider.GetClient(analystModel);
+                var retryResponse = await analystClient.CompleteRawAsync(retryRequest, ct).ConfigureAwait(false);
+                retrySw.Stop();
+                long retryElapsedMs = retrySw.ElapsedMilliseconds;
+
+                ChatUsage? retryUsage = retryResponse.Usage;
+                decimal retryCost = retryUsage is not null ? CostCalculator.Compute(retryUsage, analystModel) : 0m;
+                if (retryUsage is not null)
+                    _recorder.RecordCost(retryCost, sessionId);
+                _recorder.RecordQuota(analystModel.Name, retryResponse.Metadata);
+                _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
+                _recorder.RecordThompsonOutcome(analystModel.Name, retryElapsedMs);
+                _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, retryUsage, retryCost, retryElapsedMs,
+                    sessionId, decision.Reason + "; fusion-router: analyst retry(parse)", true, null, false, routedTier,
+                    isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
+                    timeToFirstTokenMs: retryResponse.Metadata?.ResponseHeaderLatencyMs);
+
+                analysis = FusionSynthesis.ParseAnalysis(retryResponse);
+
+                // 重试仍解析失败 → 软降级：用原始文本作 Recommendation，保留已付 panel 成本。
+                if (analysis is null)
+                {
+                    string rawText = ResponseConfidenceChecker.ExtractAssistantText(retryResponse);
+                    if (!string.IsNullOrWhiteSpace(rawText))
+                    {
+                        _logger.LogWarning(
+                            "Fusion router analyst retry parse failed (model {Model}), degrading to raw text recommendation",
+                            analystModel.Name);
+                        analysis = FusionSynthesis.BuildFallbackAnalysis(rawText);
+                    }
+                    else
+                    {
+                        _logger.LogWarning(
+                            "Fusion router analyst retry produced empty response (model {Model}), falling back to serial",
+                            analystModel.Name);
+                        return new FusionAttemptResult(null, analystModel.Name, 502, "analyst parse failed (empty retry)");
+                    }
+                }
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                retrySw.Stop();
+                long retryElapsedMs = retrySw.ElapsedMilliseconds;
+                bool retryQuotaLimited = ex is ModelClientException
+                { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+                if (retryQuotaLimited)
+                {
+                    var quotaError = (ModelClientException)ex;
+                    _recorder.RecordQuota(analystModel.Name, quotaError.Metadata, rateLimited: true);
+                }
+                else
+                {
+                    _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
+                    _recorder.RecordThompsonOutcome(analystModel.Name, null);
+                }
+                int retryStatus = UpstreamFailureClassifier.GetStatus(ex);
+                _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m, retryElapsedMs,
+                    sessionId, decision.Reason + "; fusion-router: analyst retry failed", false,
+                    UpstreamFailureClassifier.SafeMessage(ex, retryQuotaLimited), false, routedTier, isAdopted: false,
+                    parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: retryQuotaLimited);
+                _logger.LogWarning(
+                    "Fusion router analyst retry failed (model {Model}, status {Status}), falling back to serial",
+                    analystModel.Name, retryStatus);
+                return new FusionAttemptResult(null, analystModel.Name, retryStatus,
+                    UpstreamFailureClassifier.SafeMessage(ex, retryStatus == 429));
+            }
         }
 
         // 8. 解析 outer 模型并调用。
