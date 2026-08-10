@@ -228,3 +228,36 @@ ThompsonRaceCancelledReward从const提为RoutingOptions配置项(默认0.5,校�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 8: 单模型智能选择路由深层算法研究
+
+**Date**: 2026-08-11
+**Task**: 单模型智能选择路由深层算法研究
+**Branch**: `master`
+
+### Summary
+
+研究+提案+实证工具扩展（同 fusion 模式）。综述8范式(RouterBench/RouteLLM/MAB/LinUCB/语义路由/紧凑输入/LLM-as-Judge)。差距9条，提案8条(P1分类准确率可观测/P2策略链并行化/P3上下文LinUCB/P4能力标签扩展等)。实证工具: generate加--signal-accuracy/--thompson-rate/--quality-agent, analyze加Single-Model Selection段(混淆矩阵/Thompson奖励+regret/成本-质量Pareto)。闭环: 分类准确率78.7%, gpt-4o regret 0.447(非上下文Thompson低估Strong), Pareto全模型在frontier。AC1-6全过, 向后兼容。不动生产代码。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `uncommitted` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete

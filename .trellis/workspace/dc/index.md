@@ -8,8 +8,8 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
-- **Last Active**: 2026-08-10
+- **Total Sessions**: 8
+- **Last Active**: 2026-08-11
 <!-- @@@/auto:current-status -->
 
 ---
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~230 | Active |
+| `journal-1.md` | ~263 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-08-11 | 单模型智能选择路由深层算法研究 | uncommitted | `master` |
 | 7 | 2026-08-10 | 合成审计数据生成器打通数据闭环 | - | `master` |
 | 6 | 2026-08-10 | 竞速失败奖励提为运行时配置 | - | `master` |
 | 5 | 2026-08-10 | 区分竞速失败与真失败的Thompson奖励 | - | `master` |
