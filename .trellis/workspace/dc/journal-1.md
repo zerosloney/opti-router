@@ -135,3 +135,34 @@ Split blanket code→Strong into intent-aware routing (complex→Strong, simple�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: 区分竞速失败与真失败的Thompson奖励
+
+**Date**: 2026-08-10
+**Task**: 区分竞速失败与真失败的Thompson奖励
+**Branch**: `master`
+
+### Summary
+
+新增RecordThompsonRaceCancelled(reward 0.5)，RaceOrchestrator两处取消分支从硬失败0.0改为竞速失败部分奖励；真失败保持0.0。449单测+3 smoke全绿。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+(No commits - planning session)
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
