@@ -61,7 +61,7 @@ public class DashboardMetricsTests
     {
         private readonly Dictionary<string, ModelLatencyStats> _stats;
         public StubStatsProvider(params (string Model, double AvgMs, int Samples)[] entries)
-            => _stats = entries.ToDictionary(e => e.Model, e => new ModelLatencyStats(e.AvgMs, e.Samples), StringComparer.Ordinal);
+            => _stats = entries.ToDictionary(e => e.Model, e => new ModelLatencyStats(e.AvgMs, e.AvgMs, e.Samples), StringComparer.Ordinal);
         public ModelLatencyStats? GetStats(string modelName) => _stats.TryGetValue(modelName, out var s) ? s : null;
         public void Update(IReadOnlyDictionary<string, ModelLatencyStats>? stats) => throw new NotSupportedException();
     }

@@ -354,8 +354,30 @@ public class RequestAuditStoreTests
         Assert.Equal(2, stats.Count);
         Assert.Equal(200.0, stats["model-a"].AverageLatencyMs, precision: 1);
         Assert.Equal(3, stats["model-a"].SampleCount);
+        // model-a 延迟 [100,200,300]：p95 = (3-1)*0.95=1.9 → 200 + (300-200)*0.9 = 290
+        Assert.Equal(290.0, stats["model-a"].P95LatencyMs, precision: 1);
         Assert.Equal(50.0, stats["model-b"].AverageLatencyMs);
+        Assert.Equal(50.0, stats["model-b"].P95LatencyMs); // 单样本 p95 = 该值
         Assert.Equal(1, stats["model-b"].SampleCount);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void GetLatencyStatsSince_ComputesP95(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        // 10 个成功样本 [0..900] step 100 → avg 450；p95 = (10-1)*0.95 = 8.55 → 800 + (900-800)*0.55 = 855
+        for (int i = 0; i < 10; i++)
+        {
+            store.Append(SampleRecord("m", success: true) with { LatencyMs = i * 100 });
+        }
+
+        var stats = store.GetLatencyStatsSince(DateTime.UtcNow.AddMinutes(-5));
+
+        Assert.Single(stats);
+        Assert.Equal(450.0, stats["m"].AverageLatencyMs, precision: 1);
+        Assert.Equal(855.0, stats["m"].P95LatencyMs, precision: 1);
+        Assert.Equal(10, stats["m"].SampleCount);
     }
 
     [Theory]

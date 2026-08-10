@@ -171,6 +171,140 @@ public sealed class MultiDimensionalAndBanditTests
     }
 
     [Fact]
+    public void MultiDimensionalRouting_LanguageTask_CheapWinsOverStrong_ByPrice()
+    {
+        // 根治型关键场景：语言是廉价维度（档距近扁平），未显式配置能力时，
+        // 纯语言任务（simple-qa）下 Strong 与 Cheap 的语言分数应落入同桶 → 价格择廉。
+        // 旧实现对所有维度回退同一 tier 值（Strong 0.9 vs Cheap 0.3），此处 Cheap 永远赢不了。
+        var options = new RouterOptions();
+        options.Routing.EnableRuleClassifier = true;
+        options.Routing.EnableMultiDimensionalRouting = true;
+
+        var strong = new ModelEndpointOptions
+        {
+            Name = "strong-language",
+            Tier = ModelTier.Strong,
+            Enabled = true,
+            InputPricePerMillion = 5m
+        }; // 无 Capabilities → 语言回退 0.80
+
+        var cheap = new ModelEndpointOptions
+        {
+            Name = "cheap-language",
+            Tier = ModelTier.Cheap,
+            Enabled = true,
+            InputPricePerMillion = 0.01m
+        }; // 无 Capabilities → 语言回退 0.76
+
+        options.Models.Add(strong);
+        options.Models.Add(cheap);
+
+        var policy = new RuleClassifierPolicy();
+
+        // simple-qa → language=1.0, reasoning=0.1
+        // strong: 1.0×0.80 + 0.1×0.90 = 0.89 → 桶 5
+        // cheap:  1.0×0.76 + 0.1×0.20 = 0.78 → 桶 5
+        // 同桶 → 价格升序 → cheap 胜
+        var (ctx, initial) = Setup(options, options.Models, "你好");
+        var result = policy.Apply(ctx, initial);
+
+        Assert.Equal("cheap-language", result.Candidates[0].Name);
+        Assert.Equal("strong-language", result.Candidates[1].Name);
+    }
+
+    [Fact]
+    public void MultiDimensionalRouting_ReasoningTask_StrongWinsOverCheap_ByCapability()
+    {
+        // 根治型关键场景反面：推理是昂贵维度（档距陡），未显式配置能力时，
+        // 数学/推理任务下 Strong 因推理分数分差胜出。
+        var options = new RouterOptions();
+        options.Routing.EnableRuleClassifier = true;
+        options.Routing.EnableMultiDimensionalRouting = true;
+
+        var strong = new ModelEndpointOptions
+        {
+            Name = "strong-reasoner",
+            Tier = ModelTier.Strong,
+            Enabled = true,
+            InputPricePerMillion = 5m
+        }; // 推理回退 0.90
+
+        var cheap = new ModelEndpointOptions
+        {
+            Name = "cheap-reasoner",
+            Tier = ModelTier.Cheap,
+            Enabled = true,
+            InputPricePerMillion = 0.01m
+        }; // 推理回退 0.20
+
+        options.Models.Add(strong);
+        options.Models.Add(cheap);
+
+        var policy = new RuleClassifierPolicy();
+
+        // math-detected → reasoning=1.0, coding=0.5, language=0.3
+        // strong: 1.0×0.90 + 0.5×0.90 + 0.3×0.80 = 1.59 → 桶 10
+        // cheap:  1.0×0.20 + 0.5×0.30 + 0.3×0.76 = 0.578 → 桶 3
+        // 分差大 → strong 胜
+        var (ctx, initial) = Setup(options, options.Models, "求解这个微分方程: dy/dx = 2x");
+        var result = policy.Apply(ctx, initial);
+
+        Assert.Equal("strong-reasoner", result.Candidates[0].Name);
+        Assert.Equal("cheap-reasoner", result.Candidates[1].Name);
+    }
+
+    [Fact]
+    public void GetEffectiveCapability_ExplicitCapabilities_TakesPriority()
+    {
+        // 显式配置的 Capabilities 始终优先于维度回退表。
+        var m = new ModelEndpointOptions
+        {
+            Name = "explicit",
+            Tier = ModelTier.Cheap,
+            Enabled = true
+        };
+        m.Capabilities["language"] = 0.99;
+        m.Capabilities["coding"] = 0.95;
+
+        Assert.Equal(0.99, m.GetEffectiveCapability("language"));
+        Assert.Equal(0.95, m.GetEffectiveCapability("coding"));
+        // 未配置的推理维度走 Cheap 回退 0.20
+        Assert.Equal(0.20, m.GetEffectiveCapability("reasoning"));
+    }
+
+    [Fact]
+    public void GetEffectiveCapability_UnknownDimension_ReturnsNeutral()
+    {
+        // 未知维度（非 coding/reasoning/language）保守回退 0.5，不偏向任何档。
+        var strong = new ModelEndpointOptions { Name = "s", Tier = ModelTier.Strong, Enabled = true };
+        var cheap = new ModelEndpointOptions { Name = "c", Tier = ModelTier.Cheap, Enabled = true };
+
+        Assert.Equal(0.5, strong.GetEffectiveCapability("vision-quality"));
+        Assert.Equal(0.5, cheap.GetEffectiveCapability("vision-quality"));
+    }
+
+    [Fact]
+    public void GetEffectiveCapability_DimensionFallback_ByTier()
+    {
+        // 维度回退表：语言近扁平（0.80/0.78/0.76），推理陡（0.90/0.50/0.20），代码陡（0.90/0.60/0.30）。
+        var strong = new ModelEndpointOptions { Name = "s", Tier = ModelTier.Strong, Enabled = true };
+        var medium = new ModelEndpointOptions { Name = "m", Tier = ModelTier.Medium, Enabled = true };
+        var cheap = new ModelEndpointOptions { Name = "c", Tier = ModelTier.Cheap, Enabled = true };
+
+        Assert.Equal(0.80, strong.GetEffectiveCapability("language"));
+        Assert.Equal(0.78, medium.GetEffectiveCapability("language"));
+        Assert.Equal(0.76, cheap.GetEffectiveCapability("language"));
+
+        Assert.Equal(0.90, strong.GetEffectiveCapability("reasoning"));
+        Assert.Equal(0.50, medium.GetEffectiveCapability("reasoning"));
+        Assert.Equal(0.20, cheap.GetEffectiveCapability("reasoning"));
+
+        Assert.Equal(0.90, strong.GetEffectiveCapability("coding"));
+        Assert.Equal(0.60, medium.GetEffectiveCapability("coding"));
+        Assert.Equal(0.30, cheap.GetEffectiveCapability("coding"));
+    }
+
+    [Fact]
     public void ThompsonSampler_SamplesValidValues()
     {
         for (int i = 0; i < 50; i++)
@@ -245,6 +379,61 @@ public sealed class MultiDimensionalAndBanditTests
 
         double clamped = Math.Clamp(factor, 0.1, 1.0);
         Assert.Equal(alphaBefore * clamped + 1.0, stats.Alpha);
+    }
+
+    [Fact]
+    public void ThompsonStateStore_RecordOutcome_ContinuousReward_MapsTriState()
+    {
+        // 连续奖励：reward=1.0（快成功）→ 全 Alpha；0.0（硬失败）→ 全 Beta；0.3（慢成功）→ 部分 Alpha + 部分 Beta。
+        var store = new ThompsonStateStore();
+
+        var fast = store.GetOrAdd("fast");
+        store.RecordOutcome("fast", 1.0, discountFactor: 0.9);
+        Assert.Equal(1.0 * 0.9 + 1.0, fast.Alpha);
+        Assert.Equal(1.0 * 0.9 + 0.0, fast.Beta);
+
+        var slow = store.GetOrAdd("slow");
+        store.RecordOutcome("slow", 0.3, discountFactor: 0.9);
+        Assert.Equal(1.0 * 0.9 + 0.3, slow.Alpha);
+        Assert.Equal(1.0 * 0.9 + 0.7, slow.Beta);
+
+        var fail = store.GetOrAdd("fail");
+        store.RecordOutcome("fail", 0.0, discountFactor: 0.9);
+        Assert.Equal(1.0 * 0.9 + 0.0, fail.Alpha);
+        Assert.Equal(1.0 * 0.9 + 1.0, fail.Beta);
+    }
+
+    [Fact]
+    public void ThompsonStateStore_RecordOutcome_RewardClampedToRange()
+    {
+        // reward 越界钳制到 [0,1]：负值按 0（等效硬失败），>1 按 1（等效快成功）。
+        var store = new ThompsonStateStore();
+        var stats = store.GetOrAdd("clamp-reward");
+
+        store.RecordOutcome("clamp-reward", -5.0, 0.9);
+        Assert.Equal(1.0 * 0.9 + 0.0, stats.Alpha);
+        Assert.Equal(1.0 * 0.9 + 1.0, stats.Beta);
+
+        store.RecordOutcome("clamp-reward", 3.0, 0.9);
+        Assert.Equal((1.0 * 0.9 + 0.0) * 0.9 + 1.0, stats.Alpha);
+        Assert.Equal((1.0 * 0.9 + 1.0) * 0.9 + 0.0, stats.Beta);
+    }
+
+    [Fact]
+    public void ThompsonStateStore_RecordOutcome_BoolOverload_DelegatesToReward()
+    {
+        // 二值兼容重载应委托到连续奖励重载：true → reward 1.0，false → reward 0.0。
+        var store = new ThompsonStateStore();
+
+        var good = store.GetOrAdd("good");
+        store.RecordOutcome("good", isGood: true, discountFactor: 0.9);
+        Assert.Equal(1.0 * 0.9 + 1.0, good.Alpha);
+        Assert.Equal(1.0 * 0.9 + 0.0, good.Beta);
+
+        var bad = store.GetOrAdd("bad");
+        store.RecordOutcome("bad", isGood: false, discountFactor: 0.9);
+        Assert.Equal(1.0 * 0.9 + 0.0, bad.Alpha);
+        Assert.Equal(1.0 * 0.9 + 1.0, bad.Beta);
     }
 
     [Fact]

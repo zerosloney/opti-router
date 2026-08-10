@@ -98,7 +98,37 @@ public sealed class ModelEndpointOptions
     public IDictionary<string, double> Capabilities { get; set; } = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// 获取指定维度的能力评分；若未显式配置，则按 <see cref="Tier"/> 回退到默认值。
+    /// 未显式配置能力时的按维度 tier 回退表。
+    /// 维度分两类：语言是「廉价维度」（模型间差距小，档距近扁平），推理/代码是「昂贵维度」（档距陡）。
+    /// 这让多维能力路由（<c>EnableMultiDimensionalRouting</c>）在语言任务上可让 cheap 凭价格胜出，
+    /// 在推理/代码任务上仍让 strong 凭能力分差胜出。
+    /// </summary>
+    private static readonly IReadOnlyDictionary<string, IReadOnlyDictionary<ModelTier, double>> DimensionFallbacks =
+        new Dictionary<string, IReadOnlyDictionary<ModelTier, double>>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["language"] = new Dictionary<ModelTier, double>
+            {
+                [ModelTier.Strong] = 0.80,
+                [ModelTier.Medium] = 0.78,
+                [ModelTier.Cheap] = 0.76
+            },
+            ["reasoning"] = new Dictionary<ModelTier, double>
+            {
+                [ModelTier.Strong] = 0.90,
+                [ModelTier.Medium] = 0.50,
+                [ModelTier.Cheap] = 0.20
+            },
+            ["coding"] = new Dictionary<ModelTier, double>
+            {
+                [ModelTier.Strong] = 0.90,
+                [ModelTier.Medium] = 0.60,
+                [ModelTier.Cheap] = 0.30
+            }
+        };
+
+    /// <summary>
+    /// 获取指定维度的能力评分。优先级：显式 <see cref="Capabilities"/> 配置 → 按 <see cref="Tier"/> 的维度回退表。
+    /// 未知维度（非 coding/reasoning/language）保守回退 0.5，不偏向任意档。
     /// </summary>
     public double GetEffectiveCapability(string dimension)
     {
@@ -106,11 +136,11 @@ public sealed class ModelEndpointOptions
         {
             return val;
         }
-        return Tier switch
+        if (DimensionFallbacks.TryGetValue(dimension, out var byTier)
+            && byTier.TryGetValue(Tier, out double fallback))
         {
-            ModelTier.Strong => 0.9,
-            ModelTier.Medium => 0.6,
-            _ => 0.3
-        };
+            return fallback;
+        }
+        return 0.5;
     }
 }

@@ -152,8 +152,9 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             var stats = _statsProvider.GetStats(m.Name);
             if (stats is not null && stats.SampleCount >= minSamples)
             {
-                // 分数 = 1 / (avg + floor)。延迟越低分越高（排序时降序）。
-                double score = 1.0 / (stats.AverageLatencyMs + LatencyFloorMs);
+                // 分数 = 1 / (avg + 0.5×p95 + floor)。avg 与 p95 都参与：p95 项压制「avg 稳但 tail 差」的模型。
+                // 延迟越低分越高（排序时降序）。0.5 为 tail 权重，均衡平均与尾部抖动。
+                double score = 1.0 / (stats.AverageLatencyMs + 0.5 * stats.P95LatencyMs + LatencyFloorMs);
                 ordered.Add((m, score));
             }
             else

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Linq;
 using OptiRouter.Configuration;
 
 namespace OptiRouter.Routing;
@@ -182,13 +183,12 @@ public sealed class InMemoryRequestAuditStore : IRequestAuditStore, IDisposable
     }
 
     /// <inheritdoc />
-    public IReadOnlyDictionary<string, (double AverageLatencyMs, int SampleCount)> GetLatencyStatsSince(DateTime since)
+    public IReadOnlyDictionary<string, ModelLatencyStats> GetLatencyStatsSince(DateTime since)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // intentional-simple: 单次遍历累加，O(n)。审计缓冲通常 ≤10K 条，后台聚合低频，无需预聚合索引。
-        var sumMs = new Dictionary<string, double>(StringComparer.Ordinal);
-        var count = new Dictionary<string, int>(StringComparer.Ordinal);
+        // intentional-simple: 单次遍历收集每模型延迟列表，O(n)。审计缓冲通常 ≤10K 条，后台聚合低频，无需预聚合索引。
+        var byModel = new Dictionary<string, List<double>>(StringComparer.Ordinal);
 
         lock (_lock)
         {
@@ -199,20 +199,36 @@ public sealed class InMemoryRequestAuditStore : IRequestAuditStore, IDisposable
                 if (r.Timestamp < since || !r.Success)
                     continue;
 
-                sumMs.TryGetValue(r.Model, out double sum);
-                sumMs[r.Model] = sum + r.LatencyMs;
-                count.TryGetValue(r.Model, out int c);
-                count[r.Model] = c + 1;
+                if (!byModel.TryGetValue(r.Model, out var list))
+                {
+                    list = new List<double>();
+                    byModel[r.Model] = list;
+                }
+                list.Add(r.LatencyMs);
             }
         }
 
-        var result = new Dictionary<string, (double, int)>(sumMs.Count, StringComparer.Ordinal);
-        foreach (var model in sumMs.Keys)
+        var result = new Dictionary<string, ModelLatencyStats>(byModel.Count, StringComparer.Ordinal);
+        foreach (var (model, lats) in byModel)
         {
-            int n = count[model];
-            result[model] = (sumMs[model] / n, n);
+            lats.Sort();
+            double avg = lats.Count == 0 ? 0.0 : lats.Sum() / lats.Count;
+            result[model] = new ModelLatencyStats(avg, Percentile(lats, 95.0), lats.Count);
         }
         return result;
+    }
+
+    /// <summary>
+    /// 线性插值百分位（与 SQLite 实现一致）。<paramref name="sorted"/> 必须已升序排序且非空。
+    /// </summary>
+    private static double Percentile(List<double> sorted, double pct)
+    {
+        if (sorted.Count == 1) return sorted[0];
+        double k = (sorted.Count - 1) * (pct / 100.0);
+        int lo = (int)Math.Floor(k);
+        int hi = Math.Min(lo + 1, sorted.Count - 1);
+        double frac = k - lo;
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
     }
 
     /// <inheritdoc />

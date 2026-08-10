@@ -86,11 +86,12 @@ public sealed class LatencyStatsAggregatorService : BackgroundService
         try
         {
             // 后台聚合是 I/O，但发生在请求路径之外。审计表锁与 Append 共享，聚合周期低频，竞争可忽略。
+            // GetLatencyStatsSince 已返回含 p95 的 ModelLatencyStats，直接透传给快照缓存。
             var raw = _auditStore.GetLatencyStatsSince(since);
             var stats = new Dictionary<string, ModelLatencyStats>(raw.Count, StringComparer.Ordinal);
-            foreach (var (model, (avg, n)) in raw)
+            foreach (var (model, s) in raw)
             {
-                stats[model] = new ModelLatencyStats(avg, n);
+                stats[model] = s;
             }
             _statsProvider.Update(stats);
 

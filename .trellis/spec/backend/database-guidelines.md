@@ -28,7 +28,7 @@ public interface IRequestAuditStore : IDisposable
         DateTime from, DateTime to, int limit, int offset);
     (int Failures, int Total) GetFailureStats(DateTime from, DateTime to);
     int EvictBefore(DateTime cutoff);
-    IReadOnlyDictionary<string, (double AverageLatencyMs, int SampleCount)> GetLatencyStatsSince(DateTime since);
+    IReadOnlyDictionary<string, ModelLatencyStats> GetLatencyStatsSince(DateTime since);
 }
 
 public interface ICostLedgerStore : ICircuitStateStore, IDisposable

@@ -253,7 +253,9 @@ def build_by_reason(conn: sqlite3.Connection, where: str, params: list) -> str:
     # 抽 reason 中含的 classifier 信号（code-detected/simple-qa/semantic-matched/default 等）。
     signals: dict[str, list[sqlite3.Row]] = {}
     keywords = [
-        "code-detected", "simple-qa", "complex-instruction",
+        "code-detected", "code-complex", "code-simple",   # 代码意图子分类
+        "math-detected", "translation-request",           # 数学/翻译
+        "simple-qa", "complex-instruction",
         "semantic-router: matched", "long-input: filtered", "fallback-to-default",
         "session-affinity: promoted",
     ]

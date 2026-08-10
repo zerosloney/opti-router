@@ -173,7 +173,7 @@ public sealed class FusionRouter
 
                 _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(model.Name, elapsedMs < routing.ThompsonLatencyTargetMs);
+                _recorder.RecordThompsonOutcome(model.Name, elapsedMs);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion-router: panel success", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "panel",
@@ -195,7 +195,7 @@ public sealed class FusionRouter
                 else
                 {
                     tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(model.Name, false);
+                    _recorder.RecordThompsonOutcome(model.Name, null);
                 }
 
                 int status = error switch
@@ -266,7 +266,7 @@ public sealed class FusionRouter
             _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
             _recorder.RecordThompsonOutcome(
                 analystModel.Name,
-                analystElapsedMs < routing.ThompsonLatencyTargetMs);
+                analystElapsedMs);
             _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, analystUsage, analystCost, analystElapsedMs, sessionId,
                 decision.Reason + "; fusion-router: analyst", true, null, false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
@@ -289,7 +289,7 @@ public sealed class FusionRouter
             else
             {
                 _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
-                _recorder.RecordThompsonOutcome(analystModel.Name, false);
+                _recorder.RecordThompsonOutcome(analystModel.Name, null);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
             _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m, analystElapsedMs,
@@ -336,7 +336,7 @@ public sealed class FusionRouter
 
             _recorder.RecordQuota(outerModel.Name, outerResponse.Metadata);
             _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses);
-            _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
+            _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds);
             _recorder.RecordAffinity(sessionId, outerModel.Name, AffinitySignal.Weak);
             _recorder.RecordPromptCacheAffinity(request, outerModel.Name);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, outerUsage, outerCost, outerSw.ElapsedMilliseconds, sessionId,
@@ -363,7 +363,7 @@ public sealed class FusionRouter
             else
             {
                 _healthTracker.RecordFailure(outerModel.Name, threshold, cooldown);
-                _recorder.RecordThompsonOutcome(outerModel.Name, false);
+                _recorder.RecordThompsonOutcome(outerModel.Name, null);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, null, 0m, outerSw.ElapsedMilliseconds,

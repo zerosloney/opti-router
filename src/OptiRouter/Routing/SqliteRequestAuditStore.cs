@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Linq;
 using Microsoft.Data.Sqlite;
 using OptiRouter.Configuration;
 
@@ -279,36 +280,65 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     }
 
     /// <inheritdoc />
-    public IReadOnlyDictionary<string, (double AverageLatencyMs, int SampleCount)> GetLatencyStatsSince(DateTime since)
+    public IReadOnlyDictionary<string, ModelLatencyStats> GetLatencyStatsSince(DateTime since)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
         lock (_lock)
         {
+            // 需计算 p95，SQLite AVG() 无法直接给出百分位。逐行拉取窗口内成功延迟，
+            // C# 侧分组排序算 avg + p95。窗口（默认 60min）内模型 <50、样本有界，后台低频聚合可接受。
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
-                SELECT model, AVG(latency_ms), COUNT(*)
+                SELECT model, latency_ms
                 FROM request_audit
                 WHERE timestamp >= @since AND success = 1
-                GROUP BY model;
+                ORDER BY model;
                 """;
             cmd.Parameters.AddWithValue("@since", FormatTimestamp(since));
 
-            var result = new Dictionary<string, (double, int)>(StringComparer.Ordinal);
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read())
+            var byModel = new Dictionary<string, List<double>>(StringComparer.Ordinal);
+            using (var reader = cmd.ExecuteReader())
             {
-                string model = reader.GetString(0);
-                // AVG 返回 REAL；SQLite NULL 兜底为 0（理论上 COUNT>0 时 AVG 非 NULL）。
-                double avg = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
-                int n = reader.IsDBNull(2) ? 0 : Convert.ToInt32(reader.GetValue(2), CultureInfo.InvariantCulture);
-                result[model] = (avg, n);
+                while (reader.Read())
+                {
+                    string model = reader.GetString(0);
+                    double lat = reader.IsDBNull(1) ? 0.0 : Convert.ToDouble(reader.GetValue(1), CultureInfo.InvariantCulture);
+                    if (!byModel.TryGetValue(model, out var list))
+                    {
+                        list = new List<double>();
+                        byModel[model] = list;
+                    }
+                    list.Add(lat);
+                }
+            }
+
+            var result = new Dictionary<string, ModelLatencyStats>(byModel.Count, StringComparer.Ordinal);
+            foreach (var (model, lats) in byModel)
+            {
+                lats.Sort();
+                double avg = lats.Count == 0 ? 0.0 : lats.Sum() / lats.Count;
+                result[model] = new ModelLatencyStats(avg, Percentile(lats, 95.0), lats.Count);
             }
             return result;
         }
     }
 
     /// <inheritdoc />
+    /// <summary>
+    /// 线性插值百分位（与 <c>scripts/analyze_audit.py</c> 的 percentile 语义一致）。
+    /// <paramref name="sorted"/> 必须已升序排序且非空。
+    /// </summary>
+    private static double Percentile(List<double> sorted, double pct)
+    {
+        if (sorted.Count == 1) return sorted[0];
+        double k = (sorted.Count - 1) * (pct / 100.0);
+        int lo = (int)Math.Floor(k);
+        int hi = Math.Min(lo + 1, sorted.Count - 1);
+        double frac = k - lo;
+        return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

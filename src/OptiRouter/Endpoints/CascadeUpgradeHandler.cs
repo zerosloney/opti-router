@@ -84,7 +84,7 @@ public sealed class CascadeUpgradeHandler
             _healthTracker.RecordSuccess(cheapModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
             _recorder.RecordThompsonOutcome(
                 cheapModel.Name,
-                verifySw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
+                verifySw.ElapsedMilliseconds);
 
             _recorder.RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
@@ -119,7 +119,7 @@ public sealed class CascadeUpgradeHandler
                     routing.FailoverHalfOpenRequiredSuccesses);
                 _recorder.RecordThompsonOutcome(
                     upgradeTarget.Name,
-                    strongSw.ElapsedMilliseconds < routing.ThompsonLatencyTargetMs);
+                    strongSw.ElapsedMilliseconds);
                 _recorder.RecordAffinity(sessionId, upgradeTarget.Name, AffinitySignal.Weak);
                 _recorder.RecordPromptCacheAffinity(originalRequest, upgradeTarget.Name);
 
@@ -146,7 +146,7 @@ public sealed class CascadeUpgradeHandler
                         upgradeTarget.Name,
                         routing.FailoverFailureThreshold,
                         routing.FailoverCooldownSeconds);
-                    _recorder.RecordThompsonOutcome(upgradeTarget.Name, false);
+                    _recorder.RecordThompsonOutcome(upgradeTarget.Name, null);
                 }
                 // 升级调用失败（含客户端内部超时）：记录但不抛，返回 null 让调用方用原 Cheap 答案（已有，质量兜底不优于崩溃）。
                 // 仅放行外界取消；内部超时不破坏已成功的 Cheap 请求，也不污染 Cheap 熔断。
@@ -170,7 +170,7 @@ public sealed class CascadeUpgradeHandler
                     cheapModel.Name,
                     routing.FailoverFailureThreshold,
                     routing.FailoverCooldownSeconds);
-                _recorder.RecordThompsonOutcome(cheapModel.Name, false);
+                _recorder.RecordThompsonOutcome(cheapModel.Name, null);
             }
             // 自校验本身失败（含客户端内部超时）：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。
             // 仅放行外界取消，避免内部超时破坏已成功的 Cheap 请求。

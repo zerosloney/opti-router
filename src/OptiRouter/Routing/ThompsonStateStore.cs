@@ -67,22 +67,35 @@ public sealed class ThompsonStateStore
     }
 
     /// <summary>
-    /// 记录一次端点请求表现。
+    /// 记录一次端点请求表现（二值兼容重载）。
     /// </summary>
     /// <param name="modelName">模型唯一标识。</param>
     /// <param name="isGood">延迟满足设定指标且请求成功时为 true，反之为 false。</param>
     /// <param name="discountFactor">指数衰减折扣因子（如 0.95），用于淡化历史贡献，应对非平稳环境。</param>
     public void RecordOutcome(string modelName, bool isGood, double discountFactor)
+        => RecordOutcome(modelName, isGood ? 1.0 : 0.0, discountFactor);
+
+    /// <summary>
+    /// 记录一次端点请求表现（连续奖励重载）。
+    /// </summary>
+    /// <param name="modelName">模型唯一标识。</param>
+    /// <param name="reward">
+    /// 本次表现的奖励值 [0.0, 1.0]。1.0 = 快成功（延迟小于目标），0.0 = 硬失败，
+    /// 0.0~1.0 之间 = 慢成功等部分正反馈（成功但偏慢，轻微正信号）。
+    /// </param>
+    /// <param name="discountFactor">指数衰减折扣因子（如 0.95），用于淡化历史贡献，应对非平稳环境。</param>
+    public void RecordOutcome(string modelName, double reward, double discountFactor)
     {
         if (string.IsNullOrEmpty(modelName)) return;
 
         double factor = Math.Clamp(discountFactor, 0.1, 1.0);
+        double r = Math.Clamp(reward, 0.0, 1.0);
         var stats = GetOrAdd(modelName);
 
         lock (stats.Lock)
         {
-            stats.Alpha = stats.Alpha * factor + (isGood ? 1.0 : 0.0);
-            stats.Beta = stats.Beta * factor + (isGood ? 0.0 : 1.0);
+            stats.Alpha = stats.Alpha * factor + r;
+            stats.Beta = stats.Beta * factor + (1.0 - r);
         }
     }
 }

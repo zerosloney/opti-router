@@ -6,8 +6,9 @@ namespace OptiRouter.Routing;
 /// 单模型延迟统计快照。由后台聚合服务写入，供 <see cref="LatencyAwarePolicy"/> 读。
 /// </summary>
 /// <param name="AverageLatencyMs">统计窗口内成功请求的平均延迟（毫秒）。</param>
+/// <param name="P95LatencyMs">统计窗口内成功请求的第 95 百分位延迟（毫秒），用于压制尾部抖动。</param>
 /// <param name="SampleCount">统计窗口内成功请求数。</param>
-public sealed record ModelLatencyStats(double AverageLatencyMs, int SampleCount);
+public sealed record ModelLatencyStats(double AverageLatencyMs, double P95LatencyMs, int SampleCount);
 
 /// <summary>
 /// 延迟统计读接口。路由决策层通过此接口读延迟，零 I/O、零锁。

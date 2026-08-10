@@ -98,14 +98,20 @@ public sealed class ModelStats
 public IDictionary<string, double> Capabilities { get; set; }
 public double GetEffectiveCapability(string dimension);
 
-// Fallback by tier when Capabilities dict has no entry:
-//   Strong -> 0.9, Medium -> 0.6, Cheap -> 0.3
+// 维度化 tier 回退（Capabilities dict 无该维度条目时）：
+// 语言是「廉价维度」档距近扁平，推理/代码是「昂贵维度」档距陡。
+//   language:  Strong -> 0.80, Medium -> 0.78, Cheap -> 0.76
+//   reasoning: Strong -> 0.90, Medium -> 0.50, Cheap -> 0.20
+//   coding:    Strong -> 0.90, Medium -> 0.60, Cheap -> 0.30
+// 未知维度（非 coding/reasoning/language）保守回退 0.5，不偏向任何档。
+// 效果：语言任务（simple-qa/translation）下 Strong 与 Cheap 语言分数落入同 tolerance 桶 → 价格择廉；
+//       推理/数学任务下 Strong 因推理分差显著胜出。
 ```
 
 ### Latency Stats
 
 ```csharp
-public sealed record ModelLatencyStats(double AverageLatencyMs, int SampleCount);
+public sealed record ModelLatencyStats(double AverageLatencyMs, double P95LatencyMs, int SampleCount);
 
 public interface ILatencyStatsProvider
 {
@@ -116,6 +122,9 @@ public interface ILatencyStatsProvider
 // Thread-safe implementation: volatile reference swap, O(1) reads
 public sealed class LatencyStatsCache : ILatencyStatsProvider;
 ```
+
+- `GetLatencyStatsSince`（`IRequestAuditStore`）返回 `IReadOnlyDictionary<string, ModelLatencyStats>`，SQLite 与 InMemory 实现按 model 收集成功延迟列表 → 排序 → avg + p95（线性插值，与 `scripts/analyze_audit.py` 的 percentile 语义一致）。
+- 延迟评分：`score = 1 / (avg + 0.5×p95 + 50)`。p95 项压制「avg 稳但 tail 差」的模型。
 
 ---
 
@@ -143,16 +152,23 @@ public sealed class LatencyStatsCache : ILatencyStatsProvider;
 ### Thompson Outcome Recording
 
 ```csharp
-// Called on every adopted success and every non-429 failure:
-// isGood = success AND (elapsedMs < ThompsonLatencyTargetMs)
-RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds < options.Routing.ThompsonLatencyTargetMs);
-// → calls _tsStore.RecordOutcome(modelName, isGood, routing.ThompsonDiscountFactor)
+// Called on every adopted success (pass elapsedMs) and every non-429 failure (pass null):
+RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds);   // 成功路径
+RecordThompsonOutcome(candidate.Name, null);                            // 失败路径
+// → OutcomeRecorder 映射 reward，再调 _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor)
 ```
 
-- `isGood == true` (fast success, latency < target): `Alpha = Alpha * discount + 1.0`
-- `isGood == false` (slow success, timeout, network/model error, or fusion candidate cancelled): `Beta = Beta * discount + 1.0`
+- 连续/分级奖励（`RecordThompsonOutcome(string, long? elapsedMs)` → reward）：
+  - `elapsedMs == null`（硬失败：网络/超时/上游错误/被取消）→ reward `0.0`
+  - `elapsedMs < ThompsonLatencyTargetMs`（快成功）→ reward `1.0`
+  - `elapsedMs >= ThompsonLatencyTargetMs`（慢成功）→ reward `0.3`（部分正反馈，成功但偏慢）
+- `ThompsonStateStore.RecordOutcome(string, double reward, double discountFactor)`：
+  - `Alpha = Alpha * discount + reward`
+  - `Beta  = Beta  * discount + (1.0 - reward)`
+  - reward 与 discountFactor 均 `Math.Clamp` 到合法域（reward `[0,1]`，discount `[0.1,1.0]`）
+- 二值兼容重载 `RecordOutcome(string, bool, double)` 委托到 reward 重载（`true→1.0`，`false→0.0`）。
 - Start state: `Beta(1, 1)` uniform prior
-- `discountFactor` clamped to `[0.1, 1.0]` via `Math.Clamp`
+- 慢成功从旧二值语义的「Beta 惩罚」变为「部分 Alpha + 部分 Beta」——行为变化（根治型）。
 
 ### Hot-Reload Cleanup
 
@@ -226,13 +242,13 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 ### Good: Multi-dimensional routing with capability scores
 
 ```csharp
-// Model A: coding=0.95, reasoning=0.80, price=0.5/M
-// Model B: no capabilities (falls back to Medium=0.6), price=0.4/M
-// Model C: coding=0.90, reasoning=0.50, price=0.05/M
+// Model A: coding=0.95, reasoning=0.80, price=0.5/M (Medium；language 未配置 → 回退 0.78)
+// Model B: no capabilities (Medium；维度化回退 coding=0.60, reasoning=0.50, language=0.78), price=0.4/M
+// Model C: coding=0.90, reasoning=0.50, price=0.05/M (Cheap；language 未配置 → 回退 0.76)
 // Request: "write a Python sorting function" → code-detected
-// Weights: coding=1.0, reasoning=0.6
-// Scores: A=1.43, C=1.20, B=0.84
-// Sort: [A, C, B] (score gap > 0.15, so price tiebreaker not used)
+// Weights: coding=1.0, reasoning=0.6, language=0.3
+// Scores: A=1.0×0.95+0.6×0.80+0.3×0.78=1.664, C=1.0×0.90+0.6×0.50+0.3×0.76=1.428, B=1.0×0.60+0.6×0.50+0.3×0.78=1.134
+// 桶 floor(/0.15)：A=11, C=9, B=7 → Sort: [A, C, B]（分差 > 0.15，价格不参与）
 ```
 
 ### Base: Multi-dimensional routing with close scores → price wins

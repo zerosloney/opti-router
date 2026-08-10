@@ -9,14 +9,26 @@ namespace OptiRouter.Tests.Routing;
 /// </summary>
 internal sealed class StubLatencyStatsProvider : ILatencyStatsProvider
 {
-    private readonly IReadOnlyDictionary<string, ModelLatencyStats> _stats;
+    private IReadOnlyDictionary<string, ModelLatencyStats> _stats;
 
     public StubLatencyStatsProvider(params (string Model, double AvgMs, int Samples)[] entries)
     {
+        // p95 默认取 avg（既有无 p95 语义的测试行为不变）。
         _stats = entries.ToDictionary(
             e => e.Model,
-            e => new ModelLatencyStats(e.AvgMs, e.Samples),
+            e => new ModelLatencyStats(e.AvgMs, e.AvgMs, e.Samples),
             StringComparer.Ordinal);
+    }
+
+    /// <summary>带显式 p95 的便捷构造（避免与三元组 params 重载二义）。</summary>
+    public static StubLatencyStatsProvider WithP95(params (string Model, double AvgMs, double P95Ms, int Samples)[] entries)
+    {
+        var provider = new StubLatencyStatsProvider();
+        provider._stats = entries.ToDictionary(
+            e => e.Model,
+            e => new ModelLatencyStats(e.AvgMs, e.P95Ms, e.Samples),
+            StringComparer.Ordinal);
+        return provider;
     }
 
     public ModelLatencyStats? GetStats(string modelName) =>
@@ -192,5 +204,27 @@ public class LatencyAwarePolicyTests
 
         Assert.Equal(initial.Candidates, result.Candidates);
         Assert.Contains("latency-aware: <2 candidates", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_TailLatency_P95BetterWins_WhenAvgClose()
+    {
+        // 根治型关键场景：两个模型平均延迟接近，但 p95 差异大 → tail 优者（p95 更低）应排前。
+        // 旧评分只看 avg，无法区分；新评分 = 1/(avg + 0.5×p95 + 50)。
+        var options = TestHelpers.BuildOptions(
+            ("stable", ModelTier.Medium, 8000, 1m),
+            ("spiky", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 5;
+        // 两者 avg 相同 200ms；stable 的 p95=210（tail 稳），spiky 的 p95=900（tail 抖）。
+        var policy = new LatencyAwarePolicy(StubLatencyStatsProvider.WithP95(
+            ("stable", 200.0, 210.0, 50), ("spiky", 200.0, 900.0, 50)), new ThompsonStateStore());
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // stable: 1/(200+105+50)=1/355；spiky: 1/(200+450+50)=1/700 → stable 分高在前。
+        Assert.Equal("stable", result.Candidates[0].Name);
+        Assert.Equal("spiky", result.Candidates[1].Name);
     }
 }
