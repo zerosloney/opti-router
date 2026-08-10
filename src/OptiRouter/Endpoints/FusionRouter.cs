@@ -219,7 +219,7 @@ public sealed class FusionRouter
             analystModel = options.Models
                 .FirstOrDefault(m => m.Enabled && m.Name.Equals(routing.FusionRouterAnalystModel, StringComparison.OrdinalIgnoreCase));
         }
-        analystModel ??= decision.Candidates[0];
+        analystModel ??= PickUnfailedFallback(decision.Candidates, failedInThisRequest);
 
         // 7. 调用 analyst（结构化分析）。
         string analystPrompt = string.IsNullOrWhiteSpace(routing.FusionRouterAnalystPrompt)
@@ -298,7 +298,7 @@ public sealed class FusionRouter
             outerModel = options.Models
                 .FirstOrDefault(m => m.Enabled && m.Name.Equals(routing.FusionRouterOuterModel, StringComparison.OrdinalIgnoreCase));
         }
-        outerModel ??= decision.Candidates[0];
+        outerModel ??= PickUnfailedFallback(decision.Candidates, failedInThisRequest);
 
         var outerRequest = FusionSynthesis.BuildOuterRequest(
             request, analysis, FusionSynthesis.DefaultOuterPrompt, routing.FusionRouterMaxOutputTokens);
@@ -357,5 +357,18 @@ public sealed class FusionRouter
                 UpstreamFailureClassifier.SafeMessage(ex, status == 429));
         }
     }
+
+    /// <summary>
+    /// 挑选 analyst/outer 的回退模型：优先选候选链中本次请求尚未失败的模型。
+    /// 失败回退时若 <c>Candidates[0]</c> 恰是刚失败的 panel 模型，analyst/outer 选中它
+    /// 大概率再失败（且调用绕过断路器门控），浪费一次往返延迟并多走一次串行降级。
+    /// 至少一个 panel 成功（<c>panelAnswers.Count &gt; 0</c>）时，该成功模型在候选链中
+    /// 且不在 <c>failedInThisRequest</c>，故总能找到；全失败时回退首候选保底。
+    /// </summary>
+    private static ModelEndpointOptions PickUnfailedFallback(
+        IReadOnlyList<ModelEndpointOptions> candidates,
+        HashSet<string> failedInThisRequest)
+        => candidates.FirstOrDefault(m => !failedInThisRequest.Contains(m.Name))
+           ?? candidates[0];
 
 }

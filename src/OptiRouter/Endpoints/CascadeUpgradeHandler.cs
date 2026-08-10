@@ -156,6 +156,10 @@ public sealed class CascadeUpgradeHandler
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // 自校验失败：429 视为纯配额（仅记配额，不污染断路器）；
+            // 其余（5xx 等真实上游错误）视为可用性信号，计入断路器与 Thompson 反馈——
+            // 主请求成功但紧接着 verify 5xx，说明模型/上游正在劣化。
+            // 参见 CascadeCostAccountingTests.Cascade_VerificationFailure_Only5xxUpdatesHealthAndThompson。
             if (ex is ModelClientException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } quotaError)
             {
                 _recorder.RecordQuota(cheapModel.Name, quotaError.Metadata, rateLimited: true);
