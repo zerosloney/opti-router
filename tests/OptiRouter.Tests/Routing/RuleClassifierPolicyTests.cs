@@ -287,7 +287,6 @@ public class RuleClassifierPolicyTests
     [Theory]
     [InlineData("一个 hello world 示例\n```python\nprint('hello')\n```")]
     [InlineData("给一个简单的示例代码\n```go\npackage main\nfunc main(){}\n```")]
-    [InlineData("解释一下这段代码的含义\n```python\na = [i for i in range(10)]\n```")]
     [InlineData("写一个脚手架项目\n```bash\nmkdir -p src\n```")]
     public void Apply_SimpleCodeIntent_SelectsMediumTier(string content)
     {
@@ -378,5 +377,43 @@ public class RuleClassifierPolicyTests
 
         Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
         Assert.Contains("code-complex", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_ExplainCode_NotDowngradedToSimple()
+    {
+        // 语义保护：explain/解释 不再归为简单意图——解释复杂代码需要 Strong 推理。
+        // 无其它简单信号时保守 Strong（code-detected），避免把复杂代码解释任务降级到 Medium。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "解释一下这段代码\n```python\ndef quicksort(arr):\n    return arr\n```"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("code-detected", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_CodeBlockContainingHelloWorldString_NotDowngradedToSimple()
+    {
+        // 代码正文泄漏保护：代码块内的字符串/注释含 "hello world" 不应触发 simple 意图。
+        // 意图检测只跑指令文本（剔除代码块）→ 无简单信号 → 保守 Strong。
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "```python\nprint(\"hello world\")\n```"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("code-detected", result.Reason);
     }
 }

@@ -172,7 +172,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 // Weight profiles by classification:
 //   code-detected:    coding=1.0, reasoning=0.6, language=0.3
 //   code-complex:     coding=1.0, reasoning=0.8, language=0.2  (debug/fix/refactor/algorithm → Strong)
-//   code-simple:      coding=1.0, reasoning=0.3, language=0.4  (hello world/explain/scaffold → Medium)
+//   code-simple:      coding=1.0, reasoning=0.3, language=0.4  (hello world/scaffold/example → Medium)
 //   math-detected:    reasoning=1.0, coding=0.5, language=0.3
 //   complex-instruction: reasoning=0.8, language=0.7
 //   translation:      language=1.0, coding=0.1
@@ -185,7 +185,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 | Position | Policy | Gate | Effect |
 |----------|--------|------|--------|
 | 1 | `CapabilityFilterPolicy` | `EnableCapabilityFilter` | Exclude models lacking vision/tool-use/json-mode tags |
-| 2 | `RuleClassifierPolicy` | `EnableRuleClassifier` | Classify request → tier filter; or reorder by multi-dimensional capability scores. Code requests sub-classified by intent: complex (debug/fix/refactor/algorithm) → Strong, simple (hello world/explain/scaffold) → Medium, no intent → Strong |
+| 2 | `RuleClassifierPolicy` | `EnableRuleClassifier` | Classify request → tier filter; or reorder by multi-dimensional capability scores. Code requests sub-classified by intent (detected on the last user message with fenced code blocks stripped): complex (debug/fix/refactor/algorithm) → Strong, simple code-gen (hello world/scaffold/example) → Medium, no intent / explain → Strong |
 | 3 | `SessionAffinityPolicy` | — | Pin session to previously routed model |
 | 4 | `SemanticRouterPolicy` | `EnableSemanticRouter` | Override tier by cosine similarity to semantic route phrases |
 | 5 | `LongInputPolicy` | `EnableTokenEstimator` | Exclude models with insufficient context window |
@@ -279,8 +279,10 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 | `LatencyAwarePolicy_WithThompsonSampling_ReordersCorrectly` | m-good (100 successes) ranks before m-bad (100 failures) with seeded RNG |
 | `MultiDimensionalRouting_CalculatesMatchScoreAndSortsCorrectly` | Models sorted by multi-dimensional score, `Reason` contains dimension names |
 | `Apply_ComplexCodeIntent_SelectsStrongTier` | debug/fix/refactor/algorithm code → `code-complex`, Strong, Complex |
-| `Apply_SimpleCodeIntent_SelectsMediumTier` | hello world/explain/scaffold code → `code-simple`, Medium, Standard |
+| `Apply_SimpleCodeIntent_SelectsMediumTier` | hello world/example/scaffold code → `code-simple`, Medium, Standard |
 | `Apply_BareCodeBlockNoIntent_KeepsStrongTier` | bare code block (no intent) → `code-detected`, Strong (code capability priority) |
+| `Apply_ExplainCode_NotDowngradedToSimple` | `explain`/`解释` code → Strong (explain ≠ simple; needs Strong reasoning) |
+| `Apply_CodeBlockContainingHelloWorldString_NotDowngradedToSimple` | intent signals inside code block body → Strong (detection scoped to instruction text) |
 | `Apply_CodeClassNamedExample_NotDowngradedToSimple` | `public class Example {}` not downgraded (FP guard) |
 
 ### Thompson Sampling test pattern

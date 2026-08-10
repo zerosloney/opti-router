@@ -97,18 +97,19 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// 简单代码意图：hello world / 简单示例 / 脚手架 / 解释代码含义 / 入门。
-    /// 命中 → Medium（简单代码生成/解释不需要 Strong 的深度能力）。
+    /// 简单代码意图：hello world / 简单示例 / 脚手架。
+    /// 命中 → Medium（简单代码生成/脚手架不需要 Strong 的深度能力）。
     /// 仅用明确、低歧义的信号：英文裸名词 example/simple/basic 会误配代码里的
-    /// 类名/注释（如 "public class Example {}" / "BasicAuth"），故排除，只保留
-    /// 具体动词与中文意图词。
+    /// 类名/注释（如 "public class Example {}" / "BasicAuth"），故排除。
+    /// `explain`/`解释` 不在此列——解释复杂代码需要 Strong 推理，归入保守 Strong。
     /// </summary>
     /// <remarks>
-    /// intentional-simple: 触发词限定明确「简单/解释」语义，避免把含代码的复杂请求误降级。
+    /// intentional-simple: 触发词限定明确「简单/脚手架」语义；意图检测只跑在指令文本上
+    /// （见 <see cref="ExtractInstructionText"/>），不污染代码正文。
     /// </remarks>
     private static readonly Regex SimpleCodeIntentRegex = new(
-        @"\bhello\s*world\b|\b(?:scaffold|boilerplate|explain)\b|" +
-        @"hello ?world|示例|简单|脚手架|模板|解释|讲解|入门|这段代码.*(?:什么意思|含义|做什么)",
+        @"\bhello\s*world\b|\b(?:scaffold|boilerplate)\b|" +
+        @"hello ?world|简单|脚手架|模板|示例|入门",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <inheritdoc />
@@ -271,8 +272,10 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         if (hasCode)
         {
             // 代码意图细分：不再一律 Strong。复杂代码（调试/修复/重构/算法）→ Strong；
-            // 简单代码（hello world/示例/解释）→ Medium；无明确意图 → 保守 Strong（代码能力优先）。
-            return ClassifyCodeIntent(ConcatMessages(request));
+            // 简单代码（hello world/脚手架/示例）→ Medium；无明确意图 → 保守 Strong（代码能力优先）。
+            // 意图检测只跑在指令文本（最后一条 user 消息、剔除代码块）上，避免代码正文
+            // 里的注释/字符串/标识符（如 "// simple"、"hello world"）被误判为意图。
+            return ClassifyCodeIntent(ExtractInstructionText(request));
         }
 
         // 数学/公式：优先级仅次于代码。需 Strong 模型（符号推理、LaTeX 生成准确）。
@@ -352,6 +355,39 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
             return (ModelTier.Medium, ReasonCodeSimple, RequestComplexity.Standard);
 
         return (ModelTier.Strong, ReasonCodeDetected, RequestComplexity.Complex);
+    }
+
+    /// <summary>
+    /// fenced code block 匹配（``` 或 ~~~），用于从指令文本中剔除代码正文。
+    /// </summary>
+    private static readonly Regex FencedCodeBlockRegex = new(
+        @"```[\s\S]*?```|~~~[\s\S]*?~~~",
+        RegexOptions.Compiled);
+
+    /// <summary>
+    /// 提取意图检测用的指令文本：最后一条非空 user 消息，剔除 fenced code block。
+    /// 意图信号应来自用户的自然语言指令，而非代码正文——代码里的注释/字符串/标识符
+    /// （"// simple"、"hello world"）不应触发意图匹配。
+    /// </summary>
+    private static string ExtractInstructionText(Clients.ChatRequest request)
+    {
+        if (request.Messages is null || request.Messages.Count == 0) return string.Empty;
+        for (int i = request.Messages.Count - 1; i >= 0; i--)
+        {
+            var msg = request.Messages[i];
+            if (msg is null || !msg.Role.Equals("user", StringComparison.OrdinalIgnoreCase)) continue;
+            var text = msg.GetText();
+            if (string.IsNullOrEmpty(text)) continue;
+            return StripFencedCodeBlocks(text);
+        }
+        return string.Empty;
+    }
+
+    private static string StripFencedCodeBlocks(string text)
+    {
+        if (!text.Contains("```", StringComparison.Ordinal) && !text.Contains("~~~", StringComparison.Ordinal))
+            return text;
+        return FencedCodeBlockRegex.Replace(text, " ");
     }
 
     private static List<ModelEndpointOptions> FilterByTier(
