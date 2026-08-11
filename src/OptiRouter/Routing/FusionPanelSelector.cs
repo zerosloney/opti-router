@@ -9,12 +9,43 @@ public sealed record FusionPanelSelection(
 /// <summary>Pure deterministic Fusion panel sizing and soft-diversity ranking.</summary>
 public sealed class FusionPanelSelector
 {
-    public FusionPanelSelection Select(RouterDecision decision, RoutingOptions options)
+    public FusionPanelSelection Select(
+        RouterDecision decision,
+        RoutingOptions options,
+        UpstreamQuotaStateStore? quotaStore = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(decision);
         ArgumentNullException.ThrowIfNull(options);
 
-        int maximum = Math.Min(options.FusionRouterPanelSize, decision.Candidates.Count);
+        DateTimeOffset now = (timeProvider ?? TimeProvider.System).GetUtcNow();
+
+        // 1. Quota-aware filtering: Filter out candidates that are known to be exhausted
+        IReadOnlyList<ModelEndpointOptions> viableCandidates = decision.Candidates;
+        if (quotaStore is not null)
+        {
+            var unexhausted = new List<ModelEndpointOptions>();
+            foreach (var candidate in decision.Candidates)
+            {
+                var snapshot = quotaStore.GetSnapshot(candidate.Name);
+                if (snapshot?.IsExhausted(now) == true)
+                    continue;
+
+                bool lacksTokens = decision.EstimatedInputTokens > 0
+                    && snapshot?.TokensRemaining is { } tokens
+                    && (snapshot.TokensResetAt is null || snapshot.TokensResetAt > now)
+                    && tokens < decision.EstimatedInputTokens;
+
+                if (!lacksTokens)
+                    unexhausted.Add(candidate);
+            }
+
+            // Fallback to decision candidates if filtering would leave < 2 models
+            if (unexhausted.Count >= 2)
+                viableCandidates = unexhausted;
+        }
+
+        int maximum = Math.Min(options.FusionRouterPanelSize, viableCandidates.Count);
         int requested = maximum;
         if (options.EnableDynamicFusionPanelSize)
         {
@@ -28,11 +59,11 @@ public sealed class FusionPanelSelector
             };
         }
 
-        if (!options.EnableFusionDiversity || decision.Candidates.Count <= 1)
-            return new FusionPanelSelection(requested, decision.Candidates.ToList());
+        if (!options.EnableFusionDiversity || viableCandidates.Count <= 1)
+            return new FusionPanelSelection(requested, viableCandidates.ToList());
 
-        var remaining = decision.Candidates.Skip(1).ToList();
-        var ranked = new List<ModelEndpointOptions> { decision.Candidates[0] };
+        var remaining = viableCandidates.Skip(1).ToList();
+        var ranked = new List<ModelEndpointOptions> { viableCandidates[0] };
         var providers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var families = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         AddKnown(ranked[0], providers, families);

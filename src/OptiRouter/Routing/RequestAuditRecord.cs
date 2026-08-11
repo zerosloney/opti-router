@@ -35,6 +35,9 @@ namespace OptiRouter.Routing;
 /// <param name="CacheWriteInputTokens">缓存写入输入 token。</param>
 /// <param name="UncachedInputTokens">未缓存输入 token。</param>
 /// <param name="QuotaLimited">是否为上游配额拒绝。</param>
+/// <param name="TraceId">W3C 规范的分布式 Trace ID。</param>
+/// <param name="SpanId">W3C 规范的子节点 Span ID。</param>
+/// <param name="ParentSpanId">父节点 Span ID（用于构建 DAG 树）。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -60,4 +63,7 @@ public sealed record RequestAuditRecord(
     int CachedInputTokens = 0,
     int CacheWriteInputTokens = 0,
     int UncachedInputTokens = 0,
-    bool QuotaLimited = false);
+    bool QuotaLimited = false,
+    string? TraceId = null,
+    string? SpanId = null,
+    string? ParentSpanId = null);

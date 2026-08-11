@@ -60,7 +60,11 @@ builder.Configuration.Sources.Add(new ModelsJsonConfigurationSource
 });
 
 // Bind and validate RouterOptions on startup.
-builder.Services.AddMemoryCache();
+builder.Services.AddMemoryCache(options =>
+{
+    options.SizeLimit = 100_000;
+    options.CompactionPercentage = 0.2;
+});
 builder.Services.AddOptions<RouterOptions>()
     .Bind(builder.Configuration.GetSection("OptiRouter"))
     .ValidateOnStart();
@@ -116,6 +120,9 @@ builder.Services.AddSingleton<IRequestAuditStore>(sp =>
 });
 
 // t3: 注册成本账本、跨请求模型健康跟踪器（三态断路器）和路由引擎。
+// 注册 ClientKeyService
+builder.Services.AddSingleton<ClientKeyService>(sp => new ClientKeyService(Path.Combine(builder.Environment.ContentRootPath, "data", "client-keys.json"), sp.GetRequiredService<ILogger<ClientKeyService>>()));
+
 builder.Services.AddSingleton<CostLedger>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
@@ -171,6 +178,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
     var policies = new List<IRouterPolicy>
     {
+        new DataSovereigntyPolicy(),
         new CapabilityFilterPolicy(),
         new RuleClassifierPolicy(),
         new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),

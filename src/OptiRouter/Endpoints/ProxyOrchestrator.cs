@@ -102,6 +102,19 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string? lastErrorMessage = null;
         bool fusionRouterAttempted = false;
 
+        PiiMap? piiMap = null;
+        if (options.Routing.EnablePiiAnonymization)
+        {
+            var anonymized = PiiAnonymizer.AnonymizeRequest(request);
+            request = anonymized.SanitizedRequest;
+            piiMap = anonymized.PiiMap;
+        }
+
+        if (options.Routing.EnablePersonaDriftProtection && !string.IsNullOrEmpty(sessionId))
+        {
+            request = PersonaDriftGuard.ApplyPersonaAnchor(request);
+        }
+
         while (true)
         {
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
@@ -138,7 +151,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 lastErrorMessage = fusionResult.LastErrorMessage;
 
                 if (fusionResult.Response is not null)
-                    return fusionResult.Response;
+                    return ProcessResponse(fusionResult.Response, piiMap);
                 // 失败后继续到 Fusion-lite（若同开且仍有足够候选）或串行降级。
             }
 
@@ -157,7 +170,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 lastErrorMessage = fusionResult.LastErrorMessage;
 
                 if (fusionResult.Response is not null)
-                    return fusionResult.Response;
+                    return ProcessResponse(fusionResult.Response, piiMap);
                 // 全部失败：failedInThisRequest 已填充，continue 到下一轮串行降级。
                 continue;
             }
@@ -223,7 +236,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         var upgraded = await _cascadeHandler.TryUpgradeAsync(
                              request, response, decision, candidate, estimatedTokens, routedTier, sessionId, failedInThisRequest, ct).ConfigureAwait(false);
                         if (upgraded is not null)
-                            return upgraded;
+                            return ProcessResponse(upgraded, piiMap);
                     }
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
@@ -231,7 +244,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             ? CostCalculator.Compute(response.Usage, candidate).ToString("F6")
                             : "unknown");
 
-                    return response;
+                    return ProcessResponse(response, piiMap);
                 }
                 catch (ModelClientException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
                 {
@@ -330,6 +343,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string? lastErrorMessage = null;
         long totalBytesTransferred = 0;
         long maxResponseBytes = options.Routing.MaxResponseStreamBytes;
+        bool fusionRouterAttempted = false;
 
         while (true)
         {
@@ -345,6 +359,26 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (decision.BudgetExhausted)
                     throw new BudgetExhaustedException(decision.Reason);
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
+            }
+
+            // 融合路由流式支持（Progressive Speculative Streaming）
+            if (failoverEnabled && options.Routing.EnableFusionRouter && !fusionRouterAttempted
+                && failedInThisRequest.Count == 0
+                && decision.RequestComplexity >= options.Routing.FusionRouterMinComplexity
+                && decision.Candidates.Count >= 2)
+            {
+                fusionRouterAttempted = true;
+                bool producedAnyChunk = false;
+                await foreach (var line in _fusionRouter.ExecuteStreamAsync(
+                    request, options, decision, decision.EstimatedInputTokens, routedTier,
+                    sessionId, failedInThisRequest, attemptedModels, ct).WithCancellation(ct))
+                {
+                    producedAnyChunk = true;
+                    yield return line;
+                }
+
+                if (producedAnyChunk)
+                    yield break;
             }
 
             bool attemptedCandidate = false;
@@ -599,4 +633,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         return statusCode is 408 or >= 500 and <= 599;
     }
 
+    private static RawChatResponse ProcessResponse(RawChatResponse response, PiiMap? piiMap)
+    {
+        if (piiMap is null || !piiMap.HasSensitiveData || string.IsNullOrEmpty(response.Body))
+            return response;
+
+        string restoredBody = piiMap.Restore(response.Body);
+        return new RawChatResponse(restoredBody, response.Usage, response.Metadata);
+    }
 }

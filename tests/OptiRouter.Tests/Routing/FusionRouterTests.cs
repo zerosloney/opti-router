@@ -1146,4 +1146,44 @@ public class FusionRouterTests
             // 融合触发：model-a 被调 3 次（panel + analyst + outer）。
             Assert.Equal(3, modelACalls);
         }
+
+        [Fact]
+        public void CompressPanelText_RemovesGreetingsAndWhitespace()
+        {
+            string raw = "Hello!\n\nThis is the core answer line 1.\n\nThis is line 2.";
+            string compressed = FusionSynthesis.CompressPanelText(raw);
+            Assert.DoesNotContain("Hello!", compressed);
+            Assert.Contains("This is the core answer line 1.", compressed);
+            Assert.Contains("This is line 2.", compressed);
+        }
+
+        [Fact]
+        public void FusionPanelSelector_TrimsExhaustedModels()
+        {
+            var quotaStore = new UpstreamQuotaStateStore();
+            quotaStore.Record("model-b", new UpstreamResponseMetadata
+            {
+                RequestsRemaining = 0,
+                TokensRemaining = 0,
+                RetryAfter = TimeSpan.FromSeconds(60)
+            }, rateLimited: true);
+
+            var selector = new FusionPanelSelector();
+            var options = new RoutingOptions { FusionRouterPanelSize = 3 };
+            var decision = new RouterDecision
+            {
+                Reason = "test",
+                Candidates = new List<ModelEndpointOptions>
+                {
+                    new ModelEndpointOptions { Name = "model-a" },
+                    new ModelEndpointOptions { Name = "model-b" },
+                    new ModelEndpointOptions { Name = "model-c" }
+                }
+            };
+
+            var selection = selector.Select(decision, options, quotaStore);
+            Assert.DoesNotContain(selection.RankedCandidates, m => m.Name == "model-b");
+            Assert.Contains(selection.RankedCandidates, m => m.Name == "model-a");
+            Assert.Contains(selection.RankedCandidates, m => m.Name == "model-c");
+        }
 }

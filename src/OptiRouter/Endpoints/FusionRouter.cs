@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
@@ -21,6 +23,7 @@ public sealed class FusionRouter
     private readonly ModelHealthTracker _healthTracker;
     private readonly OutcomeRecorder _recorder;
     private readonly FusionPanelSelector _panelSelector;
+    private readonly UpstreamQuotaStateStore? _quotaStore;
     private readonly ILogger<FusionRouter> _logger;
 
     public FusionRouter(
@@ -28,13 +31,15 @@ public sealed class FusionRouter
         ModelHealthTracker healthTracker,
         OutcomeRecorder recorder,
         FusionPanelSelector panelSelector,
-        ILogger<FusionRouter> logger)
+        ILogger<FusionRouter> logger,
+        UpstreamQuotaStateStore? quotaStore = null)
     {
         _clientProvider = clientProvider;
         _healthTracker = healthTracker;
         _recorder = recorder;
         _panelSelector = panelSelector;
         _logger = logger;
+        _quotaStore = quotaStore;
     }
 
     public async Task<FusionAttemptResult> ExecuteAsync(
@@ -49,7 +54,7 @@ public sealed class FusionRouter
         CancellationToken ct)
     {
         var routing = options.Routing;
-        var panelSelection = _panelSelector.Select(decision, routing);
+        var panelSelection = _panelSelector.Select(decision, routing, _quotaStore);
         int panelSize = panelSelection.RequestedSize;
         int halfOpenMaxProbes = routing.FailoverHalfOpenMaxProbes;
         int requiredSuccesses = routing.FailoverHalfOpenRequiredSuccesses;
@@ -462,4 +467,150 @@ public sealed class FusionRouter
         => candidates.FirstOrDefault(m => !failedInThisRequest.Contains(m.Name))
            ?? candidates[0];
 
+    /// <summary>
+    /// 流式融合路由（Progressive Speculative Streaming）：
+    /// Anchor 锚点首选模型开启首发 SSE 实时推流（TTFT &lt; 200ms），后台并发运行 Secondary Panel 模型与 Analyst 分析。
+    /// 若 Analyst 分析识别出深度补充或矛盾分歧，在 SSE 结尾追加融合修正 Patch Chunk。
+    /// </summary>
+    public async IAsyncEnumerable<RawStreamLine> ExecuteStreamAsync(
+        ChatRequest request,
+        RouterOptions options,
+        RouterDecision decision,
+        int estimatedTokens,
+        ModelTier routedTier,
+        string? sessionId,
+        HashSet<string> failedInThisRequest,
+        List<string> attemptedModels,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var routing = options.Routing;
+        var panelSelection = _panelSelector.Select(decision, routing, _quotaStore);
+        int panelSize = panelSelection.RequestedSize;
+        if (panelSelection.RankedCandidates.Count < 2)
+            yield break;
+
+        var admitted = panelSelection.RankedCandidates.Take(panelSize).ToList();
+        var anchorModel = admitted[0];
+        attemptedModels.Add(anchorModel.Name);
+
+        // 1. 首发 Anchor 模型开始流式输出
+        IModelClient anchorClient;
+        try
+        {
+            anchorClient = _clientProvider.GetClient(anchorModel);
+        }
+        catch
+        {
+            yield break;
+        }
+
+        IAsyncEnumerable<RawStreamLine> anchorStream;
+        try
+        {
+            anchorStream = anchorClient.StreamRawAsync(request, ct);
+        }
+        catch
+        {
+            yield break;
+        }
+
+        // 2. 后台并发运行 Secondary Panel 任务（非流式获取其他 panel 补充答案）
+        var secondaryModels = admitted.Skip(1).ToList();
+        var secondaryTasks = new List<Task<(string Model, string Text)>>();
+        foreach (var m in secondaryModels)
+        {
+            var secCopy = m;
+            secondaryTasks.Add(Task.Run(async () =>
+            {
+                try
+                {
+                    var client = _clientProvider.GetClient(secCopy);
+                    var resp = await client.CompleteRawAsync(request with { Stream = false }, ct).ConfigureAwait(false);
+                    return (secCopy.Name, ResponseConfidenceChecker.ExtractAssistantText(resp));
+                }
+                catch
+                {
+                    return (secCopy.Name, string.Empty);
+                }
+            }, ct));
+        }
+
+        var anchorTextSb = new StringBuilder();
+        RawStreamLine? lastLine = null;
+
+        // 3. 实时流式输出 Anchor 模型内容
+        await foreach (var line in anchorStream.WithCancellation(ct))
+        {
+            if (line.Data == "[DONE]")
+            {
+                lastLine = line;
+                break;
+            }
+            if (!string.IsNullOrEmpty(line.Data))
+            {
+                anchorTextSb.Append(line.Data);
+            }
+            yield return line;
+        }
+
+        // 4. Anchor 流式完成后，收集 Secondary Panel 回答并执行轻量 Analyst 评估
+        string? patchJson = null;
+        try
+        {
+            var secondaryResults = await Task.WhenAll(secondaryTasks).ConfigureAwait(false);
+            var panelAnswers = new List<(string Model, string Text)> { (anchorModel.Name, anchorTextSb.ToString()) };
+            foreach (var secRes in secondaryResults)
+            {
+                if (!string.IsNullOrWhiteSpace(secRes.Text))
+                    panelAnswers.Add(secRes);
+            }
+
+            if (panelAnswers.Count >= 2)
+            {
+                ModelEndpointOptions analystModel = options.Models.FirstOrDefault(m => m.Enabled && m.Name.Equals(routing.FusionRouterAnalystModel, StringComparison.OrdinalIgnoreCase))
+                    ?? PickUnfailedFallback(decision.Candidates, failedInThisRequest);
+
+                string analystPrompt = string.IsNullOrWhiteSpace(routing.FusionRouterAnalystPrompt)
+                    ? FusionSynthesis.DefaultAnalystPrompt
+                    : routing.FusionRouterAnalystPrompt;
+
+                var analystReq = FusionSynthesis.BuildAnalystRequest(request, panelAnswers, analystPrompt, routing.FusionRouterTemperature);
+                var analystClient = _clientProvider.GetClient(analystModel);
+                var analystResp = await analystClient.CompleteRawAsync(analystReq, ct).ConfigureAwait(false);
+                var analysis = FusionSynthesis.ParseAnalysis(analystResp);
+
+                if (analysis is not null && (!string.IsNullOrWhiteSpace(analysis.Contradictions) || !string.IsNullOrWhiteSpace(analysis.UniqueInsights) || !string.IsNullOrWhiteSpace(analysis.Gaps)))
+                {
+                    var patchSb = new StringBuilder();
+                    patchSb.AppendLine("\n\n---\n💡 **多模型融合增强分析**：");
+                    if (!string.IsNullOrWhiteSpace(analysis.UniqueInsights))
+                        patchSb.AppendLine($"- **关键补充**：{analysis.UniqueInsights}");
+                    if (!string.IsNullOrWhiteSpace(analysis.Contradictions))
+                        patchSb.AppendLine($"- **主要分歧**：{analysis.Contradictions}");
+                    if (!string.IsNullOrWhiteSpace(analysis.Gaps))
+                        patchSb.AppendLine($"- **注意事项**：{analysis.Gaps}");
+
+                    patchJson = CreateDeltaChunkJson(patchSb.ToString());
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Background streaming fusion synthesis skipped or errored.");
+        }
+
+        if (!string.IsNullOrEmpty(patchJson))
+        {
+            yield return new RawStreamLine(patchJson, null);
+        }
+
+        // 5. 补发 [DONE] 标识
+        yield return lastLine ?? new RawStreamLine("[DONE]", null);
+    }
+
+    private static string CreateDeltaChunkJson(string text)
+    {
+        string escaped = JsonSerializer.Serialize(text);
+        return $"{{\"id\":\"fusion-patch-{Guid.NewGuid():N}\",\"object\":\"chat.completion.chunk\",\"created\":{DateTimeOffset.UtcNow.ToUnixTimeSeconds()},\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{escaped}}},\"finish_reason\":null}}]}}";
+    }
 }

@@ -1,5 +1,9 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Linq;
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using OptiRouter.Configuration;
 
@@ -13,6 +17,11 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     private readonly object _lock = new();
     private readonly SqliteConnection _connection;
     private bool _disposed;
+
+    private readonly ConcurrentQueue<RequestAuditRecord> _queue = new();
+    private readonly SemaphoreSlim _signal = new(0, int.MaxValue);
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Task _processTask;
 
     /// <summary>
     /// 用指定 DB 文件路径构造。
@@ -68,6 +77,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         EnsureColumn("cache_write_input_tokens", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn("uncached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn("quota_limited", "INTEGER NOT NULL DEFAULT 0");
+
+        _processTask = Task.Run(ProcessQueueAsync);
     }
 
     private void EnsureColumn(string columnName, string definition)
@@ -96,49 +107,77 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(record);
 
+        // 零阻塞入列并唤醒后台批量写任务
+        _queue.Enqueue(record);
+        _signal.Release();
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        try
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                await _signal.WaitAsync(_cts.Token).ConfigureAwait(false);
+                FlushQueue();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            FlushQueue();
+        }
+    }
+
+    private void FlushQueue()
+    {
         lock (_lock)
         {
+            if (_queue.IsEmpty) return;
+
             using var tx = _connection.BeginTransaction();
-            using var cmd = _connection.CreateCommand();
-            cmd.Transaction = tx;
-            cmd.CommandText = """
-                INSERT INTO request_audit
-                    (timestamp, request_id, model, estimated_tokens, prompt_tokens,
-                     completion_tokens, cost, latency_ms, session_id, routing_reason,
-                     success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                     is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
-                     cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited)
-                VALUES
-                    (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
-                     @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
-                     @cached, @cachewrite, @uncached, @quota);
-                """;
-            cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
-            cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
-            cmd.Parameters.AddWithValue("@model", record.Model);
-            cmd.Parameters.AddWithValue("@est", record.EstimatedInputTokens);
-            cmd.Parameters.AddWithValue("@ptok", record.PromptTokens);
-            cmd.Parameters.AddWithValue("@ctok", record.CompletionTokens);
-            cmd.Parameters.AddWithValue("@cost", (double)record.Cost);
-            cmd.Parameters.AddWithValue("@lat", record.LatencyMs);
-            cmd.Parameters.AddWithValue("@sid", (object?)record.SessionId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@reason", record.RoutingReason);
-            cmd.Parameters.AddWithValue("@succ", record.Success ? 1 : 0);
-            cmd.Parameters.AddWithValue("@err", (object?)record.ErrorMessage ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@stream", record.IsStreaming ? 1 : 0);
-            cmd.Parameters.AddWithValue("@rtier", record.RoutedTier.ToString());
-            cmd.Parameters.AddWithValue("@cascade", record.CascadeTriggered ? 1 : 0);
-            cmd.Parameters.AddWithValue("@upg", (object?)record.UpgradedFrom ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@adopted", record.IsAdopted ? 1 : 0);
-            cmd.Parameters.AddWithValue("@pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@estim", record.IsEstimated ? 1 : 0);
-            cmd.Parameters.AddWithValue("@frole", (object?)record.FusionRole ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@ttft", (object?)record.TimeToFirstTokenMs ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@cached", record.CachedInputTokens);
-            cmd.Parameters.AddWithValue("@cachewrite", record.CacheWriteInputTokens);
-            cmd.Parameters.AddWithValue("@uncached", record.UncachedInputTokens);
-            cmd.Parameters.AddWithValue("@quota", record.QuotaLimited ? 1 : 0);
-            cmd.ExecuteNonQuery();
+            while (_queue.TryDequeue(out var record))
+            {
+                using var cmd = _connection.CreateCommand();
+                cmd.Transaction = tx;
+                cmd.CommandText = """
+                    INSERT INTO request_audit
+                        (timestamp, request_id, model, estimated_tokens, prompt_tokens,
+                         completion_tokens, cost, latency_ms, session_id, routing_reason,
+                         success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
+                         is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
+                         cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited)
+                    VALUES
+                        (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
+                         @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
+                         @cached, @cachewrite, @uncached, @quota);
+                    """;
+                cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
+                cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
+                cmd.Parameters.AddWithValue("@model", record.Model);
+                cmd.Parameters.AddWithValue("@est", record.EstimatedInputTokens);
+                cmd.Parameters.AddWithValue("@ptok", record.PromptTokens);
+                cmd.Parameters.AddWithValue("@ctok", record.CompletionTokens);
+                cmd.Parameters.AddWithValue("@cost", (double)record.Cost);
+                cmd.Parameters.AddWithValue("@lat", record.LatencyMs);
+                cmd.Parameters.AddWithValue("@sid", (object?)record.SessionId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@reason", record.RoutingReason);
+                cmd.Parameters.AddWithValue("@succ", record.Success ? 1 : 0);
+                cmd.Parameters.AddWithValue("@err", (object?)record.ErrorMessage ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@stream", record.IsStreaming ? 1 : 0);
+                cmd.Parameters.AddWithValue("@rtier", record.RoutedTier.ToString());
+                cmd.Parameters.AddWithValue("@cascade", record.CascadeTriggered ? 1 : 0);
+                cmd.Parameters.AddWithValue("@upg", (object?)record.UpgradedFrom ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@adopted", record.IsAdopted ? 1 : 0);
+                cmd.Parameters.AddWithValue("@pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@estim", record.IsEstimated ? 1 : 0);
+                cmd.Parameters.AddWithValue("@frole", (object?)record.FusionRole ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@ttft", (object?)record.TimeToFirstTokenMs ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@cached", record.CachedInputTokens);
+                cmd.Parameters.AddWithValue("@cachewrite", record.CacheWriteInputTokens);
+                cmd.Parameters.AddWithValue("@uncached", record.UncachedInputTokens);
+                cmd.Parameters.AddWithValue("@quota", record.QuotaLimited ? 1 : 0);
+                cmd.ExecuteNonQuery();
+            }
             tx.Commit();
         }
     }
@@ -151,6 +190,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
         lock (_lock)
         {
+            FlushQueue();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
@@ -176,6 +216,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
         lock (_lock)
         {
+            FlushQueue();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
                 SELECT timestamp, request_id, model, estimated_tokens, prompt_tokens,
@@ -204,6 +245,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
         lock (_lock)
         {
+            FlushQueue();
             // 先取总数。
             using var countCmd = _connection.CreateCommand();
             countCmd.CommandText = """
@@ -242,6 +284,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
         lock (_lock)
         {
+            FlushQueue();
             using var cmd = _connection.CreateCommand();
             // 单条聚合：SUM(CASE...) 统计失败数，COUNT(*) 统计总数。
             // 替代 GetByTimeRange(int.MaxValue) 全量物化，O(1) 内存。
@@ -272,6 +315,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
         lock (_lock)
         {
+            FlushQueue();
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = "DELETE FROM request_audit WHERE timestamp < @cutoff;";
             cmd.Parameters.AddWithValue("@cutoff", FormatTimestamp(cutoff));
@@ -286,6 +330,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
         lock (_lock)
         {
+            FlushQueue();
             // 需计算 p95，SQLite AVG() 无法直接给出百分位。逐行拉取窗口内成功延迟，
             // C# 侧分组排序算 avg + p95。窗口（默认 60min）内模型 <50、样本有界，后台低频聚合可接受。
             using var cmd = _connection.CreateCommand();
@@ -328,7 +373,22 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _connection.Dispose();
+
+        _cts.Cancel();
+        try
+        {
+            _processTask.GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Ignore cancel exception during dispose
+        }
+
+        lock (_lock)
+        {
+            FlushQueue();
+            _connection.Dispose();
+        }
         GC.SuppressFinalize(this);
     }
 

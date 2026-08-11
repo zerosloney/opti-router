@@ -185,3 +185,23 @@ _ = Task.Run(async () => { while (true) { await Task.Delay(2000); Refresh(); } }
 _refreshTimer = new Timer(_ => _ = OnTimerTick(), null, 2000, 2000);
 public void Dispose() => _refreshTimer?.Dispose();
 ```
+
+---
+
+## 8. Sliding Glass Drawer & Modal Patterns
+
+### Pattern: Glassmorphism Sliding Detail Drawer
+- Clickable rows set `@onclick="() => SelectLogItem(item)"` with `class="hover-row"` and `cursor: pointer`.
+- Drawer backdrop fixed overlay (`rgba(0,0,0,0.6)`), drawer container (`#0f172a`, `border-left: 1px solid rgba(56,189,248,0.3)`).
+- Critical stopPropagation on inner drawer container: `@onclick:stopPropagation="true"` so clicking inside does not trigger backdrop dismissal.
+
+```razor
+@if (SelectedLogItem != null)
+{
+    <div class="drawer-backdrop" @onclick="() => SelectedLogItem = null" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 9999; display: flex; justify-content: flex-end;">
+        <div class="drawer-content" @onclick:stopPropagation="true" style="width: 520px; max-width: 90vw; height: 100%; background: #0f172a; padding: 20px; overflow-y: auto;">
+            <!-- Content -->
+        </div>
+    </div>
+}
+```

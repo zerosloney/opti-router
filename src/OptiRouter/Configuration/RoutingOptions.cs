@@ -279,6 +279,31 @@ public sealed class RoutingOptions
     public int FusionRouterPanelTimeoutSeconds { get; set; } = 0;
 
     /// <summary>
+    /// 是否启用 PII 敏感数据脱敏与反向还原。默认 false。
+    /// </summary>
+    public bool EnablePiiAnonymization { get; set; } = false;
+
+    /// <summary>
+    /// 是否启用数据不出域/本地私有节点隔离路由策略。默认 false。
+    /// </summary>
+    public bool EnableDataSovereignty { get; set; } = false;
+
+    /// <summary>
+    /// 是否启用 JSON AST 自动化修补服务（修复 Markdown 围栏、控制字符、断尾补全）。默认 true。
+    /// </summary>
+    public bool EnableJsonAstAutoRepair { get; set; } = true;
+
+    /// <summary>
+    /// 是否启用 W3C 分布式链路追踪（生成 TraceId / SpanId，映射 ActivitySource）。默认 true。
+    /// </summary>
+    public bool EnableDistributedTracing { get; set; } = true;
+
+    /// <summary>
+    /// 是否启用多轮对话人设一致性防护（Persona Drift Protection）。默认 true。
+    /// </summary>
+    public bool EnablePersonaDriftProtection { get; set; } = true;
+
+    /// <summary>
     /// 是否启用多维能力评估路由。
     /// </summary>
     public bool EnableMultiDimensionalRouting { get; set; } = false;

@@ -290,6 +290,30 @@ public sealed class ModelHealthTracker
     }
 
     /// <summary>
+    /// 手动干预断路器状态：强行将模型断路器重置为指定状态（如闭合正常或强制隔离打开）。
+    /// </summary>
+    public void ForceSetState(string modelName, CircuitState newState)
+    {
+        if (string.IsNullOrEmpty(modelName)) return;
+
+        lock (_lock)
+        {
+            if (!_circuits.TryGetValue(modelName, out var info))
+            {
+                info = new CircuitInfo();
+                _circuits[modelName] = info;
+            }
+
+            info.State = newState;
+            info.FailureCount = 0;
+            info.ActiveProbes = 0;
+            info.HalfOpenSuccesses = 0;
+            info.CoolDownUntil = newState == CircuitState.Open ? _nowProvider().AddHours(1) : default;
+            _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
+        }
+    }
+
+    /// <summary>
     /// 打开状态冷却到期时转入半开（惰性转换，无需独立定时器）。
     /// 调用方必须持有 <see cref="_lock"/>。
     /// </summary>

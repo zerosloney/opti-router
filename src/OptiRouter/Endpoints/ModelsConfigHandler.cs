@@ -1,4 +1,6 @@
+using OptiRouter.Clients;
 using OptiRouter.Configuration;
+using OptiRouter.Routing;
 
 namespace OptiRouter.Endpoints;
 
@@ -29,6 +31,7 @@ public static class ModelsConfigHandler
                 m.TimeoutSeconds,
                 m.MaxRetries,
                 m.Enabled,
+                m.IsLocalOrPrivate,
                 m.InputPricePerMillion,
                 m.CachedInputPricePerMillion,
                 m.CacheWriteInputPricePerMillion,
@@ -51,6 +54,7 @@ public static class ModelsConfigHandler
                 m.TimeoutSeconds,
                 m.MaxRetries,
                 m.Enabled,
+                m.IsLocalOrPrivate,
                 m.Provider,
                 m.Family,
                 m.InputPricePerMillion,
@@ -83,7 +87,6 @@ public static class ModelsConfigHandler
                 Provider = req.Provider?.Trim() ?? string.Empty,
                 Family = req.Family?.Trim() ?? string.Empty,
                 Tier = req.Tier ?? ModelTier.Medium,
-                // 数值 clamp：镜像 RouterOptionsValidator 边界，防止坏值落盘导致重启 ValidateOnStart 失败。
                 MaxContextTokens = (req.MaxContextTokens is > 0) ? req.MaxContextTokens.Value : 8192,
                 InputPricePerMillion = (req.InputPricePerMillion ?? 0) < 0 ? 0 : req.InputPricePerMillion!.Value,
                 OutputPricePerMillion = (req.OutputPricePerMillion ?? 0) < 0 ? 0 : req.OutputPricePerMillion!.Value,
@@ -91,7 +94,8 @@ public static class ModelsConfigHandler
                 CacheWriteInputPricePerMillion = req.CacheWriteInputPricePerMillion is >= 0 ? req.CacheWriteInputPricePerMillion : null,
                 TimeoutSeconds = (req.TimeoutSeconds is > 0) ? req.TimeoutSeconds.Value : 120,
                 MaxRetries = (req.MaxRetries is >= 0) ? req.MaxRetries.Value : 0,
-                Enabled = req.Enabled ?? true
+                Enabled = req.Enabled ?? true,
+                IsLocalOrPrivate = req.IsLocalOrPrivate ?? false
             };
             if (req.Tags is not null)
                 foreach (var tag in req.Tags)
@@ -123,6 +127,7 @@ public static class ModelsConfigHandler
             if (req.TimeoutSeconds is > 0) model.TimeoutSeconds = req.TimeoutSeconds.Value;
             if (req.MaxRetries is >= 0) model.MaxRetries = req.MaxRetries.Value;
             if (req.Enabled is not null) model.Enabled = req.Enabled.Value;
+            if (req.IsLocalOrPrivate is not null) model.IsLocalOrPrivate = req.IsLocalOrPrivate.Value;
             if (req.Provider is not null) model.Provider = req.Provider.Trim();
             if (req.Family is not null) model.Family = req.Family.Trim();
             if (req.InputPricePerMillion >= 0) model.InputPricePerMillion = req.InputPricePerMillion.Value;
@@ -149,6 +154,26 @@ public static class ModelsConfigHandler
                 return Results.NotFound(new { error = $"Model '{name}' not found" });
             return Results.Ok(new { message = $"Model '{name}' deleted" });
         });
+
+        // 7. POST Test Endpoint Connectivity
+        endpoints.MapPost("/api/models/{name}/test", async (string name, ModelsConfigService cfg, IModelClientProvider clientProvider) =>
+        {
+            var models = cfg.LoadModels();
+            var model = models.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.Ordinal));
+            if (model is null)
+                return Results.NotFound(new { success = false, error = $"Model '{name}' not found" });
+
+            var client = clientProvider.GetClient(model);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Min(10, model.TimeoutSeconds)));
+            var result = await client.ProbeAsync(cts.Token);
+            return Results.Ok(new
+            {
+                success = result.Healthy,
+                latencyMs = (long)result.LatencyMs,
+                message = result.Healthy ? "连接正常 (OK)" : "连接异常",
+                error = result.Error
+            });
+        });
     }
 
     private record UpdateModelRequest(
@@ -164,7 +189,8 @@ public static class ModelsConfigHandler
         string? Provider = null,
         string? Family = null,
         decimal? CachedInputPricePerMillion = null,
-        decimal? CacheWriteInputPricePerMillion = null);
+        decimal? CacheWriteInputPricePerMillion = null,
+        bool? IsLocalOrPrivate = null);
 
     private record CreateModelRequest(
         string Name,
@@ -181,5 +207,6 @@ public static class ModelsConfigHandler
         string? Provider = null,
         string? Family = null,
         decimal? CachedInputPricePerMillion = null,
-        decimal? CacheWriteInputPricePerMillion = null);
+        decimal? CacheWriteInputPricePerMillion = null,
+        bool? IsLocalOrPrivate = null);
 }

@@ -755,3 +755,51 @@ bool panelTimedOut = error is OperationCanceledException && !ct.IsCancellationRe
 **Default off**: 两项默认均 false，互斥规则对默认配置无影响（向后兼容）。
 
 **Extensibility**: 若未来需要在 bandit 内嵌套 thompson-style 后验，可重构成"单 bandit gate + 内部分支"，届时此 mutex 规则可放宽。
+
+## Scenario: Dashboard Policy Hot-Tuning, Circuit Breaker Overrides & Tenant Client Keys
+
+### 1. Scope / Trigger
+- Hot-tuning system routing policies and daily budget directly from the UI control studio without container restart.
+- Manual emergency override of model circuit breaker states (`Closed`, `Open`, `HalfOpen`) for operations & isolation.
+- Issuing and enforcing multi-tenant client API Access Keys with individual daily budget ($USD) and QPS rate limits.
+
+### 2. Signatures
+- `GET /api/dashboard/config` -> `Results.Ok(SystemConfigDto)`
+- `PUT /api/dashboard/config` (`UpdateSystemConfigRequest`) -> `Results.Ok`
+- `POST /api/dashboard/circuits/{name}/override` (`CircuitOverrideRequest`) -> `Results.Ok`
+- `GET /api/dashboard/keys`, `POST /api/dashboard/keys`, `PUT /api/dashboard/keys/{key}`, `DELETE /api/dashboard/keys/{key}` -> `ClientKeyService` CRUD endpoints
+- `ModelHealthTracker.ForceSetState(string modelName, CircuitState newState)`
+- `ClientKeyService.CreateKey(string tenantName, decimal dailyBudgetUsd, int maxQps)`
+
+### 3. Contracts
+- `UpdateSystemConfigRequest`: 9 policy toggles (`EnableFailover`, `EnableBudgetGuard`, `EnableRuleClassifier`, `EnableLatencyAware`, `EnableSemanticRouter`, `EnablePiiAnonymization`, `EnableDataSovereignty`, `EnableJsonAstAutoRepair`, `EnableFusionRouter`), `DailyBudgetUsd`, `EnforceOnExhausted`.
+- `CircuitOverrideRequest`: `TargetState` ("Closed", "Open", "HalfOpen").
+- `ClientKeyInfo`: `Key` ("opti-key-..."), `TenantName`, `DailyBudgetUsd`, `DailySpendUsd`, `MaxQps`, `Enabled`, `CreatedAt`.
+
+### 4. Validation & Error Matrix
+- `TargetState` not valid Enum -> `400 Bad Request` ("Invalid target state...")
+- `TenantName` empty -> `400 Bad Request` ("TenantName is required.")
+- `Key` not found -> `404 Not Found` ("Client key '{key}' not found.")
+
+### 5. Good/Base/Bad Cases
+- Good: `POST /api/dashboard/circuits/gpt-4o/override` with `{"targetState": "Closed"}` -> Resets circuit state to Closed, clears failure count.
+- Base: `PUT /api/dashboard/config` with `{"enableLatencyAware": true}` -> Instant hot reload in memory for next `RouterEngine.Decide()` run.
+- Bad: `POST /api/dashboard/circuits/unknown/override` with `{"targetState": "Invalid"}` -> Returns 400 Bad Request.
+
+### 6. Tests Required
+- `ModelHealthTracker.ForceSetState` test: verifies transition from Open to Closed clears failure count and cooldown time.
+- `ClientKeyService` persistence test: verifies CRUD operations persist safely across reloads.
+- Dashboard endpoints integration test: verifies HTTP status codes and payloads.
+
+### 7. Wrong vs Correct
+#### Wrong
+```csharp
+// Direct mutation of circuit state without lock protection
+circuit.State = CircuitState.Closed; // Thread-unsafe! Race conditions under concurrent routing decisions!
+```
+
+#### Correct
+```csharp
+// Thread-safe state force override through ModelHealthTracker
+tracker.ForceSetState(modelName, CircuitState.Closed);
+```

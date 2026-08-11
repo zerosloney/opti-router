@@ -19,10 +19,17 @@ public static class PolicyHelper
     /// <param name="detail">本策略产生的详情文本（<b>不</b>含 <c>{policy}:</c> 前缀，由 helper 拼装）。</param>
     public static RouterDecision Append(this RouterDecision previous, string policy, string detail)
     {
+        var events = new List<ReasonEvent>(previous.ReasonEvents.Count + 1);
+        if (previous.ReasonEvents.Count > 0)
+        {
+            events.AddRange(previous.ReasonEvents);
+        }
+        events.Add(new ReasonEvent(policy, detail));
+
         return previous with
         {
             Reason = $"{previous.Reason}; {policy}: {detail}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent(policy, detail)).ToList()
+            ReasonEvents = events
         };
     }
 }

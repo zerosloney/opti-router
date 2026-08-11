@@ -84,6 +84,11 @@ public sealed class ModelEndpointOptions
     public bool Enabled { get; set; } = true;
 
     /// <summary>
+    /// 是否为本地/私有化部署节点（数据不出域标示）。
+    /// </summary>
+    public bool IsLocalOrPrivate { get; set; } = false;
+
+    /// <summary>
     /// 可选能力标签，如 ["vision","tool-use"]。
     /// </summary>
     public IList<string> Tags

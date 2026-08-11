@@ -142,8 +142,8 @@ public static class FusionSynthesis
 
         try
         {
-            // 若模型用 ```json ... ``` 围栏包裹，剥离再解析。
-            string json = StripCodeFence(text);
+            // 使用 JSON AST 修复器自动剥离代码围栏、闲聊文本并修补断尾语法
+            string json = JsonAstRepairer.RepairJson(text);
             using var doc = JsonDocument.Parse(json);
             return new FusionAnalysis
             {
@@ -163,9 +163,11 @@ public static class FusionSynthesis
     private static string BuildAnalystInstruction(string analystPrompt, IReadOnlyList<(string Model, string Text)> panelAnswers)
     {
         var sb = new StringBuilder();
+        // Top-loaded static instruction prefix for Automatic Prefix Caching (APC)
+        sb.AppendLine("[SYSTEM_PREFIX_INSTRUCTION: ANALYST_SYNTHESIS_V1]");
         sb.AppendLine(analystPrompt);
         sb.AppendLine();
-        sb.AppendLine("## Panel 回答");
+        sb.AppendLine("## Panel 回答 (已压缩蒸馏)");
         for (int i = 0; i < panelAnswers.Count; i++)
         {
             var (model, text) = panelAnswers[i];
@@ -173,7 +175,9 @@ public static class FusionSynthesis
             if (!string.IsNullOrWhiteSpace(model))
                 sb.Append("：").Append(model);
             sb.AppendLine("】");
-            sb.AppendLine(string.IsNullOrWhiteSpace(text) ? "（无有效回答）" : text);
+            
+            string compressed = CompressPanelText(text);
+            sb.AppendLine(string.IsNullOrWhiteSpace(compressed) ? "（无有效回答）" : compressed);
             sb.AppendLine();
         }
         sb.Append("请只输出 JSON：{\"consensus\":\"...\",\"contradictions\":\"...\",\"gaps\":\"...\",\"unique_insights\":\"...\",\"recommendation\":\"...\"}");
@@ -183,6 +187,8 @@ public static class FusionSynthesis
     private static string BuildOuterInstruction(string outerPrompt, FusionAnalysis analysis)
     {
         var sb = new StringBuilder();
+        // Top-loaded static instruction prefix for Automatic Prefix Caching (APC)
+        sb.AppendLine("[SYSTEM_PREFIX_INSTRUCTION: OUTER_SYNTHESIS_V1]");
         sb.AppendLine(outerPrompt);
         sb.AppendLine();
         sb.AppendLine("## 分析摘要");
@@ -192,6 +198,41 @@ public static class FusionSynthesis
         sb.AppendLine("- 独特洞察：" + (string.IsNullOrWhiteSpace(analysis.UniqueInsights) ? "（无）" : analysis.UniqueInsights));
         sb.AppendLine("- 建议方向：" + (string.IsNullOrWhiteSpace(analysis.Recommendation) ? "（无）" : analysis.Recommendation));
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// 蒸馏压缩 Panel 回答：去除开场白/问候语、重复的多余空行与无意义填充，显著降低 Analyst 与 Outer 的 Input Token 消耗。
+    /// </summary>
+    public static string CompressPanelText(string rawText)
+    {
+        if (string.IsNullOrWhiteSpace(rawText)) return string.Empty;
+
+        var lines = rawText.Split('\n');
+        var sb = new StringBuilder();
+        bool isFirstLine = true;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+            // 跳过常见人工智能开场问候语
+            if (isFirstLine && (trimmed.StartsWith("你好", StringComparison.OrdinalIgnoreCase) ||
+                                trimmed.StartsWith("Hello", StringComparison.OrdinalIgnoreCase) ||
+                                trimmed.StartsWith("当然", StringComparison.OrdinalIgnoreCase) ||
+                                trimmed.StartsWith("没问题", StringComparison.OrdinalIgnoreCase) ||
+                                trimmed.StartsWith("作为AI", StringComparison.OrdinalIgnoreCase) ||
+                                trimmed.StartsWith("As an AI", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrEmpty(trimmed))
+            {
+                sb.AppendLine(trimmed);
+                isFirstLine = false;
+            }
+        }
+
+        return sb.ToString().Trim();
     }
 
     private static string StripCodeFence(string text)

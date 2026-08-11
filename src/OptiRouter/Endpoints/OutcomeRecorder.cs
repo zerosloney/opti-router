@@ -191,7 +191,11 @@ public sealed class OutcomeRecorder
                 return;
             }
 
-            _affinityCache.Set(key, new AffinityRecord(modelName, now), TimeSpan.FromSeconds(ttl));
+            _affinityCache.Set(key, new AffinityRecord(modelName, now), new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(ttl),
+                Size = 1
+            });
         }
         catch
         {

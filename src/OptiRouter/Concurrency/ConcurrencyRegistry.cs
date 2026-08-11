@@ -79,15 +79,16 @@ public static class ConcurrencyRegistry
     }
 
     /// <summary>
-    /// 节流后的惰性扫描：移除空闲超时的信号量。
+    /// 节流后的非阻塞扫描：移除空闲超时的信号量。
+    /// 使用 TryEnter 试探锁，若已有其他线程在扫描则立刻跳过，保障请求主管道 0 阻塞。
     /// </summary>
     private static void TrySweep()
     {
         DateTime now = DateTime.UtcNow;
-        // 快路径：间隔未到跳过。无锁读，偶发多线程同时通过仅多扫一次，无副作用。
         if (now - _lastSweepUtc < SweepInterval) return;
 
-        lock (_sweepLock)
+        if (!Monitor.TryEnter(_sweepLock)) return;
+        try
         {
             if (now - _lastSweepUtc < SweepInterval) return;
             _lastSweepUtc = now;
@@ -101,10 +102,6 @@ public static class ConcurrencyRegistry
                     entry.IdleSinceUtc ??= now;
                     if (now - entry.IdleSinceUtc.Value >= IdleEvictionInterval)
                     {
-                        // 尝试移除：仅当仍空闲时（并发刚占用则跳过）。
-                        // 不 Dispose 信号量：GetSemaphore 可能正返回同一实例给调用方，
-                        // Dispose 后调用方 WaitAsync/Release 会抛 ObjectDisposedException。
-                        // 移除后旧实例脱离 registry，调用方 Release 完毕无引用即由 GC 回收。
                         if (entry.Semaphore.CurrentCount == entry.InitialCount)
                         {
                             _semaphores.TryRemove(kvp.Key, out _);
@@ -116,6 +113,10 @@ public static class ConcurrencyRegistry
                     entry.IdleSinceUtc = null;
                 }
             }
+        }
+        finally
+        {
+            Monitor.Exit(_sweepLock);
         }
     }
 }
