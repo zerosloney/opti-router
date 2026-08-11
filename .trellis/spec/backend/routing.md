@@ -149,7 +149,10 @@ public sealed class LatencyStatsCache : ILatencyStatsProvider;
 | `FusionRouterMinPanelSize` | int | `2` | `[2, 5]` and `<= FusionRouterPanelSize` |
 | `EnableFusionDiversity` | bool | `false` | — |
 | `FusionRouterPanelTimeoutSeconds` | int | `0` | `>= 0` (`0` = disabled, backward-compatible) |
-| `EnableContextualBandit` | bool | `false` | 与 `EnableThompsonSampling` 互斥（启用时段内用 LinUCB） |
+| `FusionRouterTemperature` | double | `0.0` | `[0, 2]` (analyst/outer 温度，低温保 JSON 稳定) |
+| `FusionRouterPanelTemperature` | `double?` | `null` | `null` 沿用 `FusionRouterTemperature`；非 null 须 `[0, 2]` |
+| `FusionRouterMinComplexity` | `RequestComplexity` | `Unknown` | 合法枚举值（默认 `Unknown`=无门控，向后兼容） |
+| `EnableContextualBandit` | bool | `false` | 与 `EnableThompsonSampling` 互斥（启动期 `RouterOptionsValidator` 强制拒绝两者同开） |
 | `ContextualBanditAlpha` | double | `1.0` | `> 0` when `EnableContextualBandit=true` |
 | `ContextualBanditDiscountFactor` | double | `0.95` | `[0.5, 0.99]` when `EnableContextualBandit=true` |
 
@@ -213,7 +216,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 
 ### Contextual Bandit (LinUCB, P3)
 
-- Gate：`EnableContextualBandit`（默认关）。与 `EnableThompsonSampling` 互斥——启用时段内用 LinUCB 打分，Thompson 段内不生效。
+- Gate：`EnableContextualBandit`（默认关）。与 `EnableThompsonSampling` 互斥——同一段内只能由一种重排策略负责，混用会让 `ThompsonStateStore` 与 `ContextualBanditState` 互相覆盖、stat 计数器错位。`RouterOptionsValidator` 启动期强制拒绝两者同时开启（错误信息：`"EnableContextualBandit 与 EnableThompsonSampling 互斥，不能同时开启。"`）。生产路径等价互斥；`LatencyAwarePolicy.ReorderSegment` 内 `bandit > thompson > latency` 优先级顺序仅是防御性兜底（防配置漂移），正常配置下 bandit 与 thompson 不会同时为 true。
 - 特征：`ContextualBanditFeatureBuilder` 把分类信号（7 one-hot）+ tier（3 one-hot）+ bias 映射为 11 维向量。
 - 打分：`score = θ·x + α·sqrt(xᵀA⁻¹x)`（`ContextualBanditState.Predict`）。
 - 更新：`A += x·xᵀ`，`b += reward·x`，θ = A⁻¹·b，历史按 `ContextualBanditDiscountFactor` 衰减。
@@ -221,6 +224,42 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 - 修非上下文 Thompson 「只优化延迟、系统性低估 Strong」缺陷（研究实证 gpt-4o regret 0.447）——LinUCB 用请求特征学习「模型↔任务」匹配。
 - 冷启动：θ=0 仅 UCB 项（探索）；热重载 `Retain` 清理已删模型。
 - 测试：`ContextualBanditTests`（特征构造、状态数学、上下文影响选型、默认关向后兼容）。
+
+### Fusion Router Improvements (P1-P3)
+
+Fusion Router 的三个改进均**默认关/沿用旧值**，向后兼容。落地于 `08-10-fusion-p1p3`（研究报告 `08-10-fusion-router-algo-research`）。
+
+#### P1 — `FusionRouterPanelTemperature`（可配置 panel 温度多样性）
+
+- 字段：`RoutingOptions.FusionRouterPanelTemperature`（`double?`，默认 `null`）。
+- Panel 温度解析：`request.Temperature ?? routing.FusionRouterPanelTemperature ?? routing.FusionRouterTemperature`。
+- **analyst 温度不受影响**：analyst 始终用 `routing.FusionRouterTemperature`（低温度保 JSON 稳定）。
+- 语义：panel 用于发散采样（建议 >0 引入多样性，对齐 Self-Consistency 的温度多样性收益）；analyst/outer 用于收敛稳定。
+- 向后兼容：`PanelTemperature=null` 时 panel 沿用 `FusionRouterTemperature`，行为等同未配置 P1。
+- 校验：非 null 时须在 `[0, 2]`（`RouterOptionsValidator`）。
+
+#### P2 — Analyst 解析加固（`response_format` 重试 + 软降级）
+
+- 触发条件：`FusionSynthesis.ParseAnalysis` 在首次 `BuildAnalystRequest` 响应上返回 `null`（JSON 损坏/围栏剥离后仍不可解析）。
+- 第一级重试：用 `BuildAnalystRequest(..., requestJsonFormat: true)` 构造带 `response_format={type:"json_object"}` 的请求重试一次（经 `ChatRequest.ExtensionData` 透传，上游不支持时静默忽略，行为回退为普通输出）。
+- 第二级软降级：重试仍解析失败且 `ResponseConfidenceChecker.ExtractAssistantText` 拿到非空文本时，调用 `FusionSynthesis.BuildFallbackAnalysis(rawText)` 构造 `FusionAnalysis { Recommendation = rawText, ...空字段 }`，**不**回退串行，保留已付 panel 成本。outer 仍能读 `Recommendation` 写答案。
+- 失败边界：
+  - **上游失败**（异常，非解析失败）：直接回退串行（行为不变）。
+  - **重试也上游失败**：回退串行。
+  - **重试响应为空**：回退串行（`502 analyst parse failed (empty retry)`）。
+- 审计：重试请求记一条 `fusion_role="analyst"` 审计（reason 标注 `analyst retry(parse)`）；软降级记 `LogWarning("analyst parse failed, degraded to raw text recommendation")`。
+- 向后兼容：`FusionRouterAnalystPrompt` 自定义时行为不变（除非解析失败才走新路径）。
+
+#### P3 — `FusionRouterMinComplexity`（融合成本质量门控）
+
+- 字段：`RoutingOptions.FusionRouterMinComplexity`（`RequestComplexity`，默认 `Unknown`）。
+- 触发条件追加：`ProxyOrchestrator.cs:128` 在原有 `EnableFusionRouter && !fusionRouterAttempted && failedInThisRequest.Count==0 && !request.Stream && decision.Candidates.Count>=2` 基础上追加 `&& decision.RequestComplexity >= options.Routing.FusionRouterMinComplexity`。
+- 枚举序：`Unknown=0 < Simple=1 < Standard=2 < Complex=3`。`>=` 比较天然满足：
+  - 默认 `Unknown` 门控：所有复杂度（含 `Unknown`）满足 → 等同旧行为（向后兼容红线——RuleClassifier 关闭时复杂度为 `Unknown` 也放行）。
+  - `MinComplexity=Standard`：`Simple` / `Unknown` 请求跳过融合；`Standard` / `Complex` 触发。
+- 与 `EnableDynamicFusionPanelSize` 正交：前者 gate 是否融合，后者定 panel 数。两者都读 `RequestComplexity`，不冲突。
+- 校验：合法 `RequestComplexity` 枚举值（`Enum.IsDefined`，`RouterOptionsValidator`）。
+- 默认行为：所有 `FusionRouterTests` 应保持全绿（旧行为未被打破）。
 
 ### Policy Chain Order
 
@@ -251,8 +290,11 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 | `EnableThompsonSampling` + `ThompsonDiscountFactor` outside `[0.5, 0.99]` | Validation fail | `RouterOptionsValidator` |
 | `EnableContextualBandit` + `ContextualBanditAlpha <= 0` | Validation fail | `RouterOptionsValidator` |
 | `EnableContextualBandit` + `ContextualBanditDiscountFactor` outside `[0.5, 0.99]` | Validation fail | `RouterOptionsValidator` |
+| `EnableContextualBandit` + `EnableThompsonSampling` 同开 | Validation fail (启动期互斥拒绝) | `RouterOptionsValidator` |
 | `AuditRetentionHours < 1` | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterTemperature` outside `[0, 2]` | Validation fail | `RouterOptionsValidator` |
+| `FusionRouterPanelTemperature` 非 null 且 outside `[0, 2]` | Validation fail | `RouterOptionsValidator` |
+| `FusionRouterMinComplexity` 非合法枚举值 | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterPanelTimeoutSeconds < 0` | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterMinPanelSize` outside `[2, 5]` or above max panel size | Validation fail | `RouterOptionsValidator` |
 | `PromptCacheAffinityTtlSeconds <= 0` | Validation fail | `RouterOptionsValidator` |
@@ -698,3 +740,18 @@ bool panelTimedOut = error is OperationCanceledException && !ct.IsCancellationRe
 **Default off**: `FusionRouterPanelTimeoutSeconds = 0` keeps the legacy wait-for-all behavior, making the feature opt-in and backward-compatible.
 
 **Extensibility**: A future analyst/outer-level timeout could reuse the same per-stage CTS pattern if those stages exhibit similar tail-latency problems.
+
+### Decision: `EnableContextualBandit` × `EnableThompsonSampling` startup-time mutex
+
+**Context**: 24h 审查发现 `RouterOptionsValidator` 接受两者同时开启，`LatencyAwarePolicy.ReorderSegment` 静默 cascade bandit 优先 Thompson——契约与 spec `3. Contracts` 中「互斥」措辞错位，运维错误配置无启动期信号，stat 计数器会被两类状态互相污染。
+
+**Options Considered**:
+1. 删 spec「互斥」措辞，改成「cascade with bandit priority」——允许同开。
+2. 启动期 validator 拒绝同开（chosen）——fail fast，明确边界。
+3. 仅文档警告，不强制——重蹈覆辙。
+
+**Decision**: `RouterOptionsValidator` 启动期拒绝 `EnableContextualBandit=true && EnableThompsonSampling=true`，错误信息：「`EnableContextualBandit 与 EnableThompsonSampling 互斥，不能同时开启。LinUCB 在启用时段内替代 Thompson，请只开启其中一个。`」。`LatencyAwarePolicy` 内 `bandit > thompson > latency` 优先级顺序保留作为防御性兜底（防配置漂移），但生产配置下 bandit 与 thompson 不会同时为 true。测试：`RouterOptionsValidatorTests.BanditAndThompsonBothEnabled_ShouldReturnFailure` 证明互斥被拒绝；`BanditAndThompsonNotBothEnabled_ShouldSucceed`（Theory：TT/FF/FT）保证三档合法配置不踩。
+
+**Default off**: 两项默认均 false，互斥规则对默认配置无影响（向后兼容）。
+
+**Extensibility**: 若未来需要在 bandit 内嵌套 thompson-style 后验，可重构成"单 bandit gate + 内部分支"，届时此 mutex 规则可放宽。
