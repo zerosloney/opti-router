@@ -5,17 +5,22 @@ namespace OptiRouter.Routing;
 /// <summary>
 /// 延迟感知路由策略：同 tier 段内按历史平均延迟升序重排（快模型优先），跨 tier 顺序不变。
 /// 当 <see cref="RoutingOptions.EnableThompsonSampling"/> 启用时，段内改用 Thompson Sampling 重排。
+/// 当 <see cref="RoutingOptions.EnableContextualBandit"/> 启用时，段内改用 LinUCB 打分重排。
 /// </summary>
 /// <remarks>
 /// 策略链位置在 LongInput 之后、BudgetGuard/Failover 之前：
 /// 先排除装不下/熔断的模型，再按延迟择优。
 /// <para>
-/// 两个开关各自独立 gate：
+/// 三个开关各自独立 gate：
 /// <list type="bullet">
 /// <item><see cref="RoutingOptions.EnableLatencyAware"/>：段内按历史平均延迟升序。</item>
 /// <item><see cref="RoutingOptions.EnableThompsonSampling"/>：段内按 Beta 分布采样重排（自适应探索）。</item>
+/// <item><see cref="RoutingOptions.EnableContextualBandit"/>：段内按 LinUCB 打分重排（带请求上下文）。</item>
 /// </list>
-/// 两者皆关时整段透传。两者都开时 Thompson 优先（ReorderSegment 内判断）。
+/// 全部关闭时整段透传。优先级为 Contextual Bandit > Thompson > Latency（<c>ReorderSegment</c> 内判断）。
+/// <see cref="RoutingOptions.EnableContextualBandit"/> 与 <see cref="RoutingOptions.EnableThompsonSampling"/>
+/// 在 <c>RouterOptionsValidator</c> 启动期强制互斥（两者同时开启会被拒启动），故优先级在生产环境等价于互斥；
+/// 段内的 if 顺序仅是防御性兜底，防运行时配置漂移。
 /// </para>
 /// <para>
 /// 延迟路径下，样本数低于 <see cref="RoutingOptions.LatencyMinSamples"/> 的模型不参与排序（噪声大），
@@ -72,8 +77,9 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
         bool thompsonEnabled = context.Options.Routing.EnableThompsonSampling;
         bool banditEnabled = context.Options.Routing.EnableContextualBandit && _banditStore is not null;
 
-        // Thompson Sampling 不再隐式依赖 EnableLatencyAware：两者各自 gate。
-        // 上下文 bandit 与 Thompson 互斥（启用时段内用 LinUCB）。
+        // 三个开关各自独立 gate：bandit 段内用 LinUCB、thompson 用 Beta 采样、latency 用历史均值。
+        // bandit 与 thompson 在 RouterOptionsValidator 启动期互斥校验，运行时同时开启为非法配置；
+        // 段内 if 顺序 bandit > thompson > latency 是防御性兜底（防配置漂移）。
         // 仅当三者都关闭时整体跳过（保持原 reason 文案对延迟感知的描述）。
         if (!latencyEnabled && !thompsonEnabled && !banditEnabled)
         {

@@ -521,4 +521,50 @@ public class RouterOptionsValidatorTests
 
         Assert.True(result.Succeeded);
     }
+
+    [Fact]
+    public void BanditAndThompsonBothEnabled_ShouldReturnFailure()
+    {
+        // H2：互斥契约在启动期拒绝。两者同时开启时启动失败，避免段内 stat 互相覆盖、计数器错位。
+        var options = CreateValidOptions();
+        options.Routing.EnableContextualBandit = true;
+        options.Routing.ContextualBanditAlpha = 1.0;
+        options.Routing.ContextualBanditDiscountFactor = 0.95;
+        options.Routing.EnableThompsonSampling = true;
+        options.Routing.ThompsonLatencyTargetMs = 800.0;
+        options.Routing.ThompsonDiscountFactor = 0.95;
+        options.Routing.ThompsonRaceCancelledReward = 0.5;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("EnableContextualBandit 与 EnableThompsonSampling 互斥", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public void BanditAndThompsonNotBothEnabled_ShouldSucceed(bool bandit, bool thompson)
+    {
+        // 任一关闭、两者都关，都应通过（向后兼容：默认两关）。
+        var options = CreateValidOptions();
+        options.Routing.EnableContextualBandit = bandit;
+        if (bandit)
+        {
+            options.Routing.ContextualBanditAlpha = 1.0;
+            options.Routing.ContextualBanditDiscountFactor = 0.95;
+        }
+        options.Routing.EnableThompsonSampling = thompson;
+        if (thompson)
+        {
+            options.Routing.ThompsonLatencyTargetMs = 800.0;
+            options.Routing.ThompsonDiscountFactor = 0.95;
+            options.Routing.ThompsonRaceCancelledReward = 0.5;
+        }
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
 }

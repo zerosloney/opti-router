@@ -177,7 +177,16 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         }
 
         // 上下文老虎机（LinUCB）参数校验：alpha<=0 会关闭探索（纯利用，冷启动饿死）；
-        // discount 越界导致衰减失效或过激。与 Thompson 互斥（启用时段内用 LinUCB）。
+        // discount 越界导致衰减失效或过激。
+        // 与 Thompson Sampling 互斥——同一请求段内只能由一种重排策略负责，混用会让两类
+        // 状态互相覆盖、stat 计数器错位。启动期拒绝比运行时静默 cascade 更安全。
+        if (options.Routing.EnableContextualBandit
+            && options.Routing.EnableThompsonSampling)
+        {
+            return ValidateOptionsResult.Fail(
+                "EnableContextualBandit 与 EnableThompsonSampling 互斥，不能同时开启。" +
+                "LinUCB 在启用时段内替代 Thompson，请只开启其中一个。");
+        }
         if (options.Routing.EnableContextualBandit)
         {
             if (options.Routing.ContextualBanditAlpha <= 0)

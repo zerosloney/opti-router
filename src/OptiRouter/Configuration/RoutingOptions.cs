@@ -313,7 +313,8 @@ public sealed class RoutingOptions
     /// 用分类信号（one-hot）+ tier 构造上下文特征向量，每模型维护线性 θ + 协方差，
     /// 段内按 LinUCB 打分（θ·x + α·sqrt(xᵀA⁻¹x)）重排，替代非上下文 Thompson。
     /// 修非上下文 Thompson 「只优化延迟、系统性低估 Strong」的缺陷（研究实证 gpt-4o regret 0.447）。
-    /// 与 <see cref="EnableThompsonSampling"/> 互斥——启用时段内用 LinUCB，Thompson 段内不生效。
+    /// 与 <see cref="EnableThompsonSampling"/> 互斥——同一段内只能由一种重排策略负责，混用会让
+    /// 状态互相覆盖、stat 计数器错位。<c>RouterOptionsValidator</c> 启动期强制拒绝两者同时开启。
     /// </summary>
     public bool EnableContextualBandit { get; set; } = false;
 
