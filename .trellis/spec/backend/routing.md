@@ -149,6 +149,9 @@ public sealed class LatencyStatsCache : ILatencyStatsProvider;
 | `FusionRouterMinPanelSize` | int | `2` | `[2, 5]` and `<= FusionRouterPanelSize` |
 | `EnableFusionDiversity` | bool | `false` | — |
 | `FusionRouterPanelTimeoutSeconds` | int | `0` | `>= 0` (`0` = disabled, backward-compatible) |
+| `EnableContextualBandit` | bool | `false` | 与 `EnableThompsonSampling` 互斥（启用时段内用 LinUCB） |
+| `ContextualBanditAlpha` | double | `1.0` | `> 0` when `EnableContextualBandit=true` |
+| `ContextualBanditDiscountFactor` | double | `0.95` | `[0.5, 0.99]` when `EnableContextualBandit=true` |
 
 ### Thompson Outcome Recording
 
@@ -201,6 +204,24 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 //   default:          language=0.8, reasoning=0.5
 ```
 
+### Policy Group Contract & Structured Reason (P2)
+
+- 每个策略声明 `PolicyGroup`（Filter/Classify/Order/Constraint），`RouterEngine.Decide` 按组依赖序执行（Filter→Classify→Order→Constraint），**组内保留串行**（叠加过滤/fallback/重排语义）。
+- **为什么不并行**：策略链本质串行——Failover 有 fallback 副作用（从 `AllModels` 补降级）、QuotaAware 既过滤又重排，非纯谓词；genuine 并行需重构独立子链，超出安全范围。分组契约是未来并行化的地基。
+- `RouterDecision.ReasonEvents`（`IReadOnlyList<ReasonEvent>`）结构化事件列表，各策略在拼接 `Reason` 字符串之外追加。`Reason` 字符串保持原生成逻辑（测试断言锁定格式）。
+- `RouterDecision.ClassificationSignal` / `ClassificationTargetTier`：由 `RuleClassifierPolicy` 填充的结构化分类信号，生产端直接读取（不解析字符串）。`routing_reason` 的 `target=Tier(signal)` 格式保持（`analyze_audit.py` 依赖）。
+
+### Contextual Bandit (LinUCB, P3)
+
+- Gate：`EnableContextualBandit`（默认关）。与 `EnableThompsonSampling` 互斥——启用时段内用 LinUCB 打分，Thompson 段内不生效。
+- 特征：`ContextualBanditFeatureBuilder` 把分类信号（7 one-hot）+ tier（3 one-hot）+ bias 映射为 11 维向量。
+- 打分：`score = θ·x + α·sqrt(xᵀA⁻¹x)`（`ContextualBanditState.Predict`）。
+- 更新：`A += x·xᵀ`，`b += reward·x`，θ = A⁻¹·b，历史按 `ContextualBanditDiscountFactor` 衰减。
+- 奖励：复用 Thompson reward 语义（快成功 1.0/慢成功 0.3/失败 0/竞速 0.5），`RecordThompsonOutcome` / `RecordThompsonRaceCancelled` 在启用 bandit 时同步更新（需传 `classificationSignal`）。
+- 修非上下文 Thompson 「只优化延迟、系统性低估 Strong」缺陷（研究实证 gpt-4o regret 0.447）——LinUCB 用请求特征学习「模型↔任务」匹配。
+- 冷启动：θ=0 仅 UCB 项（探索）；热重载 `Retain` 清理已删模型。
+- 测试：`ContextualBanditTests`（特征构造、状态数学、上下文影响选型、默认关向后兼容）。
+
 ### Policy Chain Order
 
 | Position | Policy | Gate | Effect |
@@ -228,6 +249,8 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 | `LongInputThresholdTokens <= 0` | Validation fail | `RouterOptionsValidator` |
 | `EnableThompsonSampling` + `ThompsonLatencyTargetMs <= 0` | Validation fail | `RouterOptionsValidator` |
 | `EnableThompsonSampling` + `ThompsonDiscountFactor` outside `[0.5, 0.99]` | Validation fail | `RouterOptionsValidator` |
+| `EnableContextualBandit` + `ContextualBanditAlpha <= 0` | Validation fail | `RouterOptionsValidator` |
+| `EnableContextualBandit` + `ContextualBanditDiscountFactor` outside `[0.5, 0.99]` | Validation fail | `RouterOptionsValidator` |
 | `AuditRetentionHours < 1` | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterTemperature` outside `[0, 2]` | Validation fail | `RouterOptionsValidator` |
 | `FusionRouterPanelTimeoutSeconds < 0` | Validation fail | `RouterOptionsValidator` |

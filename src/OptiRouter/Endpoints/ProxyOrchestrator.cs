@@ -210,7 +210,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
                     _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds,
+                        decision.ClassificationSignal, decision.ClassificationTargetTier);
                     outcomeReported = true;
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);

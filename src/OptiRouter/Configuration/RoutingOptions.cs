@@ -309,6 +309,27 @@ public sealed class RoutingOptions
     public double ThompsonRaceCancelledReward { get; set; } = 0.5;
 
     /// <summary>
+    /// 是否启用上下文老虎机（Contextual Bandit / LinUCB）路由。默认 false。
+    /// 用分类信号（one-hot）+ tier 构造上下文特征向量，每模型维护线性 θ + 协方差，
+    /// 段内按 LinUCB 打分（θ·x + α·sqrt(xᵀA⁻¹x)）重排，替代非上下文 Thompson。
+    /// 修非上下文 Thompson 「只优化延迟、系统性低估 Strong」的缺陷（研究实证 gpt-4o regret 0.447）。
+    /// 与 <see cref="EnableThompsonSampling"/> 互斥——启用时段内用 LinUCB，Thompson 段内不生效。
+    /// </summary>
+    public bool EnableContextualBandit { get; set; } = false;
+
+    /// <summary>
+    /// LinUCB 探索系数 α（Upper Confidence Bound 权重）。默认 1.0。
+    /// 越大越倾向探索（选择样本不足/高不确定模型）；越小越倾向利用（选当前最优估计）。
+    /// </summary>
+    public double ContextualBanditAlpha { get; set; } = 1.0;
+
+    /// <summary>
+    /// 上下文老虎机历史折扣/衰减因子（取值范围 [0.5, 0.99]，由 RouterOptionsValidator 强制）。
+    /// 值越小，系统对端点性能变化的反应越灵敏。
+    /// </summary>
+    public double ContextualBanditDiscountFactor { get; set; } = 0.95;
+
+    /// <summary>
     /// 审计记录保留时长（小时）。超出后由后台 AuditRetentionService 周期淘汰，
     /// 防止 request_audit 无界增长。默认 168（7 天）。必须 &gt;= 1，由 RouterOptionsValidator 强制。
     /// </summary>

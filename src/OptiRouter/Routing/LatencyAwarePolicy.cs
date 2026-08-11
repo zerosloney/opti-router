@@ -32,8 +32,12 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     /// <summary>延迟分数的加性平滑地板，避免极低延迟导致分数爆炸、除零。</summary>
     private const double LatencyFloorMs = 50.0;
 
+    /// <inheritdoc />
+    public PolicyGroup Group => PolicyGroup.Order;
+
     private readonly ILatencyStatsProvider _statsProvider;
     private readonly ThompsonStateStore _tsStore;
+    private readonly ContextualBanditState? _banditStore;
     private readonly Func<double, double, double> _sampleBeta;
 
     /// <summary>
@@ -45,14 +49,20 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     /// Thompson Beta 采样委托，默认 <see cref="ThompsonSampler.SampleBeta(double,double)"/>（线程本地 RNG）。
     /// 仅供测试注入确定性采样；生产路径留空。
     /// </param>
+    /// <param name="banditStore">
+    /// 上下文老虎机状态（LinUCB）。null（默认）= 不启用上下文 bandit（向后兼容）——
+    /// 仅当 <see cref="RoutingOptions.EnableContextualBandit"/> 为 true 且传入非 null 时生效。
+    /// </param>
     public LatencyAwarePolicy(
         ILatencyStatsProvider statsProvider,
         ThompsonStateStore tsStore,
-        Func<double, double, double>? sampleBeta = null)
+        Func<double, double, double>? sampleBeta = null,
+        ContextualBanditState? banditStore = null)
     {
         _statsProvider = statsProvider ?? throw new ArgumentNullException(nameof(statsProvider));
         _tsStore = tsStore ?? throw new ArgumentNullException(nameof(tsStore));
         _sampleBeta = sampleBeta ?? ThompsonSampler.SampleBeta;
+        _banditStore = banditStore;
     }
 
     /// <inheritdoc />
@@ -60,10 +70,12 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     {
         bool latencyEnabled = context.Options.Routing.EnableLatencyAware;
         bool thompsonEnabled = context.Options.Routing.EnableThompsonSampling;
+        bool banditEnabled = context.Options.Routing.EnableContextualBandit && _banditStore is not null;
 
         // Thompson Sampling 不再隐式依赖 EnableLatencyAware：两者各自 gate。
-        // 仅当两者都关闭时整体跳过（保持原 reason 文案对延迟感知的描述）。
-        if (!latencyEnabled && !thompsonEnabled)
+        // 上下文 bandit 与 Thompson 互斥（启用时段内用 LinUCB）。
+        // 仅当三者都关闭时整体跳过（保持原 reason 文案对延迟感知的描述）。
+        if (!latencyEnabled && !thompsonEnabled && !banditEnabled)
         {
             return previous with { Reason = $"{previous.Reason}; latency-aware: disabled" };
         }
@@ -89,7 +101,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
                 continue;
             }
 
-            var reordered = ReorderSegment(seg, minSamples, context);
+            var reordered = ReorderSegment(seg, minSamples, context, previous.ClassificationSignal, previous.ClassificationTargetTier);
             if (!SameOrder(seg, reordered))
                 segmentsReordered++;
             result.AddRange(reordered);
@@ -100,7 +112,9 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             return previous with { Reason = $"{previous.Reason}; latency-aware: no change" };
         }
 
-        string extraTag = context.Options.Routing.EnableThompsonSampling ? " [Thompson Sampling]" : "";
+        string extraTag = context.Options.Routing.EnableContextualBandit && _banditStore is not null
+            ? " [Contextual Bandit]"
+            : context.Options.Routing.EnableThompsonSampling ? " [Thompson Sampling]" : "";
         return previous with
         {
             Candidates = result,
@@ -108,15 +122,43 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
         };
     }
 
-    /// <summary>同 tier 段内：根据配置选择 Thompson 采样或延迟感知重排。</summary>
-    private List<ModelEndpointOptions> ReorderSegment(List<ModelEndpointOptions> segment, int minSamples, RouterContext context)
+    /// <summary>同 tier 段内：根据配置选择上下文 bandit / Thompson / 延迟感知重排。</summary>
+    private List<ModelEndpointOptions> ReorderSegment(List<ModelEndpointOptions> segment, int minSamples, RouterContext context,
+        string? classificationSignal, ModelTier? classificationTargetTier)
     {
+        if (context.Options.Routing.EnableContextualBandit && _banditStore is not null)
+        {
+            return ReorderByContextualBandit(segment, classificationSignal, classificationTargetTier, context.Options.Routing.ContextualBanditAlpha);
+        }
+
         if (context.Options.Routing.EnableThompsonSampling)
         {
             return ReorderByThompsonSampling(segment);
         }
 
         return ReorderByLatencyScore(segment, minSamples);
+    }
+
+    /// <summary>
+    /// 上下文老虎机（LinUCB）重排：用分类信号 + tier 构造上下文特征，每模型 LinUCB 打分降序。
+    /// 修非上下文 Thompson 「只优化延迟、系统性低估 Strong」的缺陷——LinUCB 用请求特征学习「模型↔任务」匹配。
+    /// </summary>
+    private List<ModelEndpointOptions> ReorderByContextualBandit(List<ModelEndpointOptions> segment,
+        string? classificationSignal, ModelTier? classificationTargetTier, double alpha)
+    {
+        var feature = ContextualBanditFeatureBuilder.Build(classificationSignal, classificationTargetTier);
+
+        var scored = new List<(ModelEndpointOptions Model, double Score)>(segment.Count);
+        foreach (var m in segment)
+        {
+            double score = _banditStore!.Predict(m.Name, feature, alpha);
+            scored.Add((m, score));
+        }
+
+        return scored
+            .OrderByDescending(x => x.Score)
+            .Select(x => x.Model)
+            .ToList();
     }
 
     /// <summary>Beta 分布采样：Alpha/Beta 越高表示历史表现越好，采样值越高排序越靠前。</summary>

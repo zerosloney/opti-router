@@ -7,6 +7,9 @@ namespace OptiRouter.Routing;
 /// </summary>
 public sealed class FailoverPolicy : IRouterPolicy
 {
+    /// <inheritdoc />
+    public PolicyGroup Group => PolicyGroup.Filter;
+
     private readonly ModelHealthTracker _healthTracker;
 
     /// <summary>
@@ -48,7 +51,12 @@ public sealed class FailoverPolicy : IRouterPolicy
         if (excluded.Count == 0)
         {
             string halfOpenNote = halfOpen.Count > 0 ? $", half-open probing [{string.Join(", ", halfOpen)}]" : "";
-            return previous with { Reason = $"{previous.Reason}; failover: no-failed-models{halfOpenNote}" };
+            string detail = $"failover: no-failed-models{halfOpenNote}";
+            return previous with
+            {
+                Reason = $"{previous.Reason}; {detail}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("failover", detail)).ToList()
+            };
         }
 
         var remaining = previous.Candidates
@@ -66,7 +74,8 @@ public sealed class FailoverPolicy : IRouterPolicy
             return previous with
             {
                 Candidates = remaining,
-                Reason = $"{previous.Reason}; {reason}"
+                Reason = $"{previous.Reason}; {reason}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("failover", reason)).ToList()
             };
         }
 
@@ -79,7 +88,8 @@ public sealed class FailoverPolicy : IRouterPolicy
         return previous with
         {
             Candidates = fallback,
-            Reason = $"{previous.Reason}; {fallbackReason}"
+            Reason = $"{previous.Reason}; {fallbackReason}",
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("failover", fallbackReason)).ToList()
         };
     }
 

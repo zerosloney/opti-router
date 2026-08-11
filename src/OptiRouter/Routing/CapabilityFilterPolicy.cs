@@ -26,6 +26,8 @@ namespace OptiRouter.Routing;
 /// </remarks>
 public sealed class CapabilityFilterPolicy : IRouterPolicy
 {
+    public PolicyGroup Group => PolicyGroup.Filter;
+
     /// <summary>模型 Tags 中标识支持视觉输入的标签。委托 <see cref="ModelCapabilities.Vision"/>。</summary>
     public const string VisionTag = ModelCapabilities.Vision;
 
@@ -40,13 +42,13 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableCapabilityFilter)
         {
-            return previous with { Reason = $"{previous.Reason}; capability-filter: disabled" };
+            return previous with { Reason = $"{previous.Reason}; capability-filter: disabled", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", "disabled")).ToList() };
         }
 
         var required = DetectRequiredCapabilities(context.Request);
         if (required.Count == 0)
         {
-            return previous with { Reason = $"{previous.Reason}; capability-filter: no-requirements" };
+            return previous with { Reason = $"{previous.Reason}; capability-filter: no-requirements", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", "no-requirements")).ToList() };
         }
 
         var filtered = previous.Candidates
@@ -58,12 +60,12 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
             // 无模型满足能力需求：保留原候选 + warning，让上游报能力错。
             // 比 BudgetGuard 的"返回空"温和——能力过滤是优化，非硬约束（用户可能未标 Tags）。
             string warning = $"capability-filter: no candidate has {string.Join("/", required)} (tags misconfigured?), keeping original";
-            return previous with { Reason = $"{previous.Reason}; {warning}" };
+            return previous with { Reason = $"{previous.Reason}; {warning}", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", warning)).ToList() };
         }
 
         if (filtered.Count == previous.Candidates.Count)
         {
-            return previous with { Reason = $"{previous.Reason}; capability-filter: all candidates match {string.Join("/", required)}" };
+            return previous with { Reason = $"{previous.Reason}; capability-filter: all candidates match {string.Join("/", required)}", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", $"all candidates match {string.Join("/", required)}")).ToList() };
         }
 
         int removed = previous.Candidates.Count - filtered.Count;
@@ -71,7 +73,8 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
         return previous with
         {
             Candidates = filtered,
-            Reason = $"{previous.Reason}; {reason}"
+            Reason = $"{previous.Reason}; {reason}",
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", reason)).ToList()
         };
     }
 

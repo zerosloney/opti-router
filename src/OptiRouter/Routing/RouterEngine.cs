@@ -57,10 +57,15 @@ public sealed class RouterEngine
             EstimatedInputTokens = estTokens
         };
 
-        // 4. 顺序应用每个策略，每个策略可能调整 decision
-        foreach (var policy in _policies)
+        // 4. 按分组依赖序应用策略（Filter→Classify→Order→Constraint），组内保留串行。
+        //    分组契约（PolicyGroup）是未来并行化的地基；当前组内串行以保留叠加过滤/fallback/重排语义。
+        var groups = new[] { PolicyGroup.Filter, PolicyGroup.Classify, PolicyGroup.Order, PolicyGroup.Constraint };
+        foreach (var group in groups)
         {
-            decision = policy.Apply(context, decision);
+            foreach (var policy in _policies.Where(p => p.Group == group))
+            {
+                decision = policy.Apply(context, decision);
+            }
         }
 
         return decision;

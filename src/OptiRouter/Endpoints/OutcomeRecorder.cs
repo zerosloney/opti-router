@@ -21,6 +21,7 @@ public sealed class OutcomeRecorder
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly IMemoryCache _affinityCache;
     private readonly ThompsonStateStore _tsStore;
+    private readonly ContextualBanditState? _banditStore;
     private readonly PromptCacheAffinityStore _promptAffinityStore;
     private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly ILogger<OutcomeRecorder> _logger;
@@ -36,7 +37,8 @@ public sealed class OutcomeRecorder
         PromptCacheAffinityStore promptAffinityStore,
         UpstreamQuotaStateStore quotaStore,
         ILogger<OutcomeRecorder> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ContextualBanditState? banditStore = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -48,6 +50,7 @@ public sealed class OutcomeRecorder
         _quotaStore = quotaStore;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _banditStore = banditStore;
     }
 
     /// <summary>
@@ -222,13 +225,17 @@ public sealed class OutcomeRecorder
 
     /// <summary>
     /// 上报 Thompson 采样反馈，读 <see cref="RoutingOptions.ThompsonDiscountFactor"/> 作衰减。
+    /// 若启用上下文 bandit（<see cref="RoutingOptions.EnableContextualBandit"/>），同步更新 LinUCB 状态。
     /// </summary>
     /// <param name="modelName">模型名。</param>
     /// <param name="elapsedMs">
     /// 本次请求端到端延迟（毫秒）。<c>null</c> 表示硬失败（网络/超时/上游错误），奖励 0.0；
     /// <c>&lt; ThompsonLatencyTargetMs</c> 为快成功，奖励 1.0；<c>&gt;= target</c> 为慢成功，奖励 0.3（部分正反馈）。
     /// </param>
-    public void RecordThompsonOutcome(string modelName, long? elapsedMs)
+    /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
+    /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
+    public void RecordThompsonOutcome(string modelName, long? elapsedMs,
+        string? classificationSignal = null, ModelTier? classificationTargetTier = null)
     {
         var routing = _options.CurrentValue.Routing;
         double reward = elapsedMs switch
@@ -238,18 +245,35 @@ public sealed class OutcomeRecorder
             _ => 0.3
         };
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
+
+        if (routing.EnableContextualBandit && _banditStore is not null && classificationSignal is not null)
+        {
+            var feature = ContextualBanditFeatureBuilder.Build(classificationSignal, classificationTargetTier);
+            _banditStore.Update(modelName, feature, reward, routing.ContextualBanditDiscountFactor);
+        }
     }
 
     /// <summary>
     /// 上报竞速失败反馈：模型在并行竞速中被更快者比下去而取消，非自身故障。
     /// 计部分正奖励（<see cref="RoutingOptions.ThompsonRaceCancelledReward"/>，默认 0.5），
     /// 不完全惩罚——模型可能只是慢/运气差，未必坏。值可运行时配置，按观测效果调参。
+    /// 若启用上下文 bandit，同步更新 LinUCB 状态。
     /// </summary>
     /// <param name="modelName">模型名。</param>
-    public void RecordThompsonRaceCancelled(string modelName)
+    /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
+    /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
+    public void RecordThompsonRaceCancelled(string modelName,
+        string? classificationSignal = null, ModelTier? classificationTargetTier = null)
     {
         var routing = _options.CurrentValue.Routing;
-        _tsStore.RecordOutcome(modelName, routing.ThompsonRaceCancelledReward, routing.ThompsonDiscountFactor);
+        double reward = routing.ThompsonRaceCancelledReward;
+        _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
+
+        if (routing.EnableContextualBandit && _banditStore is not null && classificationSignal is not null)
+        {
+            var feature = ContextualBanditFeatureBuilder.Build(classificationSignal, classificationTargetTier);
+            _banditStore.Update(modelName, feature, reward, routing.ContextualBanditDiscountFactor);
+        }
     }
 
     /// <summary>

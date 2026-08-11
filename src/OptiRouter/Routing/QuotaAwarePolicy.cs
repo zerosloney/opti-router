@@ -5,6 +5,9 @@ namespace OptiRouter.Routing;
 /// <summary>Memory-only policy that excludes known active exhaustion and softly demotes insufficient headroom.</summary>
 public sealed class QuotaAwarePolicy : IRouterPolicy
 {
+    /// <inheritdoc />
+    public PolicyGroup Group => PolicyGroup.Filter;
+
     private readonly UpstreamQuotaStateStore _store;
     private readonly TimeProvider _timeProvider;
 
@@ -44,10 +47,12 @@ public sealed class QuotaAwarePolicy : IRouterPolicy
         }
 
         var reordered = viable.Concat(insufficient).ToList();
+        string detail = $"quota-aware: excluded={excluded}, insufficient={insufficient.Count}";
         return previous with
         {
             Candidates = reordered,
-            Reason = $"{previous.Reason}; quota-aware: excluded={excluded}, insufficient={insufficient.Count}"
+            Reason = $"{previous.Reason}; {detail}",
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("quota-aware", detail)).ToList()
         };
     }
 }

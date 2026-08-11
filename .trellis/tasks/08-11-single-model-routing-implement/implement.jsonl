@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/routing.md", "reason": "策略链、Thompson 奖励、多维评分既有契约。P2 并行化与 P3 LinUCB 必须与之保持一致，不得破坏向后兼容。"}
+{"file": "src/OptiRouter/Routing/RouterEngine.cs", "reason": "策略链串行执行入口（Decide）。P2 需改为按 PolicyGroup 分组执行，保持并行结果与串行一致。"}
+{"file": "src/OptiRouter/Routing/IRouterPolicy.cs", "reason": "策略接口。P2 新增 PolicyGroup 属性，11 个策略声明所属分组。"}
+{"file": "src/OptiRouter/Routing/LatencyAwarePolicy.cs", "reason": "段内重排逻辑。P3 需在 ReorderSegment 优先 EnableContextualBandit → LinUCB 打分。"}
+{"file": "src/OptiRouter/Routing/RuleClassifierPolicy.cs", "reason": "分类信号来源。P1 填充结构化 ClassificationSignal/ClassificationTargetTier，P3 用其构造上下文特征。"}
+{"file": "src/OptiRouter/Configuration/RoutingOptions.cs", "reason": "P3 新增 EnableContextualBandit/ContextualBanditAlpha/ContextualBanditDiscountFactor 配置，需 RouterOptionsValidator 校验。"}

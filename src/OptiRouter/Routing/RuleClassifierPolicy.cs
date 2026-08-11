@@ -12,6 +12,9 @@ namespace OptiRouter.Routing;
 /// </remarks>
 public sealed class RuleClassifierPolicy : IRouterPolicy
 {
+    /// <inheritdoc />
+    public PolicyGroup Group => PolicyGroup.Classify;
+
     /// <summary>
     /// 数学/公式标记：LaTeX 环境、分数、函数式、中文求解/计算方程。
     /// 仅匹配明确的数学符号/结构，避免自然语言误报（"等于" / "平均" 不触发）。
@@ -146,7 +149,10 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
             {
                 Candidates = reordered,
                 Reason = $"{previous.Reason}; {mdReason}",
-                RequestComplexity = complexity
+                RequestComplexity = complexity,
+                ClassificationSignal = targetReason,
+                ClassificationTargetTier = targetTier,
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("rule-classifier", mdReason)).ToList()
             };
         }
 
@@ -167,10 +173,14 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         // 让唯一可用模型（如 Strong+Cheap 配置下的翻译请求）被排除成空候选直接 503。
         if (candidates.Count == 0)
         {
+            string keepReason = $"rule-classifier: no {targetTier}({targetReason}) candidates, keeping original {previous.Candidates.Count}";
             return previous with
             {
-                Reason = $"{previous.Reason}; rule-classifier: no {targetTier}({targetReason}) candidates, keeping original {previous.Candidates.Count}",
-                RequestComplexity = complexity
+                Reason = $"{previous.Reason}; {keepReason}",
+                RequestComplexity = complexity,
+                ClassificationSignal = targetReason,
+                ClassificationTargetTier = targetTier,
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("rule-classifier", keepReason)).ToList()
             };
         }
 
@@ -183,7 +193,10 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         {
             Candidates = candidates,
             Reason = $"{previous.Reason}; {reason}",
-            RequestComplexity = complexity
+            RequestComplexity = complexity,
+            ClassificationSignal = targetReason,
+            ClassificationTargetTier = targetTier,
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("rule-classifier", reason)).ToList()
         };
     }
 

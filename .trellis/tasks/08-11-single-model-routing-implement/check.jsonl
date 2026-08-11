@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/routing.md", "reason": "验收 P1/P2/P3 是否破坏既有契约（策略链顺序、Thompson 奖励语义、Reason 格式、audit 语义）。"}
+{"file": "src/OptiRouter/Routing/RouterEngine.cs", "reason": "校验策略链分组并行后与串行结果一致；ReasonEvent 结构化后 Reason 字符串格式保持。"}
+{"file": "src/OptiRouter/Routing/LatencyAwarePolicy.cs", "reason": "校验 EnableContextualBandit 默认关时行为与现有一致；LinUCB 打分正确性。"}
+{"file": "src/OptiRouter/Configuration/RouterOptionsValidator.cs", "reason": "校验 EnableContextualBandit 相关配置边界（Alpha>0、DiscountFactor∈[0.5,0.99]）。"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "校验实现质量门禁（可测试性、向后兼容、无 stub）。"}

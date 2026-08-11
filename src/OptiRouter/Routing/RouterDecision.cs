@@ -3,6 +3,11 @@ using OptiRouter.Configuration;
 namespace OptiRouter.Routing;
 
 /// <summary>
+/// 结构化决策事件：策略名 + 详情。供机器解析（P1 分类信号、P3 上下文特征、未来可观测）。
+/// </summary>
+public sealed record ReasonEvent(string Policy, string Detail);
+
+/// <summary>
 /// 路由决策结果，贯穿策略链。
 /// </summary>
 public sealed record RouterDecision
@@ -39,4 +44,22 @@ public sealed record RouterDecision
     /// never parse <see cref="Reason"/>.
     /// </summary>
     public RequestComplexity RequestComplexity { get; init; } = RequestComplexity.Unknown;
+
+    /// <summary>
+    /// 分类信号（如 "code-complex" / "simple-qa"）。由 <c>RuleClassifierPolicy</c> 填充，
+    /// 供生产端直接读取（不解析 <see cref="Reason"/> 字符串）。null = 未分类/未启用。
+    /// </summary>
+    public string? ClassificationSignal { get; init; }
+
+    /// <summary>
+    /// 分类信号应路由的目标 tier。与 <see cref="ClassificationSignal"/> 配套，
+    /// 供生产端直接读取。null = 未分类/未启用。
+    /// </summary>
+    public ModelTier? ClassificationTargetTier { get; init; }
+
+    /// <summary>
+    /// 结构化决策事件列表（机器可解析）。各策略在拼接 <see cref="Reason"/> 字符串之外追加。
+    /// <see cref="Reason"/> 保持人类可读拼接（向后兼容日志/审计/测试断言）。
+    /// </summary>
+    public IReadOnlyList<ReasonEvent> ReasonEvents { get; init; } = Array.Empty<ReasonEvent>();
 }

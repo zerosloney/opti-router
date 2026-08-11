@@ -8,6 +8,9 @@ namespace OptiRouter.Routing;
 /// </summary>
 public sealed class BudgetGuardPolicy : IRouterPolicy
 {
+    /// <inheritdoc />
+    public PolicyGroup Group => PolicyGroup.Constraint;
+
     private readonly CostLedger _ledger;
 
     /// <summary>
@@ -23,7 +26,12 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableBudgetGuard)
         {
-            return previous with { Reason = $"{previous.Reason}; budget-guard: disabled" };
+            string detail = "budget-guard: disabled";
+            return previous with
+            {
+                Reason = $"{previous.Reason}; {detail}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", detail)).ToList()
+            };
         }
 
         var (dailySpend, _) = _ledger.GetSpend();
@@ -42,17 +50,23 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
                 ? $"session={sessionSpend:F4}/{(budget.SessionBudgetUsd?.ToString("F4") ?? "inf")}"
                 : "session=disabled(no-header)";
             string spendInfo = $"budget-guard: daily={dailySpend:F4}/{budget.DailyBudgetUsd:F4}, {sessionInfo}";
-            return previous with { Reason = $"{previous.Reason}; {spendInfo}" };
+            return previous with
+            {
+                Reason = $"{previous.Reason}; {spendInfo}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", spendInfo)).ToList()
+            };
         }
 
         // 预算耗尽
         if (budget.EnforceOnExhausted == BudgetExhaustionMode.Reject)
         {
+            string detail = $"budget-guard: budget exhausted, reject (daily={dailySpend:F4}, session={sessionSpend:F4})";
             return previous with
             {
                 Candidates = Array.Empty<ModelEndpointOptions>(),
                 BudgetExhausted = true,
-                Reason = $"{previous.Reason}; budget-guard: budget exhausted, reject (daily={dailySpend:F4}, session={sessionSpend:F4})"
+                Reason = $"{previous.Reason}; {detail}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", detail)).ToList()
             };
         }
 
@@ -96,10 +110,12 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
 
                 if (degradedCandidates.Count == 0)
                 {
+                    string detail = "budget-guard: exhausted, no candidates available";
                     return previous with
                     {
                         Candidates = Array.Empty<ModelEndpointOptions>(),
-                        Reason = $"{previous.Reason}; budget-guard: exhausted, no candidates available"
+                        Reason = $"{previous.Reason}; {detail}",
+                        ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", detail)).ToList()
                     };
                 }
 
@@ -111,7 +127,8 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
         return previous with
         {
             Candidates = degradedCandidates,
-            Reason = $"{previous.Reason}; {degradeReason}"
+            Reason = $"{previous.Reason}; {degradeReason}",
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", degradeReason)).ToList()
         };
     }
 }

@@ -11,6 +11,7 @@ namespace OptiRouter.Routing;
 /// </remarks>
 public sealed class LongInputPolicy : IRouterPolicy
 {
+    public PolicyGroup Group => PolicyGroup.Filter;
     private const double ContextHeadroom = 1.2;
 
     /// <inheritdoc />
@@ -18,7 +19,7 @@ public sealed class LongInputPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableTokenEstimator)
         {
-            return previous with { Reason = $"{previous.Reason}; long-input: disabled" };
+            return previous with { Reason = $"{previous.Reason}; long-input: disabled", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", "disabled")).ToList() };
         }
 
         int threshold = context.Options.Routing.LongInputThresholdTokens;
@@ -26,7 +27,7 @@ public sealed class LongInputPolicy : IRouterPolicy
 
         if (estimated <= threshold)
         {
-            return previous with { Reason = $"{previous.Reason}; long-input: within-threshold({estimated}<={threshold})" };
+            return previous with { Reason = $"{previous.Reason}; long-input: within-threshold({estimated}<={threshold})", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", $"within-threshold({estimated}<={threshold})")).ToList() };
         }
 
         int requiredContext = (int)Math.Ceiling(estimated * ContextHeadroom);
@@ -40,7 +41,8 @@ public sealed class LongInputPolicy : IRouterPolicy
             return previous with
             {
                 Candidates = filtered,
-                Reason = $"{previous.Reason}; {reason}"
+                Reason = $"{previous.Reason}; {reason}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", reason)).ToList()
             };
         }
 
@@ -48,7 +50,8 @@ public sealed class LongInputPolicy : IRouterPolicy
         string warning = $"long-input: no model fits (est={estimated}, required>={requiredContext}), keeping original candidates";
         return previous with
         {
-            Reason = $"{previous.Reason}; {warning}"
+            Reason = $"{previous.Reason}; {warning}",
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", warning)).ToList()
         };
     }
 }

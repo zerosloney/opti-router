@@ -154,6 +154,7 @@ builder.Services.AddSingleton<ITokenEstimator>(sp =>
 
 builder.Services.AddSingleton<ISemanticVectorEngine, TfIdfSemanticVectorEngine>();
 builder.Services.AddSingleton<ThompsonStateStore>();
+builder.Services.AddSingleton<ContextualBanditState>();
 builder.Services.AddSingleton<UpstreamQuotaStateStore>();
 builder.Services.AddSingleton<PromptCacheAffinityStore>();
 builder.Services.AddSingleton<FusionPanelSelector>();
@@ -175,7 +176,8 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),
         new SemanticRouterPolicy(vectorEngine),
         new LongInputPolicy(),
-        new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore),
+        new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore, null,
+            sp.GetRequiredService<ContextualBanditState>()),
         new PromptCacheAffinityPolicy(sp.GetRequiredService<PromptCacheAffinityStore>()),
         new BudgetGuardPolicy(ledger),
         new QuotaAwarePolicy(sp.GetRequiredService<UpstreamQuotaStateStore>()),
@@ -196,7 +198,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     sp.GetRequiredService<ThompsonStateStore>(),
     sp.GetRequiredService<PromptCacheAffinityStore>(),
     sp.GetRequiredService<UpstreamQuotaStateStore>(),
-    sp.GetRequiredService<ILogger<OutcomeRecorder>>()));
+    sp.GetRequiredService<ILogger<OutcomeRecorder>>(),
+    banditStore: sp.GetRequiredService<ContextualBanditState>()));
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
@@ -282,11 +285,13 @@ var app = builder.Build();
 // OnChange 在 models-config.json 写入触发 IConfigurationRoot.Reload 后派发。
 var tsStoreForReload = app.Services.GetRequiredService<ThompsonStateStore>();
 var quotaStoreForReload = app.Services.GetRequiredService<UpstreamQuotaStateStore>();
+var banditStoreForReload = app.Services.GetRequiredService<ContextualBanditState>();
 var routerOptionsMonitor = app.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>();
 routerOptionsMonitor.OnChange(options =>
 {
     tsStoreForReload.Retain(options.Models.Select(m => m.Name));
     quotaStoreForReload.Retain(options.Models.Select(m => m.Name));
+    banditStoreForReload.Retain(options.Models.Select(m => m.Name));
 });
 
 // Serve the Blazor boot script and the dashboard's CSS/JavaScript before the

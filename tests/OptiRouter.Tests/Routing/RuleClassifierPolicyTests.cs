@@ -416,4 +416,61 @@ public class RuleClassifierPolicyTests
         Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
         Assert.Contains("code-detected", result.Reason);
     }
+
+    [Fact]
+    public void Apply_StructuredFields_PopulatedForCodeComplex()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "修复这个 bug\n```python\ndef f(): return 1/0\n```"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.Equal("code-complex", result.ClassificationSignal);
+        Assert.Equal(ModelTier.Strong, result.ClassificationTargetTier);
+        Assert.Equal(RequestComplexity.Complex, result.RequestComplexity);
+        // Reason 保持 target=Tier(signal) 可解析格式（analyze_audit 依赖）。
+        Assert.Contains("target=Strong(code-complex)", result.Reason);
+        // ReasonEvents 结构化事件存在。
+        Assert.Contains(result.ReasonEvents, e => e.Policy == "rule-classifier"
+            && e.Detail.Contains("code-complex"));
+    }
+
+    [Fact]
+    public void Apply_StructuredFields_PopulatedForSimpleQa()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 32000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "hello"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.Equal("simple-qa", result.ClassificationSignal);
+        Assert.Equal(ModelTier.Cheap, result.ClassificationTargetTier);
+        Assert.Equal(RequestComplexity.Simple, result.RequestComplexity);
+        Assert.Contains("target=Cheap(simple-qa)", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_StructuredFields_NullWhenDisabled()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m));
+        options.Routing.EnableRuleClassifier = false;
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", "hello"));
+
+        var result = Apply(policy, options, request);
+
+        Assert.Null(result.ClassificationSignal);
+        Assert.Null(result.ClassificationTargetTier);
+    }
 }

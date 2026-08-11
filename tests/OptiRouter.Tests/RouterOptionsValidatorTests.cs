@@ -463,4 +463,62 @@ public class RouterOptionsValidatorTests
         });
         return options;
     }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    public void ContextualBanditAlphaNonPositive_ShouldReturnFailure(double value)
+    {
+        // LinUCB 探索系数 α<=0 会关闭探索（纯利用，冷启动饿死）——应被校验拦截。
+        var options = CreateValidOptions();
+        options.Routing.EnableContextualBandit = true;
+        options.Routing.ContextualBanditAlpha = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("ContextualBanditAlpha", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(0.49)]
+    [InlineData(1.0)]
+    public void ContextualBanditDiscountFactorOutOfRange_ShouldReturnFailure(double value)
+    {
+        // 折扣越界 [0.5, 0.99] 导致衰减失效或过激——应被校验拦截。
+        var options = CreateValidOptions();
+        options.Routing.EnableContextualBandit = true;
+        options.Routing.ContextualBanditDiscountFactor = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("ContextualBanditDiscountFactor", result.FailureMessage);
+    }
+
+    [Fact]
+    public void ContextualBanditValidConfig_ShouldSucceed()
+    {
+        var options = CreateValidOptions();
+        options.Routing.EnableContextualBandit = true;
+        options.Routing.ContextualBanditAlpha = 1.0;
+        options.Routing.ContextualBanditDiscountFactor = 0.95;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public void ContextualBanditDisabled_InvalidParams_ShouldSucceed()
+    {
+        // 未启用时参数不校验（向后兼容：默认关，参数可留默认）。
+        var options = CreateValidOptions();
+        options.Routing.EnableContextualBandit = false;
+        options.Routing.ContextualBanditAlpha = 0.0;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
 }

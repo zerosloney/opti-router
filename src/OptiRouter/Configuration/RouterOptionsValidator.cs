@@ -176,6 +176,20 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             }
         }
 
+        // 上下文老虎机（LinUCB）参数校验：alpha<=0 会关闭探索（纯利用，冷启动饿死）；
+        // discount 越界导致衰减失效或过激。与 Thompson 互斥（启用时段内用 LinUCB）。
+        if (options.Routing.EnableContextualBandit)
+        {
+            if (options.Routing.ContextualBanditAlpha <= 0)
+            {
+                return ValidateOptionsResult.Fail("Routing.ContextualBanditAlpha 必须大于 0（启用 Contextual Bandit 时）。");
+            }
+            if (options.Routing.ContextualBanditDiscountFactor < 0.5 || options.Routing.ContextualBanditDiscountFactor > 0.99)
+            {
+                return ValidateOptionsResult.Fail("Routing.ContextualBanditDiscountFactor 必须在 [0.5, 0.99] 范围内（启用 Contextual Bandit 时）。");
+            }
+        }
+
         // 审计保留时长校验：<=0 会让后台服务每次循环淘汰全部审计（AlertEngine 失去数据源）。
         if (options.Routing.AuditRetentionHours < 1)
         {

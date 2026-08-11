@@ -14,17 +14,30 @@ namespace OptiRouter.Routing;
 public sealed class LoadBalancePolicy : IRouterPolicy
 {
     /// <inheritdoc />
+    public PolicyGroup Group => PolicyGroup.Constraint;
+
+    /// <inheritdoc />
     public RouterDecision Apply(RouterContext context, RouterDecision previous)
     {
         if (!context.Options.Routing.EnableLoadBalance)
         {
-            return previous with { Reason = $"{previous.Reason}; load-balance: disabled" };
+            string detail = "load-balance: disabled";
+            return previous with
+            {
+                Reason = $"{previous.Reason}; {detail}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", detail)).ToList()
+            };
         }
 
         // 不足 2 个候选无可均衡；同 tier 段需 ≥2 才有重排空间。
         if (previous.Candidates.Count < 2)
         {
-            return previous with { Reason = $"{previous.Reason}; load-balance: <2 candidates" };
+            string detail = "load-balance: <2 candidates";
+            return previous with
+            {
+                Reason = $"{previous.Reason}; {detail}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", detail)).ToList()
+            };
         }
 
         // 按 tier 分段（候选链按 tier 升序构造，但下游策略可能打乱，故按出现顺序分段）。
@@ -63,13 +76,20 @@ public sealed class LoadBalancePolicy : IRouterPolicy
 
         if (!anyReordered)
         {
-            return previous with { Reason = $"{previous.Reason}; load-balance: no change after shuffle" };
+            string detail = "load-balance: no change after shuffle";
+            return previous with
+            {
+                Reason = $"{previous.Reason}; {detail}",
+                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", detail)).ToList()
+            };
         }
 
+        string redistributed = "load-balance: redistributed within tier";
         return previous with
         {
             Candidates = result,
-            Reason = $"{previous.Reason}; load-balance: redistributed within tier"
+            Reason = $"{previous.Reason}; {redistributed}",
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", redistributed)).ToList()
         };
     }
 

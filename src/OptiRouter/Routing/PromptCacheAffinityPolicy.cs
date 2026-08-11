@@ -3,6 +3,9 @@ namespace OptiRouter.Routing;
 /// <summary>Softly promotes a cached stable-prefix model within the already-filtered candidate set.</summary>
 public sealed class PromptCacheAffinityPolicy : IRouterPolicy
 {
+    /// <inheritdoc />
+    public PolicyGroup Group => PolicyGroup.Order;
+
     private readonly PromptCacheAffinityStore _store;
 
     public PromptCacheAffinityPolicy(PromptCacheAffinityStore store)
@@ -28,10 +31,12 @@ public sealed class PromptCacheAffinityPolicy : IRouterPolicy
         var preferred = reordered[index];
         reordered.RemoveAt(index);
         reordered.Insert(0, preferred);
+        string detail = "prompt-cache-affinity: hit";
         return previous with
         {
             Candidates = reordered,
-            Reason = $"{previous.Reason}; prompt-cache-affinity: hit"
+            Reason = $"{previous.Reason}; {detail}",
+            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("prompt-cache-affinity", detail)).ToList()
         };
     }
 }

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Caching.Memory;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Routing;
@@ -223,5 +224,54 @@ public class RouterEngineTests
 
         // 125 + 3（消息开销）= 128，而非分桶粗估的 253。
         Assert.Equal(128, result.EstimatedInputTokens);
+    }
+
+    [Fact]
+    public void Decide_GroupAwareExecution_MatchesPolicyChainOrder()
+    {
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
+
+        var engine = new RouterEngine(ledger, new IRouterPolicy[]
+        {
+            new CapabilityFilterPolicy(),
+            new RuleClassifierPolicy(),
+            new LongInputPolicy(),
+            new BudgetGuardPolicy(ledger),
+            new FailoverPolicy(new ModelHealthTracker())
+        });
+
+        var request = TestHelpers.BuildRequest(("user", "```python\ndef foo(): pass\n```"));
+
+        var result = engine.Decide(request, options);
+
+        // Code request → Strong tier, gpt-4o primary.
+        Assert.Equal("gpt-4o", result.Candidates[0].Name);
+        Assert.Equal("code-detected", result.ClassificationSignal);
+        Assert.Equal(ModelTier.Strong, result.ClassificationTargetTier);
+        // ReasonEvents 结构化：按组依赖序累积（capability-filter → rule-classifier → ...）。
+        Assert.Contains(result.ReasonEvents, e => e.Policy == "rule-classifier");
+        Assert.Contains(result.ReasonEvents, e => e.Policy == "capability-filter");
+    }
+
+    [Fact]
+    public void Decide_Policies_DeclareCorrectGroups()
+    {
+        // P2 分组契约：每个策略声明所属分组，供 RouterEngine 按依赖序执行。
+        var ledger = new CostLedger();
+        Assert.Equal(PolicyGroup.Filter, new CapabilityFilterPolicy().Group);
+        Assert.Equal(PolicyGroup.Filter, new LongInputPolicy().Group);
+        Assert.Equal(PolicyGroup.Filter, new FailoverPolicy(new ModelHealthTracker()).Group);
+        Assert.Equal(PolicyGroup.Filter, new QuotaAwarePolicy(new UpstreamQuotaStateStore()).Group);
+        Assert.Equal(PolicyGroup.Classify, new RuleClassifierPolicy().Group);
+        Assert.Equal(PolicyGroup.Classify, new SemanticRouterPolicy().Group);
+        Assert.Equal(PolicyGroup.Order, new LatencyAwarePolicy(new LatencyStatsCache(), new ThompsonStateStore()).Group);
+        Assert.Equal(PolicyGroup.Order, new PromptCacheAffinityPolicy(new PromptCacheAffinityStore()).Group);
+        Assert.Equal(PolicyGroup.Constraint, new BudgetGuardPolicy(ledger).Group);
+        Assert.Equal(PolicyGroup.Constraint, new SessionAffinityPolicy(new MemoryCache(new MemoryCacheOptions())).Group);
+        Assert.Equal(PolicyGroup.Constraint, new LoadBalancePolicy().Group);
     }
 }
