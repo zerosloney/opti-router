@@ -79,11 +79,11 @@ public sealed class ContextualBanditState
         lock (arm.Lock)
         {
             // θ = A⁻¹·b（解线性方程组 A·θ = b）。
-            var theta = SolveLinear(arm.A, arm.B);
+            var theta = SolveViaGaussJordan(arm.A, arm.B);
             double mean = Dot(theta, context);
 
             // UCB 项：α·sqrt(xᵀ A⁻¹ x)。
-            var aInvX = SolveLinear(arm.A, context);
+            var aInvX = SolveViaGaussJordan(arm.A, context);
             double uncertainty = Math.Sqrt(Dot(context, aInvX));
 
             return mean + alpha * uncertainty;
@@ -144,8 +144,11 @@ public sealed class ContextualBanditState
         return removed;
     }
 
-    /// <summary>解线性方程组 A·x = b（高斯消元）。A 为对称正定（岭回归），数值稳定。</summary>
-    private static double[] SolveLinear(double[,] a, double[] b)
+    /// <summary>
+    /// 解线性方程组 A·x = b（高斯-约旦消元 + 部分主元）。
+    /// A 为对称正定（岭回归），数值稳定。命名揭示 O(d³) 成本，避免误以为是 O(d²) 三角求解。
+    /// </summary>
+    private static double[] SolveViaGaussJordan(double[,] a, double[] b)
     {
         int n = b.Length;
         // 增广矩阵 [A | b] 拷贝（不修改原 A）。

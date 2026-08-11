@@ -93,9 +93,7 @@ public sealed class FusionRouter
             var modelCopy = model;
             // 每 panel 一个独立 linked CTS：panel 超时只取消自己，不影响其他 panel。
             // 0 = 不启用 panel 级超时，linkedToken 即 ct 本身（CreateLinkedTokenSource 单 token 仍可安全 Dispose）。
-            CancellationTokenSource panelCts = panelTimeoutMs > 0
-                ? CancellationTokenSource.CreateLinkedTokenSource(ct)
-                : CancellationTokenSource.CreateLinkedTokenSource(ct);
+            CancellationTokenSource panelCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             if (panelTimeoutMs > 0)
                 panelCts.CancelAfter(panelTimeoutMs);
             panelCtsList.Add(panelCts);

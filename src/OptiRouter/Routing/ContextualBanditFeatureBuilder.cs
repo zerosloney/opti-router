@@ -44,14 +44,8 @@ public static class ContextualBanditFeatureBuilder
 
         if (targetTier is { } tier)
         {
-            for (int i = 0; i < Tiers.Count; i++)
-            {
-                if (Tiers[i] == tier)
-                {
-                    x[Signals.Count + i] = 1.0;
-                    break;
-                }
-            }
+            int idx = IndexOf(Tiers, tier);
+            if (idx >= 0) x[Signals.Count + idx] = 1.0;
         }
 
         return x;
@@ -61,6 +55,15 @@ public static class ContextualBanditFeatureBuilder
     {
         for (int i = 0; i < list.Count; i++)
             if (string.Equals(list[i], value, StringComparison.OrdinalIgnoreCase))
+                return i;
+        return -1;
+    }
+
+    private static int IndexOf<T>(IReadOnlyList<T> list, T value)
+    {
+        var cmp = EqualityComparer<T>.Default;
+        for (int i = 0; i < list.Count; i++)
+            if (cmp.Equals(list[i], value))
                 return i;
         return -1;
     }
