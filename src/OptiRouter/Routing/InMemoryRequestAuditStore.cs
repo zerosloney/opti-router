@@ -213,22 +213,9 @@ public sealed class InMemoryRequestAuditStore : IRequestAuditStore, IDisposable
         {
             lats.Sort();
             double avg = lats.Count == 0 ? 0.0 : lats.Sum() / lats.Count;
-            result[model] = new ModelLatencyStats(avg, Percentile(lats, 95.0), lats.Count);
+            result[model] = new ModelLatencyStats(avg, LatencyStatsMath.Percentile(lats, 95.0), lats.Count);
         }
         return result;
-    }
-
-    /// <summary>
-    /// 线性插值百分位（与 SQLite 实现一致）。<paramref name="sorted"/> 必须已升序排序且非空。
-    /// </summary>
-    private static double Percentile(List<double> sorted, double pct)
-    {
-        if (sorted.Count == 1) return sorted[0];
-        double k = (sorted.Count - 1) * (pct / 100.0);
-        int lo = (int)Math.Floor(k);
-        int hi = Math.Min(lo + 1, sorted.Count - 1);
-        double frac = k - lo;
-        return sorted[lo] + (sorted[hi] - sorted[lo]) * frac;
     }
 
     /// <inheritdoc />
