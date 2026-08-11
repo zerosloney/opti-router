@@ -261,3 +261,36 @@ ThompsonRaceCancelledReward从const提为RoutingOptions配置项(默认0.5,校�
 ### Next Steps
 
 - None - task complete
+
+
+## Session 9: 单模型路由实现 P1+P2+P3
+
+**Date**: 2026-08-11
+**Task**: 单模型路由实现 P1+P2+P3
+**Branch**: `master`
+
+### Summary
+
+落地研究报告立即集。P1: RouterDecision加ClassificationSignal/ClassificationTargetTier结构化字段, RuleClassifier填充, routing_reason target=格式保持。P2: PolicyGroup契约(Filter/Classify/Order/Constraint)+RouterEngine按组依赖序执行(组内串行, 诚实结论: 链本质串行Failover有fallback副作用), ReasonEvents结构化(Reason字符串保持不破坏测试)。P3: EnableContextualBandit配置+校验, ContextualBanditState(LinUCB θ/协方差, 线程安全), FeatureBuilder(7信号+3tier+bias one-hot), LatencyAwarePolicy LinUCB重排, OutcomeRecorder同步更新, 热重载Retain。修非上下文Thompson低估Strong。487测试全绿(465+22新)。spec更新。commit 739a717。
+
+### Main Changes
+
+- Detailed change bullets were not supplied; see the summary above.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `739a717` | (see git log) |
+
+### Testing
+
+- Validation was not recorded for this session.
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
