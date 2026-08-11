@@ -346,6 +346,149 @@ def build_fusion(conn: sqlite3.Connection, where: str, params: list,
     return "\n".join(lines) + "\n"
 
 
+def build_single_model(conn: sqlite3.Connection, where: str, params: list,
+                       has_tier: bool, has_reason: bool) -> str:
+    """单模型智能选择路由实证分析。
+
+    回答设计文档的实证问题：
+      Q1 分类信号准确率——routing_reason 里的 target=Tier(signal) vs 实际 routed_tier 的混淆。
+      Q2 Thompson 奖励分布——routing_reason 里的 thompson: reward=X, round=Y，含每模型 Alpha/Beta 与 regret 代理。
+      Q3 成本-质量 Pareto / AIQ——routing_reason 里的 quality=Z 与 cost 构造凸包，比较单模型 vs 融合 vs 基线。
+    解析依赖 routing_reason 字符串格式（生成与解析同一约定）；列/数据缺失时优雅降级（AC6）。
+    """
+    lines = ["## Single-Model Selection\n"]
+    if not has_reason:
+        lines.append("(routing_reason column absent — legacy DB)\n")
+        return "\n".join(lines) + "\n"
+
+    cur = conn.execute(f"SELECT * FROM request_audit{where}", params)
+    rows = cur.fetchall()
+    if not rows:
+        lines.append("(no data in range)\n")
+        return "\n".join(lines) + "\n"
+
+    adopted = [r for r in rows if r["is_adopted"]]
+    if not adopted:
+        adopted = rows  # is_adopted 列可能恒 1；退化用全部行
+
+    # Q1: 分类信号混淆 / 准确率。从 reason 解析 target=Tier(signal)。
+    import re as _re
+    target_re = _re.compile(r"target=(Strong|Medium|Cheap|Unknown)\(([^)]+)\)")
+    sig_rows: dict[str, list[tuple[str, sqlite3.Row]]] = {}  # signal -> [(target_tier, row)]
+    for r in adopted:
+        reason = r["routing_reason"] or ""
+        m = target_re.search(reason)
+        if m:
+            sig_rows.setdefault(m.group(2), []).append((m.group(1), r))
+
+    if sig_rows:
+        lines.append("### Classification signal accuracy\n")
+        header = ["Signal", "Count", "Target-tier accurate", "Accuracy"]
+        out = []
+        correct_total = 0
+        count_total = 0
+        for sig in sorted(sig_rows.keys()):
+            pairs = sig_rows[sig]
+            routed_tier_col = "routed_tier"
+            acc = 0.0
+            correct = 0
+            if has_tier:
+                for target_tier, r in pairs:
+                    actual = r[routed_tier_col] or "unknown"
+                    # 目标 tier 与信号应路由 tier 一致判定准确（同档即准）。
+                    if actual == target_tier:
+                        correct += 1
+                        correct_total += 1
+                acc = correct / len(pairs) if pairs else 0.0
+                count_total += len(pairs)
+            out.append([sig, len(pairs), correct, fmt_pct(acc)])
+        lines.append(table(header, out))
+        if has_tier and count_total:
+            lines.append(f"_Overall signal accuracy: {fmt_pct(correct_total / count_total)}_\n")
+        else:
+            lines.append("_(routed_tier absent — accuracy unavailable, signal counts only)_\n")
+
+    # Q2: Thompson 奖励分布 + regret 代理。解析 thompson: reward=X, round=Y。
+    import re as _re2
+    thompson_re = _re2.compile(r"thompson: reward=([0-9.]+), round=(\d+)")
+    model_alpha: dict[str, list[float]] = {}
+    reward_hist: dict[float, int] = {}
+    for r in adopted:
+        reason = r["routing_reason"] or ""
+        m = thompson_re.search(reason)
+        if m:
+            reward = float(m.group(1))
+            reward_hist[reward] = reward_hist.get(reward, 0) + 1
+            model_alpha.setdefault(r["model"], []).append(reward)
+
+    if reward_hist:
+        lines.append("### Thompson reward distribution\n")
+        lines.append(table(
+            ["Reward", "Count", "Share"],
+            [[k, v, fmt_pct(v / sum(reward_hist.values()))]
+             for k, v in sorted(reward_hist.items())]
+        ))
+        # regret 代理：最优平均奖励（最强模型）vs 各模型平均奖励的差距。
+        avg_reward = {m: sum(v) / len(v) for m, v in model_alpha.items()}
+        if avg_reward:
+            best = max(avg_reward.values())
+            lines.append("\n### Thompson regret proxy (per-model avg reward vs best)\n")
+            lines.append(table(
+                ["Model", "Avg reward", "Samples", "Regret vs best"],
+                [[m, fmt_f(avg_reward[m], 3), len(model_alpha[m]),
+                  fmt_f(best - avg_reward[m], 3)]
+                 for m in sorted(avg_reward.keys(), key=lambda k: -avg_reward[k])]
+            ))
+            lines.append(
+                "\n_注：reward 由生成器按真实语义注入（快成功 1.0/慢成功 0.3/失败 0.0/竞速 0.5）；"
+                "regret 为合成数据下的代理，非真实质量。_\n"
+            )
+
+    # Q3: 成本-质量 Pareto / AIQ。解析 quality=Z 与 cost。
+    import re as _re3
+    quality_re = _re3.compile(r"quality=([0-9.]+)")
+    model_pq: dict[str, list[tuple[float, float]]] = {}  # model -> [(cost, quality)]
+    for r in adopted:
+        reason = r["routing_reason"] or ""
+        m = quality_re.search(reason)
+        if m is not None:
+            model_pq.setdefault(r["model"], []).append(
+                (r["cost"] or 0.0, float(m.group(1))))
+
+    if model_pq:
+        lines.append("### Cost-quality Pareto (AIQ)\n")
+        # 每模型聚合 (avg_cost, avg_quality)。
+        agg = {m: (sum(c for c, _ in pts) / len(pts), sum(q for _, q in pts) / len(pts))
+               for m, pts in model_pq.items()}
+        # 凸包（Pareto 前沿）：按成本升序，保留质量不低于已见最大质量的点。
+        pts_sorted = sorted(agg.items(), key=lambda kv: kv[1][0])
+        frontier: list[tuple[str, float, float]] = []
+        max_q = -1.0
+        for m, (c, q) in pts_sorted:
+            if q > max_q:
+                frontier.append((m, c, q))
+                max_q = q
+        lines.append(table(
+            ["Model", "Avg cost $", "Avg quality", "On Pareto frontier"],
+            [[m, fmt_f(c, 6), fmt_f(q, 3), "yes" if (m, c, q) in frontier else "no"]
+             for m, (c, q) in sorted(agg.items(), key=lambda kv: -kv[1][1])]
+        ))
+        # AIQ 代理：前沿下面积（梯形积分，按成本归一）。
+        if len(frontier) >= 2:
+            area = 0.0
+            for i in range(1, len(frontier)):
+                c0, q0 = frontier[i - 1][1], frontier[i - 1][2]
+                c1, q1 = frontier[i][1], frontier[i][2]
+                area += (q0 + q1) / 2.0 * (c1 - c0)
+            lines.append(f"_AIQ proxy (frontier area under cost): {fmt_f(area, 4)}_\n")
+        lines.append(
+            "\n_注：quality 为合成代理分数；真实部署需 LLM-as-judge 采样。"
+            "Pareto 前沿回答「哪个模型在成本-质量上占优」，融合/级联成本已由其它段给出。_\n"
+        )
+
+    return "\n".join(lines) + "\n"
+
+
 def build_by_reason(conn: sqlite3.Connection, where: str, params: list) -> str:
     """按 routing_reason 分组聚合，作为规则误判率的代理指标。
 
@@ -433,6 +576,7 @@ def main(argv: list[str] | None = None) -> int:
         has_cascade = column_exists(conn, "cascade_triggered")
         has_fusion_role = column_exists(conn, "fusion_role")
         has_group = column_exists(conn, "parallel_group_id")
+        has_reason = column_exists(conn, "routing_reason")
 
         total = conn.execute(f"SELECT COUNT(*) FROM request_audit{where}", params).fetchone()[0]
         if total == 0:
@@ -445,6 +589,7 @@ def main(argv: list[str] | None = None) -> int:
                 build_by_tier(conn, where, params, has_tier),
                 build_cascade(conn, where, params, has_cascade),
                 build_fusion(conn, where, params, has_fusion_role, has_group),
+                build_single_model(conn, where, params, has_tier, has_reason),
                 build_by_reason(conn, where, params),
                 build_daily_trend(conn, where, params),
             ]

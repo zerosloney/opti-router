@@ -7,6 +7,8 @@
 用法:
     python scripts/generate_audit_data.py [--rows N] [--seed S] [--db PATH]
         [--append] [--misclassify N] [--cascade-rate R] [--parallel-rate R] [--models-json PATH]
+        [--fusion-rate R] [--fusion-analyst-fail-rate R]
+        [--signal-accuracy R] [--thompson-rate R] [--quality-agent]
 
 默认 --db 为 data/audit-demo.db（独立演示库，不碰真实 data/optirouter-budget.db）。
 --append 显式开启才向既有库追加（不建表/不覆盖）。
@@ -66,13 +68,14 @@ CREATE TABLE IF NOT EXISTS request_audit (
 """
 
 # 默认模型画像：tier 越高成本高/延迟高/更稳，tier 越低便宜/快/成功率略低。
+# quality 是 0-1 质量代理分数（供成本-质量 Pareto/AIQ 分析；真实部署可由 LLM-as-judge 采样得出）。
 DEFAULT_MODELS = [
     {"name": "gpt-4o", "tier": "Strong", "in_price": 2.5, "out_price": 10.0,
-     "latency_base": 900, "success_rate": 0.99},
+     "latency_base": 900, "success_rate": 0.99, "quality": 0.95},
     {"name": "gpt-4o-mini", "tier": "Medium", "in_price": 0.15, "out_price": 0.6,
-     "latency_base": 500, "success_rate": 0.97},
+     "latency_base": 500, "success_rate": 0.97, "quality": 0.80},
     {"name": "deepseek-chat", "tier": "Cheap", "in_price": 0.01, "out_price": 0.03,
-     "latency_base": 300, "success_rate": 0.93},
+     "latency_base": 300, "success_rate": 0.93, "quality": 0.60},
 ]
 BY_TIER = {m["tier"]: m for m in DEFAULT_MODELS}
 
@@ -108,6 +111,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="Fraction of requests generated as full fusion groups (panel+analyst+outer, shared group) in [0,1]")
     p.add_argument("--fusion-analyst-fail-rate", type=float, default=0.1,
                    help="Fraction of fusion groups where analyst fails (no outer produced) in [0,1]")
+    p.add_argument("--signal-accuracy", type=float, default=0.9,
+                   help="Classification signal accuracy: fraction of rows routed to the signal's target tier in [0,1] (default 0.9)")
+    p.add_argument("--thompson-rate", type=float, default=0.0,
+                   help="Fraction of rows carrying a thompson: reward=X, round=Y marker in routing_reason in [0,1]")
+    p.add_argument("--quality-agent", action="store_true",
+                   help="Append quality=Z (model quality proxy) to routing_reason for cost-quality Pareto analysis")
     p.add_argument("--models-json", default=None, help="Optional JSON file with model profiles override")
     return p.parse_args(argv)
 
@@ -242,9 +251,14 @@ def generate_rows(args: argparse.Namespace, rng: random.Random) -> list[tuple]:
                 break
         _sig, target_tier, reason_frag, _w = signal
 
-        # 模型：默认按目标 tier 选；部分（8%）随机换 tier 模拟路由抖动。
+        # 模型：默认按目标 tier 选；受控误判（1 - signal_accuracy）时换到非目标 tier。
+        # 与 --misclassify 的区别：--misclassify 是注入 N 条 Strong→Cheap 的硬误判；
+        # --signal-accuracy 是速率式通用误判（任意信号按 rate 换 tier），模拟分类器噪声。
         tier = target_tier
-        if rng.random() < 0.08:
+        if args.signal_accuracy < 1.0 and rng.random() > args.signal_accuracy:
+            others = [m["tier"] for m in models if m["tier"] != target_tier]
+            tier = rng.choice(others)
+        elif rng.random() < 0.08:
             tier = rng.choice([m["tier"] for m in models])
         model = rng.choice(by_tier.get(tier, DEFAULT_MODELS))
 
@@ -279,6 +293,24 @@ def generate_rows(args: argparse.Namespace, rng: random.Random) -> list[tuple]:
             reason_frag += "; cascade: upgraded from " + model["name"]
 
         routing_reason = reason_frag + "; latency-aware: disabled; load-balance: disabled"
+
+        # Thompson 奖励标记（模拟真实 Reward 语义：快成功 1.0 / 慢成功 0.3 / 失败 0.0 / 竞速 0.5）。
+        # 仅当 --thompson-rate>0 且命中时写入，供 analyze 解析 reward 分布与 regret 代理。
+        if args.thompson_rate > 0 and rng.random() < args.thompson_rate:
+            round_no = rng.randint(1, 50)
+            if not success:
+                reward = 0.0
+            elif rng.random() < 0.15:
+                reward = 0.5  # 竞速失败（被更快者取消），部分奖励
+            elif latency < 800:
+                reward = 1.0  # 快成功（< latency target）
+            else:
+                reward = 0.3  # 慢成功
+            routing_reason += f"; thompson: reward={reward:.1f}, round={round_no}"
+
+        # 质量代理分数（模型 quality 字段），供成本-质量 Pareto/AIQ 分析。
+        if args.quality_agent:
+            routing_reason += f"; quality={model.get('quality', 0.5):.2f}"
 
         # 并行/融合。
         is_adopted = 1
