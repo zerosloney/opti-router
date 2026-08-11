@@ -19,7 +19,7 @@ public sealed class LongInputPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableTokenEstimator)
         {
-            return previous with { Reason = $"{previous.Reason}; long-input: disabled", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", "disabled")).ToList() };
+            return previous.Append("long-input", "disabled");
         }
 
         int threshold = context.Options.Routing.LongInputThresholdTokens;
@@ -27,7 +27,7 @@ public sealed class LongInputPolicy : IRouterPolicy
 
         if (estimated <= threshold)
         {
-            return previous with { Reason = $"{previous.Reason}; long-input: within-threshold({estimated}<={threshold})", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", $"within-threshold({estimated}<={threshold})")).ToList() };
+            return previous.Append("long-input", $"within-threshold({estimated}<={threshold})");
         }
 
         int requiredContext = (int)Math.Ceiling(estimated * ContextHeadroom);
@@ -37,21 +37,11 @@ public sealed class LongInputPolicy : IRouterPolicy
 
         if (filtered.Count > 0)
         {
-            string reason = $"long-input: filtered to {filtered.Count} candidates (est={estimated}, required>={requiredContext})";
-            return previous with
-            {
-                Candidates = filtered,
-                Reason = $"{previous.Reason}; {reason}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", reason)).ToList()
-            };
+            var withFiltered = previous with { Candidates = filtered };
+            return withFiltered.Append("long-input", $"filtered to {filtered.Count} candidates (est={estimated}, required>={requiredContext})");
         }
 
         // 没有模型能装下，保留原候选 + warning
-        string warning = $"long-input: no model fits (est={estimated}, required>={requiredContext}), keeping original candidates";
-        return previous with
-        {
-            Reason = $"{previous.Reason}; {warning}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("long-input", warning)).ToList()
-        };
+        return previous.Append("long-input", $"no model fits (est={estimated}, required>={requiredContext}), keeping original candidates");
     }
 }

@@ -47,12 +47,7 @@ public sealed class QuotaAwarePolicy : IRouterPolicy
         }
 
         var reordered = viable.Concat(insufficient).ToList();
-        string detail = $"quota-aware: excluded={excluded}, insufficient={insufficient.Count}";
-        return previous with
-        {
-            Candidates = reordered,
-            Reason = $"{previous.Reason}; {detail}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("quota-aware", detail)).ToList()
-        };
+        var withReordered = previous with { Candidates = reordered };
+        return withReordered.Append("quota-aware", $"excluded={excluded}, insufficient={insufficient.Count}");
     }
 }

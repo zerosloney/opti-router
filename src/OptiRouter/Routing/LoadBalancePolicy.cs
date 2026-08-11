@@ -21,23 +21,13 @@ public sealed class LoadBalancePolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableLoadBalance)
         {
-            string detail = "load-balance: disabled";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", detail)).ToList()
-            };
+            return previous.Append("load-balance", "disabled");
         }
 
         // 不足 2 个候选无可均衡；同 tier 段需 ≥2 才有重排空间。
         if (previous.Candidates.Count < 2)
         {
-            string detail = "load-balance: <2 candidates";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", detail)).ToList()
-            };
+            return previous.Append("load-balance", "<2 candidates");
         }
 
         // 按 tier 分段（候选链按 tier 升序构造，但下游策略可能打乱，故按出现顺序分段）。
@@ -76,21 +66,11 @@ public sealed class LoadBalancePolicy : IRouterPolicy
 
         if (!anyReordered)
         {
-            string detail = "load-balance: no change after shuffle";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", detail)).ToList()
-            };
+            return previous.Append("load-balance", "no change after shuffle");
         }
 
-        string redistributed = "load-balance: redistributed within tier";
-        return previous with
-        {
-            Candidates = result,
-            Reason = $"{previous.Reason}; {redistributed}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("load-balance", redistributed)).ToList()
-        };
+        var withResult = previous with { Candidates = result };
+        return withResult.Append("load-balance", "redistributed within tier");
     }
 
     /// <summary>按 MaxContextTokens 加权随机重排一个 tier 段。</summary>

@@ -26,7 +26,7 @@ public sealed class FailoverPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableFailover)
         {
-            return previous with { Reason = $"{previous.Reason}; failover: disabled" };
+            return previous.Append("failover", "disabled");
         }
 
         // 合并单请求内失败模型与跨请求熔断打开（冷却中）的模型。
@@ -51,12 +51,7 @@ public sealed class FailoverPolicy : IRouterPolicy
         if (excluded.Count == 0)
         {
             string halfOpenNote = halfOpen.Count > 0 ? $", half-open probing [{string.Join(", ", halfOpen)}]" : "";
-            string detail = $"failover: no-failed-models{halfOpenNote}";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("failover", detail)).ToList()
-            };
+            return previous.Append("failover", $"no-failed-models{halfOpenNote}");
         }
 
         var remaining = previous.Candidates
@@ -69,14 +64,10 @@ public sealed class FailoverPolicy : IRouterPolicy
             string coolingNote = coolingDown.Count > 0 ? $", cooling [{string.Join(", ", coolingDown)}]" : "";
             string halfOpenNote = halfOpen.Count > 0 ? $", half-open probing [{string.Join(", ", halfOpen)}]" : "";
             string reason = removed.Length > 0
-                ? $"failover: removed failed [{removed}]{coolingNote}{halfOpenNote}, {remaining.Count} remaining"
-                : $"failover: no candidates removed{coolingNote}{halfOpenNote}";
-            return previous with
-            {
-                Candidates = remaining,
-                Reason = $"{previous.Reason}; {reason}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("failover", reason)).ToList()
-            };
+                ? $"removed failed [{removed}]{coolingNote}{halfOpenNote}, {remaining.Count} remaining"
+                : $"no candidates removed{coolingNote}{halfOpenNote}";
+            var withRemaining = previous with { Candidates = remaining };
+            return withRemaining.Append("failover", reason);
         }
 
         // 全部排除，需要补充降级链。
@@ -84,13 +75,8 @@ public sealed class FailoverPolicy : IRouterPolicy
         // 而非固定 Strong->Medium->Cheap 顺序（否则 Cheap 失败会跳到最贵的 Strong，跳过 Medium）。
         var originalTier = previous.Candidates.Count > 0 ? previous.Candidates[0].Tier : ModelTier.Medium;
         var fallback = BuildFallbackChain(context.AllModels, previous.Candidates, excluded, originalTier);
-        string fallbackReason = $"failover: all candidates failed, fallback to [{string.Join(", ", fallback.Select(m => m.Name))}]";
-        return previous with
-        {
-            Candidates = fallback,
-            Reason = $"{previous.Reason}; {fallbackReason}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("failover", fallbackReason)).ToList()
-        };
+        var withFallback = previous with { Candidates = fallback };
+        return withFallback.Append("failover", $"all candidates failed, fallback to [{string.Join(", ", fallback.Select(m => m.Name))}]");
     }
 
     private static List<ModelEndpointOptions> BuildFallbackChain(

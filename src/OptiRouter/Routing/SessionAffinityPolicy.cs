@@ -55,46 +55,26 @@ public sealed class SessionAffinityPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableSessionAffinity)
         {
-            string detail = "session-affinity: disabled";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("session-affinity", detail)).ToList()
-            };
+            return previous.Append("session-affinity", "disabled");
         }
 
         // 无 session 头则不参与粘性。
         if (string.IsNullOrEmpty(context.SessionId))
         {
-            string detail = "session-affinity: no-session";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("session-affinity", detail)).ToList()
-            };
+            return previous.Append("session-affinity", "no-session");
         }
 
         string key = CacheKeyPrefix + context.SessionId;
         if (!_cache.TryGetValue<AffinityRecord>(key, out var record) || record is null || string.IsNullOrEmpty(record.ModelName))
         {
-            string detail = "session-affinity: no-record";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("session-affinity", detail)).ToList()
-            };
+            return previous.Append("session-affinity", "no-record");
         }
         string remembered = record.ModelName;
 
         // 记忆模型已在本请求失败 → 不强推，交给 Failover。
         if (context.FailedModels.Contains(remembered))
         {
-            string detail = $"session-affinity: remembered '{remembered}' failed, skipped";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("session-affinity", detail)).ToList()
-            };
+            return previous.Append("session-affinity", $"remembered '{remembered}' failed, skipped");
         }
 
         // 记忆模型不在当前候选链（可能被 LongInput/Budget 过滤）→ 不破坏候选，透传。
@@ -112,12 +92,7 @@ public sealed class SessionAffinityPolicy : IRouterPolicy
         {
             // idx==0 已在首位无需调整；idx==-1 不在候选。
             string note = idx == -1 ? $"remembered '{remembered}' not in candidates" : $"already primary '{remembered}'";
-            string detail = $"session-affinity: {note}";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("session-affinity", detail)).ToList()
-            };
+            return previous.Append("session-affinity", note);
         }
 
         // 提升到首位，其余保持相对顺序。
@@ -128,12 +103,7 @@ public sealed class SessionAffinityPolicy : IRouterPolicy
             if (i != idx) reordered.Add(previous.Candidates[i]);
         }
 
-        string promoteDetail = $"session-affinity: promoted '{remembered}' to primary";
-        return previous with
-        {
-            Candidates = reordered,
-            Reason = $"{previous.Reason}; {promoteDetail}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("session-affinity", promoteDetail)).ToList()
-        };
+        var withReordered = previous with { Candidates = reordered };
+        return withReordered.Append("session-affinity", $"promoted '{remembered}' to primary");
     }
 }

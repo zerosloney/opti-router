@@ -28,12 +28,7 @@ public sealed class SemanticRouterPolicy : IRouterPolicy
         var options = context.Options.Routing;
         if (!options.EnableSemanticRouter || options.SemanticRoutes is null || options.SemanticRoutes.Count == 0)
         {
-            string detail = "semantic-router: disabled";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("semantic-router", detail)).ToList()
-            };
+            return previous.Append("semantic-router", "disabled");
         }
 
         string queryText = GetQueryText(context.Request);
@@ -50,32 +45,16 @@ public sealed class SemanticRouterPolicy : IRouterPolicy
             if (candidates.Count > 0)
             {
                 candidates = candidates.OrderByDescending(m => m.MaxContextTokens).ToList();
-                string reason = $"semantic-router: matched={matchedRoute.Name}(sim={maxSimilarity:F4}, tier={matchedRoute.TargetTier}), {candidates.Count} candidates";
-
-                return previous with
-                {
-                    Candidates = candidates,
-                    Reason = $"{previous.Reason}; {reason}",
-                    ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("semantic-router", reason)).ToList()
-                };
+                var withCandidates = previous with { Candidates = candidates };
+                return withCandidates.Append("semantic-router", $"matched={matchedRoute.Name}(sim={maxSimilarity:F4}, tier={matchedRoute.TargetTier}), {candidates.Count} candidates");
             }
 
             // 匹配命中但 previous.Candidates 无目标 tier 候选：不覆盖上游过滤结果，
             // 记独立 reason 区分于真正无匹配（no-match 误导：实际匹配了但零 tier 候选）。
-            string noTierDetail = $"semantic-router: matched={matchedRoute.Name}(sim={maxSimilarity:F4}, tier={matchedRoute.TargetTier}) but 0 tier candidates, unchanged";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {noTierDetail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("semantic-router", noTierDetail)).ToList()
-            };
+            return previous.Append("semantic-router", $"matched={matchedRoute.Name}(sim={maxSimilarity:F4}, tier={matchedRoute.TargetTier}) but 0 tier candidates, unchanged");
         }
 
-        string noMatchDetail = $"semantic-router: no-match(max_sim={maxSimilarity:F4})";
-        return previous with
-        {
-            Reason = $"{previous.Reason}; {noMatchDetail}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("semantic-router", noMatchDetail)).ToList()
-        };
+        return previous.Append("semantic-router", $"no-match(max_sim={maxSimilarity:F4})");
     }
 
     private static string GetQueryText(Clients.ChatRequest request)

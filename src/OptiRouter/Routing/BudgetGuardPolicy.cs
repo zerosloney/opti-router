@@ -26,12 +26,7 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableBudgetGuard)
         {
-            string detail = "budget-guard: disabled";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", detail)).ToList()
-            };
+            return previous.Append("budget-guard", "disabled");
         }
 
         var (dailySpend, _) = _ledger.GetSpend();
@@ -49,25 +44,18 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
             string sessionInfo = context.SessionId is not null
                 ? $"session={sessionSpend:F4}/{(budget.SessionBudgetUsd?.ToString("F4") ?? "inf")}"
                 : "session=disabled(no-header)";
-            string spendInfo = $"budget-guard: daily={dailySpend:F4}/{budget.DailyBudgetUsd:F4}, {sessionInfo}";
-            return previous with
-            {
-                Reason = $"{previous.Reason}; {spendInfo}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", spendInfo)).ToList()
-            };
+            return previous.Append("budget-guard", $"daily={dailySpend:F4}/{budget.DailyBudgetUsd:F4}, {sessionInfo}");
         }
 
         // 预算耗尽
         if (budget.EnforceOnExhausted == BudgetExhaustionMode.Reject)
         {
-            string detail = $"budget-guard: budget exhausted, reject (daily={dailySpend:F4}, session={sessionSpend:F4})";
-            return previous with
+            var rejected = previous with
             {
                 Candidates = Array.Empty<ModelEndpointOptions>(),
-                BudgetExhausted = true,
-                Reason = $"{previous.Reason}; {detail}",
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", detail)).ToList()
+                BudgetExhausted = true
             };
+            return rejected.Append("budget-guard", $"budget exhausted, reject (daily={dailySpend:F4}, session={sessionSpend:F4})");
         }
 
         // Degrade：优先 Cheap tier，从全部 enabled 模型构建降级链，但排除装不下输入的模型
@@ -85,7 +73,7 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
         {
             degradedCandidates = cheapFitting;
             var primary = degradedCandidates[0];
-            degradeReason = $"budget-guard: degraded to cheap-tier chain (primary='{primary.Name}' tier={primary.Tier}, input={primary.InputPricePerMillion:F4}/M, daily={dailySpend:F4})";
+            degradeReason = $"degraded to cheap-tier chain (primary='{primary.Name}' tier={primary.Tier}, input={primary.InputPricePerMillion:F4}/M, daily={dailySpend:F4})";
         }
         else
         {
@@ -99,7 +87,7 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
             {
                 degradedCandidates = anyFitting;
                 var primary = degradedCandidates[0];
-                degradeReason = $"budget-guard: no cheap-tier fits, degraded to cheapest fitting (primary='{primary.Name}' tier={primary.Tier}, input={primary.InputPricePerMillion:F4}/M, daily={dailySpend:F4})";
+                degradeReason = $"no cheap-tier fits, degraded to cheapest fitting (primary='{primary.Name}' tier={primary.Tier}, input={primary.InputPricePerMillion:F4}/M, daily={dailySpend:F4})";
             }
             else
             {
@@ -110,25 +98,16 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
 
                 if (degradedCandidates.Count == 0)
                 {
-                    string detail = "budget-guard: exhausted, no candidates available";
-                    return previous with
-                    {
-                        Candidates = Array.Empty<ModelEndpointOptions>(),
-                        Reason = $"{previous.Reason}; {detail}",
-                        ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", detail)).ToList()
-                    };
+                    var empty = previous with { Candidates = Array.Empty<ModelEndpointOptions>() };
+                    return empty.Append("budget-guard", "exhausted, no candidates available");
                 }
 
                 var primary = degradedCandidates[0];
-                degradeReason = $"budget-guard: no model fits input, last-resort cheapest (primary='{primary.Name}', input={primary.InputPricePerMillion:F4}/M, daily={dailySpend:F4})";
+                degradeReason = $"no model fits input, last-resort cheapest (primary='{primary.Name}', input={primary.InputPricePerMillion:F4}/M, daily={dailySpend:F4})";
             }
         }
 
-        return previous with
-        {
-            Candidates = degradedCandidates,
-            Reason = $"{previous.Reason}; {degradeReason}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("budget-guard", degradeReason)).ToList()
-        };
+        var withDegraded = previous with { Candidates = degradedCandidates };
+        return withDegraded.Append("budget-guard", degradeReason);
     }
 }

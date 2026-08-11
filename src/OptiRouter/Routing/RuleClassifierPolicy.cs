@@ -144,16 +144,15 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
                 .Select(x => x.Model)
                 .ToList();
 
-            string mdReason = $"rule-classifier: multi-dimensional active ({targetReason}), weights=[{string.Join(", ", weights.Select(kv => $"{kv.Key}:{kv.Value:F1}"))}], {reordered.Count} candidates";
-            return previous with
+            string mdReason = $"multi-dimensional active ({targetReason}), weights=[{string.Join(", ", weights.Select(kv => $"{kv.Key}:{kv.Value:F1}"))}], {reordered.Count} candidates";
+            var withMetadata = previous with
             {
                 Candidates = reordered,
-                Reason = $"{previous.Reason}; {mdReason}",
                 RequestComplexity = complexity,
                 ClassificationSignal = targetReason,
-                ClassificationTargetTier = targetTier,
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("rule-classifier", mdReason)).ToList()
+                ClassificationTargetTier = targetTier
             };
+            return withMetadata.Append("rule-classifier", mdReason);
         }
 
         // 在上游策略（如 CapabilityFilter）已过滤的候选上再按 tier 筛，保持策略链叠加语义。
@@ -173,31 +172,26 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
         // 让唯一可用模型（如 Strong+Cheap 配置下的翻译请求）被排除成空候选直接 503。
         if (candidates.Count == 0)
         {
-            string keepReason = $"rule-classifier: no {targetTier}({targetReason}) candidates, keeping original {previous.Candidates.Count}";
-            return previous with
+            var withMetadata = previous with
             {
-                Reason = $"{previous.Reason}; {keepReason}",
                 RequestComplexity = complexity,
                 ClassificationSignal = targetReason,
-                ClassificationTargetTier = targetTier,
-                ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("rule-classifier", keepReason)).ToList()
+                ClassificationTargetTier = targetTier
             };
+            return withMetadata.Append("rule-classifier", $"no {targetTier}({targetReason}) candidates, keeping original {previous.Candidates.Count}");
         }
 
         // 按 MaxContextTokens 降序
         candidates = candidates.OrderByDescending(m => m.MaxContextTokens).ToList();
 
-        string reason = $"rule-classifier: target={targetTier}({targetReason}), {candidates.Count} candidates";
-
-        return previous with
+        var final = previous with
         {
             Candidates = candidates,
-            Reason = $"{previous.Reason}; {reason}",
             RequestComplexity = complexity,
             ClassificationSignal = targetReason,
-            ClassificationTargetTier = targetTier,
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("rule-classifier", reason)).ToList()
+            ClassificationTargetTier = targetTier
         };
+        return final.Append("rule-classifier", $"target={targetTier}({targetReason}), {candidates.Count} candidates");
     }
 
     private static Dictionary<string, double> GetWeightsForClassification(string reason)

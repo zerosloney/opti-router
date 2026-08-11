@@ -31,12 +31,7 @@ public sealed class PromptCacheAffinityPolicy : IRouterPolicy
         var preferred = reordered[index];
         reordered.RemoveAt(index);
         reordered.Insert(0, preferred);
-        string detail = "prompt-cache-affinity: hit";
-        return previous with
-        {
-            Candidates = reordered,
-            Reason = $"{previous.Reason}; {detail}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("prompt-cache-affinity", detail)).ToList()
-        };
+        var withReordered = previous with { Candidates = reordered };
+        return withReordered.Append("prompt-cache-affinity", "hit");
     }
 }

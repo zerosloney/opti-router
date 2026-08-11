@@ -42,13 +42,13 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
     {
         if (!context.Options.Routing.EnableCapabilityFilter)
         {
-            return previous with { Reason = $"{previous.Reason}; capability-filter: disabled", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", "disabled")).ToList() };
+            return previous.Append("capability-filter", "disabled");
         }
 
         var required = DetectRequiredCapabilities(context.Request);
         if (required.Count == 0)
         {
-            return previous with { Reason = $"{previous.Reason}; capability-filter: no-requirements", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", "no-requirements")).ToList() };
+            return previous.Append("capability-filter", "no-requirements");
         }
 
         var filtered = previous.Candidates
@@ -59,23 +59,19 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
         {
             // 无模型满足能力需求：保留原候选 + warning，让上游报能力错。
             // 比 BudgetGuard 的"返回空"温和——能力过滤是优化，非硬约束（用户可能未标 Tags）。
-            string warning = $"capability-filter: no candidate has {string.Join("/", required)} (tags misconfigured?), keeping original";
-            return previous with { Reason = $"{previous.Reason}; {warning}", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", warning)).ToList() };
+            string warning = $"no candidate has {string.Join("/", required)} (tags misconfigured?), keeping original";
+            return previous.Append("capability-filter", warning);
         }
 
         if (filtered.Count == previous.Candidates.Count)
         {
-            return previous with { Reason = $"{previous.Reason}; capability-filter: all candidates match {string.Join("/", required)}", ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", $"all candidates match {string.Join("/", required)}")).ToList() };
+            return previous.Append("capability-filter", $"all candidates match {string.Join("/", required)}");
         }
 
         int removed = previous.Candidates.Count - filtered.Count;
-        string reason = $"capability-filter: required {string.Join("/", required)}, removed {removed}, {filtered.Count} remaining";
-        return previous with
-        {
-            Candidates = filtered,
-            Reason = $"{previous.Reason}; {reason}",
-            ReasonEvents = previous.ReasonEvents.Append(new ReasonEvent("capability-filter", reason)).ToList()
-        };
+        string reason = $"required {string.Join("/", required)}, removed {removed}, {filtered.Count} remaining";
+        var filteredDecision = previous with { Candidates = filtered };
+        return filteredDecision.Append("capability-filter", reason);
     }
 
     /// <summary>
