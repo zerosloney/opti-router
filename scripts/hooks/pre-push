@@ -1,0 +1,36 @@
+#!/bin/bash
+# pre-push hook: master 分支推送时触发本地部署（本地 CI/CD）。
+# 复用 scripts/deploy.ps1 -SkipPush（跳过内部 push 避免递归触发本 hook）。
+# 部署任一步骤失败 -> 非零退出 -> 阻止 push。
+#
+# 安装方式：git config core.hooksPath scripts/hooks
+# （本文件被版本控制，换机器 clone 后重跑上面那条 config 即可生效。）
+
+set -u
+
+master_pushed=0
+# stdin 每行格式: <local-ref> <local-sha> <remote-ref> <remote-sha>
+while read -r local_ref _ _ _; do
+    [ "$local_ref" = "refs/heads/master" ] && master_pushed=1
+done
+
+# 本次推送不含 master -> 放行，不部署（避免调试 push / 其它分支误触发）
+[ "$master_pushed" -eq 0 ] && exit 0
+
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "[pre-push] cannot resolve repo root" >&2
+    exit 1
+}
+
+echo ">>> [pre-push] master 推送：触发本地部署 (test -> 停服 -> 发布 -> 启服)..."
+echo ">>> [pre-push] 期间 push 会阻塞约 30-60s，属正常。"
+powershell.exe -ExecutionPolicy Bypass -File "$repo_root/scripts/deploy.ps1" -SkipPush
+status=$?
+
+if [ "$status" -ne 0 ]; then
+    echo ">>> [pre-push] 部署失败 (exit $status)，已阻止 push。修复后重试。" >&2
+    exit 1
+fi
+
+echo ">>> [pre-push] 部署成功，继续上传 commit。"
+exit 0

@@ -89,5 +89,6 @@ $svcInfo = Get-Service $svc -ErrorAction SilentlyContinue
 if ($svcInfo -and $svcInfo.Status -eq 'Running') {
     Write-Host "✓ Service $svc is Running. Deploy complete." -ForegroundColor Green
 } else {
-    Write-Host "⚠ Service $svc status: $($svcInfo.Status) — 请手动检查 nssm/日志。" -ForegroundColor Yellow
+    # 未运行视作发布失败（exit 1）：让 pre-push hook 据此阻止 push，也避免静默放过崩溃的服务。
+    Fail "Service $svc not running after start (status: $($svcInfo.Status)); check nssm/logs/stderr.log."
 }
