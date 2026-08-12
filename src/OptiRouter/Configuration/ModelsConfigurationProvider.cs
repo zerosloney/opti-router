@@ -43,8 +43,9 @@ public sealed class ModelsJsonConfigurationProvider : ConfigurationProvider
             });
 
             Data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            // 空 config（首次启动 / dashboard 清空）不覆盖 appsettings.json 的 Models 段，
-            // 让 appsettings 作为初始种子，避免空 [] 导致 ValidateOnStart 失败。
+            // IConfiguration 的数组节点由多个 provider 合并，空数组无法为低优先级
+            // appsettings 条目写入删除墓碑。RouterOptions 的配置阶段会从
+            // ModelsConfigService 重新替换 Models，因此空/缩短数组不会复活旧模型。
             if (models is not null && models.Count > 0)
             {
                 for (int i = 0; i < models.Count; i++)
@@ -79,6 +80,7 @@ public sealed class ModelsJsonConfigurationProvider : ConfigurationProvider
         data[$"{prefix}TimeoutSeconds"] = m.TimeoutSeconds.ToString(invariant);
         data[$"{prefix}MaxRetries"] = m.MaxRetries.ToString(invariant);
         data[$"{prefix}Enabled"] = m.Enabled.ToString();
+        data[$"{prefix}IsLocalOrPrivate"] = m.IsLocalOrPrivate.ToString();
         for (int i = 0; i < m.Tags.Count; i++)
             data[$"{prefix}Tags:{i}"] = m.Tags[i];
         if (m.Capabilities is not null)

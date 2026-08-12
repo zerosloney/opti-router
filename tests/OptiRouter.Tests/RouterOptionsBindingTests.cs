@@ -1,4 +1,8 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using OptiRouter.Configuration;
 
@@ -148,7 +152,7 @@ public class RouterOptionsBindingTests
                   "maxContextTokens":8192,"inputPricePerMillion":2.5,
                   "cachedInputPricePerMillion":1.25,"cacheWriteInputPricePerMillion":3.0,
                   "outputPricePerMillion":10,"timeoutSeconds":120,"maxRetries":0,
-                  "enabled":true,"tags":["vision","custom-tag"]
+                  "enabled":true,"isLocalOrPrivate":true,"tags":["vision","custom-tag"]
                 }]
                 """);
 
@@ -164,10 +168,111 @@ public class RouterOptionsBindingTests
             Assert.Equal(1.25m, model.CachedInputPricePerMillion);
             Assert.Equal(3.0m, model.CacheWriteInputPricePerMillion);
             Assert.Equal(["vision", "custom-tag"], model.Tags);
+            Assert.True(model.IsLocalOrPrivate);
         }
         finally
         {
             Directory.Delete(directory, recursive: true);
         }
+    }
+
+    [Fact]
+    public void OptionsMonitor_UsesAuthoritativeModelsForEmptyShortenedAndChangedFiles()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "optirouter-model-options-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, "models-config.json");
+        try
+        {
+            var appsettings = new Dictionary<string, string?>
+            {
+                ["OptiRouter:Models:0:Name"] = "appsettings-a",
+                ["OptiRouter:Models:0:BaseUrl"] = "https://appsettings.test/v1",
+                ["OptiRouter:Models:0:MaxContextTokens"] = "8192",
+                ["OptiRouter:Models:0:InputPricePerMillion"] = "1",
+                ["OptiRouter:Models:1:Name"] = "appsettings-b",
+                ["OptiRouter:Models:1:BaseUrl"] = "https://appsettings.test/v1",
+                ["OptiRouter:Models:1:MaxContextTokens"] = "8192",
+                ["OptiRouter:Models:2:Name"] = "appsettings-c",
+                ["OptiRouter:Models:2:BaseUrl"] = "https://appsettings.test/v1",
+                ["OptiRouter:Models:2:MaxContextTokens"] = "8192"
+            };
+            var seedConfiguration = new ConfigurationBuilder()
+                .AddInMemoryCollection(appsettings)
+                .Build();
+
+            // 缺失文件仅在首启时从 appsettings 种子；后续合法空数组必须保持权威。
+            Assert.False(File.Exists(path));
+            Program.SeedModelsConfig(seedConfiguration, path);
+            Assert.True(File.Exists(path));
+
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(appsettings)
+                .Add(new ModelsJsonConfigurationSource { FilePath = path })
+                .Build();
+
+            using var services = new ServiceCollection()
+                .AddLogging()
+                .AddSingleton<ModelsConfigService>(_ => new ModelsConfigService(
+                    path,
+                    configuration,
+                    NullLogger<ModelsConfigService>.Instance))
+                .AddOptions<RouterOptions>()
+                .Bind(configuration.GetSection("OptiRouter"))
+                .Configure<ModelsConfigService>((options, modelsConfig) =>
+                {
+                    options.Models.Clear();
+                    foreach (var model in modelsConfig.LoadModels())
+                        options.Models.Add(model);
+                })
+                .Services
+                .BuildServiceProvider();
+
+            var monitor = services.GetRequiredService<IOptionsMonitor<RouterOptions>>();
+            Assert.Equal(["appsettings-a", "appsettings-b", "appsettings-c"], monitor.CurrentValue.Models.Select(m => m.Name));
+
+            WriteModels(path);
+            configuration.Reload();
+            Assert.Empty(monitor.CurrentValue.Models);
+
+            WriteModels(path, CreateModel("authoritative-a"));
+            configuration.Reload();
+            Assert.Equal(["authoritative-a"], monitor.CurrentValue.Models.Select(m => m.Name));
+
+            var changed = CreateModel("authoritative-local");
+            changed.IsLocalOrPrivate = true;
+            WriteModels(path, changed);
+            configuration.Reload();
+            var current = Assert.Single(monitor.CurrentValue.Models);
+            Assert.Equal("authoritative-local", current.Name);
+            Assert.True(current.IsLocalOrPrivate);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+                Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static ModelEndpointOptions CreateModel(string name) => new()
+    {
+        Name = name,
+        BaseUrl = "https://example.test/v1",
+        MaxContextTokens = 8192,
+        InputPricePerMillion = 1,
+        OutputPricePerMillion = 2,
+        TimeoutSeconds = 30,
+        MaxRetries = 0,
+        Enabled = true
+    };
+
+    private static void WriteModels(string path, params ModelEndpointOptions[] models)
+    {
+        File.WriteAllText(path, JsonSerializer.Serialize(models, new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
+        }));
     }
 }

@@ -237,6 +237,12 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
     /// <returns>错误消息（含模型名）；null 表示通过。</returns>
     public static string? ValidateModel(ModelEndpointOptions model)
     {
+        if (!Uri.TryCreate(model.BaseUrl, UriKind.Absolute, out var baseUri)
+            || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
+        {
+            return $"模型 {model.Name} 的 BaseUrl 必须是绝对 HTTP/HTTPS URI。";
+        }
+
         if (model.InputPricePerMillion < 0)
             return $"模型 {model.Name} 的 InputPricePerMillion 不能为负数。";
 
@@ -251,6 +257,12 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
 
         if (model.MaxContextTokens <= 0)
             return $"模型 {model.Name} 的 MaxContextTokens 必须大于 0。";
+
+        if (model.TimeoutSeconds <= 0)
+            return $"模型 {model.Name} 的 TimeoutSeconds 必须大于 0。";
+
+        if (model.MaxRetries < 0)
+            return $"模型 {model.Name} 的 MaxRetries 不能为负数。";
 
         return null;
     }

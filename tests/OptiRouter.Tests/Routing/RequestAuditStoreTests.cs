@@ -242,6 +242,54 @@ public class RequestAuditStoreTests
         }
     }
 
+    [Fact]
+    public void Sqlite_FailedBatch_IsRequeuedAndRetried()
+    {
+        string path = TempDbPath();
+        try
+        {
+            using var store = new SqliteRequestAuditStore(path);
+            int commitAttempts = 0;
+            store.BeforeAuditBatchCommitHook = () =>
+            {
+                if (Interlocked.Increment(ref commitAttempts) == 1)
+                    throw new InvalidOperationException("injected audit commit failure");
+            };
+
+            var first = SampleRecord(model: "first");
+            var second = SampleRecord(model: "second");
+            store.Append(first);
+            store.Append(second);
+
+            IReadOnlyList<RequestAuditRecord> recent = Array.Empty<RequestAuditRecord>();
+            DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < deadline)
+            {
+                try
+                {
+                    recent = store.GetRecent(10);
+                    if (recent.Count == 2)
+                        break;
+                }
+                catch (InvalidOperationException)
+                {
+                    // The synchronous flush may observe the injected first failure.
+                }
+
+                Thread.Sleep(10);
+            }
+
+            Assert.True(commitAttempts >= 2, "The failed batch was not retried.");
+            Assert.Equal(2, recent.Count);
+            Assert.Equal("second", recent[0].Model);
+            Assert.Equal("first", recent[1].Model);
+        }
+        finally
+        {
+            CleanupDb(path);
+        }
+    }
+
     private static void CleanupDb(string path)
     {
         try

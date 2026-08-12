@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -26,6 +27,8 @@ public sealed class OutcomeRecorder
     private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly ILogger<OutcomeRecorder> _logger;
     private readonly TimeProvider _timeProvider;
+    private readonly ClientKeyService? _clientKeyService;
+    private readonly IHttpContextAccessor? _httpContextAccessor;
 
     public OutcomeRecorder(
         IRequestAuditStore auditStore,
@@ -38,7 +41,9 @@ public sealed class OutcomeRecorder
         UpstreamQuotaStateStore quotaStore,
         ILogger<OutcomeRecorder> logger,
         TimeProvider? timeProvider = null,
-        ContextualBanditState? banditStore = null)
+        ContextualBanditState? banditStore = null,
+        ClientKeyService? clientKeyService = null,
+        IHttpContextAccessor? httpContextAccessor = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -51,6 +56,8 @@ public sealed class OutcomeRecorder
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _banditStore = banditStore;
+        _clientKeyService = clientKeyService;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     /// <summary>
@@ -156,6 +163,24 @@ public sealed class OutcomeRecorder
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Cost ledger write failed; cost {Cost} not recorded", cost);
+        }
+
+        try
+        {
+            if (_clientKeyService is null
+                || _httpContextAccessor?.HttpContext?.Items[typeof(ClientKeyAuthorizationResult)]
+                    is not ClientKeyAuthorizationResult authorization
+                || authorization.Status != ClientKeyAuthorizationStatus.Authorized
+                || string.IsNullOrWhiteSpace(authorization.KeyId))
+            {
+                return;
+            }
+
+            _clientKeyService.RecordSpend(authorization.KeyId, cost);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Tenant cost persistence failed; cost {Cost} not recorded", cost);
         }
     }
 

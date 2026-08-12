@@ -9,6 +9,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using OptiRouter.Configuration;
 
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("OptiRouter.Tests")]
+
 namespace OptiRouter.Routing;
 
 /// <summary>
@@ -25,6 +27,10 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     private readonly SemaphoreSlim _signal = new(0, int.MaxValue);
     private readonly CancellationTokenSource _cts = new();
     private readonly Task _processTask;
+
+    // Test-only seam: invoked after a batch is inserted and before its transaction commits.
+    // Keeping it internal avoids expanding the IRequestAuditStore/public store contract.
+    internal Action? BeforeAuditBatchCommitHook { get; set; }
 
     /// <summary>
     /// 用指定 DB 文件路径构造。
@@ -141,7 +147,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Audit FlushQueue failed; will retry on next signal");
+                _logger.LogError(ex, "Audit FlushQueue failed; requeued batch for retry");
             }
         }
 
@@ -156,55 +162,74 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         {
             if (_queue.IsEmpty) return;
 
-            using var tx = _connection.BeginTransaction();
+            var batch = new List<RequestAuditRecord>();
             while (_queue.TryDequeue(out var record))
+                batch.Add(record);
+
+            if (batch.Count == 0) return;
+
+            try
             {
-                using var cmd = _connection.CreateCommand();
-                cmd.Transaction = tx;
-                cmd.CommandText = """
-                    INSERT INTO request_audit
-                        (timestamp, request_id, model, estimated_tokens, prompt_tokens,
-                         completion_tokens, cost, latency_ms, session_id, routing_reason,
-                         success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                         is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
-                         cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-                         trace_id, span_id, parent_span_id)
-                    VALUES
-                        (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
-                         @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
-                         @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent);
-                    """;
-                cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
-                cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
-                cmd.Parameters.AddWithValue("@model", record.Model);
-                cmd.Parameters.AddWithValue("@est", record.EstimatedInputTokens);
-                cmd.Parameters.AddWithValue("@ptok", record.PromptTokens);
-                cmd.Parameters.AddWithValue("@ctok", record.CompletionTokens);
-                cmd.Parameters.AddWithValue("@cost", (double)record.Cost);
-                cmd.Parameters.AddWithValue("@lat", record.LatencyMs);
-                cmd.Parameters.AddWithValue("@sid", (object?)record.SessionId ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@reason", record.RoutingReason);
-                cmd.Parameters.AddWithValue("@succ", record.Success ? 1 : 0);
-                cmd.Parameters.AddWithValue("@err", (object?)record.ErrorMessage ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@stream", record.IsStreaming ? 1 : 0);
-                cmd.Parameters.AddWithValue("@rtier", record.RoutedTier.ToString());
-                cmd.Parameters.AddWithValue("@cascade", record.CascadeTriggered ? 1 : 0);
-                cmd.Parameters.AddWithValue("@upg", (object?)record.UpgradedFrom ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@adopted", record.IsAdopted ? 1 : 0);
-                cmd.Parameters.AddWithValue("@pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@estim", record.IsEstimated ? 1 : 0);
-                cmd.Parameters.AddWithValue("@frole", (object?)record.FusionRole ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@ttft", (object?)record.TimeToFirstTokenMs ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@cached", record.CachedInputTokens);
-                cmd.Parameters.AddWithValue("@cachewrite", record.CacheWriteInputTokens);
-                cmd.Parameters.AddWithValue("@uncached", record.UncachedInputTokens);
-                cmd.Parameters.AddWithValue("@quota", record.QuotaLimited ? 1 : 0);
-                cmd.Parameters.AddWithValue("@trace", (object?)record.TraceId ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@span", (object?)record.SpanId ?? DBNull.Value);
-                cmd.Parameters.AddWithValue("@parent", (object?)record.ParentSpanId ?? DBNull.Value);
-                cmd.ExecuteNonQuery();
+                using var tx = _connection.BeginTransaction();
+                foreach (var record in batch)
+                {
+                    using var cmd = _connection.CreateCommand();
+                    cmd.Transaction = tx;
+                    cmd.CommandText = """
+                        INSERT INTO request_audit
+                            (timestamp, request_id, model, estimated_tokens, prompt_tokens,
+                             completion_tokens, cost, latency_ms, session_id, routing_reason,
+                             success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
+                             is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
+                             cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
+                             trace_id, span_id, parent_span_id)
+                        VALUES
+                            (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
+                             @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
+                             @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent);
+                        """;
+                    cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
+                    cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
+                    cmd.Parameters.AddWithValue("@model", record.Model);
+                    cmd.Parameters.AddWithValue("@est", record.EstimatedInputTokens);
+                    cmd.Parameters.AddWithValue("@ptok", record.PromptTokens);
+                    cmd.Parameters.AddWithValue("@ctok", record.CompletionTokens);
+                    cmd.Parameters.AddWithValue("@cost", (double)record.Cost);
+                    cmd.Parameters.AddWithValue("@lat", record.LatencyMs);
+                    cmd.Parameters.AddWithValue("@sid", (object?)record.SessionId ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@reason", record.RoutingReason);
+                    cmd.Parameters.AddWithValue("@succ", record.Success ? 1 : 0);
+                    cmd.Parameters.AddWithValue("@err", (object?)record.ErrorMessage ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@stream", record.IsStreaming ? 1 : 0);
+                    cmd.Parameters.AddWithValue("@rtier", record.RoutedTier.ToString());
+                    cmd.Parameters.AddWithValue("@cascade", record.CascadeTriggered ? 1 : 0);
+                    cmd.Parameters.AddWithValue("@upg", (object?)record.UpgradedFrom ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@adopted", record.IsAdopted ? 1 : 0);
+                    cmd.Parameters.AddWithValue("@pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@estim", record.IsEstimated ? 1 : 0);
+                    cmd.Parameters.AddWithValue("@frole", (object?)record.FusionRole ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@ttft", (object?)record.TimeToFirstTokenMs ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@cached", record.CachedInputTokens);
+                    cmd.Parameters.AddWithValue("@cachewrite", record.CacheWriteInputTokens);
+                    cmd.Parameters.AddWithValue("@uncached", record.UncachedInputTokens);
+                    cmd.Parameters.AddWithValue("@quota", record.QuotaLimited ? 1 : 0);
+                    cmd.Parameters.AddWithValue("@trace", (object?)record.TraceId ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@span", (object?)record.SpanId ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@parent", (object?)record.ParentSpanId ?? DBNull.Value);
+                    cmd.ExecuteNonQuery();
+                }
+
+                BeforeAuditBatchCommitHook?.Invoke();
+                tx.Commit();
             }
-            tx.Commit();
+            catch
+            {
+                // Commit may be ambiguous; replaying is safer than losing audit records.
+                foreach (var record in batch)
+                    _queue.Enqueue(record);
+                _signal.Release();
+                throw;
+            }
         }
     }
 

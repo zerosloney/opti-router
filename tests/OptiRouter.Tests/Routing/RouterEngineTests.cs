@@ -66,6 +66,58 @@ public class RouterEngineTests
     }
 
     [Fact]
+    public void Decide_DataSovereigntyAndFailover_DoesNotReintroduceCloudFallback()
+    {
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("local-strong", ModelTier.Strong, 128000, 5m),
+            ("cloud-medium", ModelTier.Medium, 128000, 0.15m));
+        options.Models[0].IsLocalOrPrivate = true;
+        options.Routing.EnableDataSovereignty = true;
+        options.Routing.EnableFailover = true;
+
+        var engine = new RouterEngine(ledger, new IRouterPolicy[]
+        {
+            new DataSovereigntyPolicy(),
+            new FailoverPolicy(new ModelHealthTracker())
+        });
+
+        var request = TestHelpers.BuildRequest(("user", "hello"));
+        var result = engine.Decide(request, options, new HashSet<string> { "local-strong" });
+
+        Assert.Empty(result.Candidates);
+        Assert.DoesNotContain(result.Candidates, model => !model.IsLocalOrPrivate);
+    }
+
+    [Fact]
+    public void Decide_DataSovereigntyAndBudgetDegrade_DoesNotReintroduceCloudModel()
+    {
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("local-strong", ModelTier.Strong, 128000, 5m),
+            ("cloud-cheap", ModelTier.Cheap, 128000, 0.01m));
+        options.Models[0].IsLocalOrPrivate = true;
+        options.Budget.DailyBudgetUsd = 1m;
+        options.Budget.EnforceOnExhausted = BudgetExhaustionMode.Degrade;
+        options.Routing.EnableDataSovereignty = true;
+        ledger.Record(2m);
+
+        var engine = new RouterEngine(ledger, new IRouterPolicy[]
+        {
+            new DataSovereigntyPolicy(),
+            new BudgetGuardPolicy(ledger)
+        });
+
+        var request = TestHelpers.BuildRequest(("user", "hello"));
+        var result = engine.Decide(request, options);
+
+        Assert.Single(result.Candidates);
+        Assert.Equal("local-strong", result.Candidates[0].Name);
+        Assert.All(result.Candidates, model => Assert.True(model.IsLocalOrPrivate));
+        Assert.Contains("degraded", result.Reason);
+    }
+
+    [Fact]
     public void Decide_PrimaryFailed_UsesFallbackChain()
     {
         var ledger = new CostLedger();

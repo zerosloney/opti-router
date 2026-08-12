@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
@@ -20,6 +21,10 @@ public sealed class ModelsConfigService : IDisposable
     private readonly FileSystemWatcher _watcher;
     private readonly object _gate = new();
     private bool _disposed;
+
+    // Test-only seam: lets the atomic replacement failure path be exercised
+    // without relying on platform-specific file permission behavior.
+    internal Action<string, string>? AtomicReplaceHook { get; set; }
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -86,17 +91,7 @@ public sealed class ModelsConfigService : IDisposable
     {
         lock (_gate)
         {
-            try
-            {
-                string json = File.ReadAllText(_filePath);
-                var models = JsonSerializer.Deserialize<List<ModelEndpointOptions>>(json, JsonOptions);
-                return models ?? new List<ModelEndpointOptions>();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to load models-config.json, returning empty list");
-                return new List<ModelEndpointOptions>();
-            }
+            return LoadModelsNoLock(tolerateErrors: true);
         }
     }
 
@@ -105,15 +100,16 @@ public sealed class ModelsConfigService : IDisposable
     /// </summary>
     public void SaveModels(IEnumerable<ModelEndpointOptions> models)
     {
+        ArgumentNullException.ThrowIfNull(models);
+
         lock (_gate)
         {
-            WriteModelsToFile(models);
-            _logger.LogInformation("Saved {Count} models to models-config.json", models.Count());
-
-            // 触发 ASP.NET Core 配置重载 → IOptionsMonitor.OnChange 派发 → ModelClientProvider 热更新
-            _configRoot.Reload();
-            _logger.LogInformation("Configuration reloaded after models-config.json write");
+            var snapshot = models.ToList();
+            WriteModelsToFile(snapshot);
+            _logger.LogInformation("Saved {Count} models to models-config.json", snapshot.Count);
         }
+
+        ReloadConfiguration();
     }
 
     /// <summary>
@@ -128,23 +124,30 @@ public sealed class ModelsConfigService : IDisposable
 
         WarnUnknownTags(model);
 
-        var models = LoadModels().ToList();
-        var existing = models.FirstOrDefault(m =>
-            string.Equals(m.Name, model.Name, StringComparison.Ordinal));
-        if (existing is not null)
+        lock (_gate)
         {
-            // 保留 ApiKey 不被空字符串覆盖
-            if (string.IsNullOrEmpty(model.ApiKey) && !string.IsNullOrEmpty(existing.ApiKey))
-                model.ApiKey = existing.ApiKey;
+            var models = LoadModelsNoLock(tolerateErrors: false);
+            var existing = models.FirstOrDefault(m =>
+                string.Equals(m.Name, model.Name, StringComparison.Ordinal));
+            if (existing is not null)
+            {
+                // 保留 ApiKey 不被空字符串覆盖
+                if (string.IsNullOrEmpty(model.ApiKey) && !string.IsNullOrEmpty(existing.ApiKey))
+                    model.ApiKey = existing.ApiKey;
 
-            int idx = models.IndexOf(existing);
-            models[idx] = model;
+                int idx = models.IndexOf(existing);
+                models[idx] = model;
+            }
+            else
+            {
+                models.Add(model);
+            }
+
+            WriteModelsToFile(models);
+            _logger.LogInformation("Saved {Count} models to models-config.json", models.Count);
         }
-        else
-        {
-            models.Add(model);
-        }
-        SaveModels(models);
+
+        ReloadConfiguration();
     }
 
     /// <summary>
@@ -152,15 +155,25 @@ public sealed class ModelsConfigService : IDisposable
     /// </summary>
     public bool DeleteModel(string name)
     {
-        var models = LoadModels().ToList();
-        int removed = models.RemoveAll(m =>
-            string.Equals(m.Name, name, StringComparison.Ordinal));
-        if (removed > 0)
+        bool deleted;
+        lock (_gate)
         {
-            SaveModels(models);
-            return true;
+            var models = LoadModelsNoLock(tolerateErrors: false);
+            int removed = models.RemoveAll(m =>
+                string.Equals(m.Name, name, StringComparison.Ordinal));
+            if (removed == 0)
+            {
+                return false;
+            }
+
+            WriteModelsToFile(models);
+            _logger.LogInformation("Saved {Count} models to models-config.json", models.Count);
+            deleted = true;
         }
-        return false;
+
+        if (deleted)
+            ReloadConfiguration();
+        return deleted;
     }
 
     /// <summary>
@@ -171,7 +184,59 @@ public sealed class ModelsConfigService : IDisposable
     private void WriteModelsToFile(IEnumerable<ModelEndpointOptions> models)
     {
         string json = JsonSerializer.Serialize(models.ToList(), JsonOptions);
-        File.WriteAllText(_filePath, json);
+        string targetPath = Path.GetFullPath(_filePath);
+        string directory = Path.GetDirectoryName(targetPath)
+            ?? throw new InvalidOperationException("models-config.json path has no parent directory");
+        string tempPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(targetPath)}.{Guid.NewGuid():N}.tmp");
+
+        try
+        {
+            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false), leaveOpen: true))
+            {
+                writer.Write(json);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            if (AtomicReplaceHook is { } replace)
+                replace(tempPath, targetPath);
+            else
+                File.Move(tempPath, targetPath, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+                File.Delete(tempPath);
+        }
+    }
+
+    private List<ModelEndpointOptions> LoadModelsNoLock(bool tolerateErrors)
+    {
+        try
+        {
+            string json = File.ReadAllText(_filePath);
+            var models = JsonSerializer.Deserialize<List<ModelEndpointOptions>>(json, JsonOptions);
+            return models ?? new List<ModelEndpointOptions>();
+        }
+        catch (Exception ex)
+        {
+            if (!tolerateErrors)
+                throw;
+
+            _logger.LogError(ex, "Failed to load models-config.json, returning empty list");
+            return new List<ModelEndpointOptions>();
+        }
+    }
+
+    private void ReloadConfiguration()
+    {
+        // Reload synchronously fans out IOptionsMonitor callbacks. Keep it
+        // outside _gate so callbacks can safely call back into this service.
+        _configRoot.Reload();
+        _logger.LogInformation("Configuration reloaded after models-config.json write");
     }
 
     /// <summary>

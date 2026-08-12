@@ -27,28 +27,14 @@ builder.WebHost.ConfigureKestrel(options =>
 
 // 注册 models-config.json 为配置源（后于 appsettings.json，覆盖 OptiRouter:Models 段）。
 // Dashboard 写入该文件后 ModelsConfigService 触发 IConfigurationRoot.Reload()，IOptionsMonitor 派发到 router。
-// 首启种子：config.json 不存在时，把 appsettings.json 的 Models 段写入 config.json，
-// 使 provider 首次 Load 即覆盖 appsettings 的 index 0..N（消除双源 index 合并残留）。
+// 首启种子：models-config.json 不存在时，把 appsettings.json 的 Models 段写入一次。
+// 合法空数组是权威配置，不得在重启时被 appsettings.json 的模型重新填充。
 string modelsConfigPath = Path.Combine(builder.Environment.ContentRootPath, "models-config.json");
 if (!File.Exists(modelsConfigPath))
 {
     try
     {
-        var seeded = builder.Configuration.GetSection("OptiRouter:Models")
-            .Get<List<OptiRouter.Configuration.ModelEndpointOptions>>();
-        string? parentDir = Path.GetDirectoryName(modelsConfigPath);
-        if (!string.IsNullOrEmpty(parentDir))
-            Directory.CreateDirectory(parentDir);
-
-        using var stream = new FileStream(modelsConfigPath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
-        System.Text.Json.JsonSerializer.Serialize(stream,
-            seeded ?? new List<OptiRouter.Configuration.ModelEndpointOptions>(),
-            new System.Text.Json.JsonSerializerOptions
-            {
-                WriteIndented = true,
-                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
-                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase) }
-            });
+        Program.SeedModelsConfig(builder.Configuration, modelsConfigPath);
     }
     catch (IOException)
     {
@@ -68,6 +54,16 @@ builder.Services.AddMemoryCache(options =>
 });
 builder.Services.AddOptions<RouterOptions>()
     .Bind(builder.Configuration.GetSection("OptiRouter"))
+    // models-config.json 是首启种子完成后的权威模型列表。普通 Configure
+    // 保留 WebApplicationFactory 后注册 Configure<RouterOptions> 的覆盖能力，
+    // 同时在每次 IConfiguration reload 时重新读取文件，避免数组 provider 合并
+    // 让 appsettings 中已删除/缩短的模型重新出现。
+    .Configure<ModelsConfigService>((options, modelsConfig) =>
+    {
+        options.Models.Clear();
+        foreach (var model in modelsConfig.LoadModels())
+            options.Models.Add(model);
+    })
     .ValidateOnStart();
 
 builder.Services.AddSingleton<IValidateOptions<RouterOptions>>(sp =>
@@ -166,6 +162,7 @@ builder.Services.AddSingleton<ContextualBanditState>();
 builder.Services.AddSingleton<UpstreamQuotaStateStore>();
 builder.Services.AddSingleton<PromptCacheAffinityStore>();
 builder.Services.AddSingleton<FusionPanelSelector>();
+builder.Services.AddHttpContextAccessor();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
@@ -208,7 +205,9 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     sp.GetRequiredService<PromptCacheAffinityStore>(),
     sp.GetRequiredService<UpstreamQuotaStateStore>(),
     sp.GetRequiredService<ILogger<OutcomeRecorder>>(),
-    banditStore: sp.GetRequiredService<ContextualBanditState>()));
+    banditStore: sp.GetRequiredService<ContextualBanditState>(),
+    clientKeyService: sp.GetRequiredService<ClientKeyService>(),
+    httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>()));
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
@@ -365,6 +364,7 @@ app.Use(async (context, next) =>
         || context.Request.Path.StartsWithSegments("/api/dashboard")
         || context.Request.Path.StartsWithSegments("/models")
         || context.Request.Path.StartsWithSegments("/api/models");
+    bool isV1Path = context.Request.Path.StartsWithSegments("/v1");
     string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
     string configuredKey = isAdminPath
         ? (app.Configuration["OptiRouter:AdminApiKey"] ?? "").Length > 0
@@ -385,7 +385,52 @@ app.Use(async (context, next) =>
         providedKey = context.Request.Query["key"];
     }
 
-    if (!IsValidApiKey(configuredKey, providedKey))
+    if (isV1Path && IsValidApiKey(proxyKey, providedKey))
+    {
+        // The global proxy key remains compatible and is deliberately not sent through
+        // ClientKeyService, so it never consumes a tenant's QPS window or daily budget.
+    }
+    else if (isV1Path && !isAdminPath)
+    {
+        var authorizationResult = context.RequestServices
+            .GetRequiredService<ClientKeyService>()
+            .AuthorizeRequest(providedKey);
+
+        switch (authorizationResult.Status)
+        {
+            case ClientKeyAuthorizationStatus.Authorized:
+                // Keep the complete immutable identity for OutcomeRecorder and other request
+                // scoped consumers without changing their public method signatures.
+                context.Items[typeof(ClientKeyAuthorizationResult)] = authorizationResult;
+                break;
+
+            case ClientKeyAuthorizationStatus.RateLimited:
+                await WriteClientKeyProblemAsync(
+                    context,
+                    StatusCodes.Status429TooManyRequests,
+                    "Client key rate limit exceeded",
+                    authorizationResult.RetryAfterSeconds).ConfigureAwait(false);
+                return;
+
+            case ClientKeyAuthorizationStatus.BudgetExhausted:
+                await WriteClientKeyProblemAsync(
+                    context,
+                    StatusCodes.Status429TooManyRequests,
+                    "Client key daily budget exhausted",
+                    authorizationResult.RetryAfterSeconds).ConfigureAwait(false);
+                return;
+
+            case ClientKeyAuthorizationStatus.Invalid:
+            case ClientKeyAuthorizationStatus.Disabled:
+            default:
+                await WriteClientKeyProblemAsync(
+                    context,
+                    StatusCodes.Status401Unauthorized,
+                    "Unauthorized").ConfigureAwait(false);
+                return;
+        }
+    }
+    else if (!IsValidApiKey(configuredKey, providedKey))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         return;
@@ -396,6 +441,23 @@ app.Use(async (context, next) =>
 
     await next(context).ConfigureAwait(false);
 });
+
+static async Task WriteClientKeyProblemAsync(
+    HttpContext context,
+    int statusCode,
+    string title,
+    int retryAfterSeconds = 0)
+{
+    context.Response.StatusCode = statusCode;
+    if (retryAfterSeconds > 0)
+        context.Response.Headers.RetryAfter = retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    await context.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
+    {
+        Status = statusCode,
+        Title = title
+    }).ConfigureAwait(false);
+}
 
 // M2 阶段：分区最大并发数控制，防止单用户请求洪水打满线程池
 app.Use(async (context, next) =>
@@ -544,4 +606,29 @@ static string HashPartitionToken(string token)
     return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
 }
 
-public partial class Program { }
+public partial class Program
+{
+    internal static void SeedModelsConfig(
+        Microsoft.Extensions.Configuration.IConfiguration configuration,
+        string filePath)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentNullException.ThrowIfNull(filePath);
+
+        var seeded = configuration.GetSection("OptiRouter:Models")
+            .Get<List<OptiRouter.Configuration.ModelEndpointOptions>>();
+        string? parentDir = Path.GetDirectoryName(filePath);
+        if (!string.IsNullOrEmpty(parentDir))
+            Directory.CreateDirectory(parentDir);
+
+        using var stream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
+        System.Text.Json.JsonSerializer.Serialize(stream,
+            seeded ?? new List<OptiRouter.Configuration.ModelEndpointOptions>(),
+            new System.Text.Json.JsonSerializerOptions
+            {
+                WriteIndented = true,
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase) }
+            });
+    }
+}

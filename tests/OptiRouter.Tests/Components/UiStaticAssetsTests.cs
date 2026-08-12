@@ -1,6 +1,8 @@
 using System.Net;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.DependencyInjection;
+using OptiRouter.Configuration;
 
 namespace OptiRouter.Tests.Components;
 
@@ -14,6 +16,25 @@ public class UiStaticAssetsTests
             builder.UseSetting("OptiRouter:ProxyApiKey", "ui-test-key");
             builder.UseSetting("OptiRouter:AdminApiKey", "ui-test-key");
             builder.UseSetting("OptiRouter:Routing:EnableHealthProbe", "false");
+            builder.ConfigureServices(services =>
+            {
+                // 覆盖 Program 的权威文件配置，测试不依赖工作区中的 models-config.json。
+                services.Configure<RouterOptions>(options =>
+                {
+                    options.Models.Clear();
+                    options.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "ui-test-model",
+                        BaseUrl = "http://localhost/v1",
+                        MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m,
+                        OutputPricePerMillion = 2m,
+                        TimeoutSeconds = 30,
+                        MaxRetries = 0,
+                        Enabled = true
+                    });
+                });
+            });
         }
     }
 

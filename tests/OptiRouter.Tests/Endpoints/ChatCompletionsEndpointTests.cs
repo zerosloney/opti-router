@@ -6,6 +6,7 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
@@ -186,6 +187,79 @@ public class ChatCompletionsEndpointTests
         };
     }
 
+    private static async Task<HttpResponseMessage> PostChatAsync(HttpClient client, string model = "model-a")
+    {
+        using var content = new StringContent(
+            JsonSerializer.Serialize(BuildRequest(model)),
+            Encoding.UTF8,
+            "application/json");
+        return await client.PostAsync("/v1/chat/completions", content);
+    }
+
+    private static TenantKeyFixture CreateTenantKeyFixture(
+        decimal dailyBudgetUsd = 100m,
+        int maxQps = 50)
+    {
+        string directory = Path.Combine(
+            Path.GetTempPath(),
+            "optirouter-endpoint-client-key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        string filePath = Path.Combine(directory, "client-keys.json");
+        var clock = new FixedTimeProvider(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero));
+
+        var factory = CreateSecurityFactory();
+        var existingConfiguration = factory.ConfigureTestServicesAction;
+        factory.ConfigureTestServicesAction = services =>
+        {
+            existingConfiguration?.Invoke(services);
+            services.AddSingleton<ClientKeyService>(sp => new ClientKeyService(
+                filePath,
+                sp.GetRequiredService<ILogger<ClientKeyService>>(),
+                clock));
+        };
+
+        var service = factory.Services.GetRequiredService<ClientKeyService>();
+        var created = service.CreateKey("tenant-test", dailyBudgetUsd, maxQps);
+        return new TenantKeyFixture(factory, service, created, directory);
+    }
+
+    private sealed class TenantKeyFixture : IDisposable
+    {
+        private readonly string _directory;
+
+        public TenantKeyFixture(
+            TestWebApplicationFactory factory,
+            ClientKeyService service,
+            (string PlaintextKey, ClientKeyInfo Info) created,
+            string directory)
+        {
+            Factory = factory;
+            Service = service;
+            PlaintextKey = created.PlaintextKey;
+            Info = created.Info;
+            _directory = directory;
+        }
+
+        public TestWebApplicationFactory Factory { get; }
+        public ClientKeyService Service { get; }
+        public string PlaintextKey { get; }
+        public ClientKeyInfo Info { get; }
+
+        public void Dispose()
+        {
+            Factory.Dispose();
+            if (Directory.Exists(_directory))
+                Directory.Delete(_directory, recursive: true);
+        }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+
+        public override DateTimeOffset GetUtcNow() => _now;
+    }
+
     private static async IAsyncEnumerable<RawStreamLine> CreateStreamChunks(string text, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
         var words = text.Split(' ');
@@ -202,6 +276,21 @@ public class ChatCompletionsEndpointTests
         yield return new RawStreamLine(
             "{\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}",
             new ChatUsage { PromptTokens = 5, CompletionTokens = 2, TotalTokens = 7 });
+        yield return new RawStreamLine("[DONE]", null);
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> CreateStreamChunksWithoutUsage(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-no-usage\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}",
+            null);
+        await Task.Yield();
+        ct.ThrowIfCancellationRequested();
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-no-usage\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
+            null);
         yield return new RawStreamLine("[DONE]", null);
     }
 
@@ -254,8 +343,8 @@ public class ChatCompletionsEndpointTests
         {
             onUpstream?.Invoke();
             return Task.FromResult(new RawChatResponse(
-                "{\"id\":\"chatcmpl-security\",\"model\":\"model-a\",\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}",
-                new ChatUsage()));
+                "{\"id\":\"chatcmpl-security\",\"model\":\"model-a\",\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}",
+                new ChatUsage { PromptTokens = 2, CompletionTokens = 1, TotalTokens = 3 }));
         });
         return factory;
     }
@@ -300,6 +389,105 @@ public class ChatCompletionsEndpointTests
         // Assert
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public async Task Post_TenantKey_ReachesV1Endpoint()
+    {
+        using var tenant = CreateTenantKeyFixture();
+        using var client = tenant.Factory.CreateClient(tenant.PlaintextKey);
+
+        using var response = await PostChatAsync(client);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(Assert.Single(tenant.Service.GetAllKeys()).DailySpendUsd > 0m);
+    }
+
+    [Fact]
+    public async Task Post_InvalidOrDisabledTenantKey_Returns401WithoutTenantDetails()
+    {
+        using var tenant = CreateTenantKeyFixture();
+
+        using (var invalidClient = tenant.Factory.CreateClient("wrong-tenant-key"))
+        using (var invalidResponse = await PostChatAsync(invalidClient))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, invalidResponse.StatusCode);
+            var body = await invalidResponse.Content.ReadAsStringAsync();
+            Assert.DoesNotContain("tenant-test", body, StringComparison.Ordinal);
+            Assert.DoesNotContain(tenant.PlaintextKey, body, StringComparison.Ordinal);
+        }
+
+        Assert.True(tenant.Service.UpdateKey(tenant.Info.KeyId, enabled: false, dailyBudgetUsd: null, maxQps: null));
+        using var disabledClient = tenant.Factory.CreateClient(tenant.PlaintextKey);
+        using var disabledResponse = await PostChatAsync(disabledClient);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, disabledResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task Post_TenantKeyQpsExceeded_Returns429WithRetryAfter()
+    {
+        using var tenant = CreateTenantKeyFixture(dailyBudgetUsd: 0m, maxQps: 1);
+        using var client = tenant.Factory.CreateClient(tenant.PlaintextKey);
+
+        using var first = await PostChatAsync(client);
+        using var second = await PostChatAsync(client);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
+        Assert.True(second.Headers.TryGetValues("Retry-After", out var retryAfter));
+        Assert.True(int.Parse(retryAfter.Single(), System.Globalization.CultureInfo.InvariantCulture) > 0);
+        var body = await second.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("tenant-test", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(tenant.PlaintextKey, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Post_TenantKeyBudgetExceeded_Returns429WithRetryAfter()
+    {
+        using var tenant = CreateTenantKeyFixture(dailyBudgetUsd: 1m, maxQps: 20);
+        tenant.Service.RecordSpend(tenant.Info.KeyId, 1m);
+        using var client = tenant.Factory.CreateClient(tenant.PlaintextKey);
+
+        using var response = await PostChatAsync(client);
+
+        Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
+        Assert.True(response.Headers.TryGetValues("Retry-After", out var retryAfter));
+        Assert.True(int.Parse(retryAfter.Single(), System.Globalization.CultureInfo.InvariantCulture) > 0);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("tenant-test", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(tenant.PlaintextKey, body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task GetAdminEndpoint_TenantKeyIsRejected()
+    {
+        using var tenant = CreateTenantKeyFixture();
+        using var client = tenant.Factory.CreateClient(tenant.PlaintextKey);
+
+        using var response = await client.GetAsync("/api/dashboard/metrics");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Post_GlobalProxyKeyRemainsCompatible_AndDoesNotConsumeTenantQps()
+    {
+        using var tenant = CreateTenantKeyFixture(dailyBudgetUsd: 0m, maxQps: 1);
+        using var globalClient = tenant.Factory.CreateClient(TestWebApplicationFactory.TestProxyApiKey);
+        using var tenantClient = tenant.Factory.CreateClient(tenant.PlaintextKey);
+
+        using var globalFirst = await PostChatAsync(globalClient);
+        using var globalSecond = await PostChatAsync(globalClient);
+        Assert.Equal(0m, Assert.Single(tenant.Service.GetAllKeys()).DailySpendUsd);
+
+        using var tenantResponse = await PostChatAsync(tenantClient);
+
+        Assert.Equal(HttpStatusCode.OK, globalFirst.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, globalSecond.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, tenantResponse.StatusCode);
+        Assert.True(Assert.Single(tenant.Service.GetAllKeys()).DailySpendUsd > 0m);
     }
 
     [Fact]
@@ -940,6 +1128,56 @@ public class ChatCompletionsEndpointTests
 
         var ledger = factory.Services.GetRequiredService<CostLedger>();
         Assert.True(ledger.GetSpend().Total > 0, "Expected streaming cost to be recorded.");
+
+        var audit = Assert.Single(factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(1));
+        Assert.False(audit.IsEstimated);
+    }
+
+    [Fact]
+    public async Task Post_Streaming_WithoutUsage_RecordsEstimatedCostAndAudit()
+    {
+        // Arrange
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        var endpoint = CreateEndpoint("model-a");
+        factory.MockClients["model-a"] = new MockModelClient(endpoint,
+            streamRawFunc: (req, ct) => CreateStreamChunksWithoutUsage(ct));
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("model-a", stream: true);
+        var json = JsonSerializer.Serialize(request);
+        using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
+
+        // Act
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+        var body = await response.Content.ReadAsStringAsync();
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("[DONE]", body);
+
+        var ledger = factory.Services.GetRequiredService<CostLedger>();
+        Assert.True(ledger.GetSpend().Total > 0, "Expected estimated streaming cost to be recorded.");
+
+        var audit = Assert.Single(factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(1));
+        Assert.True(audit.Success);
+        Assert.True(audit.IsStreaming);
+        Assert.True(audit.IsEstimated);
+        Assert.True(audit.Cost > 0m);
+        Assert.Equal(OutcomeRecorder.EstimateInputCost(endpoint, audit.EstimatedInputTokens), audit.Cost);
     }
 
     [Fact]
@@ -1370,6 +1608,7 @@ public class ChatCompletionsEndpointTests
                 opt.Models.Add(new ModelEndpointOptions
                 {
                     Name = "strong-model",
+                    BaseUrl = "https://api.example.com",
                     Tier = ModelTier.Strong,
                     MaxContextTokens = 8192,
                     InputPricePerMillion = 5m,
@@ -1379,6 +1618,7 @@ public class ChatCompletionsEndpointTests
                 opt.Models.Add(new ModelEndpointOptions
                 {
                     Name = "cheap-model",
+                    BaseUrl = "https://api.example.com",
                     Tier = ModelTier.Cheap,
                     MaxContextTokens = 8192,
                     InputPricePerMillion = 0.1m,

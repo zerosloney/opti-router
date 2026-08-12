@@ -126,6 +126,75 @@ public class RouterOptionsValidatorTests
         Assert.Contains("MaxContextTokens 必须大于 0", result.FailureMessage);
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("/v1")]
+    [InlineData("api.example.com/v1")]
+    [InlineData("ftp://api.example.com/v1")]
+    [InlineData("file:///tmp/model")]
+    public void InvalidBaseUrl_ShouldFailForStartupAndModelWrite(string baseUrl)
+    {
+        var options = CreateValidOptions();
+        options.Models[0].BaseUrl = baseUrl;
+        var model = options.Models[0];
+
+        var startupResult = CreateValidator().Validate(null, options);
+        var writeResult = RouterOptionsValidator.ValidateModel(model);
+
+        Assert.False(startupResult.Succeeded);
+        Assert.Contains("BaseUrl", startupResult.FailureMessage);
+        Assert.Contains("BaseUrl", writeResult);
+    }
+
+    [Theory]
+    [InlineData("http://api.example.com/v1")]
+    [InlineData("https://api.example.com/v1")]
+    public void ValidModelEndpointBoundaries_ShouldPassForStartupAndModelWrite(string baseUrl)
+    {
+        var options = CreateValidOptions();
+        options.Models[0].BaseUrl = baseUrl;
+        options.Models[0].TimeoutSeconds = 1;
+        options.Models[0].MaxRetries = 0;
+
+        var startupResult = CreateValidator().Validate(null, options);
+        var writeResult = RouterOptionsValidator.ValidateModel(options.Models[0]);
+
+        Assert.True(startupResult.Succeeded);
+        Assert.Null(writeResult);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void NonPositiveTimeout_ShouldFailForStartupAndModelWrite(int timeoutSeconds)
+    {
+        var options = CreateValidOptions();
+        options.Models[0].TimeoutSeconds = timeoutSeconds;
+
+        var startupResult = CreateValidator().Validate(null, options);
+        var writeResult = RouterOptionsValidator.ValidateModel(options.Models[0]);
+
+        Assert.False(startupResult.Succeeded);
+        Assert.Contains("TimeoutSeconds", startupResult.FailureMessage);
+        Assert.Contains("TimeoutSeconds", writeResult);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    public void NegativeMaxRetries_ShouldFailForStartupAndModelWrite(int maxRetries)
+    {
+        var options = CreateValidOptions();
+        options.Models[0].MaxRetries = maxRetries;
+
+        var startupResult = CreateValidator().Validate(null, options);
+        var writeResult = RouterOptionsValidator.ValidateModel(options.Models[0]);
+
+        Assert.False(startupResult.Succeeded);
+        Assert.Contains("MaxRetries", startupResult.FailureMessage);
+        Assert.Contains("MaxRetries", writeResult);
+    }
+
     [Fact]
     public void NonPositiveHalfOpenMaxProbes_ShouldReturnFailure()
     {

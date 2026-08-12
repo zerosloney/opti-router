@@ -14,7 +14,9 @@ public sealed record RouterContext
     public required ChatRequest Request { get; init; }
 
     /// <summary>
-    /// 所有已启用的模型端点。
+    /// 当前策略阶段仍符合资格的模型端点。
+    /// 初始值为所有已启用模型；RouterEngine 在 Filter 组中逐步收窄该池，
+    /// 后续策略只能从最终资格池产生候选。
     /// </summary>
     public required IReadOnlyList<ModelEndpointOptions> AllModels { get; init; }
 

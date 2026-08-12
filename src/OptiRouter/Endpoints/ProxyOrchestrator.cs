@@ -559,11 +559,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         await enumerator.DisposeAsync().ConfigureAwait(false);
                     }
 
-                    // 流正常结束，记账 + 标记健康。
-                    if (finalUsage is not null)
-                    {
-                        _recorder.RecordCost(CostCalculator.Compute(finalUsage, candidate), sessionId);
-                    }
+                    // 流正常结束，记账 + 标记健康。没有 usage 时按输入 token 估算，
+                    // 避免成功请求被记为零成本，并在审计中保留预估标记。
+                    decimal cost = finalUsage is not null
+                        ? CostCalculator.Compute(finalUsage, candidate)
+                        : OutcomeRecorder.EstimateInputCost(candidate, decision.EstimatedInputTokens);
+                    bool isEstimated = finalUsage is null;
+                    if (!isEstimated || cost > 0m)
+                        _recorder.RecordCost(cost, sessionId);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds);
                     _recorder.RecordAffinity(sessionId, candidate.Name);
@@ -571,13 +574,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     probeResolved = true;
                     attemptSw.Stop();
                     _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
-                        finalUsage is not null ? CostCalculator.Compute(finalUsage, candidate) : 0m,
+                        cost,
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier,
+                        isEstimated: isEstimated,
                         timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
-                        candidate.Name, finalUsage is not null
-                            ? CostCalculator.Compute(finalUsage, candidate).ToString("F6")
-                            : "unknown");
+                        candidate.Name, cost.ToString("F6"));
                     yield break;
                 }
                 finally

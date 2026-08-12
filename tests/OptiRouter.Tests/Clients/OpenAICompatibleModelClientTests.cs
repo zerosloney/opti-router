@@ -10,6 +10,8 @@ namespace OptiRouter.Tests;
 
 public class OpenAICompatibleModelClientTests
 {
+    private const int NonStreamingResponseLimitBytes = 1024 * 1024;
+
     private static ModelEndpointOptions CreateEndpoint(string baseUrl = "https://api.openai.com", string apiKey = "sk-test", string name = "gpt-4o")
     {
         return new ModelEndpointOptions
@@ -177,6 +179,38 @@ public class OpenAICompatibleModelClientTests
         Assert.Equal(HttpStatusCode.InternalServerError, ex.StatusCode);
         Assert.Contains("server error", ex.ResponseBody);
         Assert.DoesNotContain("server error", ex.Message);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_OversizedContentLengthSuccess_ThrowsResponseSizeLimitExceededException()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = CreateOversizedResponseContent(knownLength: true)
+        };
+        Assert.Equal(NonStreamingResponseLimitBytes + 1, response.Content.Headers.ContentLength);
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ResponseSizeLimitExceededException>(
+            () => client.CompleteAsync(new ChatRequest()));
+
+        Assert.Equal(NonStreamingResponseLimitBytes, ex.LimitBytes);
+    }
+
+    [Fact]
+    public async Task CompleteAsync_OversizedChunkedSuccess_ThrowsResponseSizeLimitExceededException()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = CreateOversizedResponseContent(knownLength: false)
+        };
+        Assert.Null(response.Content.Headers.ContentLength);
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ResponseSizeLimitExceededException>(
+            () => client.CompleteAsync(new ChatRequest()));
+
+        Assert.Equal(NonStreamingResponseLimitBytes, ex.LimitBytes);
     }
 
     #endregion
@@ -429,6 +463,74 @@ public class OpenAICompatibleModelClientTests
     }
 
     [Fact]
+    public async Task CompleteRawAsync_OversizedContentLengthError_ThrowsResponseSizeLimitExceededException()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = CreateOversizedResponseContent(knownLength: true)
+        };
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ResponseSizeLimitExceededException>(
+            () => client.CompleteRawAsync(new ChatRequest()));
+
+        Assert.Equal(NonStreamingResponseLimitBytes, ex.LimitBytes);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_OversizedChunkedError_ThrowsResponseSizeLimitExceededException()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = CreateOversizedResponseContent(knownLength: false)
+        };
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ResponseSizeLimitExceededException>(
+            () => client.CompleteRawAsync(new ChatRequest()));
+
+        Assert.Equal(NonStreamingResponseLimitBytes, ex.LimitBytes);
+    }
+
+    [Fact]
+    public async Task StreamAsync_OversizedContentLengthError_ThrowsResponseSizeLimitExceededException()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = CreateOversizedResponseContent(knownLength: true)
+        };
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ResponseSizeLimitExceededException>(async () =>
+        {
+            await foreach (var _ in client.StreamAsync(new ChatRequest { Stream = true }))
+            {
+            }
+        });
+
+        Assert.Equal(NonStreamingResponseLimitBytes, ex.LimitBytes);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_OversizedChunkedError_ThrowsResponseSizeLimitExceededException()
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = CreateOversizedResponseContent(knownLength: false)
+        };
+        var client = CreateClient(CreateEndpoint(), CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ResponseSizeLimitExceededException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(new ChatRequest { Stream = true }))
+            {
+            }
+        });
+
+        Assert.Equal(NonStreamingResponseLimitBytes, ex.LimitBytes);
+    }
+
+    [Fact]
     public async Task StreamRawAsync_WhenSuccess_YieldsOriginalDataLines()
     {
         var endpoint = CreateEndpoint(baseUrl: "https://api.openai.com/v1");
@@ -618,6 +720,14 @@ public class OpenAICompatibleModelClientTests
 
     #region Helpers
 
+    private static HttpContent CreateOversizedResponseContent(bool knownLength)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(new string('a', NonStreamingResponseLimitBytes + 1));
+        return knownLength
+            ? new ByteArrayContent(bytes)
+            : new StreamContent(new ChunkedReadStream(bytes));
+    }
+
     /// <summary>
     /// 可记录请求内容的 HttpMessageHandler，用于测试。
     /// </summary>
@@ -656,6 +766,57 @@ public class OpenAICompatibleModelClientTests
         {
             return _lastRequest?.RequestUri;
         }
+    }
+
+    private sealed class ChunkedReadStream : Stream
+    {
+        private readonly byte[] _bytes;
+        private int _offset;
+
+        public ChunkedReadStream(byte[] bytes)
+        {
+            _bytes = bytes;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _bytes.Length;
+        public override long Position
+        {
+            get => _offset;
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int read = Math.Min(Math.Min(count, 4096), _bytes.Length - _offset);
+            if (read == 0)
+                return 0;
+
+            _bytes.AsSpan(_offset, read).CopyTo(buffer.AsSpan(offset, read));
+            _offset += read;
+            return read;
+        }
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            int read = Math.Min(Math.Min(buffer.Length, 4096), _bytes.Length - _offset);
+            if (read == 0)
+                return ValueTask.FromResult(0);
+
+            _bytes.AsMemory(_offset, read).CopyTo(buffer[..read]);
+            _offset += read;
+            return ValueTask.FromResult(read);
+        }
+
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     #endregion

@@ -19,6 +19,11 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     /// </summary>
     private const int MaxStreamLineBytes = 1024 * 1024; // 1 MB
 
+    /// <summary>
+    /// 非流式响应体最大字节数。完整物化前先通过 Content-Length 或流读取检查。
+    /// </summary>
+    private const int MaxNonStreamingResponseBytes = 1024 * 1024; // 1 MB
+
     private static readonly JsonSerializerOptions _serializeOptions = new()
     {
         PropertyNamingPolicy = new JsonSnakeCaseNamingPolicy(),
@@ -67,7 +72,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         responseSw.Stop();
         var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
-        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        var responseBody = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
 
         if (!response.IsSuccessStatusCode)
         {
@@ -97,7 +102,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
 
         if (!response.IsSuccessStatusCode)
         {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var errorBody = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
             throw new ModelClientException(response.StatusCode, errorBody, metadata: metadata);
         }
 
@@ -241,7 +246,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
                 responseSw.Stop();
                 var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
-                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                var responseBody = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -294,18 +299,24 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 if (!response.IsSuccessStatusCode)
                 {
                     var statusCode = response.StatusCode;
-                    var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                    var exception = new ModelClientException(statusCode, errorBody, metadata: responseMetadata);
-                    response.Dispose();
-                    response = null;
-
-                    if (IsRetryable(statusCode) && attempt < maxRetries)
+                    try
                     {
-                        attempt++;
-                        await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
-                        continue;
+                        var errorBody = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
+                        var exception = new ModelClientException(statusCode, errorBody, metadata: responseMetadata);
+
+                        if (IsRetryable(statusCode) && attempt < maxRetries)
+                        {
+                            attempt++;
+                            await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+                            continue;
+                        }
+                        throw exception;
                     }
-                    throw exception;
+                    finally
+                    {
+                        response.Dispose();
+                        response = null;
+                    }
                 }
 
                 break; // 成功
@@ -322,7 +333,8 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         try
         {
             bool isFirstDataItem = true;
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            var successfulResponse = response ?? throw new InvalidOperationException("Upstream response was not available after retries.");
+            await using var stream = await successfulResponse.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
             // PipeReader 逐行扫描，单行累计字节超 MaxStreamLineBytes 则中断，防恶意上游发超长单行撑爆内存
             // （StreamReader.ReadLineAsync 无单行上限，先读入再检查为时已晚）。
             var reader = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8 * 1024));
@@ -442,6 +454,56 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             return ex.InnerException is TimeoutException;
 
         return false;
+    }
+
+    /// <summary>
+    /// 在完整物化前读取有限大小的 UTF-8 响应体。
+    /// </summary>
+    private static async Task<string> ReadResponseBodyAsync(HttpContent content, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+
+        if (content.Headers.ContentLength is > MaxNonStreamingResponseBytes)
+        {
+            throw new ResponseSizeLimitExceededException(MaxNonStreamingResponseBytes,
+                $"Upstream response body exceeded {MaxNonStreamingResponseBytes} bytes; aborting to prevent OOM.");
+        }
+
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+        int initialCapacity = content.Headers.ContentLength is > 0
+            ? (int)content.Headers.ContentLength.Value
+            : 0;
+        using var body = new MemoryStream(initialCapacity);
+        byte[] buffer = ArrayPool<byte>.Shared.Rent(81920);
+
+        try
+        {
+            while (true)
+            {
+                long remaining = MaxNonStreamingResponseBytes - body.Length;
+                int readLength = (int)Math.Min(buffer.Length, remaining + 1);
+                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, readLength), cancellationToken)
+                    .ConfigureAwait(false);
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+
+                if (body.Length + bytesRead > MaxNonStreamingResponseBytes)
+                {
+                    throw new ResponseSizeLimitExceededException(MaxNonStreamingResponseBytes,
+                        $"Upstream response body exceeded {MaxNonStreamingResponseBytes} bytes; aborting to prevent OOM.");
+                }
+
+                body.Write(buffer, 0, bytesRead);
+            }
+
+            return Encoding.UTF8.GetString(body.GetBuffer(), 0, checked((int)body.Length));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     private static async Task DelayWithJitterAsync(int attempt, CancellationToken cancellationToken)

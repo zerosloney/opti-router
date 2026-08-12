@@ -44,8 +44,14 @@ public sealed class RouterEngine
             SessionId = sessionId
         };
 
+        // Keep a monotonic eligibility pool for the complete policy chain. Filter
+        // policies narrow this pool; later policies can only select from it. This
+        // prevents fallback/degrade policies from rebuilding candidates from the
+        // original enabled-model list and undoing an earlier hard filter.
+        var eligibleModels = context.AllModels.ToList();
+
         // 3. 初始决策：所有 enabled 模型按 tier 升序（Strong 优先）作为候选
-        var initialCandidates = context.AllModels
+        var initialCandidates = eligibleModels
             .OrderBy(m => TierOrder.Rank(m.Tier))
             .ThenByDescending(m => m.MaxContextTokens)
             .ToList();
@@ -64,10 +70,36 @@ public sealed class RouterEngine
         {
             foreach (var policy in _policies.Where(p => p.Group == group))
             {
-                decision = policy.Apply(context, decision);
+                // All policies see the current eligible pool. A filter policy may
+                // only narrow it; every result is intersected defensively so a
+                // policy that rebuilds from its own source cannot reintroduce a
+                // model removed by an earlier filter.
+                var policyContext = context with { AllModels = eligibleModels };
+                var policyDecision = policy.Apply(policyContext, decision);
+                var candidates = IntersectWithEligible(policyDecision.Candidates, eligibleModels);
+
+                if (group == PolicyGroup.Filter)
+                {
+                    eligibleModels = candidates;
+                }
+
+                decision = policyDecision with { Candidates = candidates };
             }
         }
 
         return decision;
+    }
+
+    private static List<ModelEndpointOptions> IntersectWithEligible(
+        IReadOnlyList<ModelEndpointOptions> candidates,
+        IReadOnlyList<ModelEndpointOptions> eligibleModels)
+    {
+        var eligibleNames = eligibleModels
+            .Select(model => model.Name)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return candidates
+            .Where(model => eligibleNames.Contains(model.Name))
+            .ToList();
     }
 }

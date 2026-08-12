@@ -90,6 +90,25 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
+            // 覆盖 Program 的权威文件配置，测试不依赖工作区中的 models-config.json。
+            services.Configure<RouterOptions>(options =>
+            {
+                options.Models.Clear();
+                options.Models.Add(new ModelEndpointOptions
+                {
+                    Name = "gpt-4o",
+                    BaseUrl = "http://localhost/v1",
+                    ApiKey = "sk-xxx",
+                    Tier = ModelTier.Strong,
+                    MaxContextTokens = 8192,
+                    InputPricePerMillion = 10m,
+                    OutputPricePerMillion = 30m,
+                    TimeoutSeconds = 30,
+                    MaxRetries = 0,
+                    Enabled = true
+                });
+            });
+
             // Remove existing ModelClientProvider and register M2ModelClientProvider with mock
             var descriptor = services.SingleOrDefault(d => d.ServiceType == typeof(IModelClientProvider));
             if (descriptor != null)
