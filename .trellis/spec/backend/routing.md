@@ -210,6 +210,7 @@ tsStoreForReload.Retain(options.Models.Select(m => m.Name));
 ### Policy Group Contract & Structured Reason (P2)
 
 - 每个策略声明 `PolicyGroup`（Filter/Classify/Order/Constraint），`RouterEngine.Decide` 按组依赖序执行（Filter→Classify→Order→Constraint），**组内保留串行**（叠加过滤/fallback/重排语义）。
+- 路由资格池单调递减：每个 Filter 的输出与当前资格池取交集并成为新的资格池；Classify/Order/Constraint 的输出也必须与最终资格池取交集。数据主权、能力、长输入、配额、健康状态或 failed-model 过滤掉的模型，不能被预算降级、故障转移、排序或粘性重新引入。
 - **为什么不并行**：策略链本质串行——Failover 有 fallback 副作用（从 `AllModels` 补降级）、QuotaAware 既过滤又重排，非纯谓词；genuine 并行需重构独立子链，超出安全范围。分组契约是未来并行化的地基。
 - `RouterDecision.ReasonEvents`（`IReadOnlyList<ReasonEvent>`）结构化事件列表，各策略在拼接 `Reason` 字符串之外追加。`Reason` 字符串保持原生成逻辑（测试断言锁定格式）。
 - `RouterDecision.ClassificationSignal` / `ClassificationTargetTier`：由 `RuleClassifierPolicy` 填充的结构化分类信号，生产端直接读取（不解析字符串）。`routing_reason` 的 `target=Tier(signal)` 格式保持（`analyze_audit.py` 依赖）。
@@ -770,11 +771,16 @@ bool panelTimedOut = error is OperationCanceledException && !ct.IsCancellationRe
 - `GET /api/dashboard/keys`, `POST /api/dashboard/keys`, `PUT /api/dashboard/keys/{key}`, `DELETE /api/dashboard/keys/{key}` -> `ClientKeyService` CRUD endpoints
 - `ModelHealthTracker.ForceSetState(string modelName, CircuitState newState)`
 - `ClientKeyService.CreateKey(string tenantName, decimal dailyBudgetUsd, int maxQps)`
+- `ClientKeyService.AuthorizeRequest(string? plaintext) -> ClientKeyAuthorizationResult`
+- `ClientKeyService.RecordSpend(string keyId, decimal cost)`
 
 ### 3. Contracts
 - `UpdateSystemConfigRequest`: 9 policy toggles (`EnableFailover`, `EnableBudgetGuard`, `EnableRuleClassifier`, `EnableLatencyAware`, `EnableSemanticRouter`, `EnablePiiAnonymization`, `EnableDataSovereignty`, `EnableJsonAstAutoRepair`, `EnableFusionRouter`), `DailyBudgetUsd`, `EnforceOnExhausted`.
 - `CircuitOverrideRequest`: `TargetState` ("Closed", "Open", "HalfOpen").
-- `ClientKeyInfo`: `Key` ("opti-key-..."), `TenantName`, `DailyBudgetUsd`, `DailySpendUsd`, `MaxQps`, `Enabled`, `CreatedAt`.
+- `ClientKeyInfo`: `KeyId`, SHA-256 `KeyHash`, operational `KeyPrefix`, `TenantName`, `DailyBudgetUsd`, `DailySpendUsd`, `DailySpendDateUtc`, `MaxQps`, `Enabled`, `CreatedAt`. `KeyHash` is never projected by dashboard APIs; treat the partial token prefix as sensitive operational metadata and never log it on request paths.
+- `/v1` authenticates the global `ProxyApiKey` first for backward compatibility, then tenant keys. Global-key requests do not consume tenant QPS or spend. Dashboard/model administration routes never accept tenant keys.
+- Enabled tenant keys use a per-key fixed one-second QPS window and a UTC-daily spend budget. Authorized request identity is request-local; every cost recorded by `OutcomeRecorder` for that request is also persisted against the tenant key.
+- New client-key files start as `[]`. Plaintext is returned only by key creation and is never persisted or logged. Corrupt or legacy plaintext files fail closed and are preserved for operator recovery.
 
 ### 4. Validation & Error Matrix
 - `TargetState` not valid Enum -> `400 Bad Request` ("Invalid target state...")

@@ -1,0 +1,9 @@
+{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
+{"file": ".trellis/spec/backend/routing.md", "reason": "Routing policy contracts and required regression coverage"}
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "SQLite transaction and store conventions"}
+{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Secret-handling and structured logging rules"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "Response-size and upstream error contracts"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Backend coding and test requirements"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "Layer ownership and dependency direction"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Cross-layer configuration and request-flow checks"}
+{"file": ".trellis/tasks/08-12-review-remediation/research/review-findings.md", "reason": "Verified reproduction paths and baseline evidence"}

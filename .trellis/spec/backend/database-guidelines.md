@@ -141,6 +141,7 @@ new SqliteConnection($"Data Source={path};Default Timeout=15");
 - **One `SqliteConnection` per store + explicit `lock(_lock)` serializes all writes.** SQLite single-writer semantics; write frequency is low (≤2 ledger accumulations + 1 audit row per request), lock is not a bottleneck.
 - **Two stores share one file with independent connections** — cross-store write serialization relies on `busy_timeout` (5000ms / Default Timeout).
 - All writes use `BeginTransaction()` + `Commit()`. Atomic accumulate-and-return uses `... RETURNING amount;`.
+- Audit appends are drained into a local batch and committed in one transaction. If insert or commit fails, the complete drained batch is re-enqueued and signalled for retry. This is at-least-once delivery: an ambiguous commit may duplicate rows, but a transient flush failure must not silently lose audit records.
 - Timestamps stored as ISO-8601 `"o"` invariant strings (`ToString("o", CultureInfo.InvariantCulture)`), UTC. Dates stored as `yyyy-MM-dd` (via `FormatDate`).
 
 ### Incremental Column Migration
