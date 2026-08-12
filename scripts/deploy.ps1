@@ -83,9 +83,11 @@ finally {
 
 # --- 5. 验证服务状态 ---
 Step "Verifying service state ..."
-$status = (& $nssm status $svc 2>&1) -join ''
-if ($status -match 'RUNNING') {
-    Write-Host "✓ Service $svc is RUNNING. Deploy complete." -ForegroundColor Green
+# 用 Get-Service 而非 nssm status：后者返回 SERVICE_RUNNING 等 UTF-16 宽字符(字符间带空格)，
+# 正则匹配不可靠；Get-Service.Status 是干净枚举(Running/Stopped)。
+$svcInfo = Get-Service $svc -ErrorAction SilentlyContinue
+if ($svcInfo -and $svcInfo.Status -eq 'Running') {
+    Write-Host "✓ Service $svc is Running. Deploy complete." -ForegroundColor Green
 } else {
-    Write-Host "⚠ Service $svc status: $status — 请手动检查 nssm/日志。" -ForegroundColor Yellow
+    Write-Host "⚠ Service $svc status: $($svcInfo.Status) — 请手动检查 nssm/日志。" -ForegroundColor Yellow
 }
