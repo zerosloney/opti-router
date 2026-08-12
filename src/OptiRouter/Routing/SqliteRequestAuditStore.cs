@@ -5,6 +5,8 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using OptiRouter.Configuration;
 
 namespace OptiRouter.Routing;
@@ -16,6 +18,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 {
     private readonly object _lock = new();
     private readonly SqliteConnection _connection;
+    private readonly ILogger<SqliteRequestAuditStore> _logger;
     private bool _disposed;
 
     private readonly ConcurrentQueue<RequestAuditRecord> _queue = new();
@@ -27,9 +30,11 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     /// 用指定 DB 文件路径构造。
     /// </summary>
     /// <param name="path">SQLite 文件路径。与 CostLedger 共用同一文件。</param>
-    public SqliteRequestAuditStore(string path)
+    /// <param name="logger">日志记录器（可选；默认 NullLogger），用于记录后台写入失败以免审计子系统静默死亡。</param>
+    public SqliteRequestAuditStore(string path, ILogger<SqliteRequestAuditStore>? logger = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
+        _logger = logger ?? NullLogger<SqliteRequestAuditStore>.Instance;
 
         // Default Timeout 连接串参数 = busy_timeout（秒）；与 SqliteCostLedgerStore 共享同一文件需跨 store 写串行化。
         _connection = new SqliteConnection($"Data Source={path};Default Timeout=15");
@@ -77,6 +82,9 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         EnsureColumn("cache_write_input_tokens", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn("uncached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn("quota_limited", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("trace_id", "TEXT");
+        EnsureColumn("span_id", "TEXT");
+        EnsureColumn("parent_span_id", "TEXT");
 
         _processTask = Task.Run(ProcessQueueAsync);
     }
@@ -114,18 +122,32 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
     private async Task ProcessQueueAsync()
     {
-        try
+        // 等待信号与排空队列分开捕获：FlushQueue 的 SqliteException/磁盘错误不能终结后台任务，
+        // 否则 _processTask 静默 fault、队列无限增长、每个 reader 的 FlushQueue 重抛，审计子系统无声死亡。
+        while (!_cts.IsCancellationRequested)
         {
-            while (!_cts.IsCancellationRequested)
+            try
             {
                 await _signal.WaitAsync(_cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            try
+            {
                 FlushQueue();
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Audit FlushQueue failed; will retry on next signal");
+            }
         }
-        catch (OperationCanceledException)
-        {
-            FlushQueue();
-        }
+
+        // 取消退出前尽力排空剩余记录。
+        try { FlushQueue(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Final audit FlushQueue on shutdown failed"); }
     }
 
     private void FlushQueue()
@@ -145,11 +167,12 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                          completion_tokens, cost, latency_ms, session_id, routing_reason,
                          success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                          is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
-                         cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited)
+                         cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
+                         trace_id, span_id, parent_span_id)
                     VALUES
                         (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
                          @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
-                         @cached, @cachewrite, @uncached, @quota);
+                         @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent);
                     """;
                 cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
                 cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
@@ -176,6 +199,9 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 cmd.Parameters.AddWithValue("@cachewrite", record.CacheWriteInputTokens);
                 cmd.Parameters.AddWithValue("@uncached", record.UncachedInputTokens);
                 cmd.Parameters.AddWithValue("@quota", record.QuotaLimited ? 1 : 0);
+                cmd.Parameters.AddWithValue("@trace", (object?)record.TraceId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@span", (object?)record.SpanId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@parent", (object?)record.ParentSpanId ?? DBNull.Value);
                 cmd.ExecuteNonQuery();
             }
             tx.Commit();
@@ -197,7 +223,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                        is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
-                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited
+                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
+                       trace_id, span_id, parent_span_id
                 FROM request_audit
                 ORDER BY id DESC
                 LIMIT @limit;
@@ -223,7 +250,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                        is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
-                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited
+                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
+                       trace_id, span_id, parent_span_id
                 FROM request_audit
                 WHERE model = @model
                 ORDER BY id DESC
@@ -262,7 +290,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                        completion_tokens, cost, latency_ms, session_id, routing_reason,
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                        is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
-                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited
+                       cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
+                       trace_id, span_id, parent_span_id
                 FROM request_audit
                 WHERE timestamp >= @from AND timestamp <= @to
                 ORDER BY id DESC
@@ -389,6 +418,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
             FlushQueue();
             _connection.Dispose();
         }
+        _signal.Dispose();
+        _cts.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -423,7 +454,10 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 CachedInputTokens: reader.IsDBNull(21) ? 0 : reader.GetInt32(21),
                 CacheWriteInputTokens: reader.IsDBNull(22) ? 0 : reader.GetInt32(22),
                 UncachedInputTokens: reader.IsDBNull(23) ? 0 : reader.GetInt32(23),
-                QuotaLimited: !reader.IsDBNull(24) && reader.GetInt32(24) != 0));
+                QuotaLimited: !reader.IsDBNull(24) && reader.GetInt32(24) != 0,
+                TraceId: reader.IsDBNull(25) ? null : reader.GetString(25),
+                SpanId: reader.IsDBNull(26) ? null : reader.GetString(26),
+                ParentSpanId: reader.IsDBNull(27) ? null : reader.GetString(27)));
         }
         return list;
     }
