@@ -1,8 +1,0 @@
-{"file":".trellis/spec/backend/routing.md","reason":"Verify policy ordering, compatibility defaults, 429 behavior, and Fusion selection."}
-{"file":".trellis/spec/backend/database-guidelines.md","reason":"Verify schema migration and dual store parity."}
-{"file":".trellis/spec/backend/error-handling.md","reason":"Verify failure classification and HTTP behavior."}
-{"file":".trellis/spec/backend/logging-guidelines.md","reason":"Verify structured logs and no sensitive headers/content."}
-{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Verify tests, determinism, immutable contracts, and hot-path rules."}
-{"file":".trellis/spec/backend/directory-structure.md","reason":"Verify file placement and dependency direction."}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify complete metadata data flow and typed projections."}
-{"file":".trellis/spec/frontend/type-safety.md","reason":"Verify Dashboard/ApiService DTO JSON compatibility and decimal/double type safety."}

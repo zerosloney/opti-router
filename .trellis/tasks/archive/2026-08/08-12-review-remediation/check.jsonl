@@ -1,8 +1,0 @@
-{"_example": "Fill with {\"file\": \"<path>\", \"reason\": \"<why>\"}. Put spec/research files only — no code paths. Run `python .trellis/scripts/get_context.py --mode packages` to list available specs. Delete this line once real entries are added."}
-{"file": ".trellis/spec/backend/routing.md", "reason": "Verify routing invariants and policy-chain compatibility"}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Verify audit durability and SQLite conventions"}
-{"file": ".trellis/spec/backend/logging-guidelines.md", "reason": "Verify no plaintext secret logging"}
-{"file": ".trellis/spec/backend/error-handling.md", "reason": "Verify response-size error semantics"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Run coding and test quality gate"}
-{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Verify cross-layer consistency"}
-{"file": ".trellis/tasks/08-12-review-remediation/research/review-findings.md", "reason": "Check every confirmed finding against acceptance criteria"}

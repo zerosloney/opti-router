@@ -1,4 +1,0 @@
-{"file": ".trellis/spec/backend/routing.md", "reason": "单模型选择路由既有契约（策略链顺序、Thompson 奖励语义、多维 tolerance、KnownTags、audit 列）。改进提案必须与之保持一致，不得破坏向后兼容。"}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "request_audit SQLite 表结构。实证分析扩展 generate/analyze 脚本时需遵循数据库写入与只读约定。"}
-{"file": "src/OptiRouter/Routing/RouterEngine.cs", "reason": "策略链串行执行入口（Decide）。差距分析需对照其 linear Apply 与隐式 Candidates 耦合，评估并行化提案（P2 待办）。"}
-{"file": "src/OptiRouter/Routing/ThompsonSampler.cs", "reason": "Thompson Sampling MAB 现有实现。差距分析对照 SOTA 多臂老虎机（UCB/EXP3/LinUCB），评估探索-利用与上下文老虎机提案。"}

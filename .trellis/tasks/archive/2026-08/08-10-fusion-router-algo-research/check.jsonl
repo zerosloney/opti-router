@@ -1,3 +1,0 @@
-{"file": ".trellis/spec/backend/routing.md", "reason": "验收融合路由改进提案是否破坏既有契约（panel 超时、diversity、动态 size、audit 语义）。"}
-{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "校验 generate/analyze 脚本对 request_audit 表的读写符合数据库约定（只读分析、schema 一致性）。"}
-{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "校验研究报告与脚本改动的质量门禁（可测试性、向后兼容、无 stub）。"}
