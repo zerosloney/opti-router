@@ -203,7 +203,38 @@ public static class DashboardHandler
                 budget["EnforceOnExhausted"] = behavior.ToString();
             }
 
-            File.WriteAllText(appsettingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            string directory = Path.GetDirectoryName(appsettingsPath) ?? env.ContentRootPath;
+            string tempPath = Path.Combine(directory, $".appsettings.{Guid.NewGuid():N}.tmp");
+            try
+            {
+                File.WriteAllText(tempPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                int attempts = 0;
+                while (true)
+                {
+                    try
+                    {
+                        if (File.Exists(appsettingsPath))
+                            File.Replace(tempPath, appsettingsPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                        else
+                            File.Move(tempPath, appsettingsPath);
+                        break;
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        attempts++;
+                        if (attempts >= 10) throw;
+                        Thread.Sleep(10 * attempts);
+                    }
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    try { File.Delete(tempPath); } catch { }
+                }
+            }
+
             ((IConfigurationRoot)config).Reload();
 
             return Results.Ok(new { message = "System configuration persisted to appsettings.json and hot-applied via reload." });

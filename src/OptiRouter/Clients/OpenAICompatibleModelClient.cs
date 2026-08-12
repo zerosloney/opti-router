@@ -165,8 +165,8 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 yield return chunk;
             }
 
-            // 剩余未遇换行的字节：累计，超限则中断。
-            pendingLineBytes += (int)buffer.Length;
+            // 剩余未遇换行的字节：即当前 buffer 中的未消费字节长度，超限则中断。
+            pendingLineBytes = (int)buffer.Length;
             if (pendingLineBytes > MaxStreamLineBytes)
             {
                 await reader.CompleteAsync().ConfigureAwait(false);
@@ -395,8 +395,8 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     yield return new RawStreamLine(data, TryExtractUsage(data), lineMetadata);
                 }
 
-                // 剩余未遇换行的字节：累计，超限则中断。
-                pendingLineBytes += (int)buffer.Length;
+                // 剩余未遇换行的字节：即当前 buffer 中的未消费字节长度，超限则中断。
+                pendingLineBytes = (int)buffer.Length;
                 if (pendingLineBytes > MaxStreamLineBytes)
                 {
                     await reader.CompleteAsync().ConfigureAwait(false);

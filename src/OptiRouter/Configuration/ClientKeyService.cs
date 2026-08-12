@@ -16,6 +16,8 @@ public sealed class ClientKeyService
     private readonly TimeProvider _timeProvider;
     private readonly object _gate = new();
     private readonly Dictionary<string, QpsWindow> _qpsWindows = new(StringComparer.Ordinal);
+    private List<ClientKeyInfo>? _cachedKeys;
+    private DateTime _lastFileWriteTimeUtc = DateTime.MinValue;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -58,8 +60,25 @@ public sealed class ClientKeyService
 
             // Validate an existing file, but never replace it when it is corrupt or in a legacy
             // plaintext format. Callers must see the failure so an operator can recover the file.
-            _ = LoadKeysFromFile();
+            _ = GetCachedOrLoadKeysNoLock();
         }
+    }
+
+    private List<ClientKeyInfo> GetCachedOrLoadKeysNoLock()
+    {
+        if (File.Exists(_filePath))
+        {
+            var lastWrite = File.GetLastWriteTimeUtc(_filePath);
+            if (_cachedKeys is not null && lastWrite == _lastFileWriteTimeUtc)
+            {
+                return _cachedKeys;
+            }
+        }
+
+        var loaded = LoadKeysFromFile();
+        _cachedKeys = loaded;
+        _lastFileWriteTimeUtc = File.Exists(_filePath) ? File.GetLastWriteTimeUtc(_filePath) : DateTime.MinValue;
+        return loaded;
     }
 
     private List<ClientKeyInfo> LoadKeysFromFile()
@@ -100,7 +119,7 @@ public sealed class ClientKeyService
     public List<ClientKeyInfo> GetAllKeys()
     {
         lock (_gate)
-            return LoadKeysFromFile();
+            return GetCachedOrLoadKeysNoLock();
     }
 
     /// <summary>
@@ -116,7 +135,7 @@ public sealed class ClientKeyService
 
             byte[] candidateHash = SHA256.HashData(Encoding.UTF8.GetBytes(plaintext));
             ClientKeyInfo? matched = null;
-            var keys = LoadKeysFromFile();
+            var keys = GetCachedOrLoadKeysNoLock();
 
             foreach (var key in keys)
             {
@@ -183,7 +202,7 @@ public sealed class ClientKeyService
 
         lock (_gate)
         {
-            var keys = LoadKeysFromFile();
+            var keys = GetCachedOrLoadKeysNoLock();
             var item = keys.FirstOrDefault(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
             if (item is null)
                 return;
@@ -207,7 +226,7 @@ public sealed class ClientKeyService
         ArgumentException.ThrowIfNullOrWhiteSpace(tenantName);
         lock (_gate)
         {
-            var keys = LoadKeysFromFile();
+            var keys = GetCachedOrLoadKeysNoLock();
             var (plaintext, info) = Build(tenantName.Trim(), dailyBudgetUsd, maxQps);
             keys.Add(info);
             SaveKeysToFile(keys);
@@ -219,7 +238,7 @@ public sealed class ClientKeyService
     {
         lock (_gate)
         {
-            var keys = LoadKeysFromFile();
+            var keys = GetCachedOrLoadKeysNoLock();
             var item = keys.FirstOrDefault(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
             if (item is null) return false;
 
@@ -236,7 +255,7 @@ public sealed class ClientKeyService
     {
         lock (_gate)
         {
-            var keys = LoadKeysFromFile();
+            var keys = GetCachedOrLoadKeysNoLock();
             int removed = keys.RemoveAll(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
             if (removed > 0)
             {
@@ -357,6 +376,9 @@ public sealed class ClientKeyService
                 File.Replace(temporaryPath, fullPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
             else
                 File.Move(temporaryPath, fullPath);
+
+            _cachedKeys = keys;
+            _lastFileWriteTimeUtc = File.Exists(fullPath) ? File.GetLastWriteTimeUtc(fullPath) : DateTime.MinValue;
         }
         finally
         {

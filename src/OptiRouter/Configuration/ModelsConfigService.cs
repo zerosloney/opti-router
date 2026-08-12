@@ -202,9 +202,31 @@ public sealed class ModelsConfigService : IDisposable
             }
 
             if (AtomicReplaceHook is { } replace)
+            {
                 replace(tempPath, targetPath);
+            }
             else
-                File.Move(tempPath, targetPath, overwrite: true);
+            {
+                int attempts = 0;
+                while (true)
+                {
+                    try
+                    {
+                        if (File.Exists(targetPath))
+                            File.Replace(tempPath, targetPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                        else
+                            File.Move(tempPath, targetPath);
+                        break;
+                    }
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                    {
+                        attempts++;
+                        if (attempts >= 10)
+                            throw;
+                        Thread.Sleep(10 * attempts);
+                    }
+                }
+            }
         }
         finally
         {

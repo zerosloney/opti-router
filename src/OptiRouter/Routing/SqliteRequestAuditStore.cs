@@ -227,7 +227,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 // Commit may be ambiguous; replaying is safer than losing audit records.
                 foreach (var record in batch)
                     _queue.Enqueue(record);
-                _signal.Release();
+                _signal.Release(batch.Count);
                 throw;
             }
         }

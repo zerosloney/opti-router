@@ -50,8 +50,10 @@ public sealed class PromptTemplateManager
         return _templates.TryGetValue(key, out var template) ? template : null;
     }
 
+    private static readonly Regex SlotRegex = new(@"\{\{([\w\-]+)\}\}", RegexOptions.Compiled);
+
     /// <summary>
-    /// 对模版文本进行变量插值（例如 {{question}}, {{panel_answers}}）。
+    /// 对模版文本进行变量插值（例如 {{question}}, {{panel_answers}}, {{user-query}}）。
     /// </summary>
     public string Render(string name, string version, IDictionary<string, string> variables)
     {
@@ -69,7 +71,7 @@ public sealed class PromptTemplateManager
         foreach (var (k, v) in variables)
             lookup[k] = v ?? string.Empty;
 
-        return Regex.Replace(text, @"\{\{(\w+)\}\}",
+        return SlotRegex.Replace(text,
             match => lookup.TryGetValue(match.Groups[1].Value, out var v) ? v : string.Empty);
     }
 
