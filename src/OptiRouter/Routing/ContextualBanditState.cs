@@ -152,10 +152,15 @@ public sealed class ContextualBanditState
     {
         int n = b.Length;
         // 增广矩阵 [A | b] 拷贝（不修改原 A）。
+        // ridge floor：Update 每步对整个 A 做 *= discount，未触发的 one-hot 特征列对角元按 discount^k
+        // 衰减（discount=0.95 约 538 步、0.5 约 40 步跌破 1e-12）。原实现一旦单列奇异就返回全零，
+        // 使整组 Predict（θ 与 A⁻¹x）作废，bandit 静默退化为 no-op。加未衰减岭项保证非奇异。
+        const double ridge = 1e-6;
         var m = new double[n, n + 1];
         for (int i = 0; i < n; i++)
         {
             for (int j = 0; j < n; j++) m[i, j] = a[i, j];
+            m[i, i] += ridge;
             m[i, n] = b[i];
         }
 
@@ -170,7 +175,8 @@ public sealed class ContextualBanditState
                 double v = Math.Abs(m[r, col]);
                 if (v > maxAbs) { maxAbs = v; pivot = r; }
             }
-            if (maxAbs < 1e-12) return new double[n];  // 奇异，返回零（退化保护）
+            // 加 ridge 后仍奇异（极端）：该列无信息，跳过消元置零，不丢弃其他列的解。
+            if (maxAbs < 1e-12) continue;
 
             if (pivot != col)
             {
@@ -187,10 +193,10 @@ public sealed class ContextualBanditState
             }
         }
 
-        // 回代。
+        // 回代（被跳过的奇异列对角元为 0，该分量置 0）。
         var x = new double[n];
         for (int i = 0; i < n; i++)
-            x[i] = m[i, n] / m[i, i];
+            x[i] = Math.Abs(m[i, i]) < 1e-12 ? 0.0 : m[i, n] / m[i, i];
         return x;
     }
 

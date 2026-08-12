@@ -107,7 +107,10 @@ public sealed class OutcomeRecorder
                 CachedInputTokens: usage?.CachedInputTokens ?? 0,
                 CacheWriteInputTokens: usage?.CacheWriteInputTokens ?? 0,
                 UncachedInputTokens: usage?.UncachedInputTokens ?? 0,
-                QuotaLimited: quotaLimited));
+                QuotaLimited: quotaLimited,
+                TraceId: TraceScope.Current?.TraceId,
+                SpanId: TraceScope.Current?.SpanId,
+                ParentSpanId: TraceScope.Current?.ParentSpanId));
         }
         catch
         {

@@ -108,7 +108,7 @@ public class ApiService
 
     public async Task<SandboxResult?> RunSandboxRouteAsync(string prompt)
     {
-        var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/sandbox/route"), new { prompt });
+        using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/sandbox/route"), new { prompt });
         if (resp.IsSuccessStatusCode)
             return await resp.Content.ReadFromJsonAsync<SandboxResult>();
         return null;
@@ -116,7 +116,7 @@ public class ApiService
 
     public async Task<EvalReportDto?> RunEvalBenchmarkAsync()
     {
-        var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/eval/run"), new { });
+        using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/eval/run"), new { });
         if (resp.IsSuccessStatusCode)
             return await resp.Content.ReadFromJsonAsync<EvalReportDto>();
         return null;
@@ -127,13 +127,13 @@ public class ApiService
 
     public async Task<bool> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
     {
-        var resp = await _http.PutAsJsonAsync(Url("/api/dashboard/config"), req);
+        using var resp = await _http.PutAsJsonAsync(Url("/api/dashboard/config"), req);
         return resp.IsSuccessStatusCode;
     }
 
     public async Task<bool> OverrideCircuitStateAsync(string modelName, string targetState)
     {
-        var resp = await _http.PostAsJsonAsync(Url($"/api/dashboard/circuits/{Uri.EscapeDataString(modelName)}/override"), new { targetState });
+        using var resp = await _http.PostAsJsonAsync(Url($"/api/dashboard/circuits/{Uri.EscapeDataString(modelName)}/override"), new { targetState });
         return resp.IsSuccessStatusCode;
     }
 
@@ -143,23 +143,23 @@ public class ApiService
         return result ?? new List<ClientKeyDto>();
     }
 
-    public async Task<ClientKeyDto?> CreateClientKeyAsync(string tenantName, decimal dailyBudgetUsd, int maxQps)
+    public async Task<CreatedClientKeyDto?> CreateClientKeyAsync(string tenantName, decimal dailyBudgetUsd, int maxQps)
     {
-        var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/keys"), new { tenantName, dailyBudgetUsd, maxQps });
+        using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/keys"), new { tenantName, dailyBudgetUsd, maxQps });
         if (resp.IsSuccessStatusCode)
-            return await resp.Content.ReadFromJsonAsync<ClientKeyDto>();
+            return await resp.Content.ReadFromJsonAsync<CreatedClientKeyDto>();
         return null;
     }
 
     public async Task<bool> UpdateClientKeyAsync(string key, bool enabled, decimal dailyBudgetUsd, int maxQps)
     {
-        var resp = await _http.PutAsJsonAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"), new { enabled, dailyBudgetUsd, maxQps });
+        using var resp = await _http.PutAsJsonAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"), new { enabled, dailyBudgetUsd, maxQps });
         return resp.IsSuccessStatusCode;
     }
 
     public async Task<bool> DeleteClientKeyAsync(string key)
     {
-        var resp = await _http.DeleteAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"));
+        using var resp = await _http.DeleteAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"));
         return resp.IsSuccessStatusCode;
     }
 
@@ -173,25 +173,25 @@ public class ApiService
 
     public async Task<bool> CreateModelAsync(CreateModelRequest req)
     {
-        var resp = await _http.PostAsJsonAsync(Url("/api/models"), req);
+        using var resp = await _http.PostAsJsonAsync(Url("/api/models"), req);
         return resp.IsSuccessStatusCode;
     }
 
     public async Task<bool> UpdateModelAsync(string name, UpdateModelRequest req)
     {
-        var resp = await _http.PutAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"), req);
+        using var resp = await _http.PutAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"), req);
         return resp.IsSuccessStatusCode;
     }
 
     public async Task<bool> DeleteModelAsync(string name)
     {
-        var resp = await _http.DeleteAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"));
+        using var resp = await _http.DeleteAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"));
         return resp.IsSuccessStatusCode;
     }
 
     public async Task<ModelTestResultDto?> TestModelConnectionAsync(string name)
     {
-        var resp = await _http.PostAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}/test"), new { });
+        using var resp = await _http.PostAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}/test"), new { });
         if (resp.IsSuccessStatusCode)
             return await resp.Content.ReadFromJsonAsync<ModelTestResultDto>();
         return new ModelTestResultDto(false, 0, "HTTP Request Failed", null);
@@ -451,10 +451,22 @@ public class ApiService
         string? EnforceOnExhausted);
 
     public record ClientKeyDto(
-        string Key,
+        string KeyId,
+        string KeyPrefix,
         string TenantName,
         decimal DailyBudgetUsd,
         decimal DailySpendUsd,
+        int MaxQps,
+        bool Enabled,
+        DateTime CreatedAt);
+
+    /// <summary>创建密钥的一次性响应：明文仅此一次返回，之后只存哈希、不可重取。</summary>
+    public record CreatedClientKeyDto(
+        string PlaintextKey,
+        string KeyId,
+        string KeyPrefix,
+        string TenantName,
+        decimal DailyBudgetUsd,
         int MaxQps,
         bool Enabled,
         DateTime CreatedAt);

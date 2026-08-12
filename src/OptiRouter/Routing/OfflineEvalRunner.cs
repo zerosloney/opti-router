@@ -100,9 +100,15 @@ public static class OfflineEvalRunner
                     cTokens,
                     null));
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 sw.Stop();
+                // 失败/超时也计入延迟累计：否则 AvgLatencyMs 分母含失败分子却排除，系统性低估。
+                totalLatency += sw.ElapsedMilliseconds;
                 results.Add(new EvalTestResult(
                     testCase,
                     string.Empty,
@@ -148,7 +154,35 @@ public static class OfflineEvalRunner
 
     private static IEnumerable<string> Tokenize(string text)
     {
-        return text.Split(new[] { ' ', '\t', '\r', '\n', ',', '.', '，', '。', '！', '？', ':', '：', '\'', '"', '-' },
-            StringSplitOptions.RemoveEmptyEntries);
+        var tokens = new List<string>();
+        // 按原有分隔符切段，再对每段内的 CJK 连续游程做字符 bigram：
+        // 中文无词边界，整段单 token 会使任意两句相似度≈0，CJK 评测全部误判失败。
+        foreach (var seg in text.Split(new[] { ' ', '\t', '\r', '\n', ',', '.', '，', '。', '！', '？', ':', '：', '\'', '"', '-' },
+            StringSplitOptions.RemoveEmptyEntries))
+        {
+            int i = 0;
+            while (i < seg.Length)
+            {
+                bool cjk = IsCjk(seg[i]);
+                int start = i;
+                while (i < seg.Length && IsCjk(seg[i]) == cjk) i++;
+                int len = i - start;
+                if (cjk && len >= 2)
+                {
+                    for (int k = 0; k < len - 1; k++)
+                        tokens.Add(seg.Substring(start + k, 2));
+                }
+                else
+                {
+                    tokens.Add(seg.Substring(start, len));
+                }
+            }
+        }
+        return tokens;
     }
+
+    private static bool IsCjk(char ch) =>
+        (ch >= 0x4E00 && ch <= 0x9FFF) ||  // CJK 统一表意文字
+        (ch >= 0x3040 && ch <= 0x30FF) ||  // 平假名/片假名
+        (ch >= 0xAC00 && ch <= 0xD7AF);    // 韩文音节
 }

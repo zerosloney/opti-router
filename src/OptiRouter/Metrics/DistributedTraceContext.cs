@@ -57,3 +57,29 @@ public static class DistributedTraceContext
         return $"00-{validTraceId}-{validSpanId}-{flags}";
     }
 }
+
+/// <summary>
+/// 请求级 Trace 作用域：中间件在入口 <see cref="Begin"/>，<c>OutcomeRecorder.RecordAudit</c> 读 <see cref="Current"/>，
+/// 通过 <see cref="AsyncLocal{T}"/> 沿异步流贯穿整条请求，无需在每个 RecordAudit 调用点显式传 trace 参数。
+/// 嵌套 Begin 会覆盖父 scope（本服务单层入口），Dispose 复原。
+/// </summary>
+public sealed class TraceScope(string traceId, string spanId, string? parentSpanId) : IDisposable
+{
+    private static readonly AsyncLocal<TraceScope?> _current = new();
+
+    /// <summary>当前异步流的活跃 trace 作用域；未在 trace 中间件覆盖范围内时为 null。</summary>
+    public static TraceScope? Current => _current.Value;
+
+    public string TraceId { get; } = traceId;
+    public string SpanId { get; } = spanId;
+    public string? ParentSpanId { get; } = parentSpanId;
+
+    public static TraceScope Begin(string traceId, string spanId, string? parentSpanId)
+    {
+        var scope = new TraceScope(traceId, spanId, parentSpanId);
+        _current.Value = scope;
+        return scope;
+    }
+
+    public void Dispose() => _current.Value = null;
+}

@@ -1,8 +1,11 @@
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Routing;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace OptiRouter.Endpoints;
 
@@ -143,10 +146,10 @@ public static class DashboardHandler
             return Results.Ok(report);
         });
 
-        // 7. GET System Config API
-        endpoints.MapGet("/api/dashboard/config", (IOptions<RouterOptions> options) =>
+        // 7. GET System Config API（读 IOptionsMonitor.CurrentValue，反映 reload 后的真值）
+        endpoints.MapGet("/api/dashboard/config", (IOptionsMonitor<RouterOptions> options) =>
         {
-            var opt = options.Value;
+            var opt = options.CurrentValue;
             return Results.Ok(new
             {
                 Routing = new
@@ -169,27 +172,41 @@ public static class DashboardHandler
             });
         });
 
-        // 8. PUT Update System Config API (Hot-apply to active options)
-        endpoints.MapPut("/api/dashboard/config", (IOptions<RouterOptions> options, UpdateSystemConfigRequest req) =>
+        // 8. PUT Update System Config API（持久化到 appsettings.json + 触发 IConfigurationRoot.Reload，
+        //    IOptionsMonitor 自然派发到所有消费方；取代旧版 mutate IOptions.Value 的非持久写法，
+        //    后者被 models-config.json 写入触发的整体 reload 覆盖、且重启丢失）。
+        endpoints.MapPut("/api/dashboard/config", (
+            IConfiguration config,
+            IWebHostEnvironment env,
+            UpdateSystemConfigRequest req) =>
         {
-            var opt = options.Value;
-            if (req.EnableFailover is not null) opt.Routing.EnableFailover = req.EnableFailover.Value;
-            if (req.EnableBudgetGuard is not null) opt.Routing.EnableBudgetGuard = req.EnableBudgetGuard.Value;
-            if (req.EnableRuleClassifier is not null) opt.Routing.EnableRuleClassifier = req.EnableRuleClassifier.Value;
-            if (req.EnableLatencyAware is not null) opt.Routing.EnableLatencyAware = req.EnableLatencyAware.Value;
-            if (req.EnableSemanticRouter is not null) opt.Routing.EnableSemanticRouter = req.EnableSemanticRouter.Value;
-            if (req.EnablePiiAnonymization is not null) opt.Routing.EnablePiiAnonymization = req.EnablePiiAnonymization.Value;
-            if (req.EnableDataSovereignty is not null) opt.Routing.EnableDataSovereignty = req.EnableDataSovereignty.Value;
-            if (req.EnableJsonAstAutoRepair is not null) opt.Routing.EnableJsonAstAutoRepair = req.EnableJsonAstAutoRepair.Value;
-            if (req.EnableFusionRouter is not null) opt.Routing.EnableFusionRouter = req.EnableFusionRouter.Value;
+            string appsettingsPath = Path.Combine(env.ContentRootPath, "appsettings.json");
+            var root = JsonNode.Parse(File.ReadAllText(appsettingsPath))?.AsObject()
+                ?? throw new InvalidOperationException("appsettings.json is unreadable; cannot persist config.");
+            var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
+            var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
+            var budget = (optiRouter["Budget"] as JsonObject) ?? (JsonObject)(optiRouter["Budget"] = new JsonObject());
 
-            if (req.DailyBudgetUsd is >= 0) opt.Budget.DailyBudgetUsd = req.DailyBudgetUsd.Value;
+            if (req.EnableFailover is not null) routing["EnableFailover"] = req.EnableFailover.Value;
+            if (req.EnableBudgetGuard is not null) routing["EnableBudgetGuard"] = req.EnableBudgetGuard.Value;
+            if (req.EnableRuleClassifier is not null) routing["EnableRuleClassifier"] = req.EnableRuleClassifier.Value;
+            if (req.EnableLatencyAware is not null) routing["EnableLatencyAware"] = req.EnableLatencyAware.Value;
+            if (req.EnableSemanticRouter is not null) routing["EnableSemanticRouter"] = req.EnableSemanticRouter.Value;
+            if (req.EnablePiiAnonymization is not null) routing["EnablePiiAnonymization"] = req.EnablePiiAnonymization.Value;
+            if (req.EnableDataSovereignty is not null) routing["EnableDataSovereignty"] = req.EnableDataSovereignty.Value;
+            if (req.EnableJsonAstAutoRepair is not null) routing["EnableJsonAstAutoRepair"] = req.EnableJsonAstAutoRepair.Value;
+            if (req.EnableFusionRouter is not null) routing["EnableFusionRouter"] = req.EnableFusionRouter.Value;
+
+            if (req.DailyBudgetUsd is >= 0) budget["DailyBudgetUsd"] = req.DailyBudgetUsd.Value;
             if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
             {
-                opt.Budget.EnforceOnExhausted = behavior;
+                budget["EnforceOnExhausted"] = behavior.ToString();
             }
 
-            return Results.Ok(new { message = "System configuration updated and hot-applied successfully." });
+            File.WriteAllText(appsettingsPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            ((IConfigurationRoot)config).Reload();
+
+            return Results.Ok(new { message = "System configuration persisted to appsettings.json and hot-applied via reload." });
         });
 
         // 9. Circuit Breaker Override API
@@ -204,10 +221,14 @@ public static class DashboardHandler
             return Results.Ok(new { message = $"Model '{name}' circuit state manually overridden to '{targetState}'." });
         });
 
-        // 10. Client Access Keys & Tenant Quota APIs
+        // 10. Client Access Keys & Tenant Quota APIs（响应一律排除 KeyHash，仅返回 KeyId/KeyPrefix 指纹）
         endpoints.MapGet("/api/dashboard/keys", (ClientKeyService keySvc) =>
         {
-            return Results.Ok(keySvc.GetAllKeys());
+            var dtos = keySvc.GetAllKeys().Select(k => new
+            {
+                k.KeyId, k.KeyPrefix, k.TenantName, k.DailyBudgetUsd, k.DailySpendUsd, k.MaxQps, k.Enabled, k.CreatedAt
+            });
+            return Results.Ok(dtos);
         });
 
         endpoints.MapPost("/api/dashboard/keys", (ClientKeyService keySvc, CreateClientKeyRequest req) =>
@@ -215,22 +236,32 @@ public static class DashboardHandler
             if (string.IsNullOrWhiteSpace(req.TenantName))
                 return Results.BadRequest(new { error = "TenantName is required." });
 
-            var created = keySvc.CreateKey(req.TenantName, req.DailyBudgetUsd ?? 100.0m, req.MaxQps ?? 50);
-            return Results.Created($"/api/dashboard/keys/{created.Key}", created);
+            var (plaintext, info) = keySvc.CreateKey(req.TenantName, req.DailyBudgetUsd ?? 100.0m, req.MaxQps ?? 50);
+            return Results.Created($"/api/dashboard/keys/{info.KeyId}", new
+            {
+                plaintextKey = plaintext,
+                keyId = info.KeyId,
+                keyPrefix = info.KeyPrefix,
+                tenantName = info.TenantName,
+                dailyBudgetUsd = info.DailyBudgetUsd,
+                maxQps = info.MaxQps,
+                enabled = info.Enabled,
+                createdAt = info.CreatedAt
+            });
         });
 
-        endpoints.MapPut("/api/dashboard/keys/{key}", (string key, ClientKeyService keySvc, UpdateClientKeyRequest req) =>
+        endpoints.MapPut("/api/dashboard/keys/{keyId}", (string keyId, ClientKeyService keySvc, UpdateClientKeyRequest req) =>
         {
-            bool ok = keySvc.UpdateKey(key, req.Enabled, req.DailyBudgetUsd, req.MaxQps);
-            if (!ok) return Results.NotFound(new { error = $"Client key '{key}' not found." });
-            return Results.Ok(new { message = $"Client key '{key}' updated successfully." });
+            bool ok = keySvc.UpdateKey(keyId, req.Enabled, req.DailyBudgetUsd, req.MaxQps);
+            if (!ok) return Results.NotFound(new { error = $"Client key '{keyId}' not found." });
+            return Results.Ok(new { message = $"Client key '{keyId}' updated successfully." });
         });
 
-        endpoints.MapDelete("/api/dashboard/keys/{key}", (string key, ClientKeyService keySvc) =>
+        endpoints.MapDelete("/api/dashboard/keys/{keyId}", (string keyId, ClientKeyService keySvc) =>
         {
-            bool ok = keySvc.DeleteKey(key);
-            if (!ok) return Results.NotFound(new { error = $"Client key '{key}' not found." });
-            return Results.Ok(new { message = $"Client key '{key}' deleted successfully." });
+            bool ok = keySvc.DeleteKey(keyId);
+            if (!ok) return Results.NotFound(new { error = $"Client key '{keyId}' not found." });
+            return Results.Ok(new { message = $"Client key '{keyId}' deleted successfully." });
         });
     }
 

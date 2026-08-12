@@ -235,21 +235,6 @@ public static class FusionSynthesis
         return sb.ToString().Trim();
     }
 
-    private static string StripCodeFence(string text)
-    {
-        var t = text.Trim();
-        if (t.StartsWith("```"))
-        {
-            int firstNewline = t.IndexOf('\n');
-            if (firstNewline > 0)
-                t = t.Substring(firstNewline + 1);
-            int closing = t.LastIndexOf("```", StringComparison.Ordinal);
-            if (closing >= 0)
-                t = t.Substring(0, closing);
-        }
-        return t.Trim();
-    }
-
     private static string ReadString(JsonElement root, string property)
     {
         if (!root.TryGetProperty(property, out var el)) return string.Empty;

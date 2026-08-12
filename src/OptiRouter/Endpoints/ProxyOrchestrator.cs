@@ -341,13 +341,23 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string? lastModelName = null;
         int? lastStatusCode = null;
         string? lastErrorMessage = null;
-        long totalBytesTransferred = 0;
-        long maxResponseBytes = options.Routing.MaxResponseStreamBytes;
-        bool fusionRouterAttempted = false;
+            long totalBytesTransferred = 0;
+            long maxResponseBytes = options.Routing.MaxResponseStreamBytes;
+            bool fusionRouterAttempted = false;
 
-        while (true)
-        {
-            var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
+            // PII 脱敏（与非流式 SendAsync 对称）：流式路径同样必须在上游发送前替换敏感数据，
+            // 并在每个 yield 行上反向还原，否则原始 PII 直达上游、占位符泄露给客户端。
+            PiiMap? piiMap = null;
+            if (options.Routing.EnablePiiAnonymization)
+            {
+                var anonymized = PiiAnonymizer.AnonymizeRequest(request);
+                request = anonymized.SanitizedRequest;
+                piiMap = anonymized.PiiMap;
+            }
+
+            while (true)
+            {
+                var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
             ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
 
             if (_logger.IsEnabled(LogLevel.Debug))
@@ -374,7 +384,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     sessionId, failedInThisRequest, attemptedModels, ct).WithCancellation(ct))
                 {
                     producedAnyChunk = true;
-                    yield return line;
+                    yield return RestorePii(line, piiMap);
                 }
 
                 if (producedAnyChunk)
@@ -511,7 +521,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             throw new ResponseSizeLimitExceededException(maxResponseBytes,
                                 $"Response size limit exceeded ({maxResponseBytes} bytes).");
                         }
-                        yield return firstLine;
+                        yield return RestorePii(firstLine, piiMap);
 
                         // 继续 yield 剩余行。
                         while (true)
@@ -541,7 +551,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                 throw new ResponseSizeLimitExceededException(maxResponseBytes,
                                     $"Response size limit exceeded ({maxResponseBytes} bytes).");
                             }
-                            yield return line;
+                            yield return RestorePii(line, piiMap);
                         }
                     }
                     finally
@@ -640,5 +650,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         string restoredBody = piiMap.Restore(response.Body);
         return new RawChatResponse(restoredBody, response.Usage, response.Metadata);
+    }
+
+    private static RawStreamLine RestorePii(RawStreamLine line, PiiMap? piiMap)
+    {
+        if (piiMap is null || !piiMap.HasSensitiveData || string.IsNullOrEmpty(line.Data))
+            return line;
+
+        return line with { Data = piiMap.Restore(line.Data) };
     }
 }

@@ -11,6 +11,7 @@ using OptiRouter.Components.Services;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
 using OptiRouter.Health;
+using OptiRouter.Metrics;
 using OptiRouter.Routing;
 using Prometheus;
 
@@ -116,7 +117,7 @@ builder.Services.AddSingleton<IRequestAuditStore>(sp =>
     {
         Directory.CreateDirectory(dir);
     }
-    return new SqliteRequestAuditStore(storePath);
+    return new SqliteRequestAuditStore(storePath, sp.GetRequiredService<ILogger<SqliteRequestAuditStore>>());
 });
 
 // t3: 注册成本账本、跨请求模型健康跟踪器（三态断路器）和路由引擎。
@@ -314,7 +315,20 @@ app.Use(async (context, next) =>
     }
     context.Response.Headers["X-Request-Id"] = requestId;
     context.Items["RequestId"] = requestId.ToString();
-    await next(context).ConfigureAwait(false);
+
+    // 分布式追踪：解析入口 W3C traceparent（缺省则生成新 trace），开 TraceScope 供
+    // OutcomeRecorder.RecordAudit 沿 AsyncFlow 读取，贯穿 ProxyOrchestrator/FusionRouter 所有审计点。
+    var routingOpts = context.RequestServices.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue.Routing;
+    if (routingOpts.EnableDistributedTracing)
+    {
+        var (traceId, parentSpanId) = DistributedTraceContext.ParseTraceParent(context.Request.Headers["traceparent"]);
+        using var scope = TraceScope.Begin(traceId, DistributedTraceContext.GenerateSpanId(), parentSpanId);
+        await next(context).ConfigureAwait(false);
+    }
+    else
+    {
+        await next(context).ConfigureAwait(false);
+    }
 });
 
 static bool IsProtectedPath(PathString path) =>
