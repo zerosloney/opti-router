@@ -1,0 +1,5 @@
+# 强制 shell 脚本 LF 行尾。
+# Windows checkout 默认转 CRLF，会导致 bash hook（scripts/hooks/*）读取时
+# 变量/命令末尾带 \r 而解析失败。core.hooksPath 可移植方案依赖此规则。
+*.sh text eol=lf
+scripts/hooks/* text eol=lf
