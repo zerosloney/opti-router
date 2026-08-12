@@ -197,6 +197,64 @@
             </div>
         </div>
 
+        <!-- 多窗口统计 -->
+        <div class="glass-card" style="margin-bottom: 20px;">
+            <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; flex-wrap: wrap; gap: 8px;">
+                <span>多窗口统计</span>
+                <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+                    @foreach (var w in WindowOptions)
+                    {
+                        var isActive = w == WindowKey;
+                        <button @onclick="() => SetWindow(w)"
+                                style="background: @(isActive ? "rgba(56,189,248,0.25)" : "transparent"); border: 1px solid rgba(56,189,248,0.3); color: @(isActive ? "#7dd3fc" : "#cbd5e1"); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">
+                            @WindowLabels[w]
+                        </button>
+                    }
+                </div>
+            </div>
+            @if (WindowData != null)
+            {
+                @if (WindowKey != "all" && WindowData.WindowHours > WindowData.RetentionHours)
+                {
+                    <div class="alert-banner alert-warning" style="margin: 10px 0; padding: 8px 12px; font-size: 0.85rem;">
+                        ⚠ 当前窗口 (@WindowData.WindowHours h) 超出审计保留期 (@WindowData.RetentionHours h)，更早数据已被淘汰，仅显示保留期内数据。
+                    </div>
+                }
+                <div class="stats-row">
+                    <div class="stat-card">
+                        <div class="stat-card-label">输入 Token</div>
+                        <div class="stat-card-val">@WindowData.InputTokens.ToString("N0")</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-label">输出 Token</div>
+                        <div class="stat-card-val">@WindowData.OutputTokens.ToString("N0")</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-label">缓存命中率</div>
+                        <div class="stat-card-val" style="color:#34d399;">@WindowData.CacheHitRatePercent.ToString("F1")%</div>
+                        <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">命中 @WindowData.CachedInputTokens.ToString("N0") / 未缓存 @WindowData.UncachedInputTokens.ToString("N0")</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-label">错误率</div>
+                        <div class="stat-card-val" style="color:@(WindowData.ErrorRatePercent > 0 ? "#f87171" : "#e2e8f0");">@WindowData.ErrorRatePercent.ToString("F2")%</div>
+                        <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">失败 @WindowData.Failures.ToString("N0") / 请求 @WindowData.TotalRequests.ToString("N0")</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-label">平均延迟</div>
+                        <div class="stat-card-val">@WindowData.AvgLatencyMs.ToString("F1") ms</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-card-label">总成本</div>
+                        <div class="stat-card-val" style="color:#34d399;">$@WindowData.TotalCost.ToString("F4")</div>
+                    </div>
+                </div>
+            }
+            else
+            {
+                <div class="text-center text-secondary" style="padding: 20px;">加载中...</div>
+            }
+        </div>
+
         <!-- 快速统计 -->
         <div class="stats-row">
             <div class="stat-card">
@@ -652,6 +710,16 @@
     private ApiService.DashboardMetrics? Metrics;
     private List<ApiService.DailySpend> Trends = new();
     private List<ApiService.AlertInfo> Alerts => Metrics?.System.Alerts ?? new();
+
+    // 多窗口统计：Tab 选项 + 当前选中窗口 + 数据。默认 24h。
+    private static readonly string[] WindowOptions = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };
+    private static readonly Dictionary<string, string> WindowLabels = new()
+    {
+        ["1h"] = "1小时", ["7h"] = "7小时", ["24h"] = "24小时",
+        ["7d"] = "7天", ["15d"] = "15天", ["30d"] = "30天", ["all"] = "全部"
+    };
+    private string WindowKey = "24h";
+    private ApiService.WindowSummary? WindowData;
     private int TrendDays = 7;
 
     private List<ApiService.AuditItem> AuditItems = new();
@@ -876,6 +944,7 @@
         await LoadMetrics();
         await LoadTrends();
         await LoadLogs();
+        await LoadWindowSummary();
 
         _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         _ = PollMetricsLoopAsync();
@@ -897,6 +966,7 @@
             while (await _timer!.WaitForNextTickAsync(_cts.Token))
             {
                 await LoadMetrics();
+                await LoadWindowSummary();
                 await InvokeAsync(StateHasChanged);
             }
         }
@@ -927,6 +997,21 @@
         TrendDays = days;
         await LoadTrends();
         await RenderChart(); // 切换天数时 Canvas 已绑定，立即重绘
+    }
+
+    private async Task SetWindow(string key)
+    {
+        WindowKey = key;
+        await LoadWindowSummary();
+    }
+
+    private async Task LoadWindowSummary()
+    {
+        try
+        {
+            WindowData = await Api.GetWindowSummaryAsync(WindowKey);
+        }
+        catch { }
     }
 
     private async Task RenderChart()

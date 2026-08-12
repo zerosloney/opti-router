@@ -57,6 +57,47 @@ public class RequestAuditStoreTests
 
     [Theory]
     [MemberData(nameof(StoreFactories))]
+    public void GetAggregateStats_AggregatesTokensCacheAndErrors(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+
+        // 成功 + 有缓存命中
+        store.Append(SampleRecord() with
+        {
+            PromptTokens = 80, CompletionTokens = 40, Cost = 0.001m, LatencyMs = 250,
+            CachedInputTokens = 50, CacheWriteInputTokens = 10, UncachedInputTokens = 20,
+            Success = true
+        });
+        // 成功 + 无缓存
+        store.Append(SampleRecord() with
+        {
+            PromptTokens = 100, CompletionTokens = 50, Cost = 0.002m, LatencyMs = 500,
+            CachedInputTokens = 0, CacheWriteInputTokens = 0, UncachedInputTokens = 100,
+            Success = true
+        });
+        // 失败（延迟不应计入 SuccessLatencySum）
+        store.Append(SampleRecord(success: false) with
+        {
+            PromptTokens = 60, CompletionTokens = 0, Cost = 0.0005m, LatencyMs = 300
+        });
+
+        // 宽松时间窗覆盖全部样本，聚焦聚合正确性（时间过滤由 GetByTimeRange 等测试覆盖）。
+        var agg = store.GetAggregateStats(DateTime.MinValue, DateTime.UtcNow.AddDays(1));
+
+        Assert.Equal(3, agg.TotalRequests);
+        Assert.Equal(1, agg.Failures);
+        Assert.Equal(240, agg.InputTokens);         // 80 + 100 + 60
+        Assert.Equal(90, agg.OutputTokens);         // 40 + 50 + 0
+        Assert.Equal(50, agg.CachedInputTokens);    // 50 + 0 + 0
+        Assert.Equal(10, agg.CacheWriteInputTokens);
+        Assert.Equal(120, agg.UncachedInputTokens); // 20 + 100 + 0
+        Assert.Equal(2, agg.SuccessLatencySamples); // 仅 2 个成功
+        Assert.Equal(750, agg.SuccessLatencySumMs); // 250 + 500，失败的不计入
+        Assert.Equal(0.0035, agg.TotalCost, 6);     // 0.001 + 0.002 + 0.0005
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
     public void Append_RoundTripsTtftAndCacheBreakdown(Func<IRequestAuditStore> factory)
     {
         using var store = factory();

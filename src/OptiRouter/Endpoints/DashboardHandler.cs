@@ -41,6 +41,22 @@ public static class DashboardHandler
             });
         });
 
+        // 2b. Window Summary API (cached 1s) — 多窗口统计（输入/输出 token、缓存命中率、错误率等）
+        endpoints.MapGet("/api/dashboard/metrics/summary", (
+            IRequestAuditStore auditStore,
+            IOptions<RouterOptions> options,
+            IMemoryCache cache,
+            string? window) =>
+        {
+            string key = NormalizeWindow(window);
+            return cache.GetOrCreate($"dashboard:summary:{key}", entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(1);
+                entry.Size = 1;
+                return ComputeWindowSummary(auditStore, options.Value, key);
+            });
+        });
+
         // 3. Spend Trends API (cached 5s)
         endpoints.MapGet("/api/dashboard/trends", (ICostLedgerStore store, IMemoryCache cache, int days) =>
         {
@@ -314,6 +330,68 @@ public static class DashboardHandler
         bool? EnableFusionRouter,
         decimal? DailyBudgetUsd,
         string? EnforceOnExhausted);
+
+    private static readonly string[] ValidWindows = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };
+
+    private static string NormalizeWindow(string? window)
+    {
+        if (string.IsNullOrEmpty(window)) return "24h";
+        string w = window.ToLowerInvariant();
+        return Array.IndexOf(ValidWindows, w) >= 0 ? w : "24h";
+    }
+
+    /// <summary>
+    /// 计算指定窗口的多维度统计汇总。窗口超出保留期时仍返回保留期内的聚合（前端据 WindowHours/RetentionHours 提示）。
+    /// </summary>
+    private static object ComputeWindowSummary(IRequestAuditStore auditStore, RouterOptions options, string window)
+    {
+        DateTime to = DateTime.UtcNow;
+        DateTime from;
+        int? windowHours = null;
+
+        if (window == "all")
+        {
+            from = DateTime.MinValue; // timestamp >= '0001-...' 等价无下界
+        }
+        else
+        {
+            TimeSpan span = window switch
+            {
+                "1h" => TimeSpan.FromHours(1),
+                "7h" => TimeSpan.FromHours(7),
+                "24h" => TimeSpan.FromHours(24),
+                "7d" => TimeSpan.FromDays(7),
+                "15d" => TimeSpan.FromDays(15),
+                "30d" => TimeSpan.FromDays(30),
+                _ => TimeSpan.FromHours(24)
+            };
+            from = to - span;
+            windowHours = (int)span.TotalHours;
+        }
+
+        var agg = auditStore.GetAggregateStats(from, to);
+        long cacheDenom = agg.CachedInputTokens + agg.UncachedInputTokens;
+
+        return new
+        {
+            Window = window,
+            WindowHours = windowHours,
+            RetentionHours = options.Routing.AuditRetentionHours,
+            FromUtc = from == DateTime.MinValue ? (DateTime?)null : from,
+            ToUtc = to,
+            TotalRequests = agg.TotalRequests,
+            Failures = agg.Failures,
+            ErrorRatePercent = agg.TotalRequests > 0 ? Math.Round(agg.Failures * 100.0 / agg.TotalRequests, 2) : 0.0,
+            InputTokens = agg.InputTokens,
+            OutputTokens = agg.OutputTokens,
+            CachedInputTokens = agg.CachedInputTokens,
+            CacheWriteInputTokens = agg.CacheWriteInputTokens,
+            UncachedInputTokens = agg.UncachedInputTokens,
+            CacheHitRatePercent = cacheDenom > 0 ? Math.Round(agg.CachedInputTokens * 100.0 / cacheDenom, 2) : 0.0,
+            AvgLatencyMs = agg.SuccessLatencySamples > 0 ? Math.Round((double)agg.SuccessLatencySumMs / agg.SuccessLatencySamples, 1) : 0.0,
+            TotalCost = Math.Round(agg.TotalCost, 6)
+        };
+    }
 
     private static object ComputeMetrics(CostLedger ledger, ModelHealthTracker tracker, IRequestAuditStore auditStore, AlertEngine alertEngine, ILatencyStatsProvider latencyStats, RouterOptions options)
     {

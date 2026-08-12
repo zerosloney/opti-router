@@ -152,6 +152,47 @@ public sealed class InMemoryRequestAuditStore : IRequestAuditStore, IDisposable
     }
 
     /// <inheritdoc />
+    public WindowAggregateStats GetAggregateStats(DateTime from, DateTime to)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        // 单次遍历累加，与 GetFailureStats 同模式：O(n)，环形缓冲 ≤10K 条。
+        int total = 0, failures = 0, latSamples = 0;
+        long inputTokens = 0, outputTokens = 0, cached = 0, cacheWrite = 0, uncached = 0, latSum = 0;
+        double totalCost = 0.0;
+
+        lock (_lock)
+        {
+            for (int i = 0; i < _count; i++)
+            {
+                int idx = (_head + i) % _buffer.Length;
+                var r = _buffer[idx];
+                if (r.Timestamp < from || r.Timestamp > to)
+                    continue;
+
+                total++;
+                inputTokens += r.PromptTokens;
+                outputTokens += r.CompletionTokens;
+                cached += r.CachedInputTokens;
+                cacheWrite += r.CacheWriteInputTokens;
+                uncached += r.UncachedInputTokens;
+                totalCost += (double)r.Cost;
+                if (!r.Success)
+                {
+                    failures++;
+                }
+                else
+                {
+                    latSum += r.LatencyMs;
+                    latSamples++;
+                }
+            }
+        }
+
+        return new WindowAggregateStats(total, failures, inputTokens, outputTokens, cached, cacheWrite, uncached, latSum, latSamples, totalCost);
+    }
+
+    /// <inheritdoc />
     public int EvictBefore(DateTime cutoff)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);

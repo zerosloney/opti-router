@@ -72,6 +72,9 @@ public class ApiService
     public Task<DashboardMetrics?> GetMetricsAsync()
         => _http.GetFromJsonAsync<DashboardMetrics>(Url("/api/dashboard/metrics"));
 
+    public Task<WindowSummary?> GetWindowSummaryAsync(string window)
+        => _http.GetFromJsonAsync<WindowSummary>(Url($"/api/dashboard/metrics/summary?window={Uri.EscapeDataString(window)}"));
+
     public async Task<List<DailySpend>> GetTrendsAsync(int days = 7)
     {
         var result = await _http.GetFromJsonAsync<List<DailySpend>>(Url($"/api/dashboard/trends?days={days}"));
@@ -202,6 +205,25 @@ public class ApiService
     public record DashboardMetrics(
         SystemInfo System,
         List<ModelInfo> Models);
+
+    /// <summary>多时间窗口统计汇总（输入/输出 token、缓存命中率、错误率等）。WindowHours 为 null 表示"全部"窗口。</summary>
+    public record WindowSummary(
+        string Window,
+        int? WindowHours,
+        int RetentionHours,
+        DateTime? FromUtc,
+        DateTime ToUtc,
+        int TotalRequests,
+        int Failures,
+        double ErrorRatePercent,
+        long InputTokens,
+        long OutputTokens,
+        long CachedInputTokens,
+        long CacheWriteInputTokens,
+        long UncachedInputTokens,
+        double CacheHitRatePercent,
+        double AvgLatencyMs,
+        double TotalCost);
 
     public record SystemInfo(
         DateTime Time,

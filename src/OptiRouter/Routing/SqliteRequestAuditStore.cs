@@ -363,6 +363,54 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     }
 
     /// <inheritdoc />
+    public WindowAggregateStats GetAggregateStats(DateTime from, DateTime to)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        lock (_lock)
+        {
+            FlushQueue();
+            // 单条聚合查询，与 GetFailureStats 同模式：O(1) 内存，走 timestamp 索引。
+            // from=DateTime.MinValue 时 timestamp >= '0001-...' 等价无下界（"全部"窗口）。
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = """
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(prompt_tokens), 0),
+                    COALESCE(SUM(completion_tokens), 0),
+                    COALESCE(SUM(cached_input_tokens), 0),
+                    COALESCE(SUM(cache_write_input_tokens), 0),
+                    COALESCE(SUM(uncached_input_tokens), 0),
+                    COALESCE(SUM(CASE WHEN success = 1 THEN latency_ms ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(cost), 0)
+                FROM request_audit
+                WHERE timestamp >= @from AND timestamp <= @to;
+                """;
+            cmd.Parameters.AddWithValue("@from", FormatTimestamp(from));
+            cmd.Parameters.AddWithValue("@to", FormatTimestamp(to));
+
+            using var reader = cmd.ExecuteReader();
+            if (reader.Read())
+            {
+                int total = Convert.ToInt32(reader.GetValue(0), CultureInfo.InvariantCulture);
+                int failures = Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture);
+                long inputTokens = Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture);
+                long outputTokens = Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture);
+                long cached = Convert.ToInt64(reader.GetValue(4), CultureInfo.InvariantCulture);
+                long cacheWrite = Convert.ToInt64(reader.GetValue(5), CultureInfo.InvariantCulture);
+                long uncached = Convert.ToInt64(reader.GetValue(6), CultureInfo.InvariantCulture);
+                long latSum = Convert.ToInt64(reader.GetValue(7), CultureInfo.InvariantCulture);
+                int latSamples = Convert.ToInt32(reader.GetValue(8), CultureInfo.InvariantCulture);
+                double totalCost = Convert.ToDouble(reader.GetValue(9), CultureInfo.InvariantCulture);
+                return new WindowAggregateStats(total, failures, inputTokens, outputTokens, cached, cacheWrite, uncached, latSum, latSamples, totalCost);
+            }
+            return new WindowAggregateStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0);
+        }
+    }
+
+    /// <inheritdoc />
     public int EvictBefore(DateTime cutoff)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
