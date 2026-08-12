@@ -489,7 +489,7 @@
                             {
                                 <tr>
                                     <td><strong>@k.TenantName</strong></td>
-                                    <td style="font-family: monospace; color: #c084fc;">@k.Key</td>
+                                    <td style="font-family: monospace; color: #c084fc;">@k.KeyPrefix</td>
                                     <td>$@k.DailyBudgetUsd.ToString("N0")</td>
                                     <td>@k.MaxQps QPS</td>
                                     <td>
@@ -498,7 +498,7 @@
                                     <td>@k.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
                                     <td style="display: flex; gap: 6px;">
                                         <button class="btn-ghost btn-sm" @onclick="() => ToggleKeyEnabled(k)">@(k.Enabled ? "禁用" : "启用")</button>
-                                        <button class="btn-danger btn-sm" @onclick="() => DeleteKey(k.Key)">删除</button>
+                                        <button class="btn-danger btn-sm" @onclick="() => DeleteKey(k.KeyId)">删除</button>
                                     </td>
                                 </tr>
                             }
@@ -586,8 +586,8 @@
             <div class="pagination">
                 <span class="text-secondary">显示 @AuditItems.Count 条，共 @AuditTotal 条</span>
                 <div>
-                    <button disabled="@(LogOffset == 0)" @onclick="() => { LogOffset = Math.Max(0, LogOffset - LogLimit); _ = LoadLogs(); }">上一页</button>
-                    <button disabled="@(LogOffset + LogLimit >= AuditTotal)" @onclick="() => { LogOffset += LogLimit; _ = LoadLogs(); }">下一页</button>
+                    <button disabled="@(LogOffset == 0)" @onclick="async () => { LogOffset = Math.Max(0, LogOffset - LogLimit); await LoadLogs(); }">上一页</button>
+                    <button disabled="@(LogOffset + LogLimit >= AuditTotal)" @onclick="async () => { LogOffset += LogLimit; await LoadLogs(); }">下一页</button>
                 </div>
             </div>
         </div>
@@ -839,14 +839,18 @@
         var created = await Api.CreateClientKeyAsync(NewTenantName, NewTenantBudget, NewTenantQps);
         if (created != null)
         {
+            // 明文仅此一次返回：弹窗提示运维立即保存，关闭后服务端只留哈希、不可重取。
+            await JS.InvokeVoidAsync("alert",
+                $"租户「{created.TenantName}」的新密钥（仅显示一次，请立即保存）：\n\n{created.PlaintextKey}\n\n关闭后将无法再次获取。");
             ShowAddKeyForm = false;
+            NewTenantName = "";
             await LoadClientKeys();
         }
     }
 
     private async Task ToggleKeyEnabled(ApiService.ClientKeyDto k)
     {
-        await Api.UpdateClientKeyAsync(k.Key, !k.Enabled, k.DailyBudgetUsd, k.MaxQps);
+        await Api.UpdateClientKeyAsync(k.KeyId, !k.Enabled, k.DailyBudgetUsd, k.MaxQps);
         await LoadClientKeys();
     }
 
@@ -877,6 +881,15 @@
         _ = PollMetricsLoopAsync();
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // 首次渲染后 ChartCanvas 才绑定；OnInitializedAsync 阶段 ref 仍为默认，无法绘制。
+        if (firstRender)
+        {
+            await RenderChart();
+        }
+    }
+
     private async Task PollMetricsLoopAsync()
     {
         try
@@ -888,6 +901,7 @@
             }
         }
         catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { } // circuit 拆除后 dispatcher 失效，轮询自行退出
     }
 
     private async Task LoadMetrics()
@@ -904,7 +918,6 @@
         try
         {
             Trends = await Api.GetTrendsAsync(TrendDays);
-            await RenderChart();
         }
         catch { }
     }
@@ -913,17 +926,18 @@
     {
         TrendDays = days;
         await LoadTrends();
+        await RenderChart(); // 切换天数时 Canvas 已绑定，立即重绘
     }
 
     private async Task RenderChart()
     {
         if (Trends == null || !Trends.Any()) return;
-        var labels = Trends.Select(t => t.Date).ToArray();
-        var data = Trends.Select(t => (double)t.Amount).ToArray();
+        // drawTrendChart 期望 [{date, amount}]；显式 camelCase 匿名对象避免序列化策略差异。
+        var payload = Trends.Select(t => new { date = t.Date, amount = (double)t.Amount }).ToArray();
 
         try
         {
-            await JS.InvokeVoidAsync("renderTrendChart", ChartCanvas, labels, data);
+            await JS.InvokeVoidAsync("drawTrendChart", ChartCanvas, payload);
         }
         catch { }
     }
