@@ -40,9 +40,13 @@ public sealed class HybridSpeculativeOrchestrator
             var draftResp = await draftClient.CompleteRawAsync(originalRequest with { Stream = false }, ct).ConfigureAwait(false);
             draftText = ResponseConfidenceChecker.ExtractAssistantText(draftResp);
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch
         {
-            // 如果 Draft 失败，直接回退为 Verifier 单独回答
+            // 如果 Draft 失败（非取消），直接回退为 Verifier 单独回答
             var verifierDirectClient = _clientProvider.GetClient(verifierModel);
             return await verifierDirectClient.CompleteRawAsync(originalRequest, ct).ConfigureAwait(false);
         }

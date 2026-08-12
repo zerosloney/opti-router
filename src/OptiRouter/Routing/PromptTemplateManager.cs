@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text.RegularExpressions;
 
 namespace OptiRouter.Routing;
 
@@ -59,14 +60,17 @@ public sealed class PromptTemplateManager
             throw new KeyNotFoundException($"Prompt template '{name}:{version}' not found.");
 
         string text = template.TemplateText;
-        if (variables is not null)
-        {
-            foreach (var (varName, val) in variables)
-            {
-                text = text.Replace($"{{{{{varName}}}}}", val, StringComparison.OrdinalIgnoreCase);
-            }
-        }
-        return text;
+        if (variables is null || variables.Count == 0)
+            return text;
+
+        // 单次扫描原始模板占位符：避免逐变量顺序 Replace 把已替换值中形如 {{slot}} 的内容二次展开（跨槽注入）。
+        // 缺失变量与 null 值都按空串处理。
+        var lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in variables)
+            lookup[k] = v ?? string.Empty;
+
+        return Regex.Replace(text, @"\{\{(\w+)\}\}",
+            match => lookup.TryGetValue(match.Groups[1].Value, out var v) ? v : string.Empty);
     }
 
     private static string BuildKey(string name, string version) => $"{name}:{version}";

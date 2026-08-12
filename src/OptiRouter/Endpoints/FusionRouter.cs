@@ -537,20 +537,47 @@ public sealed class FusionRouter
 
         var anchorTextSb = new StringBuilder();
         RawStreamLine? lastLine = null;
+        long anchorElapsedMs = 0;
+        bool anchorStreamCompleted = false;
 
-        // 3. 实时流式输出 Anchor 模型内容
-        await foreach (var line in anchorStream.WithCancellation(ct))
+        // 3. 实时流式输出 Anchor 模型内容（try-finally：IAsyncEnumerable 禁止 try-catch 含 yield，
+        //    但允许 try-finally。finally 内同步记 audit/health，让融合流请求进入审计与断路器统计）。
+        var anchorSw = System.Diagnostics.Stopwatch.StartNew();
+        try
         {
-            if (line.Data == "[DONE]")
+            await foreach (var line in anchorStream.WithCancellation(ct))
             {
-                lastLine = line;
-                break;
+                if (line.Data == "[DONE]")
+                {
+                    lastLine = line;
+                    break;
+                }
+                if (!string.IsNullOrEmpty(line.Data))
+                {
+                    anchorTextSb.Append(line.Data);
+                }
+                yield return line;
             }
-            if (!string.IsNullOrEmpty(line.Data))
+            anchorStreamCompleted = true;
+        }
+        finally
+        {
+            anchorSw.Stop();
+            anchorElapsedMs = anchorSw.ElapsedMilliseconds;
+            if (anchorStreamCompleted)
             {
-                anchorTextSb.Append(line.Data);
+                _healthTracker.RecordSuccess(anchorModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
+                _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
+                    anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier);
             }
-            yield return line;
+            else if (!ct.IsCancellationRequested)
+            {
+                // 真实故障（非客户端取消）：计入断路器 + 审计。取消由客户端触发，不 penalize 模型。
+                bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
+                _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
+                    anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier);
+                _logger.LogWarning("Fusion anchor {Name} stream faulted{Tripped}", anchorModel.Name, tripped ? " (circuit tripped)" : "");
+            }
         }
 
         // 4. Anchor 流式完成后，收集 Secondary Panel 回答并执行轻量 Analyst 评估
