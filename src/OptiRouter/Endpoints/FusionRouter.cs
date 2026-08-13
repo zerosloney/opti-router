@@ -95,14 +95,13 @@ public sealed class FusionRouter
 
         foreach (var model in admitted)
         {
-            var modelCopy = model;
             // 每 panel 一个独立 linked CTS：panel 超时只取消自己，不影响其他 panel。
             // 0 = 不启用 panel 级超时，linkedToken 即 ct 本身（CreateLinkedTokenSource 单 token 仍可安全 Dispose）。
             CancellationTokenSource panelCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             if (panelTimeoutMs > 0)
                 panelCts.CancelAfter(panelTimeoutMs);
             panelCtsList.Add(panelCts);
-            panelTasks.Add(InvokePanelAsync(modelCopy, panelCts.Token));
+            panelTasks.Add(InvokePanelAsync(model, panelCts.Token));
 
             async Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs)> InvokePanelAsync(
                 ModelEndpointOptions panelModel, CancellationToken panelToken)
@@ -303,7 +302,9 @@ public sealed class FusionRouter
                 parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: quotaLimited);
             _logger.LogWarning("Fusion router analyst call failed (model {Model}, status {Status}), falling back to serial",
                 analystModel.Name, status);
-            // analyst 失败不记 failedInThisRequest（analyst 不是候选模型），释放主力模型用串行。
+            // 配额限流的 analyst 已记入 failedInThisRequest（串行降级不再重试该 429 模型）；
+            // 非配额失败经 RecordFailure 计入断路器（若 analyst 恰是候选，FailoverPolicy 按熔断态排除）。
+            // 二者均回退串行降级链。
             return new FusionAttemptResult(null, analystModel.Name, status,
                 UpstreamFailureClassifier.SafeMessage(ex, status == 429));
         }
@@ -545,32 +546,31 @@ public sealed class FusionRouter
         }
 
         // 2. 后台并发运行 Secondary Panel 任务（非流式获取其他 panel 补充答案）
+        // secondary 模型已在准入阶段计入 attemptedModels，此处不再重复添加（此前为重复项）。
         var secondaryModels = admitted.Skip(1).ToList();
         var secondaryTasks = new List<Task<(string Model, string Text)>>();
         foreach (var m in secondaryModels)
         {
-            var secCopy = m;
-            attemptedModels.Add(secCopy.Name);
             secondaryTasks.Add(Task.Run(async () =>
             {
                 var secondarySw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    var client = _clientProvider.GetClient(secCopy);
+                    var client = _clientProvider.GetClient(m);
                     var resp = await client.CompleteRawAsync(request with { Stream = false }, ct).ConfigureAwait(false);
                     secondarySw.Stop();
                     ChatUsage? usage = resp.Usage;
-                    decimal cost = usage is not null ? CostCalculator.Compute(usage, secCopy) : 0m;
+                    decimal cost = usage is not null ? CostCalculator.Compute(usage, m) : 0m;
                     if (usage is not null)
                         _recorder.RecordCost(cost, sessionId);
-                    _recorder.RecordQuota(secCopy.Name, resp.Metadata);
-                    _healthTracker.RecordSuccess(secCopy.Name, routing.FailoverHalfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(secCopy.Name, secondarySw.ElapsedMilliseconds, decision);
-                    _recorder.RecordAudit(null, secCopy.Name, estimatedTokens, usage, cost,
+                    _recorder.RecordQuota(m.Name, resp.Metadata);
+                    _healthTracker.RecordSuccess(m.Name, routing.FailoverHalfOpenRequiredSuccesses);
+                    _recorder.RecordThompsonOutcome(m.Name, secondarySw.ElapsedMilliseconds, decision);
+                    _recorder.RecordAudit(null, m.Name, estimatedTokens, usage, cost,
                         secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary",
                         true, null, true, routedTier, isAdopted: false, fusionRole: "secondary",
                         timeToFirstTokenMs: resp.Metadata?.ResponseHeaderLatencyMs);
-                    return (secCopy.Name, ResponseConfidenceChecker.ExtractAssistantText(resp));
+                    return (m.Name, ResponseConfidenceChecker.ExtractAssistantText(resp));
                 }
                 catch (Exception ex)
                 {
@@ -578,25 +578,25 @@ public sealed class FusionRouter
                     bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
                     if (quotaLimited)
                     {
-                        _recorder.RecordQuota(secCopy.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
+                        _recorder.RecordQuota(m.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
                         // 配额限流非模型健康信号：仅释放准入时占用的探测槽位（此前为泄漏路径）。
-                        _healthTracker.ReleaseProbe(secCopy.Name);
+                        _healthTracker.ReleaseProbe(m.Name);
                     }
                     else if (!ct.IsCancellationRequested)
                     {
-                        _healthTracker.RecordFailure(secCopy.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
-                        _recorder.RecordThompsonOutcome(secCopy.Name, null, decision);
+                        _healthTracker.RecordFailure(m.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
+                        _recorder.RecordThompsonOutcome(m.Name, null, decision);
                     }
                     else
                     {
                         // 客户端取消：非模型健康信号，释放槽位（此前为泄漏路径）。
-                        _healthTracker.ReleaseProbe(secCopy.Name);
+                        _healthTracker.ReleaseProbe(m.Name);
                     }
-                    _recorder.RecordAudit(null, secCopy.Name, estimatedTokens, null, 0m,
+                    _recorder.RecordAudit(null, m.Name, estimatedTokens, null, 0m,
                         secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary failed",
                         false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), true, routedTier,
                         isAdopted: false, fusionRole: "secondary", quotaLimited: quotaLimited);
-                    return (secCopy.Name, string.Empty);
+                    return (m.Name, string.Empty);
                 }
             }, ct));
         }

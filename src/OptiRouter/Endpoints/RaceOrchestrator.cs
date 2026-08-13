@@ -94,22 +94,20 @@ public sealed class RaceOrchestrator
         {
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(raceCts.Token);
             perCandidateCts[model.Name] = linkedCts;
-            var modelCopy = model; // 闭包捕获。
-            var wasHalfOpenCopy = wasHalfOpen;
             tasks.Add(Task.Run(async () =>
             {
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
-                    var client = _clientProvider.GetClient(modelCopy);
+                    var client = _clientProvider.GetClient(model);
                     var response = await client.CompleteRawAsync(request, linkedCts.Token).ConfigureAwait(false);
                     sw.Stop();
-                    return (modelCopy, response, (Exception?)null, sw.ElapsedMilliseconds, wasHalfOpenCopy);
+                    return (model, response, (Exception?)null, sw.ElapsedMilliseconds, wasHalfOpen);
                 }
                 catch (Exception ex)
                 {
                     sw.Stop();
-                    return (modelCopy, (RawChatResponse?)null, ex, sw.ElapsedMilliseconds, wasHalfOpenCopy);
+                    return (model, (RawChatResponse?)null, ex, sw.ElapsedMilliseconds, wasHalfOpen);
                 }
             }, linkedCts.Token));
         }
