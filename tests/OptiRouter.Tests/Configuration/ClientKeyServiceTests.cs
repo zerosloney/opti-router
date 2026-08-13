@@ -67,6 +67,10 @@ public sealed class ClientKeyServiceTests
         service.RecordSpend(info.KeyId, 1m);
         Assert.Equal(ClientKeyAuthorizationStatus.BudgetExhausted, service.AuthorizeRequest(plaintext).Status);
 
+        // RecordSpend 现为去抖落盘：内存值即时生效（上面 BudgetExhausted 已证明），
+        // 但跨实例读文件需显式 Flush 才能持久化。
+        service.Flush();
+
         var reloaded = CreateService(fixture.Path, clock);
         Assert.Equal(1m, Assert.Single(reloaded.GetAllKeys()).DailySpendUsd);
 
@@ -76,8 +80,33 @@ public sealed class ClientKeyServiceTests
         Assert.Equal(0m, Assert.Single(reloaded.GetAllKeys()).DailySpendUsd);
 
         reloaded.RecordSpend(info.KeyId, 0.25m);
+        reloaded.Flush();
         var final = CreateService(fixture.Path, clock);
         Assert.Equal(0.25m, Assert.Single(final.GetAllKeys()).DailySpendUsd);
+    }
+
+    [Fact]
+    public void RecordSpend_LiveValueIsImmediate_ButFilePersistsOnlyAfterFlush()
+    {
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero));
+        using var fixture = new TempFixture();
+        // 用零宽 interval 关掉后台定时器，避免与断言竞争。
+        using var service = CreateService(fixture.Path, clock, flushInterval: TimeSpan.Zero);
+        var (_, info) = service.CreateKey("tenant-a", dailyBudgetUsd: 100m, maxQps: 50);
+
+        string beforeBatch = File.ReadAllText(fixture.Path);
+
+        // 连续多笔花费：内存值即时累加，文件不应被改写（去抖）。
+        service.RecordSpend(info.KeyId, 1m);
+        service.RecordSpend(info.KeyId, 2m);
+        service.RecordSpend(info.KeyId, 3m);
+        Assert.Equal(6m, Assert.Single(service.GetAllKeys()).DailySpendUsd);
+        Assert.Equal(beforeBatch, File.ReadAllText(fixture.Path));
+
+        // Flush 后整批一次性落盘，值正确。
+        service.Flush();
+        var reloaded = CreateService(fixture.Path, clock);
+        Assert.Equal(6m, Assert.Single(reloaded.GetAllKeys()).DailySpendUsd);
     }
 
     [Fact]
@@ -122,8 +151,8 @@ public sealed class ClientKeyServiceTests
         Assert.Equal(92, outcomes.Count(r => r.Status == ClientKeyAuthorizationStatus.RateLimited));
     }
 
-    private static ClientKeyService CreateService(string path, TimeProvider? clock = null)
-        => new(path, NullLogger<ClientKeyService>.Instance, clock);
+    private static ClientKeyService CreateService(string path, TimeProvider? clock = null, TimeSpan? flushInterval = null)
+        => new(path, NullLogger<ClientKeyService>.Instance, clock, flushInterval);
 
     private sealed class TempFixture : IDisposable
     {

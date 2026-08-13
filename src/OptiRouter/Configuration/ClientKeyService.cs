@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 
 namespace OptiRouter.Configuration;
@@ -10,14 +11,29 @@ namespace OptiRouter.Configuration;
 /// 客户端 API Key 与多租户配额管理服务。持久化至 client-keys.json。
 /// 密钥以 SHA256 哈希存储（KeyHash），明文仅在创建时返回一次；KeyId 为公开标识用于管理引用。
 /// </summary>
-public sealed class ClientKeyService
+/// <remarks>
+/// 花费持久化为去抖批量：<see cref="RecordSpend"/> 仅同步更新内存中的 <see cref="ClientKeyInfo.DailySpendUsd"/>
+/// （保证 <see cref="AuthorizeRequest"/> 的预算/QPS 管控即时生效），不再每请求同步 fsync 整个文件；
+/// 后台定时器按 <see cref="_flushInterval"/> 合并落盘。高 QPS 下数千笔花费合并为一次磁盘写。
+/// 进程崩溃最多丢失一个 flush 窗口内的花费记录（成本统计而非资金，可接受）。
+/// 需要即时落盘时调 <see cref="Flush"/>；DI 注册的单例实现 <see cref="IDisposable"/>，
+/// 容器关闭时自动 Dispose 触发最终 Flush。
+/// </remarks>
+public sealed class ClientKeyService : IDisposable
 {
+    /// <summary>默认花费落盘去抖间隔（高 QPS 合并写）。</summary>
+    public static readonly TimeSpan DefaultFlushInterval = TimeSpan.FromSeconds(3);
+
     private readonly string _filePath;
     private readonly TimeProvider _timeProvider;
     private readonly object _gate = new();
     private readonly Dictionary<string, QpsWindow> _qpsWindows = new(StringComparer.Ordinal);
     private List<ClientKeyInfo>? _cachedKeys;
     private DateTime _lastFileWriteTimeUtc = DateTime.MinValue;
+    private readonly TimeSpan _flushInterval;
+    private readonly ITimer? _flushTimer;
+    private bool _spendDirty;
+    private bool _disposed;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -30,7 +46,8 @@ public sealed class ClientKeyService
     public ClientKeyService(
         string? filePath,
         ILogger<ClientKeyService> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        TimeSpan? flushInterval = null)
     {
         ArgumentNullException.ThrowIfNull(logger);
 
@@ -38,8 +55,19 @@ public sealed class ClientKeyService
             ? Path.Combine("data", "client-keys.json")
             : filePath;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _flushInterval = flushInterval ?? DefaultFlushInterval;
 
         EnsureFileExists();
+
+        // 去抖落盘定时器：周期检查 _spendDirty，合并写一次。Zero/负值禁用定时器（仅供测试）。
+        if (_flushInterval > TimeSpan.Zero)
+        {
+            _flushTimer = _timeProvider.CreateTimer(
+                _ => FlushIfDirty(),
+                null,
+                _flushInterval,
+                _flushInterval);
+        }
     }
 
     private void EnsureFileExists()
@@ -195,7 +223,8 @@ public sealed class ClientKeyService
     }
 
     /// <summary>
-    /// Adds actual request cost to a tenant's UTC daily spend and persists the result.
+    /// Adds actual request cost to a tenant's UTC daily spend.内存值即时更新（预算/QPS 管控即时生效），
+    /// 文件持久化由后台去抖定时器合并执行（见类备注），不再每请求同步 fsync。需要即时落盘请调 <see cref="Flush"/>。
     /// Unknown keys and non-positive costs are ignored so accounting cannot create credit.
     /// </summary>
     public void RecordSpend(string keyId, decimal cost)
@@ -214,7 +243,58 @@ public sealed class ClientKeyService
             RollDailySpend(item, today);
             item.DailySpendUsd += cost;
             item.DailySpendDateUtc ??= today;
-            SaveKeysToFile(keys);
+            _spendDirty = true;
+        }
+    }
+
+    /// <summary>
+    /// 立即把挂起的花费同步落盘。供测试、手动持久化与优雅关闭使用。
+    /// 多次调用幂等；无脏数据时为 no-op。
+    /// </summary>
+    public void Flush()
+    {
+        lock (_gate)
+        {
+            if (_disposed || !_spendDirty) return;
+            SaveKeysToFile(GetCachedOrLoadKeysNoLock());
+            _spendDirty = false;
+        }
+    }
+
+    /// <summary>定时器回调：脏则合并落盘。异常吞掉以免后台任务死亡（下一周期重试）。</summary>
+    private void FlushIfDirty()
+    {
+        try { Flush(); }
+        catch
+        {
+            // 后台落盘失败不影响请求路径；下一周期会再次尝试。
+        }
+    }
+
+    /// <summary>
+    /// 释放定时器并尽力把挂起的花费最终落盘。DI 容器关闭单例时自动触发（优雅关闭即不丢账）。
+    /// </summary>
+    public void Dispose()
+    {
+        _flushTimer?.Dispose();
+
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+
+            if (_spendDirty)
+            {
+                try
+                {
+                    SaveKeysToFile(GetCachedOrLoadKeysNoLock());
+                    _spendDirty = false;
+                }
+                catch
+                {
+                    // 优雅关闭期间的最终落盘为 best-effort，失败不抛以免中断关闭。
+                }
+            }
         }
     }
 
@@ -382,6 +462,8 @@ public sealed class ClientKeyService
 
             _cachedKeys = keys;
             _lastFileWriteTimeUtc = File.Exists(fullPath) ? File.GetLastWriteTimeUtc(fullPath) : DateTime.MinValue;
+            // 整文件已写入：任何挂起的花费随之落盘，清去抖脏标志（覆盖所有 SaveKeysToFile 调用点）。
+            _spendDirty = false;
         }
         finally
         {
