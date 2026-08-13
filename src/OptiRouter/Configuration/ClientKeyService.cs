@@ -115,11 +115,14 @@ public sealed class ClientKeyService
         }
     }
 
-    /// <summary>Returns all persisted key metadata. KeyHash is included for internal callers only.</summary>
+    /// <summary>
+    /// Returns a snapshot copy of all persisted key metadata. KeyHash is included for internal callers only.
+    /// 返回拷贝而非缓存本体，避免外部调用方修改列表污染内部缓存（内部写路径仍直接操作缓存本体）。
+    /// </summary>
     public List<ClientKeyInfo> GetAllKeys()
     {
         lock (_gate)
-            return GetCachedOrLoadKeysNoLock();
+            return new List<ClientKeyInfo>(GetCachedOrLoadKeysNoLock());
     }
 
     /// <summary>
