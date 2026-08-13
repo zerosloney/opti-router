@@ -90,6 +90,14 @@ public sealed class CascadeUpgradeHandler
                 decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
                 true, null, false, routedTier, cascadeTriggered: true);
 
+            // 质量信号接入学习状态：自校验置信度此前被丢弃，导致 Thompson/Bandit 系统性偏好"快但不准"的 Cheap。
+            // 置信=答案质量高→正反馈强化；不置信→负反馈惩罚，降低后续对该 Cheap 的偏好。reward 值可配置。
+            _recorder.RecordQualityOutcome(
+                cheapModel.Name,
+                confident ? routing.CascadeUpgradeConfidentReward : routing.CascadeUpgradeUncertainReward,
+                decision.ClassificationSignal,
+                decision.ClassificationTargetTier);
+
             if (confident) return null;
 
             // 低置信 → 升级到首个可用 Strong 模型。

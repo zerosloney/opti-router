@@ -176,6 +176,20 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             }
         }
 
+        // 级联质量 reward 校验：注入 Thompson/Bandit 的 reward 必须落在 [0,1]，否则
+        // 越界值会扭曲 Beta 分布（负值饿死、>1 过激）。仅 Cascade 启用时才注入，故此时校验。
+        if (options.Routing.EnableCascadeUpgrade)
+        {
+            if (options.Routing.CascadeUpgradeConfidentReward < 0.0 || options.Routing.CascadeUpgradeConfidentReward > 1.0)
+            {
+                return ValidateOptionsResult.Fail("Routing.CascadeUpgradeConfidentReward 必须在 [0.0, 1.0] 范围内（启用级联升级时）。");
+            }
+            if (options.Routing.CascadeUpgradeUncertainReward < 0.0 || options.Routing.CascadeUpgradeUncertainReward > 1.0)
+            {
+                return ValidateOptionsResult.Fail("Routing.CascadeUpgradeUncertainReward 必须在 [0.0, 1.0] 范围内（启用级联升级时）。");
+            }
+        }
+
         // 上下文老虎机（LinUCB）参数校验：alpha<=0 会关闭探索（纯利用，冷启动饿死）；
         // discount 越界导致衰减失效或过激。
         // 与 Thompson Sampling 互斥——同一请求段内只能由一种重排策略负责，混用会让两类

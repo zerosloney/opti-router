@@ -159,6 +159,19 @@ public sealed class RoutingOptions
     public string CascadeUpgradeSelfVerifyPrompt { get; set; } = string.Empty;
 
     /// <summary>
+    /// 级联自校验判定 CONFIDENT 时，给 Cheap 模型注入的 Thompson/Bandit 质量 reward [0.0, 1.0]。默认 1.0。
+    /// 此前自校验的置信度判定被丢弃，学习状态只看延迟+硬失败，系统性偏好"快但不一定准"的模型。
+    /// 置信 = 答案质量高 → 正反馈强化该 Cheap 模型。
+    /// </summary>
+    public double CascadeUpgradeConfidentReward { get; set; } = 1.0;
+
+    /// <summary>
+    /// 级联自校验判定 UNCERTAIN（并触发升级）时，给 Cheap 模型注入的 Thompson/Bandit 质量 reward [0.0, 1.0]。默认 0.0。
+    /// 不置信 = 答案质量不足 → 负反馈惩罚该 Cheap 模型，使后续路由降低对其偏好。
+    /// </summary>
+    public double CascadeUpgradeUncertainReward { get; set; } = 0.0;
+
+    /// <summary>
     /// 是否启用延迟感知路由。开启后，同 tier 段内按历史平均延迟重排（快模型优先），
     /// 跨 tier 顺序不变。延迟统计由后台 <c>LatencyStatsAggregatorService</c> 聚合，决策层零 I/O。
     /// 冷启动（样本不足）时透传，退回 MaxContextTokens 排序。默认 false。

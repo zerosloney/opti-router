@@ -276,13 +276,7 @@ public sealed class OutcomeRecorder
             var ms when ms < routing.ThompsonLatencyTargetMs => 1.0,
             _ => 0.3
         };
-        _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
-
-        if (routing.EnableContextualBandit && _banditStore is not null && classificationSignal is not null)
-        {
-            var feature = ContextualBanditFeatureBuilder.Build(classificationSignal, classificationTargetTier);
-            _banditStore.Update(modelName, feature, reward, routing.ContextualBanditDiscountFactor);
-        }
+        ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
     }
 
     /// <summary>
@@ -297,8 +291,35 @@ public sealed class OutcomeRecorder
     public void RecordThompsonRaceCancelled(string modelName,
         string? classificationSignal = null, ModelTier? classificationTargetTier = null)
     {
+        double reward = _options.CurrentValue.Routing.ThompsonRaceCancelledReward;
+        ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
+    }
+
+    /// <summary>
+    /// 上报显式质量驱动的 reward（绕过延迟映射）。用于已有质量判定信号（如级联自校验置信度）接入学习状态。
+    /// 此前质量信号被丢弃，Thompson/Bandit 只看延迟+硬失败，系统性偏好"快但不一定准"的模型——
+    /// 此方法把质量事件显式注入，使学习状态能感知"答得对不对"，而非仅"快不快/崩没崩"。
+    /// reward 被 Clamp 到 [0,1]：1.0=质量高（强化），0.0=质量差（惩罚）。衰减与 bandit 更新同主路径。
+    /// </summary>
+    /// <param name="modelName">模型名。</param>
+    /// <param name="qualityReward">质量 reward，将在内部 Clamp 到 [0,1]。</param>
+    /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
+    /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
+    public void RecordQualityOutcome(string modelName, double qualityReward,
+        string? classificationSignal = null, ModelTier? classificationTargetTier = null)
+    {
+        double reward = Math.Clamp(qualityReward, 0.0, 1.0);
+        ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
+    }
+
+    /// <summary>
+    /// 把 reward 应用到 Thompson 采样状态与（若启用）上下文 bandit。三个上报入口共享此核心，
+    /// 区别仅在 reward 来源：延迟映射（<see cref="RecordThompsonOutcome"/>）、竞速取消（<see cref="RecordThompsonRaceCancelled"/>）、
+    /// 显式质量（<see cref="RecordQualityOutcome"/>）。
+    /// </summary>
+    private void ApplyOutcome(string modelName, double reward, string? classificationSignal, ModelTier? classificationTargetTier)
+    {
         var routing = _options.CurrentValue.Routing;
-        double reward = routing.ThompsonRaceCancelledReward;
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
 
         if (routing.EnableContextualBandit && _banditStore is not null && classificationSignal is not null)
