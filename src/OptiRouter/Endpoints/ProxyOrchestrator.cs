@@ -110,6 +110,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         int? lastStatusCode = null;
         string? lastErrorMessage = null;
         bool fusionRouterAttempted = false;
+        bool fusionModeAttempted = false;
 
         PiiMap? piiMap = null;
         if (options.Routing.EnablePiiAnonymization)
@@ -170,11 +171,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
 
             // 并行首试（Fusion-lite）：首轮 + 非流式 + 启用 + ≥2 候选时，并行尝试前 N 个，取最快成功。
-            // 失败/取消全进入 failedInThisRequest，continue 后由串行降级链兜底。
-            if (failoverEnabled && options.Routing.EnableFusionMode
+            // 真实失败/取消进 failedInThisRequest，continue 后由串行降级链兜底。
+            // 但 Race 在 admitted<2（候选存在但多数熔断、凑不齐并行数）时回退串行，不写入 failedInThisRequest——
+            // 此时 failedInThisRequest 仍为空，若无一次性守卫会无限重入本块：默认无全局超时（FailoverGlobalTimeoutSeconds=0），
+            // 且 admitted<2 同步返回不观察 ct，客户端断开也无法打破，致线程满 CPU 自旋。故每请求最多触发一次，随后必落串行降级。
+            if (failoverEnabled && options.Routing.EnableFusionMode && !fusionModeAttempted
                 && failedInThisRequest.Count == 0 && !request.Stream
                 && decision.Candidates.Count >= 2)
             {
+                fusionModeAttempted = true;
                 var fusionResult = await _raceOrchestrator.ExecuteAsync(
                     request, options, decision, estimatedTokens, routedTier,
                     sessionId, failedInThisRequest, attemptedModels, effectiveCt).ConfigureAwait(false);

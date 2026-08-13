@@ -318,6 +318,112 @@ public class FusionModeTests
         Assert.False(slowCalled, "流式不应触发并行，slow 不应被调用");
     }
 
+    /// <summary>
+    /// Fusion-lite 凑不齐并行探测时的回归夹具：slow-model 预载为 HalfOpen 且半开探测槽位已被预占，
+    /// 使 TryBeginProbe 拒绝它，但 FailoverPolicy 仍保留 HalfOpen 凑足 ≥2 候选
+    /// ——从而精确复现 Race admitted&lt;2 回退串行、且不写入 failedInThisRequest 的路径。
+    /// </summary>
+    private sealed class FusionProbeShortfallFactory : WebApplicationFactory<Program>
+    {
+        public const string Key = "fusion-probe-key";
+        public Dictionary<string, IModelClient> MockClients { get; } = new();
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
+            builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
+            builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+            builder.ConfigureServices(services =>
+            {
+                services.Configure<RouterOptions>(opt =>
+                {
+                    opt.Models.Clear();
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "fast-model",
+                        BaseUrl = "https://example.com",
+                        ApiKey = "k",
+                        Tier = ModelTier.Medium,
+                        MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m,
+                        OutputPricePerMillion = 2m,
+                        Enabled = true
+                    });
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "slow-model",
+                        BaseUrl = "https://example.com",
+                        ApiKey = "k",
+                        Tier = ModelTier.Medium,
+                        MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m,
+                        OutputPricePerMillion = 2m,
+                        Enabled = true
+                    });
+
+                    opt.Routing.EnableRuleClassifier = false;
+                    opt.Routing.EnableTokenEstimator = false;
+                    opt.Routing.EnableBudgetGuard = false;
+                    opt.Routing.EnableFailover = true;
+                    opt.Routing.EnableSemanticRouter = false;
+                    opt.Routing.EnableSessionAffinity = false;
+                    opt.Routing.EnableLoadBalance = false;
+                    opt.Routing.EnableFusionMode = true;
+                    opt.Routing.FusionMaxParallel = 2;
+                    opt.Routing.EnableHealthProbe = false;
+                });
+
+                // 替换 ModelHealthTracker：用可变时钟先把 slow-model 熔断到 Open，再推进时钟使其过期转 HalfOpen，
+                // 并预占其半开探测槽位（FailoverHalfOpenMaxProbes 默认 1）——模拟并发请求在途占满槽位的稳态。
+                // FailoverPolicy 不排除 HalfOpen → 候选链仍含 slow-model 凑足 ≥2；但 Race/串行的 TryBeginProbe
+                // 因槽位已满拒绝它 → admitted<2 回退串行。
+                services.AddSingleton<ModelHealthTracker>(sp =>
+                {
+                    var now = DateTime.UtcNow;
+                    var tracker = new ModelHealthTracker(() => now);
+                    for (int i = 0; i < 5; i++)
+                        tracker.RecordFailure("slow-model", 3, 60); // 连续失败达阈值 → Open
+                    now = now.AddMinutes(5);                        // 推进时钟 → 下次 GetState 转 HalfOpen
+                    tracker.TryBeginProbe("slow-model", 1);         // 占满半开槽位 → 后续 TryBeginProbe 被拒
+                    return tracker;
+                });
+
+                services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
+            });
+        }
+    }
+
+    [Fact]
+    public async Task Fusion_ProbeShortfall_FallsBackToSerial_NoInfiniteLoop()
+    {
+        // 回归：候选存在但凑不齐并行探测（admitted<2）时，Fusion-lite 必须每请求最多触发一次，随后落串行降级。
+        // 修复前：Race admitted<2 返回 null 且不写 failedInThisRequest，SendAsync 的 continue 无限重入本块
+        //         （默认无全局超时，admitted<2 同步返回不观察 ct，客户端断开也无法打破 → 满 CPU 自旋）。
+        using var factory = new FusionProbeShortfallFactory();
+        // fast 串行命中即返回；slow 处于 HalfOpen 且槽位已满，Race 凑不齐数回退，串行也不会调用它。
+        factory.MockClients["fast-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "fast-model" },
+            (req, ct) => Task.FromResult(MakeResponse("fast-model", 10, 5)));
+        factory.MockClients["slow-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "slow-model" },
+            (req, ct) => Task.FromResult(MakeResponse("slow-model", 10, 5)));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionProbeShortfallFactory.Key);
+
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+        // 5 秒超时——修复前会因无限重入 Fusion-lite 块而挂死超时。
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync(cts.Token);
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("fast-model", doc.RootElement.GetProperty("model").GetString());
+    }
+
     private static async IAsyncEnumerable<RawStreamLine> StreamLinesAsync(string[] lines)
     {
         foreach (var line in lines)
