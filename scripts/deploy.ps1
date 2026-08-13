@@ -38,6 +38,12 @@ function Fail($msg) { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
 
 # --- 0. 前置检查 ---
 if (-not (Test-Path $nssm)) { Fail "nssm.exe not found at $nssm" }
+# 工作树必须干净：dotnet publish 编译的是工作树代码，git push 上传的是 commit，
+# 二者不一致会让线上服务跑着查不到的代码。
+$dirty = git -C $repoRoot status --porcelain
+if ($dirty) {
+    Fail "Working tree is dirty; deploy aborted. Commit or stash first so the deployed binary matches the pushed commit."
+}
 
 # --- 1. 测试门禁 ---
 if (-not $SkipTest) {
