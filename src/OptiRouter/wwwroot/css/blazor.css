@@ -312,6 +312,34 @@ body {
     letter-spacing: 0.02em;
     opacity: 0.85;
 }
+
+/* 签发租户密钥模态框 */
+.key-modal {
+    width: min(560px, 92vw);
+    padding: 1.6rem 1.6rem 1.4rem;
+    border-radius: 0.75rem;
+    background: #0f172a;
+    border: 1px solid rgba(168, 85, 247, 0.35);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6), 0 0 30px rgba(168, 85, 247, 0.15);
+    animation: login-card-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.key-modal-title { color: #c084fc; font-size: 1.05rem; font-weight: 700; margin-bottom: 0.5rem; }
+.key-modal-warn { color: #fbbf24; font-size: 0.85rem; margin-bottom: 1rem; }
+.key-modal-value {
+    padding: 0.9rem 1rem;
+    border: 1px solid rgba(168, 85, 247, 0.3);
+    border-radius: 0.5rem;
+    background: rgba(9, 13, 22, 0.8);
+    color: #e9d5ff;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    word-break: break-all;
+    user-select: all;
+    margin-bottom: 1.2rem;
+}
+.key-modal-actions { display: flex; justify-content: flex-end; gap: 0.75rem; }
+.key-modal-feedback { margin-top: 0.75rem; color: #34d399; font-size: 0.85rem; text-align: right; }
 .nav-link {
     padding: 0.4rem 0.8rem;
     border-radius: 0.375rem;

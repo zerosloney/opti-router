@@ -70,6 +70,25 @@
     </div>
 </div>
 
+@if (IssuedPlaintextKey != null)
+{
+    <div class="drawer-backdrop" @onclick="CloseIssuedKey" style="position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9999; display: flex; align-items: center; justify-content: center;">
+        <div class="key-modal" @onclick:stopPropagation="true">
+            <div class="key-modal-title">🔑 新租户密钥（仅显示一次）</div>
+            <div class="key-modal-warn">租户「@IssuedTenant」——请立即复制保存，关闭后无法再次获取。</div>
+            <div class="key-modal-value">@IssuedPlaintextKey</div>
+            <div class="key-modal-actions">
+                <button class="btn-primary" @onclick="CopyIssuedKey">📋 复制密钥</button>
+                <button class="btn-ghost" @onclick="CloseIssuedKey">关 闭</button>
+            </div>
+            @if (!string.IsNullOrEmpty(CopyFeedback))
+            {
+                <div class="key-modal-feedback">@CopyFeedback</div>
+            }
+        </div>
+    </div>
+}
+
 @code {
     private List<ApiService.ClientKeyDto> KeyList = new();
     private bool ShowAddKeyForm = false;
@@ -108,13 +127,31 @@
         var created = await Api.CreateClientKeyAsync(NewTenantName, NewTenantBudget, NewTenantQps);
         if (created != null)
         {
-            // 明文仅此一次返回：弹窗提示运维立即保存，关闭后服务端只留哈希、不可重取。
-            await JS.InvokeVoidAsync("alert",
-                $"租户「{created.TenantName}」的新密钥（仅显示一次，请立即保存）：\n\n{created.PlaintextKey}\n\n关闭后将无法再次获取。");
+            // 明文仅此一次返回：模态框展示并支持复制，关闭后服务端只留哈希、不可重取。
+            IssuedPlaintextKey = created.PlaintextKey;
+            IssuedTenant = created.TenantName;
+            CopyFeedback = "";
             ShowAddKeyForm = false;
             NewTenantName = "";
             await LoadClientKeys();
         }
+    }
+
+    private string? IssuedPlaintextKey;
+    private string? IssuedTenant;
+    private string CopyFeedback = "";
+
+    private async Task CopyIssuedKey()
+    {
+        if (IssuedPlaintextKey == null) return;
+        bool ok = await JS.InvokeAsync<bool>("copyToClipboard", IssuedPlaintextKey);
+        CopyFeedback = ok ? "✓ 已复制到剪贴板" : "✗ 复制失败，请手动选择复制";
+    }
+
+    private void CloseIssuedKey()
+    {
+        IssuedPlaintextKey = null;
+        CopyFeedback = "";
     }
 
     private async Task ToggleKeyEnabled(ApiService.ClientKeyDto k)

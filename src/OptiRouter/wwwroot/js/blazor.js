@@ -1,4 +1,28 @@
-// Shared JS for OptiRouter Blazor components (drawTrendChart only)
+// Shared JS for OptiRouter Blazor components (drawTrendChart, copyToClipboard)
+
+// 复制文本到剪贴板。优先 navigator.clipboard（需 secure context）；
+// 非安全上下文（http 非 localhost 访问）回退 textarea + execCommand，返回是否成功。
+window.copyToClipboard = function(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text).then(
+            function() { return true; },
+            function() { return legacyCopyToClipboard(text); });
+    }
+    return legacyCopyToClipboard(text);
+};
+
+function legacyCopyToClipboard(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.top = '-9999px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { return document.execCommand('copy'); }
+    catch (e) { return false; }
+    finally { document.body.removeChild(ta); }
+}
 
 window.drawTrendChart = function(canvas, data) {
     if (!canvas || !data || data.length === 0) return;
