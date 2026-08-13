@@ -501,13 +501,21 @@ public sealed class FusionRouter
             admitted.Add(candidate);
             attemptedModels.Add(candidate.Name);
         }
-        if (admitted.Count < 2)
+        // 准入回退：释放所有已占探测槽位并回滚 attemptedModels（与 ExecuteAsync 的 admitted<2 路径对称）。
+        // anchor 客户端/流创建抛出或凑不齐并行数时调用，避免半开探测槽位泄漏
+        // （此前 anchor 设置失败直接 yield break 会泄漏 anchor + 尚未启动的 secondary 全部槽位）。
+        void ReleaseAdmitted()
         {
             foreach (var m in admitted)
             {
                 _healthTracker.ReleaseProbe(m.Name);
                 attemptedModels.Remove(m.Name);
             }
+        }
+
+        if (admitted.Count < 2)
+        {
+            ReleaseAdmitted();
             yield break;
         }
         var anchorModel = admitted[0];
@@ -520,6 +528,8 @@ public sealed class FusionRouter
         }
         catch
         {
+            // 准入已为 anchor 及尚未启动的 secondary 占槽位：设置失败须全部释放，否则半开槽位永久滞留。
+            ReleaseAdmitted();
             yield break;
         }
 
@@ -530,6 +540,7 @@ public sealed class FusionRouter
         }
         catch
         {
+            ReleaseAdmitted();
             yield break;
         }
 
@@ -635,19 +646,34 @@ public sealed class FusionRouter
                     anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier,
                     isEstimated: anchorUsage is null);
             }
-            else if (!ct.IsCancellationRequested)
-            {
-                // 真实故障（非客户端取消）：计入断路器 + 审计（RecordFailure 顺带释放准入时占用的探测槽位）。
-                bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
-                _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
-                _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
-                    anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier);
-                _logger.LogWarning("Fusion anchor {Name} stream faulted{Tripped}", anchorModel.Name, tripped ? " (circuit tripped)" : "");
-            }
             else
             {
-                // 客户端取消：非模型健康信号，仅释放准入时占用的探测槽位（此前为泄漏路径）。
-                _healthTracker.ReleaseProbe(anchorModel.Name);
+                if (!ct.IsCancellationRequested)
+                {
+                    // 真实故障（非客户端取消）：计入断路器 + 审计（RecordFailure 顺带释放准入时占用的探测槽位）。
+                    bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
+                    _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
+                    _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
+                        anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier);
+                    _logger.LogWarning("Fusion anchor {Name} stream faulted{Tripped}", anchorModel.Name, tripped ? " (circuit tripped)" : "");
+                }
+                else
+                {
+                    // 客户端取消：非模型健康信号，仅释放准入时占用的探测槽位（此前为泄漏路径）。
+                    _healthTracker.ReleaseProbe(anchorModel.Name);
+                }
+
+                // anchor 中途故障/取消：控制流不再到达下方的 secondary 收集块（Task.WhenAll），
+                // 在此观察已启动的 secondary 任务，避免它们成为孤儿 fire-and-forget（结果丢弃，
+                // 但各 task 自行释放探测槽位/记审计；secondary 共用同一 ct，取消时快速收尾）。
+                try
+                {
+                    await Task.WhenAll(secondaryTasks).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // secondary tasks 内部已 try-catch 并始终返回元组，不应抛；防御性吞掉。
+                }
             }
         }
 
