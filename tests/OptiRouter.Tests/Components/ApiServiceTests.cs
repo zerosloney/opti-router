@@ -27,7 +27,7 @@ public class ApiServiceTests
             }
             """;
         using var http = new HttpClient(new StaticJsonHandler(json));
-        var service = new ApiService(http, new TestNavigationManager("http://localhost/dashboard"));
+        var service = new ApiService(http, new TestNavigationManager("http://localhost/dashboard"), httpContextAccessor: null);
 
         var metrics = await service.GetMetricsAsync();
 
@@ -37,19 +37,20 @@ public class ApiServiceTests
     }
 
     [Fact]
-    public async Task DashboardRequests_AppendKeyWithCorrectQuerySeparator()
+    public async Task DashboardRequests_NoKeyAppended()
     {
+        // 管理端鉴权改走登录会话 Cookie：请求 URL 不再附加 ?key=，保持路径原样。
         var handler = new RecordingHandler();
         using var http = new HttpClient(handler);
         var navigation = new TestNavigationManager("http://localhost/dashboard?key=admin%20key");
-        var service = new ApiService(http, navigation);
+        var service = new ApiService(http, navigation, httpContextAccessor: null);
 
         await service.GetTrendsAsync(30);
         await service.GetAuditLogAsync(limit: 25, offset: 50, model: "model/a");
 
         Assert.Collection(handler.RequestUris,
-            uri => Assert.Equal("/api/dashboard/trends?days=30&key=admin%20key", uri.PathAndQuery),
-            uri => Assert.Equal("/api/dashboard/requests?limit=25&offset=50&model=model%2Fa&key=admin%20key", uri.PathAndQuery));
+            uri => Assert.Equal("/api/dashboard/trends?days=30", uri.PathAndQuery),
+            uri => Assert.Equal("/api/dashboard/requests?limit=25&offset=50&model=model%2Fa", uri.PathAndQuery));
     }
 
     private sealed class RecordingHandler : HttpMessageHandler

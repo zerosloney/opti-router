@@ -1,0 +1,272 @@
+@page "/requests"
+@inject ApiService Api
+@implements IDisposable
+
+<PageTitle>OptiRouter - 请求追踪</PageTitle>
+
+<div class="models-page">
+    <!-- 实时请求流 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+            <span>实时请求流 (Live Request Stream)</span>
+            <span class="tag tag-success" style="font-size: 0.75rem;">● 实时抓取</span>
+        </div>
+        <div class="table-wrap">
+            <table class="log-table">
+                <thead>
+                    <tr>
+                        <th>时间</th><th>请求 ID</th><th>路由模型</th><th>分档 Tier</th><th>Tokens (In/Out)</th><th>延迟 / TTFT</th><th>成本</th><th>类型</th><th>状态</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (Metrics?.System.RecentRequests != null && Metrics.System.RecentRequests.Any())
+                    {
+                        @foreach (var r in Metrics.System.RecentRequests)
+                        {
+                            <tr>
+                                <td>@r.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
+                                <td><code style="font-size: 0.8rem; color: #a7f3d0;">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
+                                <td><strong>@r.Model</strong></td>
+                                <td><span class="tag tag-info">@r.RoutedTier</span></td>
+                                <td>@r.PromptTokens / @r.CompletionTokens</td>
+                                <td>@r.LatencyMs.ToString("F0") ms / @(r.TimeToFirstTokenMs is { } reqTtft ? $"{reqTtft:F0} ms" : "--")</td>
+                                <td style="color: #34d399; font-weight: bold;">$@r.Cost.ToString("F6")</td>
+                                <td>
+                                    <span class="tag tag-secondary">@(r.IsStreaming ? "流式" : "JSON")</span>
+                                    @if (!string.IsNullOrEmpty(r.FusionRole))
+                                    {
+                                        <span class="tag tag-info">@r.FusionRole</span>
+                                    }
+                                </td>
+                                <td class="@(r.Success ? "text-success" : "text-danger")">
+                                    @(r.Success ? "✓ 成功" : "✗ 失败")
+                                </td>
+                            </tr>
+                        }
+                    }
+                    else
+                    {
+                        <tr><td colspan="9" class="text-center text-secondary">暂无实时请求流数据</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 审计日志 -->
+    <div class="glass-card">
+        <div class="card-label">历史请求审计日志 (点击任意行查看 Debugger Trace 详情)</div>
+        <div class="log-controls" style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; align-items: center;">
+            <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" style="width: 140px; background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;" />
+            <select @bind="LogFilterTier" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+                <option value="">全能力分档</option>
+                <option value="Strong">Strong</option>
+                <option value="Medium">Medium</option>
+                <option value="Cheap">Cheap</option>
+            </select>
+            <select @bind="LogFilterStatus" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+                <option value="">全请求状态</option>
+                <option value="200">仅成功 (200 OK)</option>
+                <option value="error">仅失败/异常</option>
+            </select>
+            <select @bind="LogFilterMinLatency" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+                <option value="0">任意耗时</option>
+                <option value="500">耗时 &gt; 500ms</option>
+                <option value="1000">耗时 &gt; 1000ms</option>
+                <option value="3000">耗时 &gt; 3000ms</option>
+            </select>
+            <select @bind="LogLimit" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+                <option value="50">每页 50 条</option>
+                <option value="100">每页 100 条</option>
+            </select>
+            <button class="btn-primary" @onclick="LoadLogs" style="padding: 4px 16px;">🔍 组合筛选</button>
+        </div>
+        <div class="table-wrap">
+            <table class="log-table">
+                <thead>
+                    <tr>
+                        <th>时间</th><th>模型</th><th>Tier</th><th>Token</th><th>缓存 hit/write</th><th>费用</th><th>延迟</th><th>TTFT</th><th>状态</th><th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (AuditItems.Any())
+                    {
+                        @foreach (var item in AuditItems)
+                        {
+                            <tr @onclick="() => SelectLogItem(item)" style="cursor: pointer; transition: background 0.2s;" class="hover-row">
+                                <td>@item.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
+                                <td><strong>@item.Model</strong></td>
+                                <td><span class="badge badge-info" style="font-size: 0.75rem;">@item.RoutedTier</span></td>
+                                <td>@(item.PromptTokens + item.CompletionTokens)</td>
+                                <td>@item.CachedInputTokens / @item.CacheWriteInputTokens</td>
+                                <td>
+                                    $@item.Cost.ToString("F6")
+                                    @if (item.IsEstimated)
+                                    {
+                                        <span class="tag tag-warning">预估</span>
+                                    }
+                                </td>
+                                <td>@item.LatencyMs.ToString("F0") ms</td>
+                                <td>@(item.TimeToFirstTokenMs is { } auditTtft ? $"{auditTtft:F0} ms" : "--")</td>
+                                <td class="@(item.Success ? "text-success" : "text-danger")">
+                                    @(item.Success ? "成功" : item.QuotaLimited ? "配额受限" : "失败")
+                                </td>
+                                <td>
+                                    <button class="btn-ghost btn-sm" @onclick:stopPropagation="true" @onclick="() => SelectLogItem(item)">🔍 详情</button>
+                                </td>
+                            </tr>
+                        }
+                    }
+                    else
+                    {
+                        <tr><td colspan="10" class="text-center text-secondary">暂无符合条件的日志数据</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <div class="pagination">
+            <span class="text-secondary">显示 @AuditItems.Count 条，共 @AuditTotal 条</span>
+            <div>
+                <button disabled="@(LogOffset == 0)" @onclick="async () => { LogOffset = Math.Max(0, LogOffset - LogLimit); await LoadLogs(); }">上一页</button>
+                <button disabled="@(LogOffset + LogLimit >= AuditTotal)" @onclick="async () => { LogOffset += LogLimit; await LoadLogs(); }">下一页</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@if (SelectedLogItem != null)
+{
+    <div class="drawer-backdrop" @onclick="() => SelectedLogItem = null" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 9999; display: flex; justify-content: flex-end;">
+        <div class="drawer-content" @onclick:stopPropagation="true" style="width: 520px; max-width: 90vw; height: 100%; background: #0f172a; border-left: 1px solid rgba(56,189,248,0.3); padding: 20px; overflow-y: auto; color: #e2e8f0; box-shadow: -10px 0 25px rgba(0,0,0,0.5);">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 16px;">
+                <span style="font-weight: bold; font-size: 1.1rem; color: #38bdf8;">📌 请求全链路 Debugger Trace</span>
+                <button class="btn-ghost" @onclick="() => SelectedLogItem = null" style="font-size: 1.2rem; cursor: pointer;">&times;</button>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 12px;">
+                    <div style="color: #9ca3af; font-size: 0.8rem; margin-bottom: 4px;">REQUEST & TRACE ID</div>
+                    <div style="font-family: monospace; font-size: 0.85rem; color: #f43f5e; word-break: break-all;">ReqId: @(SelectedLogItem.RequestId ?? "-")</div>
+                    <div style="font-family: monospace; font-size: 0.85rem; color: #38bdf8; word-break: break-all; margin-top: 2px;">TraceId: @(SelectedLogItem.TraceId ?? "-")</div>
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.85rem;">
+                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
+                        <span style="color: #9ca3af;">命中 Model:</span> <span style="font-weight: bold; color: #38bdf8;">@SelectedLogItem.Model</span>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
+                        <span style="color: #9ca3af;">路由 Target Tier:</span> <span class="badge badge-info">@SelectedLogItem.RoutedTier</span>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
+                        <span style="color: #9ca3af;">端到端耗时:</span> <span style="font-weight: bold; color: #34d399;">@SelectedLogItem.LatencyMs ms</span>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
+                        <span style="color: #9ca3af;">流式 TTFT:</span> <span>@(SelectedLogItem.TimeToFirstTokenMs is { } t ? $"{t} ms" : "--")</span>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
+                        <span style="color: #9ca3af;">Token 计费:</span> <span>Prompt: @SelectedLogItem.PromptTokens / Comp: @SelectedLogItem.CompletionTokens</span>
+                    </div>
+                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
+                        <span style="color: #9ca3af;">计算费用:</span> <span style="color: #34d399; font-weight: bold;">$@SelectedLogItem.Cost.ToString("F6")</span>
+                    </div>
+                </div>
+
+                <div style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 12px; margin-top: 4px;">
+                    <div style="color: #38bdf8; font-size: 0.85rem; font-weight: bold; margin-bottom: 6px;">🧠 路由决策 Reasons 链</div>
+                    <div style="font-size: 0.8rem; color: #cbd5e1; font-family: monospace; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px;">@SelectedLogItem.RoutingReason</div>
+                </div>
+
+                @if (!string.IsNullOrEmpty(SelectedLogItem.ErrorMessage))
+                {
+                    <div style="background: rgba(244,63,94,0.1); border: 1px solid rgba(244,63,94,0.3); border-radius: 6px; padding: 12px;">
+                        <div style="color: #f43f5e; font-size: 0.85rem; font-weight: bold;">❌ 异常日志信息</div>
+                        <div style="font-size: 0.8rem; color: #fca5a5; font-family: monospace; margin-top: 4px;">@SelectedLogItem.ErrorMessage</div>
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private ApiService.DashboardMetrics? Metrics;
+    private List<ApiService.AuditItem> AuditItems = new();
+    private int AuditTotal = 0;
+    private string LogFilterModel = "";
+    private int LogLimit = 50;
+    private int LogOffset = 0;
+
+    private string LogFilterTier = "";
+    private string LogFilterStatus = "";
+    private long LogFilterMinLatency = 0;
+    private ApiService.AuditItem? SelectedLogItem;
+
+    private PeriodicTimer? _timer;
+    private CancellationTokenSource _cts = new();
+
+    private async Task SelectLogItem(ApiService.AuditItem item)
+    {
+        SelectedLogItem = item;
+        if (!string.IsNullOrEmpty(item.RequestId))
+        {
+            var detail = await Api.GetAuditDetailAsync(item.RequestId);
+            if (detail != null) SelectedLogItem = detail;
+        }
+    }
+
+    private async Task LoadLogs()
+    {
+        try
+        {
+            var page = await Api.GetAuditLogAsync(LogLimit, LogOffset, LogFilterModel, LogFilterTier, LogFilterStatus, LogFilterMinLatency > 0 ? LogFilterMinLatency : null);
+            AuditItems = page.Items;
+            AuditTotal = page.TotalCount;
+        }
+        catch { }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadMetrics();
+        await LoadLogs();
+
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        _ = PollMetricsLoopAsync();
+    }
+
+    private async Task PollMetricsLoopAsync()
+    {
+        try
+        {
+            while (await _timer!.WaitForNextTickAsync(_cts.Token))
+            {
+                await LoadMetrics();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { } // circuit 拆除后 dispatcher 失效，轮询自行退出
+    }
+
+    private async Task LoadMetrics()
+    {
+        try
+        {
+            Metrics = await Api.GetMetricsAsync();
+        }
+        catch { }
+    }
+
+    private static string Truncate(string val, int maxLen)
+    {
+        if (string.IsNullOrEmpty(val)) return "-";
+        return val.Length <= maxLen ? val : val[..maxLen] + "...";
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+        _timer?.Dispose();
+    }
+}

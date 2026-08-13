@@ -27,6 +27,7 @@ public class DashboardMetricsTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseSetting("OptiRouter:ProxyApiKey", Key);
+            builder.UseSetting("OptiRouter:AdminApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>

@@ -1,0 +1,338 @@
+@page "/overview"
+@page "/dashboard"
+@inject ApiService Api
+@inject IJSRuntime JS
+@implements IDisposable
+
+<PageTitle>OptiRouter - 总览</PageTitle>
+
+<div class="overview-page">
+    <!-- 告警 -->
+    @if (Alerts.Any())
+    {
+        <div class="alert-banner alert-@Alerts.First().Level">
+            <span class="indicator pulse"></span>
+            <span>@string.Join(" | ", Alerts.Select(a => a.Message))</span>
+        </div>
+    }
+
+    <!-- 核心指标卡 -->
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-card-label">日预算消耗</div>
+            <div class="stat-card-val">$@((Metrics?.System.Budget.DailySpend ?? 0).ToString("F6"))</div>
+            <div class="budget-bar" style="margin-top: 8px;">
+                <div class="budget-fill" style="width: @(BudgetPercent)%"></div>
+            </div>
+            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">@BudgetPercent.ToString("F2")% / 上限 $@((Metrics?.System.Budget.DailyBudgetUsd ?? 0).ToString("F2"))</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-label">累计消费</div>
+            <div class="stat-card-val" style="color:#38bdf8;">$@((Metrics?.System.Budget.TotalSpend ?? 0).ToString("F6"))</div>
+            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">服务启动以来合计</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-label">总请求数</div>
+            <div class="stat-card-val">@((Metrics?.System.TotalRequests ?? 0).ToString("N0"))</div>
+            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">QPS: @((Metrics?.System.Qps ?? 0).ToString("F1"))</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-label">总 Token 数</div>
+            <div class="stat-card-val">@((Metrics?.System.TotalTokens ?? 0).ToString("N0"))</div>
+            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">缓存命中 @((Metrics?.System.CachedInputTokens ?? 0).ToString("N0")) / 写入 @((Metrics?.System.CacheWriteInputTokens ?? 0).ToString("N0"))</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-card-label">平均延迟</div>
+            <div class="stat-card-val">@((Metrics?.System.AvgLatencyMs ?? 0).ToString("F1")) ms</div>
+            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">平均 TTFT: @(Metrics?.System.AvgTtftMs is { } ttft ? $"{ttft:F1} ms" : "--")</div>
+        </div>
+    </div>
+
+    <!-- 智能降本 ROI 归因卡片 -->
+    <div class="glass-card roi-card" style="background: linear-gradient(135deg, rgba(16,185,129,0.12), rgba(59,130,246,0.12)); border: 1px solid rgba(16,185,129,0.3); padding: 18px 20px;">
+        <div class="card-label" style="color: #34d399; font-weight: 600; font-size: 1rem;">智能降本 ROI 归因看板</div>
+        <div style="display: flex; align-items: baseline; gap: 16px; margin: 10px 0;">
+            <div class="stat-value" style="color: #10b981; font-size: 2.2rem; font-weight: 700;">$@((Metrics?.System.Roi?.SavedUsd ?? 0).ToString("F6"))</div>
+            <div style="background: rgba(16,185,129,0.2); color: #34d399; padding: 4px 12px; border-radius: 12px; font-weight: bold; font-size: 1rem;">
+                智能路由降本 @((Metrics?.System.Roi?.SavingRatePercent ?? 0).ToString("F1"))%
+            </div>
+        </div>
+        <div class="meta-text" style="color: #9ca3af; font-size: 0.85rem;">
+            基线预估成本（全使用强模型）：$@((Metrics?.System.Roi?.BaselineCostUsd ?? 0).ToString("F6")) | 实际优化处理成本：$@((Metrics?.System.Roi?.ActualCostUsd ?? 0).ToString("F6"))
+        </div>
+    </div>
+
+    <div class="chart-pair">
+        <!-- 费用趋势图 -->
+        <div class="glass-card chart-wide">
+            <div class="card-label">费用趋势</div>
+            <div class="trend-controls">
+                <button class="@(TrendDays == 7 ? "active" : "")" @onclick="() => SetTrendDays(7)">近7天</button>
+                <button class="@(TrendDays == 30 ? "active" : "")" @onclick="() => SetTrendDays(30)">近30天</button>
+            </div>
+            <div class="chart-container">
+                <canvas id="trend-chart" @ref="ChartCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- 数据安全与 PII 脱敏防护看板 -->
+        <div class="glass-card">
+            <div class="card-label" style="color: #c084fc; font-weight: 600; font-size: 1rem; display: flex; justify-content: space-between;">
+                <span>数据合规与 PII 防护</span>
+                <span class="tag tag-info">数据不出域: @(Metrics?.System.Security?.DataSovereigntyEnabled == true ? "已开启" : "未开启")</span>
+            </div>
+            <div style="display: flex; align-items: baseline; gap: 16px; margin: 10px 0;">
+                <div class="stat-value" style="color: #a855f7; font-size: 2.2rem; font-weight: 700;">@((Metrics?.System.Security?.PiiProtectedTotal ?? 0).ToString("N0")) <span style="font-size: 1rem; font-weight: normal; color: #d8b4fe;">次敏感项脱敏</span></div>
+            </div>
+            <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
+                <span class="tag tag-secondary">📱 手机号: @((Metrics?.System.Security?.PhoneProtected ?? 0).ToString("N0"))</span>
+                <span class="tag tag-secondary">📧 邮箱: @((Metrics?.System.Security?.EmailProtected ?? 0).ToString("N0"))</span>
+                <span class="tag tag-secondary">🆔 身份证: @((Metrics?.System.Security?.IdCardProtected ?? 0).ToString("N0"))</span>
+                <span class="tag tag-secondary">💳 银行卡: @((Metrics?.System.Security?.CreditCardProtected ?? 0).ToString("N0"))</span>
+                <span class="tag tag-secondary">🌐 IP 地址: @((Metrics?.System.Security?.IpProtected ?? 0).ToString("N0"))</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 多窗口统计 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; flex-wrap: wrap; gap: 8px;">
+            <span>多窗口统计</span>
+            <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+                @foreach (var w in WindowOptions)
+                {
+                    var isActive = w == WindowKey;
+                    <button @onclick="() => SetWindow(w)"
+                            style="background: @(isActive ? "rgba(56,189,248,0.25)" : "transparent"); border: 1px solid rgba(56,189,248,0.3); color: @(isActive ? "#7dd3fc" : "#cbd5e1"); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">
+                        @WindowLabels[w]
+                    </button>
+                }
+            </div>
+        </div>
+        @if (WindowData != null)
+        {
+            @if (WindowKey != "all" && WindowData.WindowHours > WindowData.RetentionHours)
+            {
+                <div class="alert-banner alert-warning" style="margin: 10px 0; padding: 8px 12px; font-size: 0.85rem;">
+                    ⚠ 当前窗口 (@WindowData.WindowHours h) 超出审计保留期 (@WindowData.RetentionHours h)，更早数据已被淘汰，仅显示保留期内数据。
+                </div>
+            }
+            <div class="stats-row">
+                <div class="stat-card">
+                    <div class="stat-card-label">输入 Token</div>
+                    <div class="stat-card-val">@WindowData.InputTokens.ToString("N0")</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-label">输出 Token</div>
+                    <div class="stat-card-val">@WindowData.OutputTokens.ToString("N0")</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-label">缓存命中率</div>
+                    <div class="stat-card-val" style="color:#34d399;">@WindowData.CacheHitRatePercent.ToString("F1")%</div>
+                    <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">命中 @WindowData.CachedInputTokens.ToString("N0") / 未缓存 @WindowData.UncachedInputTokens.ToString("N0")</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-label">错误率</div>
+                    <div class="stat-card-val" style="color:@(WindowData.ErrorRatePercent > 0 ? "#f87171" : "#e2e8f0");">@WindowData.ErrorRatePercent.ToString("F2")%</div>
+                    <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">失败 @WindowData.Failures.ToString("N0") / 请求 @WindowData.TotalRequests.ToString("N0")</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-label">平均延迟</div>
+                    <div class="stat-card-val">@WindowData.AvgLatencyMs.ToString("F1") ms</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-card-label">总成本</div>
+                    <div class="stat-card-val" style="color:#34d399;">$@WindowData.TotalCost.ToString("F4")</div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="text-center text-secondary" style="padding: 20px;">加载中...</div>
+        }
+    </div>
+
+    <!-- 实时请求流预览 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+            <span>实时请求流 (Live Request Stream)</span>
+            <NavLink href="/requests" class="nav-link" style="font-size: 0.85rem;">查看全部请求 →</NavLink>
+        </div>
+        <div class="table-wrap">
+            <table class="log-table">
+                <thead>
+                    <tr>
+                        <th>时间</th><th>请求 ID</th><th>路由模型</th><th>分档 Tier</th><th>Tokens (In/Out)</th><th>延迟 / TTFT</th><th>成本</th><th>类型</th><th>状态</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (RecentRequests.Any())
+                    {
+                        @foreach (var r in RecentRequests)
+                        {
+                            <tr>
+                                <td>@r.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
+                                <td><code style="font-size: 0.8rem; color: #a7f3d0;">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
+                                <td><strong>@r.Model</strong></td>
+                                <td><span class="tag tag-info">@r.RoutedTier</span></td>
+                                <td>@r.PromptTokens / @r.CompletionTokens</td>
+                                <td>@r.LatencyMs.ToString("F0") ms / @(r.TimeToFirstTokenMs is { } reqTtft ? $"{reqTtft:F0} ms" : "--")</td>
+                                <td style="color: #34d399; font-weight: bold;">$@r.Cost.ToString("F6")</td>
+                                <td>
+                                    <span class="tag tag-secondary">@(r.IsStreaming ? "流式" : "JSON")</span>
+                                    @if (!string.IsNullOrEmpty(r.FusionRole))
+                                    {
+                                        <span class="tag tag-info">@r.FusionRole</span>
+                                    }
+                                </td>
+                                <td class="@(r.Success ? "text-success" : "text-danger")">
+                                    @(r.Success ? "✓ 成功" : "✗ 失败")
+                                </td>
+                            </tr>
+                        }
+                    }
+                    else
+                    {
+                        <tr><td colspan="9" class="text-center text-secondary">暂无实时请求流数据</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+@code {
+    private ApiService.DashboardMetrics? Metrics;
+    private List<ApiService.DailySpend> Trends = new();
+    private List<ApiService.AlertInfo> Alerts => Metrics?.System.Alerts ?? new();
+
+    // 多窗口统计：Tab 选项 + 当前选中窗口 + 数据。默认 24h。
+    private static readonly string[] WindowOptions = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };
+    private static readonly Dictionary<string, string> WindowLabels = new()
+    {
+        ["1h"] = "1小时", ["7h"] = "7小时", ["24h"] = "24小时",
+        ["7d"] = "7天", ["15d"] = "15天", ["30d"] = "30天", ["all"] = "全部"
+    };
+    private string WindowKey = "24h";
+    private ApiService.WindowSummary? WindowData;
+    private int TrendDays = 7;
+
+    private IReadOnlyList<ApiService.RecentRequestItem> RecentRequests
+        => Metrics?.System.RecentRequests?.Take(8).ToList() ?? new List<ApiService.RecentRequestItem>();
+
+    private ElementReference ChartCanvas;
+    private PeriodicTimer? _timer;
+    private CancellationTokenSource _cts = new();
+
+    private double BudgetPercent
+    {
+        get
+        {
+            if (Metrics?.System.Budget == null) return 0;
+            var limit = (double)Metrics.System.Budget.DailyBudgetUsd;
+            if (limit <= 0) return 0;
+            var spend = (double)Metrics.System.Budget.DailySpend;
+            return Math.Min(100.0, (spend / limit) * 100.0);
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadMetrics();
+        await LoadTrends();
+        await LoadWindowSummary();
+
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        _ = PollMetricsLoopAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // 首次渲染后 ChartCanvas 才绑定；OnInitializedAsync 阶段 ref 仍为默认，无法绘制。
+        if (firstRender)
+        {
+            await RenderChart();
+        }
+    }
+
+    private async Task PollMetricsLoopAsync()
+    {
+        try
+        {
+            while (await _timer!.WaitForNextTickAsync(_cts.Token))
+            {
+                await LoadMetrics();
+                await LoadWindowSummary();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { } // circuit 拆除后 dispatcher 失效，轮询自行退出
+    }
+
+    private async Task LoadMetrics()
+    {
+        try
+        {
+            Metrics = await Api.GetMetricsAsync();
+        }
+        catch { }
+    }
+
+    private async Task LoadTrends()
+    {
+        try
+        {
+            Trends = await Api.GetTrendsAsync(TrendDays);
+        }
+        catch { }
+    }
+
+    private async Task SetTrendDays(int days)
+    {
+        TrendDays = days;
+        await LoadTrends();
+        await RenderChart(); // 切换天数时 Canvas 已绑定，立即重绘
+    }
+
+    private async Task SetWindow(string key)
+    {
+        WindowKey = key;
+        await LoadWindowSummary();
+    }
+
+    private async Task LoadWindowSummary()
+    {
+        try
+        {
+            WindowData = await Api.GetWindowSummaryAsync(WindowKey);
+        }
+        catch { }
+    }
+
+    private async Task RenderChart()
+    {
+        if (Trends == null || !Trends.Any()) return;
+        // drawTrendChart 期望 [{date, amount}]；显式 camelCase 匿名对象避免序列化策略差异。
+        var payload = Trends.Select(t => new { date = t.Date, amount = (double)t.Amount }).ToArray();
+
+        try
+        {
+            await JS.InvokeVoidAsync("drawTrendChart", ChartCanvas, payload);
+        }
+        catch { }
+    }
+
+    private static string Truncate(string val, int maxLen)
+    {
+        if (string.IsNullOrEmpty(val)) return "-";
+        return val.Length <= maxLen ? val : val[..maxLen] + "...";
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+        _timer?.Dispose();
+    }
+}

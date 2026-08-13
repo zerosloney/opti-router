@@ -26,7 +26,7 @@ public static class ModelsConfigHandler
                 m.BaseUrl,
                 m.Provider,
                 m.Family,
-                m.Tier,
+                Tier = m.Tier.ToString(),
                 m.MaxContextTokens,
                 m.TimeoutSeconds,
                 m.MaxRetries,
@@ -49,7 +49,7 @@ public static class ModelsConfigHandler
             {
                 m.Name,
                 m.BaseUrl,
-                m.Tier,
+                Tier = m.Tier.ToString(),
                 m.MaxContextTokens,
                 m.TimeoutSeconds,
                 m.MaxRetries,

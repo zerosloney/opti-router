@@ -1,0 +1,376 @@
+@page "/router"
+@inject ApiService Api
+@implements IDisposable
+
+<PageTitle>OptiRouter - 路由实验室</PageTitle>
+
+<div class="models-page">
+    <!-- 路由引擎状态 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+            <span>路由引擎状态</span>
+            <span class="tag tag-info" style="font-size: 0.75rem;">● 实时</span>
+        </div>
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-card-label">故障转移</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableFailover == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableFailover == true ? "启用" : "禁用")</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">预算防护</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableBudgetGuard == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableBudgetGuard == true ? "启用" : "禁用")</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">规则分类器</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableRuleClassifier == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableRuleClassifier == true ? "启用" : "禁用")</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">延迟感知</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableLatencyAware == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableLatencyAware == true ? "启用" : "禁用")</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">语义路由</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableSemanticRouter == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableSemanticRouter == true ? "启用" : "禁用")</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 系统策略与预算动态控制面板 -->
+    <div class="glass-card" style="background: linear-gradient(135deg, rgba(30,41,59,0.9), rgba(15,23,42,0.9)); border: 1px solid rgba(56,189,248,0.3); padding: 18px 20px;">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; color: #38bdf8;">
+            <span>⚙️ 系统路由策略与预算配置控制台 (UI Config Studio)</span>
+            <button class="btn-primary" @onclick="SaveSystemConfig" disabled="@IsConfigSaving" style="padding: 4px 16px; font-size: 0.85rem;">
+                @(IsConfigSaving ? "热更新保存中..." : "💾 保存并热生效")
+            </button>
+        </div>
+
+        @if (!string.IsNullOrEmpty(ConfigStatusMsg))
+        {
+            <div class="tag tag-success" style="margin: 8px 0; padding: 6px 12px; font-size: 0.85rem;">@ConfigStatusMsg</div>
+        }
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 14px;">
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgFailover" /> 故障转移策略
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgBudgetGuard" /> 预算防护策略
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgRuleClassifier" /> 规则分类器
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgLatencyAware" /> 历史延迟感知重排
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgSemanticRouter" /> 语义向量路由
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgPiiAnonymization" /> PII 隐私脱敏
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgDataSovereignty" /> 数据不出域隔离
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgJsonAstAutoRepair" /> JSON AST 自动修复
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+                <input type="checkbox" @bind="CfgFusionRouter" /> Fusion MoA 融合路由
+            </label>
+        </div>
+
+        <div style="display: flex; gap: 20px; align-items: center; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="color: #9ca3af; font-size: 0.85rem;">日预算 (USD):</span>
+                <input type="number" step="1.0" min="0" @bind="CfgDailyBudgetUsd" style="width: 100px; background: rgba(15,23,42,0.8); color: #34d399; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px; font-weight: bold;" />
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="color: #9ca3af; font-size: 0.85rem;">预算耗尽行为:</span>
+                <select @bind="CfgEnforceBehavior" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+                    <option value="Degrade">Degrade (降级至 Cheap)</option>
+                    <option value="Reject">Reject (直接拒绝 429)</option>
+                </select>
+            </div>
+        </div>
+    </div>
+
+    <!-- 分布式 DAG 链路拓扑与 Fusion MoA 瀑布流 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+            <span>分布式 DAG 链路拓扑与 Fusion MoA 甘特图 (DAG Trace Visualizer)</span>
+            <span class="tag tag-info">W3C Traceparent 标准</span>
+        </div>
+        @if (Metrics?.System.DagTraces != null && Metrics.System.DagTraces.Any())
+        {
+            @foreach (var dag in Metrics.System.DagTraces)
+            {
+                <div style="background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 12px; margin-top: 12px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
+                        <span style="font-family: monospace; color: #38bdf8; font-weight: 600;">Group ID: @Truncate(dag.GroupId ?? "-", 16)</span>
+                        <span style="color: #34d399; font-weight: bold;">DAG 总成本: $@dag.TotalCost.ToString("F6") | 最大延迟: @dag.MaxLatencyMs.ToString("F0") ms</span>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 6px;">
+                        @foreach (var span in dag.Spans)
+                        {
+                            double widthPct = dag.MaxLatencyMs > 0 ? Math.Min(100.0, Math.Max(10.0, (span.LatencyMs / dag.MaxLatencyMs) * 100.0)) : 100.0;
+                            string roleBg = span.Role switch
+                            {
+                                "panel" => "#3b82f6",
+                                "analyst" => "#8b5cf6",
+                                "outer" => "#10b981",
+                                "cascade" => "#f59e0b",
+                                _ => "#64748b"
+                            };
+                            <div style="display: flex; align-items: center; gap: 10px; font-size: 0.85rem;">
+                                <span style="width: 80px; text-transform: uppercase; font-weight: bold; color: @roleBg;">[@span.Role]</span>
+                                <span style="width: 120px; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">@span.Model</span>
+                                <div style="flex: 1; background: rgba(255,255,255,0.05); border-radius: 4px; height: 18px; overflow: hidden; position: relative;">
+                                    <div style="background: @roleBg; width: @widthPct.ToString("F0")%; height: 100%; border-radius: 4px; transition: width 0.3s ease;"></div>
+                                </div>
+                                <span style="width: 90px; text-align: right; color: #cbd5e1;">@span.LatencyMs.ToString("F0") ms</span>
+                                <span style="width: 80px; text-align: right; color: #34d399;">$@span.Cost.ToString("F6")</span>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        }
+        else
+        {
+            <div class="text-secondary text-center" style="padding: 16px;">暂无 Fusion / Cascade DAG Trace 采样数据</div>
+        }
+    </div>
+
+    <!-- 交互式路由匹配沙盒 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+            <span>交互式路由决策沙盒 (Route Playground Sandbox)</span>
+            <span class="tag tag-success">即时路由仿真</span>
+        </div>
+        <div style="margin-top: 10px; display: flex; gap: 12px; flex-direction: column;">
+            <textarea class="form-control" rows="3" placeholder="在此输入测试 Prompt（如：写个快速排序、求微积分积分、翻译文本...）" @bind="SandboxInputPrompt" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 10px; font-family: inherit; width: 100%;"></textarea>
+            <div style="display: flex; justify-content: flex-end;">
+                <button class="btn-primary" @onclick="RunSandbox" disabled="@IsSandboxRunning" style="padding: 6px 18px;">
+                    @(IsSandboxRunning ? "路由仿真中..." : "🚀 运行路由匹配测试")
+                </button>
+            </div>
+        </div>
+        @if (SandboxResultData != null)
+        {
+            <div style="background: rgba(15,23,42,0.7); border: 1px solid rgba(56,189,248,0.3); border-radius: 8px; padding: 14px; margin-top: 12px;">
+                <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 10px;">
+                    <span style="font-weight: bold;">命中 Target Tier:</span>
+                    <span class="badge badge-info" style="font-size: 0.9rem;">@SandboxResultData.TargetTier</span>
+                    <span style="color: #9ca3af; font-size: 0.85rem;">估算 Prompt Tokens: @SandboxResultData.EstimatedTokens</span>
+                </div>
+                <div style="margin-bottom: 8px; font-size: 0.85rem; color: #cbd5e1;">
+                    <strong>匹配 Policy 逻辑链：</strong>
+                    <ul style="margin: 4px 0 0 16px; padding: 0;">
+                        @foreach (var reason in SandboxResultData.Reasons)
+                        {
+                            <li><span style="color: #38bdf8;">[@reason.PolicyName]</span> @reason.Message</li>
+                        }
+                    </ul>
+                </div>
+                <div style="font-size: 0.85rem; color: #34d399;">
+                    <strong>推荐模型候选链：</strong> @string.Join(" → ", SandboxResultData.CandidateModels)
+                </div>
+            </div>
+        }
+    </div>
+
+    <!-- Golden Dataset 离线回归评测中心 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+            <span>Golden Dataset 离线回归评测工作室 (Eval Studio)</span>
+            <button class="btn-primary" @onclick="RunEval" disabled="@IsEvalRunning" style="padding: 4px 12px; font-size: 0.85rem;">
+                @(IsEvalRunning ? "自动化评测中..." : "🧪 一键运行 Golden 题库回归评测")
+            </button>
+        </div>
+        @if (EvalReportData != null)
+        {
+            <div style="background: rgba(15,23,42,0.7); border: 1px solid rgba(168,85,247,0.3); border-radius: 8px; padding: 14px; margin-top: 12px;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 12px; align-items: center;">
+                    <span style="font-family: monospace; color: #c084fc; font-weight: bold;">Batch ID: @EvalReportData.BatchId</span>
+                    <div style="display: flex; gap: 12px;">
+                        <span class="tag tag-success">准确率: @((EvalReportData.AccuracyRate * 100).ToString("F1"))%</span>
+                        <span class="tag tag-info">平均延迟: @EvalReportData.AvgLatencyMs.ToString("F0") ms</span>
+                        <span class="tag tag-secondary">总 Tokens: @EvalReportData.TotalTokens.ToString("N0")</span>
+                    </div>
+                </div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    @foreach (var res in EvalReportData.Results)
+                    {
+                        <div style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 8px 12px; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center;">
+                            <div>
+                                <span style="color: #e2e8f0; font-weight: 600;">[@res.TestCase.Category] @res.TestCase.Question</span>
+                                <div style="color: #9ca3af; font-size: 0.75rem; margin-top: 2px;">输出: @Truncate(res.ActualAnswer, 40)</div>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 12px;">
+                                <span style="color: #38bdf8; font-size: 0.8rem;">Jaccard 相似度: @((res.SimilarityScore * 100).ToString("F0"))%</span>
+                                <span class="@(res.Passed ? "text-success" : "text-danger")" style="font-weight: bold;">@(res.Passed ? "✓ 通过" : "✗ 未通过")</span>
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+</div>
+
+@code {
+    private ApiService.DashboardMetrics? Metrics;
+
+    private bool CfgFailover = true;
+    private bool CfgBudgetGuard = true;
+    private bool CfgRuleClassifier = true;
+    private bool CfgLatencyAware = false;
+    private bool CfgSemanticRouter = true;
+    private bool CfgPiiAnonymization = false;
+    private bool CfgDataSovereignty = false;
+    private bool CfgJsonAstAutoRepair = true;
+    private bool CfgFusionRouter = false;
+    private decimal CfgDailyBudgetUsd = 10.0m;
+    private string CfgEnforceBehavior = "Degrade";
+    private bool IsConfigSaving = false;
+    private string ConfigStatusMsg = "";
+
+    private string SandboxInputPrompt = "写一个 C# 快速排序算法，并说明空间复杂度";
+    private bool IsSandboxRunning = false;
+    private ApiService.SandboxResult? SandboxResultData;
+
+    private bool IsEvalRunning = false;
+    private ApiService.EvalReportDto? EvalReportData;
+
+    private PeriodicTimer? _timer;
+    private CancellationTokenSource _cts = new();
+
+    private async Task LoadSystemConfig()
+    {
+        try
+        {
+            var cfg = await Api.GetSystemConfigAsync();
+            if (cfg != null)
+            {
+                CfgFailover = cfg.Routing.EnableFailover;
+                CfgBudgetGuard = cfg.Routing.EnableBudgetGuard;
+                CfgRuleClassifier = cfg.Routing.EnableRuleClassifier;
+                CfgLatencyAware = cfg.Routing.EnableLatencyAware;
+                CfgSemanticRouter = cfg.Routing.EnableSemanticRouter;
+                CfgPiiAnonymization = cfg.Routing.EnablePiiAnonymization;
+                CfgDataSovereignty = cfg.Routing.EnableDataSovereignty;
+                CfgJsonAstAutoRepair = cfg.Routing.EnableJsonAstAutoRepair;
+                CfgFusionRouter = cfg.Routing.EnableFusionRouter;
+                CfgDailyBudgetUsd = cfg.Budget.DailyBudgetUsd;
+                CfgEnforceBehavior = cfg.Budget.EnforceOnExhausted;
+            }
+        }
+        catch { }
+    }
+
+    private async Task SaveSystemConfig()
+    {
+        IsConfigSaving = true;
+        ConfigStatusMsg = "";
+        try
+        {
+            var req = new ApiService.UpdateSystemConfigRequest(
+                CfgFailover, CfgBudgetGuard, CfgRuleClassifier, CfgLatencyAware,
+                CfgSemanticRouter, CfgPiiAnonymization, CfgDataSovereignty,
+                CfgJsonAstAutoRepair, CfgFusionRouter, CfgDailyBudgetUsd, CfgEnforceBehavior);
+
+            bool ok = await Api.UpdateSystemConfigAsync(req);
+            if (ok)
+            {
+                ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
+                await LoadMetrics();
+            }
+            else
+            {
+                ConfigStatusMsg = "✗ 保存失败，请检查 API Key。";
+            }
+        }
+        catch (Exception ex)
+        {
+            ConfigStatusMsg = "✗ 错误: " + ex.Message;
+        }
+        finally
+        {
+            IsConfigSaving = false;
+        }
+    }
+
+    private async Task RunSandbox()
+    {
+        if (string.IsNullOrWhiteSpace(SandboxInputPrompt)) return;
+        IsSandboxRunning = true;
+        try
+        {
+            SandboxResultData = await Api.RunSandboxRouteAsync(SandboxInputPrompt);
+        }
+        catch { }
+        finally
+        {
+            IsSandboxRunning = false;
+        }
+    }
+
+    private async Task RunEval()
+    {
+        IsEvalRunning = true;
+        try
+        {
+            EvalReportData = await Api.RunEvalBenchmarkAsync();
+        }
+        catch { }
+        finally
+        {
+            IsEvalRunning = false;
+        }
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadSystemConfig();
+        await LoadMetrics();
+
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        _ = PollMetricsLoopAsync();
+    }
+
+    private async Task PollMetricsLoopAsync()
+    {
+        try
+        {
+            while (await _timer!.WaitForNextTickAsync(_cts.Token))
+            {
+                await LoadMetrics();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { } // circuit 拆除后 dispatcher 失效，轮询自行退出
+    }
+
+    private async Task LoadMetrics()
+    {
+        try
+        {
+            Metrics = await Api.GetMetricsAsync();
+        }
+        catch { }
+    }
+
+    private static string Truncate(string val, int maxLen)
+    {
+        if (string.IsNullOrEmpty(val)) return "-";
+        return val.Length <= maxLen ? val : val[..maxLen] + "...";
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+        _timer?.Dispose();
+    }
+}

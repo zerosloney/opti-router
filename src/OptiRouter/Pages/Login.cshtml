@@ -1,0 +1,54 @@
+@page "/login"
+@model OptiRouter.Pages.LoginModel
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OptiRouter - 管理员登录</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="~/css/blazor.css">
+</head>
+<body>
+    <div class="login-page">
+        <div class="login-glow login-glow-a"></div>
+        <div class="login-glow login-glow-b"></div>
+
+        <div class="login-card">
+            <div class="login-brand">
+                <div class="logo-icon">&#931;</div>
+                <div class="login-title">OptiRouter</div>
+                <div class="login-sub">管理控制台 · 管理员登录</div>
+            </div>
+
+            @if (!string.IsNullOrEmpty(Model.ErrorMessage))
+            {
+                <div class="login-error">&#9888; @Model.ErrorMessage</div>
+            }
+
+            <div class="login-secure">
+                <span class="login-secure-dot"></span> 安全访问通道
+            </div>
+
+            <form method="post" autocomplete="off">
+                @Html.AntiForgeryToken()
+                <div class="login-field">
+                    <label for="AdminKey">管理密钥</label>
+                    <div class="login-input-wrap">
+                        <span class="login-input-icon">&#128274;</span>
+                        <input id="AdminKey" type="password" asp-for="AdminKey" placeholder="请输入管理员密钥" autofocus autocomplete="current-password" />
+                    </div>
+                </div>
+                <button type="submit" class="login-submit">
+                    <span class="login-submit-text">登 录</span>
+                    <span class="login-submit-arrow">&#8594;</span>
+                </button>
+            </form>
+
+            <div class="login-foot">仅管理员可访问 · 会话 8 小时</div>
+        </div>
+    </div>
+</body>
+</html>

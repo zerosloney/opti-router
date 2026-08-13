@@ -1,0 +1,131 @@
+@page "/keys"
+@inject ApiService Api
+@inject IJSRuntime JS
+
+<PageTitle>OptiRouter - 客户端管理</PageTitle>
+
+<div class="models-page">
+    <!-- 🔑 客户端 API Key 与租户配额控制台 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; color: #c084fc;">
+            <span>🔑 客户端 API Key 与租户配额控制台 (Client Quota Studio)</span>
+            <button class="btn-primary" @onclick="ToggleAddKeyForm" style="padding: 4px 12px; font-size: 0.85rem;">
+                @(ShowAddKeyForm ? "- 取消签发" : "+ 签发租户 API Key")
+            </button>
+        </div>
+
+        @if (ShowAddKeyForm)
+        {
+            <div style="background: rgba(15,23,42,0.7); border: 1px solid rgba(168,85,247,0.3); border-radius: 8px; padding: 14px; margin-top: 12px; margin-bottom: 12px;">
+                <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
+                    <input type="text" placeholder="租户/部门名称 (如: 财务部 App)" @bind="NewTenantName" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 6px 10px; width: 220px;" />
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span style="color: #9ca3af; font-size: 0.85rem;">日预算 ($):</span>
+                        <input type="number" step="10" min="0" @bind="NewTenantBudget" style="width: 100px; background: rgba(15,23,42,0.8); color: #34d399; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 6px 10px;" />
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 6px;">
+                        <span style="color: #9ca3af; font-size: 0.85rem;">QPS 上限:</span>
+                        <input type="number" step="5" min="1" @bind="NewTenantQps" style="width: 80px; background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 6px 10px;" />
+                    </div>
+                    <button class="btn-primary" @onclick="CreateClientKey" style="padding: 6px 16px;">确认签发</button>
+                </div>
+            </div>
+        }
+
+        <div class="table-wrap" style="margin-top: 12px;">
+            <table class="config-table">
+                <thead>
+                    <tr>
+                        <th>租户/部门</th><th>API Key</th><th>日预算 ($)</th><th>QPS 限制</th><th>状态</th><th>签发时间</th><th>操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @if (KeyList.Any())
+                    {
+                        @foreach (var k in KeyList)
+                        {
+                            <tr>
+                                <td><strong>@k.TenantName</strong></td>
+                                <td style="font-family: monospace; color: #c084fc;">@k.KeyPrefix</td>
+                                <td>$@k.DailyBudgetUsd.ToString("N0")</td>
+                                <td>@k.MaxQps QPS</td>
+                                <td>
+                                    <span class="@(k.Enabled ? "text-success" : "text-secondary")" style="font-weight: bold;">@(k.Enabled ? "正常" : "已禁用")</span>
+                                </td>
+                                <td>@k.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                <td style="display: flex; gap: 6px;">
+                                    <button class="btn-ghost btn-sm" @onclick="() => ToggleKeyEnabled(k)">@(k.Enabled ? "禁用" : "启用")</button>
+                                    <button class="btn-danger btn-sm" @onclick="() => DeleteKey(k.KeyId)">删除</button>
+                                </td>
+                            </tr>
+                        }
+                    }
+                    else
+                    {
+                        <tr><td colspan="7" class="text-center text-secondary">暂无签发的客户端 API Key，点击上方 "+ 签发租户 API Key" 开始分配。</td></tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+@code {
+    private List<ApiService.ClientKeyDto> KeyList = new();
+    private bool ShowAddKeyForm = false;
+    private string NewTenantName = "";
+    private decimal NewTenantBudget = 100.0m;
+    private int NewTenantQps = 50;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadClientKeys();
+    }
+
+    private async Task LoadClientKeys()
+    {
+        try
+        {
+            KeyList = await Api.GetClientKeysAsync();
+        }
+        catch { }
+    }
+
+    private void ToggleAddKeyForm()
+    {
+        ShowAddKeyForm = !ShowAddKeyForm;
+        if (ShowAddKeyForm)
+        {
+            NewTenantName = "";
+            NewTenantBudget = 100.0m;
+            NewTenantQps = 50;
+        }
+    }
+
+    private async Task CreateClientKey()
+    {
+        if (string.IsNullOrWhiteSpace(NewTenantName)) return;
+        var created = await Api.CreateClientKeyAsync(NewTenantName, NewTenantBudget, NewTenantQps);
+        if (created != null)
+        {
+            // 明文仅此一次返回：弹窗提示运维立即保存，关闭后服务端只留哈希、不可重取。
+            await JS.InvokeVoidAsync("alert",
+                $"租户「{created.TenantName}」的新密钥（仅显示一次，请立即保存）：\n\n{created.PlaintextKey}\n\n关闭后将无法再次获取。");
+            ShowAddKeyForm = false;
+            NewTenantName = "";
+            await LoadClientKeys();
+        }
+    }
+
+    private async Task ToggleKeyEnabled(ApiService.ClientKeyDto k)
+    {
+        await Api.UpdateClientKeyAsync(k.KeyId, !k.Enabled, k.DailyBudgetUsd, k.MaxQps);
+        await LoadClientKeys();
+    }
+
+    private async Task DeleteKey(string key)
+    {
+        await Api.DeleteClientKeyAsync(key);
+        await LoadClientKeys();
+    }
+}

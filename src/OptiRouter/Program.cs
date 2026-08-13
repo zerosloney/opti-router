@@ -1,7 +1,11 @@
 using System.Net.Http.Headers;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
@@ -194,6 +198,19 @@ builder.Services.AddSingleton<PromptCacheAffinityStore>();
 builder.Services.AddSingleton<FusionPanelSelector>();
 builder.Services.AddHttpContextAccessor();
 
+// 管理端登录会话（Cookie）：可视化界面仅管理员登录后可用。
+// /v1/* 代理端点不受此影响（仍走 ProxyApiKey + 租户 ClientKeyService）。
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.LoginPath = "/login";
+        options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        options.SlidingExpiration = true;
+        options.Cookie.Name = "OptiRouter.Admin";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+    });
+
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
@@ -284,7 +301,16 @@ builder.Services.AddHealthChecks()
 // 需 AddRazorPages 提供 PersistentComponentState 等预渲染服务，否则 AntiforgeryStateProvider 解析失败。
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
-builder.Services.AddHttpClient<ApiService>();
+// ApiService 必须 Scoped（circuit 内共享）：Blazor Server 页面间 NavLink 导航 URL 不含 ?key=，
+// Transient 会在每次组件解析时新建实例并从当前 URL 重新提取 key → 导航后全部 401。
+builder.Services.AddHttpClient(nameof(ApiService), client => client.Timeout = TimeSpan.FromSeconds(100));
+builder.Services.AddScoped<ApiService>(sp =>
+{
+    var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(ApiService));
+    var nav = sp.GetRequiredService<NavigationManager>();
+    var httpContextAccessor = sp.GetRequiredService<IHttpContextAccessor>();
+    return new ApiService(client, nav, httpContextAccessor);
+});
 
 int requestsPerMinute = builder.Configuration.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? 60;
 if (requestsPerMinute <= 0)
@@ -336,6 +362,9 @@ routerOptionsMonitor.OnChange(options =>
 // authentication middleware. Framework asset requests cannot carry the admin key.
 app.UseStaticFiles();
 
+// 解析登录会话 Cookie（管理端可视化界面鉴权）。
+app.UseAuthentication();
+
 app.Use(async (context, next) =>
 {
     if (!context.Request.Headers.TryGetValue("X-Request-Id", out var requestId) || string.IsNullOrEmpty(requestId))
@@ -363,7 +392,11 @@ app.Use(async (context, next) =>
 static bool IsProtectedPath(PathString path) =>
     path.StartsWithSegments("/v1")
     || path.StartsWithSegments("/dashboard")
+    || path.StartsWithSegments("/overview")
+    || path.StartsWithSegments("/requests")
     || path.StartsWithSegments("/models")
+    || path.StartsWithSegments("/router")
+    || path.StartsWithSegments("/keys")
     || path.StartsWithSegments("/api/dashboard")
     || path.StartsWithSegments("/api/models");
 
@@ -388,34 +421,27 @@ app.Use(async (context, next) =>
         return;
     }
 
-    // 管理端与代理分离鉴权：管理路径（dashboard/models）优先用 AdminApiKey，
-    // 未配置 AdminApiKey 时回退到 ProxyApiKey（保持既有行为，非破坏性）。
+    // 管理端与代理分离鉴权：
+    //   - 管理路径（dashboard/models 页面与 /api/dashboard、/api/models）：优先放行已登录会话（Cookie），
+    //     兼容 Authorization: Bearer <AdminApiKey>（脚本/测试客户端）。未认证的页面请求 302 到 /login，API 请求 401。
+    //   - /v1/* 代理路径：ProxyApiKey 或租户 ClientKeyService（保持不变）。
     bool isAdminPath = context.Request.Path.StartsWithSegments("/dashboard")
-        || context.Request.Path.StartsWithSegments("/api/dashboard")
+        || context.Request.Path.StartsWithSegments("/overview")
+        || context.Request.Path.StartsWithSegments("/requests")
         || context.Request.Path.StartsWithSegments("/models")
+        || context.Request.Path.StartsWithSegments("/router")
+        || context.Request.Path.StartsWithSegments("/keys")
+        || context.Request.Path.StartsWithSegments("/api/dashboard")
         || context.Request.Path.StartsWithSegments("/api/models");
     bool isV1Path = context.Request.Path.StartsWithSegments("/v1");
     string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
-    string configuredKey = isAdminPath
+    string adminKey = isAdminPath
         ? (app.Configuration["OptiRouter:AdminApiKey"] ?? "").Length > 0
             ? app.Configuration["OptiRouter:AdminApiKey"]!
             : proxyKey ?? ""
         : proxyKey ?? "";
 
-    string? providedKey = null;
-    if (AuthenticationHeaderValue.TryParse(context.Request.Headers.Authorization, out var authorization)
-        && authorization.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase))
-    {
-        providedKey = authorization.Parameter;
-    }
-    // Dashboard/模型配置浏览器场景：Authorization 头不便携带，支持 ?key= 查询参数（仅 dashboard/models 路径）。
-    // 运维侧工具，访问者即 key 持有者；key 入 URL 有日志风险，由调用方/反代负责。
-    else if (isAdminPath)
-    {
-        providedKey = context.Request.Query["key"];
-    }
-
-    if (isV1Path && IsValidApiKey(proxyKey, providedKey))
+    if (isV1Path && AdminKeyVerifier.IsValid(proxyKey, ExtractBearerToken(context)))
     {
         // The global proxy key remains compatible and is deliberately not sent through
         // ClientKeyService, so it never consumes a tenant's QPS window or daily budget.
@@ -424,7 +450,7 @@ app.Use(async (context, next) =>
     {
         var authorizationResult = context.RequestServices
             .GetRequiredService<ClientKeyService>()
-            .AuthorizeRequest(providedKey);
+            .AuthorizeRequest(ExtractBearerToken(context));
 
         switch (authorizationResult.Status)
         {
@@ -460,7 +486,25 @@ app.Use(async (context, next) =>
                 return;
         }
     }
-    else if (!IsValidApiKey(configuredKey, providedKey))
+    else if (isAdminPath)
+    {
+        bool sessionAuthenticated = context.User.Identity?.IsAuthenticated == true;
+        bool bearerAuthenticated = AdminKeyVerifier.IsValid(adminKey, ExtractBearerToken(context));
+
+        if (!sessionAuthenticated && !bearerAuthenticated)
+        {
+            // 页面（HTML）场景：浏览器重定向到登录页；API 场景：直接 401。
+            bool isPageRequest = !context.Request.Path.StartsWithSegments("/api");
+            if (isPageRequest)
+            {
+                context.Response.Redirect("/login");
+                return;
+            }
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return;
+        }
+    }
+    else if (!AdminKeyVerifier.IsValid(adminKey, ExtractBearerToken(context)))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         return;
@@ -471,6 +515,16 @@ app.Use(async (context, next) =>
 
     await next(context).ConfigureAwait(false);
 });
+
+static string? ExtractBearerToken(HttpContext context)
+{
+    if (AuthenticationHeaderValue.TryParse(context.Request.Headers.Authorization, out var authorization)
+        && authorization.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase))
+    {
+        return authorization.Parameter;
+    }
+    return null;
+}
 
 static async Task WriteClientKeyProblemAsync(
     HttpContext context,
@@ -583,16 +637,6 @@ app.MapDashboardEndpoints();
 app.MapModelsConfigEndpoints();
 
 app.Run();
-
-static bool IsValidApiKey(string? configuredKey, string? providedKey)
-{
-    if (string.IsNullOrWhiteSpace(configuredKey) || string.IsNullOrEmpty(providedKey))
-        return false;
-
-    byte[] configuredHash = SHA256.HashData(Encoding.UTF8.GetBytes(configuredKey));
-    byte[] providedHash = SHA256.HashData(Encoding.UTF8.GetBytes(providedKey));
-    return CryptographicOperations.FixedTimeEquals(configuredHash, providedHash);
-}
 
 // 分区 Key 解析：限流与并发中间件共用。
 // 优先级 Session > IP > Auth：

@@ -1,0 +1,31 @@
+@page "/logout"
+@model OptiRouter.Pages.LogoutModel
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OptiRouter - 退出登录</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="~/css/blazor.css">
+</head>
+<body>
+    <div class="login-page">
+        <div class="login-glow login-glow-a"></div>
+        <div class="login-glow login-glow-b"></div>
+        <div class="login-card">
+            <div class="login-brand">
+                <div class="logo-icon">&#931;</div>
+                <div class="login-title">OptiRouter</div>
+                <div class="login-sub">正在退出登录...</div>
+            </div>
+            <div class="login-secure">
+                <span class="login-secure-dot"></span> 会话已结束
+            </div>
+            <div class="login-foot">即将跳转到登录页</div>
+        </div>
+    </div>
+</body>
+</html>

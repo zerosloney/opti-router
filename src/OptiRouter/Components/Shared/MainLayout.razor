@@ -1,21 +1,34 @@
 @inherits LayoutComponentBase
-@inject NavigationManager Nav
 
 <div class="app-shell">
-    <header class="app-header">
+    <aside class="side-nav">
         <div class="logo-area">
-            <div class="logo-icon">&#937;</div>
+            <div class="logo-icon">&#931;</div>
             <div class="logo-title">OptiRouter</div>
+            <div class="logo-sub">OBSERVABILITY</div>
         </div>
-        <nav class="app-nav">
-            <NavLink href="/dashboard" class="nav-link" ActiveClass="nav-link-active">
-                监控
+        <nav class="side-nav-links">
+            <NavLink href="/overview" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                <span class="nav-icon">◎</span> 总览 <span class="nav-en">Overview</span>
             </NavLink>
-            <NavLink href="/models" class="nav-link" ActiveClass="nav-link-active">
-                模型配置
+            <NavLink href="/requests" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                <span class="nav-icon">⇄</span> 请求 <span class="nav-en">Requests</span>
+            </NavLink>
+            <NavLink href="/models" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                <span class="nav-icon">▤</span> 模型 <span class="nav-en">Models</span>
+            </NavLink>
+            <NavLink href="/router" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                <span class="nav-icon">⛭</span> 路由 <span class="nav-en">Router</span>
+            </NavLink>
+            <NavLink href="/keys" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                <span class="nav-icon">🔑</span> 客户端 <span class="nav-en">Keys</span>
             </NavLink>
         </nav>
-    </header>
+        <div class="side-nav-footer">
+            <div class="side-nav-user">管理员</div>
+            <a href="/logout" class="side-nav-logout">退出登录</a>
+        </div>
+    </aside>
 
     <main class="app-main">
         @Body

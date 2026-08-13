@@ -217,6 +217,59 @@
             </table>
         </div>
     </div>
+
+    <!-- 模型健康状态（熔断与运维控制） -->
+    <div class="glass-card">
+        <div class="card-header-row">
+            <div class="card-label" style="margin: 0;">模型健康状态</div>
+            <span class="tag tag-info" style="font-size: 0.75rem;">● 每 5 秒自动刷新</span>
+        </div>
+        <div class="models-grid">
+            @if (ModelHealth.Any())
+            {
+                @foreach (var m in ModelHealth)
+                {
+                    <div class="model-card state-@m.CircuitState.ToLower()">
+                        <div class="card-header-row">
+                            <div>
+                                <div class="model-name">@m.Name</div>
+                                <div class="model-tier">@m.Tier Tier</div>
+                            </div>
+                            <span class="badge badge-@CircuitBadge(m.CircuitState)">@CircuitText(m.CircuitState)</span>
+                        </div>
+
+                        <div class="metrics-row">
+                            <div class="metric-item">
+                                <span class="metric-label">失败次数</span>
+                                <span class="metric-val @(m.FailureCount > 0 ? "text-danger" : "")">@m.FailureCount</span>
+                            </div>
+                            <div class="metric-item" style="text-align:center;">
+                                <span class="metric-label">平均延迟</span>
+                                <span class="metric-val @(m.LatencySamples > 0 ? "text-primary" : "")">@(m.LatencySamples > 0 ? $"{m.AvgLatencyMs:F0} ms" : "--")</span>
+                            </div>
+                            <div class="metric-item" style="text-align:center;">
+                                <span class="metric-label">延迟样本</span>
+                                <span class="metric-val">@m.LatencySamples</span>
+                            </div>
+                            <div class="metric-item" style="text-align:right;">
+                                <span class="metric-label">活跃探测</span>
+                                <span class="metric-val @(m.ActiveProbes > 0 ? "text-warning" : "")">@m.ActiveProbes</span>
+                            </div>
+                        </div>
+
+                        <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; padding-top: 8px; border-top: 1px solid rgba(255,255,255,0.06);">
+                            <button class="btn-ghost btn-sm" @onclick='() => OverrideCircuit(m.Name, "Closed")' style="color: #34d399; font-size: 0.75rem;" title="重置断路器为闭合正常状态">⚡ 恢复正常</button>
+                            <button class="btn-ghost btn-sm" @onclick='() => OverrideCircuit(m.Name, "Open")' style="color: #f43f5e; font-size: 0.75rem;" title="强制下线该端点进行运维隔离">🚫 强行隔离</button>
+                        </div>
+                    </div>
+                }
+            }
+            else
+            {
+                <div class="text-center text-secondary" style="padding: 20px;">加载中...</div>
+            }
+        </div>
+    </div>
 </div>
 
 @if (!string.IsNullOrEmpty(ToastMsg))
@@ -242,11 +295,75 @@
 
     private NewModelForm NewModel = new();
     private EditModelForm EditModel = new();
+    private List<ApiService.ModelInfo> ModelHealth = new();
+    private PeriodicTimer? _healthTimer;
+    private CancellationTokenSource _healthCts = new();
 
     protected override async Task OnInitializedAsync()
     {
         await LoadModels();
+        await LoadModelHealth();
+
+        _healthTimer = new PeriodicTimer(TimeSpan.FromSeconds(5));
+        _ = PollHealthLoopAsync();
     }
+
+    private async Task PollHealthLoopAsync()
+    {
+        try
+        {
+            while (await _healthTimer!.WaitForNextTickAsync(_healthCts.Token))
+            {
+                await LoadModelHealth();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { } // circuit 拆除后 dispatcher 失效，轮询自行退出
+    }
+
+    private async Task LoadModelHealth()
+    {
+        try
+        {
+            var metrics = await Api.GetMetricsAsync();
+            if (metrics?.Models != null)
+            {
+                ModelHealth = metrics.Models.ToList();
+            }
+        }
+        catch { }
+    }
+
+    private async Task OverrideCircuit(string modelName, string targetState)
+    {
+        bool ok = await Api.OverrideCircuitStateAsync(modelName, targetState);
+        if (ok)
+        {
+            Toast(targetState == "Open" ? $"模型 \"{modelName}\" 已强制隔离" : $"模型 \"{modelName}\" 已恢复正常");
+            await LoadModelHealth();
+        }
+        else
+        {
+            Toast("熔断状态更新失败", true);
+        }
+    }
+
+    private string CircuitBadge(string state) => state.ToLower() switch
+    {
+        "closed" => "success",
+        "open" => "danger",
+        "halfopen" => "warning",
+        _ => "secondary"
+    };
+
+    private string CircuitText(string state) => state.ToLower() switch
+    {
+        "closed" => "正常 (Closed)",
+        "open" => "熔断 (Open)",
+        "halfopen" => "探测 (HalfOpen)",
+        _ => state
+    };
 
     private async Task LoadModels()
     {
@@ -469,7 +586,13 @@
         catch { }
     }
 
-    public void Dispose() => _toastTimer?.Dispose();
+    public void Dispose()
+    {
+        _toastTimer?.Dispose();
+        _healthCts.Cancel();
+        _healthCts.Dispose();
+        _healthTimer?.Dispose();
+    }
 
     private static string Truncate(string? s, int len) => s != null && s.Length > len ? s[..len] + "..." : s ?? "-";
 

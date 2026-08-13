@@ -11,61 +11,24 @@ namespace OptiRouter.Components.Services;
 public class ApiService
 {
     private readonly HttpClient _http;
-    private readonly NavigationManager _nav;
-    private string? _key;
 
-    public ApiService(HttpClient http, NavigationManager nav)
+    public ApiService(HttpClient http, NavigationManager nav, IHttpContextAccessor? httpContextAccessor)
     {
         _http = http;
-        _nav = nav;
         // Set base address so relative paths work inside the Blazor circuit.
         if (_http.BaseAddress == null)
-            _http.BaseAddress = new Uri(_nav.BaseUri);
+            _http.BaseAddress = new Uri(nav.BaseUri);
 
-        // 浏览器鉴权：管理端 API 经 ?key= 查询参数携带（与鉴权中间件一致）。
-        // Blazor Server 下 NavigationManager.Uri 是浏览器当前 URL，含 key。
-        // 解析一次写入 _key，后续所有请求自动附加。
-        _key = ExtractKeyFromUri(nav.Uri);
-    }
-
-    /// <summary>从 URL ?key= 查询参数提取鉴权 key；不存在返回 null。</summary>
-    private static string? ExtractKeyFromUri(string absoluteUri)
-    {
-        if (Uri.TryCreate(absoluteUri, UriKind.Absolute, out var uri)
-            && !string.IsNullOrEmpty(uri.Query))
+        // 管理端鉴权走登录会话 Cookie。Blazor Server 的 HttpClient 在服务端 circuit 内执行，
+        // 不会自动携带浏览器 cookie——从 circuit 初始请求的 HttpContext 读取并附加到请求头。
+        var cookieHeader = httpContextAccessor?.HttpContext?.Request.Headers.Cookie.ToString();
+        if (!string.IsNullOrEmpty(cookieHeader))
         {
-            // 手解析避免引 System.Web / Microsoft.AspNetCore.WebUtilities 依赖。
-            // query 形如 ?key=xxx&a=b；按 & 分段，段内按 = 拆键值。
-            ReadOnlySpan<char> q = uri.Query.AsSpan();
-            if (q.Length > 0 && q[0] == '?')
-                q = q[1..];
-            while (!q.IsEmpty)
-            {
-                int amp = q.IndexOf('&');
-                ReadOnlySpan<char> pair = amp < 0 ? q : q[..amp];
-                int eq = pair.IndexOf('=');
-                if (eq > 0 && pair[..eq].SequenceEqual("key"))
-                {
-                    string val = pair[(eq + 1)..].ToString();
-                    return string.IsNullOrEmpty(val) ? null : Uri.UnescapeDataString(val);
-                }
-                if (amp < 0) break;
-                q = q[(amp + 1)..];
-            }
+            _http.DefaultRequestHeaders.Add("Cookie", cookieHeader);
         }
-        return null;
     }
 
-    public void SetKey(string? key) => _key = key;
-
-    private string Url(string path)
-    {
-        if (string.IsNullOrEmpty(_key))
-            return path;
-
-        char separator = path.Contains('?', StringComparison.Ordinal) ? '&' : '?';
-        return $"{path}{separator}key={Uri.EscapeDataString(_key)}";
-    }
+    private static string Url(string path) => path;
 
     // ── Dashboard ──────────────────────────────────────────────────
 
