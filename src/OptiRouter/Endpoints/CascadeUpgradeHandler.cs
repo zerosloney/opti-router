@@ -117,10 +117,12 @@ public sealed class CascadeUpgradeHandler
                 var strongResponse = await strongClient.CompleteRawAsync(originalRequest, ct).ConfigureAwait(false);
                 strongSw.Stop();
 
+                decimal upgradeCost = strongResponse.Usage is not null
+                    ? CostCalculator.Compute(strongResponse.Usage, upgradeTarget)
+                    : 0m;
                 if (strongResponse.Usage is not null)
                 {
-                    var cost = CostCalculator.Compute(strongResponse.Usage, upgradeTarget);
-                    _recorder.RecordCost(cost, sessionId);
+                    _recorder.RecordCost(upgradeCost, sessionId);
                 }
                 _recorder.RecordQuota(upgradeTarget.Name, strongResponse.Metadata);
                 _healthTracker.RecordSuccess(upgradeTarget.Name,
@@ -133,7 +135,7 @@ public sealed class CascadeUpgradeHandler
                 _recorder.RecordPromptCacheAffinity(originalRequest, upgradeTarget.Name);
 
                 _recorder.RecordAudit(null, upgradeTarget.Name, estimatedTokens, strongResponse.Usage,
-                    strongResponse.Usage is not null ? CostCalculator.Compute(strongResponse.Usage, upgradeTarget) : 0m,
+                    upgradeCost,
                     strongSw.ElapsedMilliseconds, sessionId, decision.Reason + "; cascade: upgraded from " + cheapModel.Name,
                     true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name,
                     timeToFirstTokenMs: strongResponse.Metadata?.ResponseHeaderLatencyMs);

@@ -87,13 +87,13 @@ public sealed class RaceOrchestrator
 
         // 2. 并行发起。每个候选配 linked CTS，首个成功后 cancel 其余。
         using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var perCandidateCts = new List<(ModelEndpointOptions Model, CancellationTokenSource Cts, bool WasHalfOpen)>();
+        var perCandidateCts = new Dictionary<string, CancellationTokenSource>(StringComparer.Ordinal);
         var tasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs, bool WasHalfOpen)>>();
 
         foreach (var (model, wasHalfOpen) in admitted)
         {
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(raceCts.Token);
-            perCandidateCts.Add((model, linkedCts, wasHalfOpen));
+            perCandidateCts[model.Name] = linkedCts;
             var modelCopy = model; // 闭包捕获。
             var wasHalfOpenCopy = wasHalfOpen;
             tasks.Add(Task.Run(async () =>
@@ -162,7 +162,7 @@ public sealed class RaceOrchestrator
             // 与 client 自身超时（HttpClient 取消内部 token，不取消 linkedCts）。
             // 后者应计入断路器失败，否则故障模型持续收流量。
             // linkedCts 与 admitted 一一对应，理论上必存在；防御找不到时按非取消处理。
-            var linkedCts = perCandidateCts.FirstOrDefault(p => p.Model.Name == model.Name).Cts;
+            var linkedCts = perCandidateCts.TryGetValue(model.Name, out var ctsForModel) ? ctsForModel : null;
             bool cancelledByRace = raceCts.IsCancellationRequested
                 && error is OperationCanceledException
                 && linkedCts is not null
@@ -237,7 +237,7 @@ public sealed class RaceOrchestrator
         }
 
         // 释放所有候选的 linked CTS。
-        foreach (var (m, cts, _) in perCandidateCts)
+        foreach (var cts in perCandidateCts.Values)
             cts.Dispose();
 
         // 5. 清理 break 后未遍历的候选，按 task 实际结果区分"成功"vs"取消"，避免误算。

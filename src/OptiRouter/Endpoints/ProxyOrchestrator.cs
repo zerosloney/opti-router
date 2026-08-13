@@ -221,9 +221,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     var response = await client.CompleteRawAsync(request, effectiveCt).ConfigureAwait(false);
                     attemptSw.Stop();
 
+                    decimal cost = response.Usage is not null
+                        ? CostCalculator.Compute(response.Usage, candidate)
+                        : 0m;
                     if (response.Usage is not null)
                     {
-                        var cost = CostCalculator.Compute(response.Usage, candidate);
                         _recorder.RecordCost(cost, sessionId);
                         _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
                             timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
@@ -259,7 +261,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, response.Usage is not null
-                            ? CostCalculator.Compute(response.Usage, candidate).ToString("F6")
+                            ? cost.ToString("F6")
                             : "unknown");
 
                     return ProcessResponse(response, piiMap);
@@ -376,28 +378,28 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string? lastModelName = null;
         int? lastStatusCode = null;
         string? lastErrorMessage = null;
-            long totalBytesTransferred = 0;
-            long maxResponseBytes = options.Routing.MaxResponseStreamBytes;
-            bool fusionRouterAttempted = false;
+        long totalBytesTransferred = 0;
+        long maxResponseBytes = options.Routing.MaxResponseStreamBytes;
+        bool fusionRouterAttempted = false;
 
-            // PII 脱敏（与非流式 SendAsync 对称）：流式路径同样必须在上游发送前替换敏感数据，
-            // 并在每个 yield 行上反向还原，否则原始 PII 直达上游、占位符泄露给客户端。
-            PiiMap? piiMap = null;
-            if (options.Routing.EnablePiiAnonymization)
+        // PII 脱敏（与非流式 SendAsync 对称）：流式路径同样必须在上游发送前替换敏感数据，
+        // 并在每个 yield 行上反向还原，否则原始 PII 直达上游、占位符泄露给客户端。
+        PiiMap? piiMap = null;
+        if (options.Routing.EnablePiiAnonymization)
+        {
+            var anonymized = PiiAnonymizer.AnonymizeRequest(request);
+            request = anonymized.SanitizedRequest;
+            piiMap = anonymized.PiiMap;
+        }
+
+        while (true)
+        {
+            if (globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
             {
-                var anonymized = PiiAnonymizer.AnonymizeRequest(request);
-                request = anonymized.SanitizedRequest;
-                piiMap = anonymized.PiiMap;
+                throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode ?? 408, lastErrorMessage ?? $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.", $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
             }
 
-            while (true)
-            {
-                if (globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
-                {
-                    throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode ?? 408, lastErrorMessage ?? $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.", $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
-                }
-
-                var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
+            var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
             ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
 
             if (_logger.IsEnabled(LogLevel.Debug))
@@ -566,13 +568,16 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // size-limit 抛出时 finally 仍会 dispose enumerator，避免 socket/stream 泄漏。
                     try
                     {
-                        totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(firstLine.Data ?? "");
+                        // 先还原 PII 再统计字节：限流须约束实际下发客户端的字节数，
+                        // 否则占位符还原为（更长的）原文后实际体量可超过 MaxResponseStreamBytes。
+                        var restoredFirst = RestorePii(firstLine, piiMap);
+                        totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(restoredFirst.Data ?? "");
                         if (totalBytesTransferred > maxResponseBytes)
                         {
                             throw new ResponseSizeLimitExceededException(maxResponseBytes,
                                 $"Response size limit exceeded ({maxResponseBytes} bytes).");
                         }
-                        yield return RestorePii(firstLine, piiMap);
+                        yield return restoredFirst;
 
                         // 继续 yield 剩余行。
                         while (true)
@@ -596,13 +601,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             if (line.Usage is not null)
                                 finalUsage = line.Usage;
 
-                            totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(line.Data ?? "");
+                            var restored = RestorePii(line, piiMap);
+                            totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(restored.Data ?? "");
                             if (totalBytesTransferred > maxResponseBytes)
                             {
                                 throw new ResponseSizeLimitExceededException(maxResponseBytes,
                                     $"Response size limit exceeded ({maxResponseBytes} bytes).");
                             }
-                            yield return RestorePii(line, piiMap);
+                            yield return restored;
                         }
                     }
                     finally
