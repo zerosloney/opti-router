@@ -62,6 +62,62 @@ public class P1StageTests
     }
 
     [Fact]
+    public void PiiAnonymizer_PreservesMultimodalImageAndAnonymizesOnlyText()
+    {
+        // 多模态 content：一段含手机号的文本 + 一张图片。脱敏必须保留 image_url 结构，仅替换文本里的 PII。
+        var content = JsonDocument.Parse(
+            """
+            [
+              {"type":"text","text":"Reach me at 13812345678."},
+              {"type":"image_url","image_url":{"url":"https://example.test/img.png","detail":"high"}}
+            ]
+            """).RootElement.Clone();
+
+        var request = new ChatRequest
+        {
+            Messages = new List<ChatMessage>
+            {
+                new ChatMessage { Role = "user", Content = content }
+            }
+        };
+
+        var (sanitized, piiMap, containsPii) = PiiAnonymizer.AnonymizeRequest(request);
+
+        Assert.True(containsPii);
+        var sanitizedContent = sanitized.Messages![0].Content!.Value;
+        Assert.Equal(JsonValueKind.Array, sanitizedContent.ValueKind);
+
+        string? textPart = null;
+        string? imageUrl = null;
+        string? imageDetail = null;
+        foreach (var item in sanitizedContent.EnumerateArray())
+        {
+            Assert.True(item.TryGetProperty("type", out var typeEl));
+            switch (typeEl.GetString())
+            {
+                case "text":
+                    textPart = item.GetProperty("text").GetString();
+                    break;
+                case "image_url":
+                    var img = item.GetProperty("image_url");
+                    imageUrl = img.GetProperty("url").GetString();
+                    imageDetail = img.GetProperty("detail").GetString();
+                    break;
+            }
+        }
+
+        // 文本片段：手机号被占位符替换，可还原。
+        Assert.NotNull(textPart);
+        Assert.Contains("[PII_PHONE_1]", textPart);
+        Assert.DoesNotContain("13812345678", textPart);
+        Assert.Contains("13812345678", PiiAnonymizer.DeanonymizeText(textPart!, piiMap));
+
+        // 图片部分：结构完整保留（这正是回归所保护的——此前会被 FromText 压平丢弃）。
+        Assert.Equal("https://example.test/img.png", imageUrl);
+        Assert.Equal("high", imageDetail);
+    }
+
+    [Fact]
     public void DataSovereigntyPolicy_ExcludesCloudEndpointsWhenEnabled()
     {
         var policy = new DataSovereigntyPolicy();

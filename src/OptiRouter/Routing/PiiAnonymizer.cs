@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using OptiRouter.Clients;
 
@@ -80,6 +82,9 @@ public static class PiiAnonymizer
 
     /// <summary>
     /// 对 ChatRequest 中的消息文本进行敏感数据脱敏。
+    /// 纯文本 content 按整段脱敏后用 <see cref="ChatMessage.FromText"/> 重建；
+    /// 多模态数组 content 仅脱敏 <c>{type:"text",text:...}</c> 片段，<c>image_url</c> 等非文本部分原样保留——
+    /// 否则开启 PII 脱敏会让视觉请求的图片被静默丢弃。
     /// </summary>
     public static (ChatRequest SanitizedRequest, PiiMap PiiMap, bool ContainsPii) AnonymizeRequest(ChatRequest request)
     {
@@ -89,86 +94,120 @@ public static class PiiAnonymizer
             return (request, new PiiMap(), false);
 
         var piiMap = new PiiMap();
+        var anonymizer = new SegmentAnonymizer(piiMap);
         var sanitizedMessages = new List<ChatMessage>(request.Messages.Count);
-        bool containsPii = false;
-
-        int phoneCount = 0, emailCount = 0, idCardCount = 0, cardCount = 0, ipCount = 0;
 
         foreach (var msg in request.Messages)
         {
             if (msg is null) continue;
 
-            string originalText = msg.GetText();
-            if (string.IsNullOrEmpty(originalText))
+            // 无 content（如纯 tool 调用）：不动。
+            if (msg.Content is not { } content)
             {
                 sanitizedMessages.Add(msg);
                 continue;
             }
 
-            string anonymizedText = originalText;
-
-            // 1. 身份证号脱敏
-            anonymizedText = IdCardRegex.Replace(anonymizedText, match =>
+            // 纯文本：脱敏后 FromText 重建（保持既有行为）。
+            if (content.ValueKind == JsonValueKind.String)
             {
-                containsPii = true;
-                Interlocked.Increment(ref _idCardCount);
-                string placeholder = $"[PII_ID_CARD_{++idCardCount}]";
-                piiMap.Add(placeholder, match.Value);
-                return placeholder;
-            });
-
-            // 2. 手机号脱敏
-            anonymizedText = PhoneRegex.Replace(anonymizedText, match =>
-            {
-                containsPii = true;
-                Interlocked.Increment(ref _phoneCount);
-                string placeholder = $"[PII_PHONE_{++phoneCount}]";
-                piiMap.Add(placeholder, match.Value);
-                return placeholder;
-            });
-
-            // 3. 邮箱脱敏
-            anonymizedText = EmailRegex.Replace(anonymizedText, match =>
-            {
-                containsPii = true;
-                Interlocked.Increment(ref _emailCount);
-                string placeholder = $"[PII_EMAIL_{++emailCount}]";
-                piiMap.Add(placeholder, match.Value);
-                return placeholder;
-            });
-
-            // 4. 银行卡号脱敏
-            anonymizedText = CreditCardRegex.Replace(anonymizedText, match =>
-            {
-                containsPii = true;
-                Interlocked.Increment(ref _cardCount);
-                string placeholder = $"[PII_CARD_{++cardCount}]";
-                piiMap.Add(placeholder, match.Value);
-                return placeholder;
-            });
-
-            // 5. IP 脱敏
-            anonymizedText = IpRegex.Replace(anonymizedText, match =>
-            {
-                containsPii = true;
-                Interlocked.Increment(ref _ipCount);
-                string placeholder = $"[PII_IP_{++ipCount}]";
-                piiMap.Add(placeholder, match.Value);
-                return placeholder;
-            });
-
-            if (anonymizedText != originalText)
-            {
-                sanitizedMessages.Add(ChatMessage.FromText(msg.Role, anonymizedText));
+                string original = content.GetString() ?? string.Empty;
+                string anonymized = anonymizer.Anonymize(original);
+                sanitizedMessages.Add(anonymized != original
+                    ? ChatMessage.FromText(msg.Role, anonymized)
+                    : msg);
+                continue;
             }
-            else
+
+            // 多模态数组：逐片段脱敏文本部分，保留图像/音频等结构。
+            if (content.ValueKind == JsonValueKind.Array)
             {
-                sanitizedMessages.Add(msg);
+                var (rebuilt, changed) = AnonymizeArrayContent(content, anonymizer);
+                sanitizedMessages.Add(changed
+                    ? new ChatMessage { Role = msg.Role, Content = rebuilt }
+                    : msg);
+                continue;
             }
+
+            // 其他形态（object/number 等，罕见）：不动。
+            sanitizedMessages.Add(msg);
         }
 
-        var sanitizedRequest = request with { Messages = sanitizedMessages };
-        return (sanitizedRequest, piiMap, containsPii);
+        return (request with { Messages = sanitizedMessages }, piiMap, anonymizer.ContainsPii);
+    }
+
+    /// <summary>
+    /// 脱敏多模态数组 content：克隆每个元素，仅替换文本片段的 text 字段，其余（image_url 等）原样保留。
+    /// 用 <see cref="JsonElement"/> API 做无歧义的类型/取值检测，<see cref="JsonObject"/> 仅用于克隆与写入 text。
+    /// </summary>
+    /// <returns>重建后的数组 JsonElement 与"是否发生改动"标志；未改动时返回 (null, false) 以避免无谓重序列化。</returns>
+    private static (JsonElement? Rebuilt, bool Changed) AnonymizeArrayContent(JsonElement array, SegmentAnonymizer anonymizer)
+    {
+        bool changed = false;
+        var rebuilt = new JsonArray();
+        foreach (var item in array.EnumerateArray())
+        {
+            // 用 GetRawText → JsonNode 克隆，完整保留未知结构（image_url url、detail 等）。
+            JsonNode? node = JsonNode.Parse(item.GetRawText());
+
+            // 文本片段检测走 JsonElement（GetString/ValueEquals 语义明确），并保持在同一 if 链内，
+            // 让 textEl 的 out var 定赋可被编译器追踪。
+            if (node is JsonObject obj
+                && item.ValueKind == JsonValueKind.Object
+                && item.TryGetProperty("type", out var typeEl)
+                && typeEl.ValueKind == JsonValueKind.String
+                && typeEl.ValueEquals("text")
+                && item.TryGetProperty("text", out var textEl)
+                && textEl.ValueKind == JsonValueKind.String)
+            {
+                string original = textEl.GetString() ?? string.Empty;
+                string anonymized = anonymizer.Anonymize(original);
+                if (!string.Equals(anonymized, original, StringComparison.Ordinal))
+                {
+                    obj["text"] = anonymized;
+                    changed = true;
+                }
+            }
+            rebuilt.Add(node);
+        }
+
+        return changed ? (JsonSerializer.SerializeToElement(rebuilt), true) : (null, false);
+    }
+
+    /// <summary>
+    /// 单次请求范围内的脱敏器：持有本次请求的占位符计数器与 <see cref="PiiMap"/>，
+    /// 让纯文本与多模态各 text 片段共享同一套唯一占位符命名空间，反向还原无歧义。
+    /// </summary>
+    private sealed class SegmentAnonymizer
+    {
+        private readonly PiiMap _map;
+        private int _idCard, _phone, _email, _card, _ip;
+        public bool ContainsPii { get; private set; }
+
+        public SegmentAnonymizer(PiiMap map) => _map = map;
+
+        public string Anonymize(string text)
+        {
+            if (string.IsNullOrEmpty(text))
+                return text;
+
+            string anonymized = text;
+            anonymized = IdCardRegex.Replace(anonymized, m => Annotate(m, ref _idCard, "ID_CARD", ref _idCardCount));
+            anonymized = PhoneRegex.Replace(anonymized, m => Annotate(m, ref _phone, "PHONE", ref _phoneCount));
+            anonymized = EmailRegex.Replace(anonymized, m => Annotate(m, ref _email, "EMAIL", ref _emailCount));
+            anonymized = CreditCardRegex.Replace(anonymized, m => Annotate(m, ref _card, "CARD", ref _cardCount));
+            anonymized = IpRegex.Replace(anonymized, m => Annotate(m, ref _ip, "IP", ref _ipCount));
+            return anonymized;
+        }
+
+        private string Annotate(Match match, ref int perRequestCounter, string kind, ref long globalCounter)
+        {
+            ContainsPii = true;
+            Interlocked.Increment(ref globalCounter);
+            string placeholder = $"[PII_{kind}_{++perRequestCounter}]";
+            _map.Add(placeholder, match.Value);
+            return placeholder;
+        }
     }
 
     /// <summary>
