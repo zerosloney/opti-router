@@ -180,12 +180,14 @@ builder.Services.AddSingleton<IBanditStateStore>(sp =>
 builder.Services.AddSingleton<ThompsonStateStore>(sp =>
 {
     var persistence = sp.GetRequiredService<IThompsonStateStore>();
-    return new ThompsonStateStore(persistence);
+    var logger = sp.GetRequiredService<ILogger<ThompsonStateStore>>();
+    return new ThompsonStateStore(persistence, logger);
 });
 builder.Services.AddSingleton<ContextualBanditState>(sp =>
 {
     var persistence = sp.GetRequiredService<IBanditStateStore>();
-    return new ContextualBanditState(persistence: persistence);
+    var logger = sp.GetRequiredService<ILogger<ContextualBanditState>>();
+    return new ContextualBanditState(persistence: persistence, logger: logger);
 });
 builder.Services.AddSingleton<UpstreamQuotaStateStore>();
 builder.Services.AddSingleton<PromptCacheAffinityStore>();

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 
 namespace OptiRouter.Routing;
 
@@ -31,14 +32,17 @@ public sealed class ThompsonStateStore
 
     private readonly ConcurrentDictionary<string, ModelStats> _states = new(StringComparer.OrdinalIgnoreCase);
     private readonly IThompsonStateStore? _persistence;
+    private readonly ILogger<ThompsonStateStore>? _logger;
 
     /// <summary>
     /// 构造内存 Thompson 状态存储。可选传入持久化层，使 α/β 跨进程重启保留。
     /// </summary>
     /// <param name="persistence">持久化接口；null（默认）时不持久化。</param>
-    public ThompsonStateStore(IThompsonStateStore? persistence = null)
+    /// <param name="logger">日志记录器（持久化失败时告警）；null（默认）时静默。</param>
+    public ThompsonStateStore(IThompsonStateStore? persistence = null, ILogger<ThompsonStateStore>? logger = null)
     {
         _persistence = persistence;
+        _logger = logger;
 
         if (_persistence is not null)
         {
@@ -116,6 +120,15 @@ public sealed class ThompsonStateStore
             stats.Beta = stats.Beta * factor + (1.0 - r);
         }
 
-        _persistence?.Save(modelName, stats.Alpha, stats.Beta);
+        if (_persistence is null) return;
+        try
+        {
+            _persistence.Save(modelName, stats.Alpha, stats.Beta);
+        }
+        catch (Exception ex)
+        {
+            // 持久化 best-effort：磁盘满/IO 故障不应阻断在线决策路径，仅告警。
+            _logger?.LogWarning(ex, "Thompson state persist failed for model {Model}", modelName);
+        }
     }
 }

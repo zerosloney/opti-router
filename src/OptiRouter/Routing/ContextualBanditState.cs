@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Logging;
 
 namespace OptiRouter.Routing;
 
@@ -43,17 +44,20 @@ public sealed class ContextualBanditState
     private readonly ConcurrentDictionary<string, ArmState> _arms;
     private readonly int _dim;
     private readonly IBanditStateStore? _persistence;
+    private readonly ILogger<ContextualBanditState>? _logger;
 
     /// <summary>
     /// 构造上下文老虎机状态。
     /// </summary>
     /// <param name="dim">上下文特征维度（默认 11 = 7 信号 + 3 tier + 1 bias）。</param>
     /// <param name="persistence">持久化接口；null（默认）时不持久化。</param>
-    public ContextualBanditState(int dim = 11, IBanditStateStore? persistence = null)
+    /// <param name="logger">日志记录器（持久化失败时告警）；null（默认）时静默。</param>
+    public ContextualBanditState(int dim = 11, IBanditStateStore? persistence = null, ILogger<ContextualBanditState>? logger = null)
     {
         _dim = dim;
         _arms = new ConcurrentDictionary<string, ArmState>(StringComparer.OrdinalIgnoreCase);
         _persistence = persistence;
+        _logger = logger;
 
         if (_persistence is not null)
         {
@@ -120,6 +124,9 @@ public sealed class ContextualBanditState
             throw new ArgumentException($"context 长度 {context.Length} 必须等于维度 {_dim}", nameof(context));
 
         var arm = GetOrAdd(modelName);
+        double[,] aSnapshot;
+        double[] bSnapshot;
+        int nSnapshot;
         lock (arm.Lock)
         {
             // 历史衰减：A *= discount, b *= discount（旧样本影响力随时间减弱）。
@@ -140,9 +147,24 @@ public sealed class ContextualBanditState
                 arm.B[i] += reward * context[i];
 
             arm.N++;
+
+            // 锁内快照：持久化 Save 在锁外遍历数组序列化，若直接传 arm.A/B 引用，
+            // 会被并发 Update 撕裂成半新半旧的协方差矩阵。克隆后锁外写盘。
+            aSnapshot = (double[,])arm.A.Clone();
+            bSnapshot = (double[])arm.B.Clone();
+            nSnapshot = arm.N;
         }
 
-        _persistence?.Save(modelName, _dim, arm.A, arm.B, arm.N);
+        if (_persistence is null) return;
+        try
+        {
+            _persistence.Save(modelName, _dim, aSnapshot, bSnapshot, nSnapshot);
+        }
+        catch (Exception ex)
+        {
+            // 持久化 best-effort：磁盘满/IO 故障不应阻断在线决策路径，仅告警。
+            _logger?.LogWarning(ex, "Bandit state persist failed for model {Model}", modelName);
+        }
     }
 
     /// <summary>

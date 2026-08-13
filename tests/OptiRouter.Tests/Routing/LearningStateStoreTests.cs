@@ -229,4 +229,41 @@ public class LearningStateStoreTests
         Assert.Equal(1.0, arm.B[0]);
         Assert.Equal(0.0, arm.B[1]);
     }
+
+    [Fact]
+    public void ThompsonStateStore_RecordOutcome_SwallowsPersistException()
+    {
+        // 持久化 best-effort：Save 抛异常不应阻断在线决策，内存状态仍须更新。
+        var store = new ThompsonStateStore(new ThrowingThompsonStore());
+        var ex = Record.Exception(() => store.RecordOutcome("model-a", true, 1.0));
+        Assert.Null(ex);
+        var stats = store.GetOrAdd("model-a");
+        Assert.Equal(2.0, stats.Alpha); // 1.0 先验 + 1.0 奖励
+    }
+
+    [Fact]
+    public void ContextualBanditState_Update_SwallowsPersistException()
+    {
+        int dim = 2;
+        var bandit = new ContextualBanditState(dim, new ThrowingBanditStore());
+        var ex = Record.Exception(() => bandit.Update("model-a", new double[] { 1.0, 0.0 }, 1.0, 1.0));
+        Assert.Null(ex);
+        Assert.Equal(1, bandit.GetOrAdd("model-a").N); // 内存状态仍更新
+    }
+
+    private sealed class ThrowingThompsonStore : IThompsonStateStore
+    {
+        public void Save(string modelName, double alpha, double beta)
+            => throw new InvalidOperationException("disk full");
+        Dictionary<string, (double Alpha, double Beta)> IThompsonStateStore.LoadAll()
+            => new(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private sealed class ThrowingBanditStore : IBanditStateStore
+    {
+        public void Save(string modelName, int dim, double[,] a, double[] b, int n)
+            => throw new InvalidOperationException("disk full");
+        Dictionary<string, (int Dim, double[,] A, double[] B, int N)> IBanditStateStore.LoadAll()
+            => new(StringComparer.OrdinalIgnoreCase);
+    }
 }
