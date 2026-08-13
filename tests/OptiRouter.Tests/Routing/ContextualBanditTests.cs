@@ -17,14 +17,13 @@ public class ContextualBanditTests
         var x = ContextualBanditFeatureBuilder.Build("code-complex", ModelTier.Strong);
 
         Assert.Equal(ContextualBanditFeatureBuilder.Dimension, x.Length);
-        // 7 信号 + 3 tier + 1 bias = 11。
-        Assert.Equal(11, x.Length);
+        Assert.Equal(15, x.Length);
         // code-complex 是信号列表第 2 位（index 1）。
         Assert.Equal(1.0, x[1]);
-        // Strong 是 tier 列表第 1 位（index 7）。
-        Assert.Equal(1.0, x[7]);
+        // Strong 是 tier 列表第 1 位（8 个信号之后的 index 8）。
+        Assert.Equal(1.0, x[8]);
         // bias 恒 1。
-        Assert.Equal(1.0, x[10]);
+        Assert.Equal(1.0, x[14]);
         // 其余位为 0。
         Assert.Equal(0.0, x[0]);
         Assert.Equal(0.0, x[2]);
@@ -37,8 +36,8 @@ public class ContextualBanditTests
 
         // 未知信号 → 信号位全零；Cheap 是 tier 第 3 位（index 9）；bias=1。
         Assert.Equal(0.0, x[0]);
-        Assert.Equal(1.0, x[9]);
         Assert.Equal(1.0, x[10]);
+        Assert.Equal(1.0, x[14]);
     }
 
     [Fact]
@@ -46,9 +45,26 @@ public class ContextualBanditTests
     {
         var x = ContextualBanditFeatureBuilder.Build(null, null);
 
-        Assert.Equal(1.0, x[10]);
-        for (int i = 0; i < 10; i++)
+        Assert.Equal(1.0, x[14]);
+        for (int i = 0; i < 14; i++)
             Assert.Equal(0.0, x[i]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_IncludesStableRequestShape()
+    {
+        var x = ContextualBanditFeatureBuilder.Build(
+            "semantic:deep-analysis",
+            ModelTier.Strong,
+            estimatedInputTokens: 4095,
+            isStreaming: true,
+            messageCount: 3);
+
+        Assert.Equal(1.0, x[7]);
+        Assert.Equal(1.0, x[8]);
+        Assert.InRange(x[11], 0.59, 0.61);
+        Assert.Equal(1.0, x[12]);
+        Assert.Equal(1.0, x[13]);
     }
 
     // ---- ContextualBanditState ----
@@ -97,6 +113,19 @@ public class ContextualBanditTests
 
         // 0.0 奖励不把 θ 推负（b 全零 → θ=0），只不抬升——a 不应高于未训练的 b。
         Assert.True(sa <= sb, $"expected model-a ({sa}) <= model-b ({sb}) after failures");
+    }
+
+    [Fact]
+    public void State_DiscountPreservesUnitRidgeForUntouchedFeatures()
+    {
+        var state = new ContextualBanditState();
+        var feature = ContextualBanditFeatureBuilder.Build("simple-qa", ModelTier.Cheap);
+
+        for (int i = 0; i < 100; i++)
+            state.Update("model-a", feature, 1.0, 0.5);
+
+        var arm = state.GetOrAdd("model-a");
+        Assert.Equal(1.0, arm.A[0, 0], precision: 10);
     }
 
     [Fact]

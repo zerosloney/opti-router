@@ -79,6 +79,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FailoverHalfOpenRequiredSuccesses 必须大于 0。");
         }
 
+        if (options.Routing.FailoverGlobalTimeoutSeconds < 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.FailoverGlobalTimeoutSeconds 不能为负数。");
+        }
+
         if (options.Routing.HealthProbeIntervalSeconds <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.HealthProbeIntervalSeconds 必须大于 0。");
@@ -125,6 +130,23 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Routing.PromptCacheAffinityTtlSeconds <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.PromptCacheAffinityTtlSeconds 必须大于 0。");
+        }
+
+        if (options.Routing.SemanticSimilarityThreshold < 0 || options.Routing.SemanticSimilarityThreshold > 1)
+        {
+            return ValidateOptionsResult.Fail("Routing.SemanticSimilarityThreshold 必须在 [0.0, 1.0] 范围内。");
+        }
+
+        if (options.Routing.HybridHighConfidenceThreshold < 0 || options.Routing.HybridHighConfidenceThreshold > 1)
+        {
+            return ValidateOptionsResult.Fail("Routing.HybridHighConfidenceThreshold 必须在 [0.0, 1.0] 范围内。");
+        }
+
+        if (!string.Equals(options.Routing.SemanticRouterMode, "TfIdf", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(options.Routing.SemanticRouterMode, "Hybrid", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(options.Routing.SemanticRouterMode, "Dense", StringComparison.OrdinalIgnoreCase))
+        {
+            return ValidateOptionsResult.Fail("Routing.SemanticRouterMode 必须是 'Hybrid'、'TfIdf' 或 'Dense'。");
         }
 
         if (options.Routing.EnableFusionRouter && options.Routing.FusionRouterMaxOutputTokens <= 0)
@@ -200,6 +222,16 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail(
                 "EnableContextualBandit 与 EnableThompsonSampling 互斥，不能同时开启。" +
                 "LinUCB 在启用时段内替代 Thompson，请只开启其中一个。");
+        }
+
+        if (options.Routing.EnableLoadBalance
+            && (options.Routing.EnableContextualBandit
+                || options.Routing.EnableThompsonSampling
+                || options.Routing.EnableLatencyAware))
+        {
+            return ValidateOptionsResult.Fail(
+                "EnableLoadBalance 与 Contextual Bandit、Thompson Sampling、LatencyAware 排序互斥。" +
+                "负载均衡会覆盖同 tier 的学习/延迟排序，请只启用一种排序所有者。");
         }
         if (options.Routing.EnableContextualBandit)
         {

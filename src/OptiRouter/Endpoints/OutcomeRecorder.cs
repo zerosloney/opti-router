@@ -279,6 +279,19 @@ public sealed class OutcomeRecorder
         ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
     }
 
+    /// <summary>使用完整路由决策记录反馈，确保决策与学习使用相同的请求上下文。</summary>
+    public void RecordThompsonOutcome(string modelName, long? elapsedMs, RouterDecision decision)
+    {
+        var routing = _options.CurrentValue.Routing;
+        double reward = elapsedMs switch
+        {
+            null => 0.0,
+            var ms when ms < routing.ThompsonLatencyTargetMs => 1.0,
+            _ => 0.3
+        };
+        ApplyOutcome(modelName, reward, decision);
+    }
+
     /// <summary>
     /// 上报竞速失败反馈：模型在并行竞速中被更快者比下去而取消，非自身故障。
     /// 计部分正奖励（<see cref="RoutingOptions.ThompsonRaceCancelledReward"/>，默认 0.5），
@@ -294,6 +307,10 @@ public sealed class OutcomeRecorder
         double reward = _options.CurrentValue.Routing.ThompsonRaceCancelledReward;
         ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
     }
+
+    /// <summary>使用完整路由决策记录竞速取消反馈。</summary>
+    public void RecordThompsonRaceCancelled(string modelName, RouterDecision decision)
+        => ApplyOutcome(modelName, _options.CurrentValue.Routing.ThompsonRaceCancelledReward, decision);
 
     /// <summary>
     /// 上报显式质量驱动的 reward（绕过延迟映射）。用于已有质量判定信号（如级联自校验置信度）接入学习状态。
@@ -312,10 +329,13 @@ public sealed class OutcomeRecorder
         ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
     }
 
+    /// <summary>使用完整路由决策记录质量反馈。</summary>
+    public void RecordQualityOutcome(string modelName, double qualityReward, RouterDecision decision)
+        => ApplyOutcome(modelName, Math.Clamp(qualityReward, 0.0, 1.0), decision);
+
     /// <summary>
     /// 把 reward 应用到 Thompson 采样状态与（若启用）上下文 bandit。三个上报入口共享此核心，
-    /// 区别仅在 reward 来源：延迟映射（<see cref="RecordThompsonOutcome"/>）、竞速取消（<see cref="RecordThompsonRaceCancelled"/>）、
-    /// 显式质量（<see cref="RecordQualityOutcome"/>）。
+    /// 区别仅在 reward 来源：延迟映射、竞速取消或显式质量。
     /// </summary>
     private void ApplyOutcome(string modelName, double reward, string? classificationSignal, ModelTier? classificationTargetTier)
     {
@@ -326,6 +346,21 @@ public sealed class OutcomeRecorder
         {
             var feature = ContextualBanditFeatureBuilder.Build(classificationSignal, classificationTargetTier);
             _banditStore.Update(modelName, feature, reward, routing.ContextualBanditDiscountFactor);
+        }
+    }
+
+    private void ApplyOutcome(string modelName, double reward, RouterDecision decision)
+    {
+        var routing = _options.CurrentValue.Routing;
+        _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
+
+        if (routing.EnableContextualBandit && _banditStore is not null)
+        {
+            _banditStore.Update(
+                modelName,
+                ContextualBanditFeatureBuilder.Build(decision),
+                reward,
+                routing.ContextualBanditDiscountFactor);
         }
     }
 

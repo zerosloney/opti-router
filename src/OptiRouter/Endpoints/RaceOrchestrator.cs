@@ -140,7 +140,7 @@ public sealed class RaceOrchestrator
 
                 _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(model.Name, elapsedMs);
+                _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision);
                 _recorder.RecordAffinity(sessionId, model.Name, AffinitySignal.Weak);
                 _recorder.RecordPromptCacheAffinity(request, model.Name);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
@@ -173,7 +173,7 @@ public sealed class RaceOrchestrator
                 // 被取消（非自身失败）：仅释放探测槽位，不计断路器失败。
                 _healthTracker.ReleaseProbe(model.Name);
                 // Thompson：竞速失败（另一模型已胜出，本模型被取消）——模型仍在途、未必坏，计部分奖励而非硬失败。
-                _recorder.RecordThompsonRaceCancelled(model.Name);
+                _recorder.RecordThompsonRaceCancelled(model.Name, decision);
                 // 预估成本入账：请求已发出到上游，上游对已接收的请求计费，但本地拿不到 Usage（响应未完整返回）。
                 // 按 EstimatedInputTokens × input 价格估算，标注 IsEstimated=true 以区分真实成本。
                 decimal estCost = OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
@@ -200,7 +200,7 @@ public sealed class RaceOrchestrator
             else
             {
                 tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
-                _recorder.RecordThompsonOutcome(model.Name, null);
+                _recorder.RecordThompsonOutcome(model.Name, null, decision);
             }
 
             int status = error switch
@@ -260,7 +260,7 @@ public sealed class RaceOrchestrator
                     _recorder.RecordCost(cost, sessionId);
                 _recorder.RecordQuota(m.Name, response.Metadata);
                 _healthTracker.RecordSuccess(m.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(m.Name, elapsedMs);
+                _recorder.RecordThompsonOutcome(m.Name, elapsedMs, decision);
                 _recorder.RecordAudit(null, m.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId,
@@ -281,7 +281,7 @@ public sealed class RaceOrchestrator
             }
             else
             {
-                _recorder.RecordThompsonRaceCancelled(m.Name);
+                _recorder.RecordThompsonRaceCancelled(m.Name, decision);
             }
             decimal estCost = postBreakQuotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
             if (estCost > 0m)

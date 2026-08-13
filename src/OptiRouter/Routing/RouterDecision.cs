@@ -39,6 +39,12 @@ public sealed record RouterDecision
     /// </summary>
     public int EstimatedInputTokens { get; init; }
 
+    /// <summary>是否为流式请求。作为在线学习的稳定、无 I/O 上下文特征。</summary>
+    public bool RequestIsStreaming { get; init; }
+
+    /// <summary>请求消息数。作为在线学习的多轮上下文特征。</summary>
+    public int RequestMessageCount { get; init; }
+
     /// <summary>
     /// Structured complexity signal. Behavioral consumers must use this field and
     /// never parse <see cref="Reason"/>.

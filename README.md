@@ -167,11 +167,14 @@ curl http://localhost:5000/health
 | `TiktokenEncoding` | Tiktoken 编码名（仅 `TokenEstimation=Tiktoken` 时生效） | `o200k_base` |
 | `FailoverFailureThreshold` | 触发跨请求熔断的连续失败次数 | `3` |
 | `FailoverCooldownSeconds` | 熔断冷却秒数，到期进入半开探测 | `60` |
+| `FailoverGlobalTimeoutSeconds` | Failover 过程全局总超时秒数（`0` 表示不限制；超过此时间终止候选重试） | `0` |
 | `FailoverHalfOpenMaxProbes` | 半开态允许的最大并发探测请求数 | `1` |
 | `FailoverHalfOpenRequiredSuccesses` | 半开态连续探测成功多少次后才闭合熔断（防单次偶然成功导致抖动） | `1` |
 | `EnableHealthProbe` | 是否启用后台主动健康探活（定时对所有启用模型探测，结果上报断路器） | `true` |
 | `HealthProbeIntervalSeconds` | 后台探活间隔秒数 | `60` |
-| `EnableSemanticRouter` | 是否启用向量空间语义路由（离线词袋模型，余弦相似度匹配） | `true` |
+| `EnableSemanticRouter` | 是否启用向量空间语义路由 | `true` |
+| `SemanticRouterMode` | `Hybrid`（TF-IDF 高置信短路 + 第二阶段）/ `TfIdf` / `Dense`；内置 Dense 是稳定词法特征哈希，不是训练 embedding | `Hybrid` |
+| `HybridHighConfidenceThreshold` | Hybrid 模式下 TF-IDF 高置信短路阈值；低于阈值交给第二阶段判定 | `0.45` |
 | `SemanticSimilarityThreshold` | 语义匹配余弦相似度阈值 `[0.0, 1.0]`，低于此值不命中 | `0.25` |
 | `SemanticRoutes` | 语义路由规则列表，每条含 `Name`/`TargetTier`/`Phrases` | `[]` |
 | `EnableSessionAffinity` | 显式 `X-Session-Id` 会话粘性 | `false` |

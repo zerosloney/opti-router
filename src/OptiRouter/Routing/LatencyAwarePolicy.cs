@@ -107,7 +107,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
                 continue;
             }
 
-            var reordered = ReorderSegment(seg, minSamples, context, previous.ClassificationSignal, previous.ClassificationTargetTier);
+            var reordered = ReorderSegment(seg, minSamples, context, previous);
             if (!SameOrder(seg, reordered))
                 segmentsReordered++;
             result.AddRange(reordered);
@@ -129,12 +129,15 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     }
 
     /// <summary>同 tier 段内：根据配置选择上下文 bandit / Thompson / 延迟感知重排。</summary>
-    private List<ModelEndpointOptions> ReorderSegment(List<ModelEndpointOptions> segment, int minSamples, RouterContext context,
-        string? classificationSignal, ModelTier? classificationTargetTier)
+    private List<ModelEndpointOptions> ReorderSegment(
+        List<ModelEndpointOptions> segment,
+        int minSamples,
+        RouterContext context,
+        RouterDecision decision)
     {
         if (context.Options.Routing.EnableContextualBandit && _banditStore is not null)
         {
-            return ReorderByContextualBandit(segment, classificationSignal, classificationTargetTier, context.Options.Routing.ContextualBanditAlpha);
+            return ReorderByContextualBandit(segment, decision, context.Options.Routing.ContextualBanditAlpha);
         }
 
         if (context.Options.Routing.EnableThompsonSampling)
@@ -149,10 +152,12 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     /// 上下文老虎机（LinUCB）重排：用分类信号 + tier 构造上下文特征，每模型 LinUCB 打分降序。
     /// 修非上下文 Thompson 「只优化延迟、系统性低估 Strong」的缺陷——LinUCB 用请求特征学习「模型↔任务」匹配。
     /// </summary>
-    private List<ModelEndpointOptions> ReorderByContextualBandit(List<ModelEndpointOptions> segment,
-        string? classificationSignal, ModelTier? classificationTargetTier, double alpha)
+    private List<ModelEndpointOptions> ReorderByContextualBandit(
+        List<ModelEndpointOptions> segment,
+        RouterDecision decision,
+        double alpha)
     {
-        var feature = ContextualBanditFeatureBuilder.Build(classificationSignal, classificationTargetTier);
+        var feature = ContextualBanditFeatureBuilder.Build(decision);
 
         var scored = new List<(ModelEndpointOptions Model, double Score)>(segment.Count);
         foreach (var m in segment)

@@ -60,7 +60,9 @@ public sealed class RouterEngine
         {
             Candidates = initialCandidates,
             Reason = $"initial: {initialCandidates.Count} candidates, est {estTokens} tokens",
-            EstimatedInputTokens = estTokens
+            EstimatedInputTokens = estTokens,
+            RequestIsStreaming = request.Stream,
+            RequestMessageCount = request.Messages?.Count ?? 0
         };
 
         // 4. 按分组依赖序应用策略（Filter→Classify→Order→Constraint），组内保留串行。

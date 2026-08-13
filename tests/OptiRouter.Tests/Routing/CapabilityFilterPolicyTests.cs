@@ -178,7 +178,7 @@ public class CapabilityFilterPolicyTests
     }
 
     [Fact]
-    public void Apply_NoModelMatches_KeepsOriginalWithWarning()
+    public void Apply_NoModelMatches_FailsClosedWithExplicitReason()
     {
         var options = new RouterOptions();
         options.Routing.EnableCapabilityFilter = true;
@@ -204,9 +204,8 @@ public class CapabilityFilterPolicyTests
         var initial = MakeInitial(options.Models);
         var result = policy.Apply(ctx, initial);
 
-        // 无 vision 模型 → 保留原候选 + warning。
-        Assert.Equal(initial.Candidates.Count, result.Candidates.Count);
-        Assert.Contains("capability-filter: no candidate has", result.Reason);
+        Assert.Empty(result.Candidates);
+        Assert.Contains("capability-filter: required vision; no eligible candidate supports all required capabilities", result.Reason);
     }
 
     [Fact]
