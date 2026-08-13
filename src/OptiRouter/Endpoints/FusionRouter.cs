@@ -487,12 +487,30 @@ public sealed class FusionRouter
         var routing = options.Routing;
         var panelSelection = _panelSelector.Select(decision, routing, _quotaStore);
         int panelSize = panelSelection.RequestedSize;
+        int halfOpenMaxProbes = routing.FailoverHalfOpenMaxProbes;
         if (panelSelection.RankedCandidates.Count < 2)
             yield break;
 
-        var admitted = panelSelection.RankedCandidates.Take(panelSize).ToList();
+        // 准入：逐候选占用半开探测槽位（与非流式 ExecuteAsync 一致），防止半开态模型被并发融合流过量打入。
+        var admitted = new List<ModelEndpointOptions>();
+        foreach (var candidate in panelSelection.RankedCandidates)
+        {
+            if (admitted.Count >= panelSize) break;
+            if (!_healthTracker.TryBeginProbe(candidate.Name, halfOpenMaxProbes))
+                continue;
+            admitted.Add(candidate);
+            attemptedModels.Add(candidate.Name);
+        }
+        if (admitted.Count < 2)
+        {
+            foreach (var m in admitted)
+            {
+                _healthTracker.ReleaseProbe(m.Name);
+                attemptedModels.Remove(m.Name);
+            }
+            yield break;
+        }
         var anchorModel = admitted[0];
-        attemptedModels.Add(anchorModel.Name);
 
         // 1. 首发 Anchor 模型开始流式输出
         IModelClient anchorClient;
@@ -550,11 +568,18 @@ public sealed class FusionRouter
                     if (quotaLimited)
                     {
                         _recorder.RecordQuota(secCopy.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
+                        // 配额限流非模型健康信号：仅释放准入时占用的探测槽位（此前为泄漏路径）。
+                        _healthTracker.ReleaseProbe(secCopy.Name);
                     }
                     else if (!ct.IsCancellationRequested)
                     {
                         _healthTracker.RecordFailure(secCopy.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
                         _recorder.RecordThompsonOutcome(secCopy.Name, null, decision);
+                    }
+                    else
+                    {
+                        // 客户端取消：非模型健康信号，释放槽位（此前为泄漏路径）。
+                        _healthTracker.ReleaseProbe(secCopy.Name);
                     }
                     _recorder.RecordAudit(null, secCopy.Name, estimatedTokens, null, 0m,
                         secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary failed",
@@ -569,6 +594,7 @@ public sealed class FusionRouter
         RawStreamLine? lastLine = null;
         long anchorElapsedMs = 0;
         bool anchorStreamCompleted = false;
+        ChatUsage? anchorUsage = null;
 
         // 3. 实时流式输出 Anchor 模型内容（try-finally：IAsyncEnumerable 禁止 try-catch 含 yield，
         //    但允许 try-finally。finally 内同步记 audit/health，让融合流请求进入审计与断路器统计）。
@@ -577,6 +603,9 @@ public sealed class FusionRouter
         {
             await foreach (var line in anchorStream.WithCancellation(ct))
             {
+                // 捕获末次 usage（OpenAI 通常在末块或 [DONE] 前一块携带），用于成本入账（此前被丢弃导致日预算低估）。
+                if (line.Usage is not null)
+                    anchorUsage = line.Usage;
                 if (line.Data == "[DONE]")
                 {
                     lastLine = line;
@@ -596,19 +625,29 @@ public sealed class FusionRouter
             anchorElapsedMs = anchorSw.ElapsedMilliseconds;
             if (anchorStreamCompleted)
             {
+                // anchor 成本按真实 usage 计；无 usage 时记 0 并标 IsEstimated=false（与主链流式口径一致）。
+                decimal anchorCost = anchorUsage is not null ? CostCalculator.Compute(anchorUsage, anchorModel) : 0m;
+                if (anchorUsage is not null)
+                    _recorder.RecordCost(anchorCost, sessionId);
                 _healthTracker.RecordSuccess(anchorModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
                 _recorder.RecordThompsonOutcome(anchorModel.Name, anchorElapsedMs, decision);
-                _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
-                    anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier);
+                _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, anchorUsage, anchorCost,
+                    anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier,
+                    isEstimated: anchorUsage is null);
             }
             else if (!ct.IsCancellationRequested)
             {
-                // 真实故障（非客户端取消）：计入断路器 + 审计。取消由客户端触发，不 penalize 模型。
+                // 真实故障（非客户端取消）：计入断路器 + 审计（RecordFailure 顺带释放准入时占用的探测槽位）。
                 bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
                 _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
                 _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
                     anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier);
                 _logger.LogWarning("Fusion anchor {Name} stream faulted{Tripped}", anchorModel.Name, tripped ? " (circuit tripped)" : "");
+            }
+            else
+            {
+                // 客户端取消：非模型健康信号，仅释放准入时占用的探测槽位（此前为泄漏路径）。
+                _healthTracker.ReleaseProbe(anchorModel.Name);
             }
         }
 
