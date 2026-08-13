@@ -157,8 +157,36 @@ builder.Services.AddSingleton<ITokenEstimator>(sp =>
 });
 
 builder.Services.AddSingleton<ISemanticVectorEngine, TfIdfSemanticVectorEngine>();
-builder.Services.AddSingleton<ThompsonStateStore>();
-builder.Services.AddSingleton<ContextualBanditState>();
+
+// Thompson 采样 + Contextual Bandit 状态持久化（共享同一 SQLite 文件）。
+builder.Services.AddSingleton<IThompsonStateStore>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    if (!options.Budget.UsePersistentStore)
+        return NullLearningStateStore.Instance;
+    string storePath = options.Budget.StorePath;
+    string? dir = Path.GetDirectoryName(storePath);
+    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+        Directory.CreateDirectory(dir);
+    return new SqliteLearningStateStore(storePath);
+});
+// Bandit 复用 Thompson 侧的同一持久化实例（两者写同一 DB 的不同表）。
+builder.Services.AddSingleton<IBanditStateStore>(sp =>
+{
+    var tsStore = sp.GetRequiredService<IThompsonStateStore>();
+    return tsStore is SqliteLearningStateStore sqlite ? sqlite : NullLearningStateStore.Instance;
+});
+
+builder.Services.AddSingleton<ThompsonStateStore>(sp =>
+{
+    var persistence = sp.GetRequiredService<IThompsonStateStore>();
+    return new ThompsonStateStore(persistence);
+});
+builder.Services.AddSingleton<ContextualBanditState>(sp =>
+{
+    var persistence = sp.GetRequiredService<IBanditStateStore>();
+    return new ContextualBanditState(persistence: persistence);
+});
 builder.Services.AddSingleton<UpstreamQuotaStateStore>();
 builder.Services.AddSingleton<PromptCacheAffinityStore>();
 builder.Services.AddSingleton<FusionPanelSelector>();

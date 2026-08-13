@@ -42,15 +42,32 @@ public sealed class ContextualBanditState
 
     private readonly ConcurrentDictionary<string, ArmState> _arms;
     private readonly int _dim;
+    private readonly IBanditStateStore? _persistence;
 
     /// <summary>
     /// 构造上下文老虎机状态。
     /// </summary>
     /// <param name="dim">上下文特征维度（默认 11 = 7 信号 + 3 tier + 1 bias）。</param>
-    public ContextualBanditState(int dim = 11)
+    /// <param name="persistence">持久化接口；null（默认）时不持久化。</param>
+    public ContextualBanditState(int dim = 11, IBanditStateStore? persistence = null)
     {
         _dim = dim;
         _arms = new ConcurrentDictionary<string, ArmState>(StringComparer.OrdinalIgnoreCase);
+        _persistence = persistence;
+
+        if (_persistence is not null)
+        {
+            foreach (var (model, armState) in _persistence.LoadAll())
+            {
+                if (armState.Dim != dim) continue;
+                _arms[model] = new ArmState(dim)
+                {
+                    A = armState.A,
+                    B = armState.B,
+                    N = armState.N
+                };
+            }
+        }
     }
 
     /// <summary>上下文特征维度。</summary>
@@ -124,6 +141,8 @@ public sealed class ContextualBanditState
 
             arm.N++;
         }
+
+        _persistence?.Save(modelName, _dim, arm.A, arm.B, arm.N);
     }
 
     /// <summary>

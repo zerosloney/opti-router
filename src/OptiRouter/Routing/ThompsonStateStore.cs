@@ -30,6 +30,24 @@ public sealed class ThompsonStateStore
     }
 
     private readonly ConcurrentDictionary<string, ModelStats> _states = new(StringComparer.OrdinalIgnoreCase);
+    private readonly IThompsonStateStore? _persistence;
+
+    /// <summary>
+    /// 构造内存 Thompson 状态存储。可选传入持久化层，使 α/β 跨进程重启保留。
+    /// </summary>
+    /// <param name="persistence">持久化接口；null（默认）时不持久化。</param>
+    public ThompsonStateStore(IThompsonStateStore? persistence = null)
+    {
+        _persistence = persistence;
+
+        if (_persistence is not null)
+        {
+            foreach (var (model, stats) in _persistence.LoadAll())
+            {
+                _states[model] = new ModelStats { Alpha = stats.Alpha, Beta = stats.Beta };
+            }
+        }
+    }
 
     /// <summary>
     /// 获取或添加指定模型的采样指标参数。
@@ -97,5 +115,7 @@ public sealed class ThompsonStateStore
             stats.Alpha = stats.Alpha * factor + r;
             stats.Beta = stats.Beta * factor + (1.0 - r);
         }
+
+        _persistence?.Save(modelName, stats.Alpha, stats.Beta);
     }
 }
