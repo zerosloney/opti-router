@@ -177,7 +177,7 @@ public sealed class FusionRouter
 
                 _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(model.Name, elapsedMs);
+                _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion-router: panel success", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "panel",
@@ -199,7 +199,7 @@ public sealed class FusionRouter
                 else
                 {
                     tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(model.Name, null);
+                    _recorder.RecordThompsonOutcome(model.Name, null, decision);
                 }
 
                 int status = error switch
@@ -270,7 +270,8 @@ public sealed class FusionRouter
             _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
             _recorder.RecordThompsonOutcome(
                 analystModel.Name,
-                analystElapsedMs);
+                analystElapsedMs,
+                decision);
             _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, analystUsage, analystCost, analystElapsedMs, sessionId,
                 decision.Reason + "; fusion-router: analyst", true, null, false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
@@ -293,7 +294,7 @@ public sealed class FusionRouter
             else
             {
                 _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
-                _recorder.RecordThompsonOutcome(analystModel.Name, null);
+                _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
             _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m, analystElapsedMs,
@@ -330,7 +331,7 @@ public sealed class FusionRouter
                     _recorder.RecordCost(retryCost, sessionId);
                 _recorder.RecordQuota(analystModel.Name, retryResponse.Metadata);
                 _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(analystModel.Name, retryElapsedMs);
+                _recorder.RecordThompsonOutcome(analystModel.Name, retryElapsedMs, decision);
                 _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, retryUsage, retryCost, retryElapsedMs,
                     sessionId, decision.Reason + "; fusion-router: analyst retry(parse)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
@@ -372,7 +373,7 @@ public sealed class FusionRouter
                 else
                 {
                     _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(analystModel.Name, null);
+                    _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                 }
                 int retryStatus = UpstreamFailureClassifier.GetStatus(ex);
                 _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m, retryElapsedMs,
@@ -413,7 +414,7 @@ public sealed class FusionRouter
 
             _recorder.RecordQuota(outerModel.Name, outerResponse.Metadata);
             _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses);
-            _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds);
+            _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds, decision);
             _recorder.RecordAffinity(sessionId, outerModel.Name, AffinitySignal.Weak);
             _recorder.RecordPromptCacheAffinity(request, outerModel.Name);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, outerUsage, outerCost, outerSw.ElapsedMilliseconds, sessionId,
@@ -440,7 +441,7 @@ public sealed class FusionRouter
             else
             {
                 _healthTracker.RecordFailure(outerModel.Name, threshold, cooldown);
-                _recorder.RecordThompsonOutcome(outerModel.Name, null);
+                _recorder.RecordThompsonOutcome(outerModel.Name, null, decision);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, null, 0m, outerSw.ElapsedMilliseconds,
@@ -520,16 +521,45 @@ public sealed class FusionRouter
         foreach (var m in secondaryModels)
         {
             var secCopy = m;
+            attemptedModels.Add(secCopy.Name);
             secondaryTasks.Add(Task.Run(async () =>
             {
+                var secondarySw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
                     var client = _clientProvider.GetClient(secCopy);
                     var resp = await client.CompleteRawAsync(request with { Stream = false }, ct).ConfigureAwait(false);
+                    secondarySw.Stop();
+                    ChatUsage? usage = resp.Usage;
+                    decimal cost = usage is not null ? CostCalculator.Compute(usage, secCopy) : 0m;
+                    if (usage is not null)
+                        _recorder.RecordCost(cost, sessionId);
+                    _recorder.RecordQuota(secCopy.Name, resp.Metadata);
+                    _healthTracker.RecordSuccess(secCopy.Name, routing.FailoverHalfOpenRequiredSuccesses);
+                    _recorder.RecordThompsonOutcome(secCopy.Name, secondarySw.ElapsedMilliseconds, decision);
+                    _recorder.RecordAudit(null, secCopy.Name, estimatedTokens, usage, cost,
+                        secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary",
+                        true, null, true, routedTier, isAdopted: false, fusionRole: "secondary",
+                        timeToFirstTokenMs: resp.Metadata?.ResponseHeaderLatencyMs);
                     return (secCopy.Name, ResponseConfidenceChecker.ExtractAssistantText(resp));
                 }
-                catch
+                catch (Exception ex)
                 {
+                    secondarySw.Stop();
+                    bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
+                    if (quotaLimited)
+                    {
+                        _recorder.RecordQuota(secCopy.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
+                    }
+                    else if (!ct.IsCancellationRequested)
+                    {
+                        _healthTracker.RecordFailure(secCopy.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
+                        _recorder.RecordThompsonOutcome(secCopy.Name, null, decision);
+                    }
+                    _recorder.RecordAudit(null, secCopy.Name, estimatedTokens, null, 0m,
+                        secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary failed",
+                        false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), true, routedTier,
+                        isAdopted: false, fusionRole: "secondary", quotaLimited: quotaLimited);
                     return (secCopy.Name, string.Empty);
                 }
             }, ct));
@@ -567,6 +597,7 @@ public sealed class FusionRouter
             if (anchorStreamCompleted)
             {
                 _healthTracker.RecordSuccess(anchorModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
+                _recorder.RecordThompsonOutcome(anchorModel.Name, anchorElapsedMs, decision);
                 _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
                     anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier);
             }
@@ -574,6 +605,7 @@ public sealed class FusionRouter
             {
                 // 真实故障（非客户端取消）：计入断路器 + 审计。取消由客户端触发，不 penalize 模型。
                 bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
+                _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
                 _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
                     anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier);
                 _logger.LogWarning("Fusion anchor {Name} stream faulted{Tripped}", anchorModel.Name, tripped ? " (circuit tripped)" : "");
@@ -602,8 +634,45 @@ public sealed class FusionRouter
                     : routing.FusionRouterAnalystPrompt;
 
                 var analystReq = FusionSynthesis.BuildAnalystRequest(request, panelAnswers, analystPrompt, routing.FusionRouterTemperature);
-                var analystClient = _clientProvider.GetClient(analystModel);
-                var analystResp = await analystClient.CompleteRawAsync(analystReq, ct).ConfigureAwait(false);
+                attemptedModels.Add(analystModel.Name);
+                var analystSw = System.Diagnostics.Stopwatch.StartNew();
+                RawChatResponse analystResp;
+                try
+                {
+                    var analystClient = _clientProvider.GetClient(analystModel);
+                    analystResp = await analystClient.CompleteRawAsync(analystReq, ct).ConfigureAwait(false);
+                    analystSw.Stop();
+                    ChatUsage? usage = analystResp.Usage;
+                    decimal cost = usage is not null ? CostCalculator.Compute(usage, analystModel) : 0m;
+                    if (usage is not null)
+                        _recorder.RecordCost(cost, sessionId);
+                    _recorder.RecordQuota(analystModel.Name, analystResp.Metadata);
+                    _healthTracker.RecordSuccess(analystModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
+                    _recorder.RecordThompsonOutcome(analystModel.Name, analystSw.ElapsedMilliseconds, decision);
+                    _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, usage, cost,
+                        analystSw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: analyst",
+                        true, null, true, routedTier, isAdopted: false, fusionRole: "analyst",
+                        timeToFirstTokenMs: analystResp.Metadata?.ResponseHeaderLatencyMs);
+                }
+                catch (Exception ex)
+                {
+                    analystSw.Stop();
+                    bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
+                    if (quotaLimited)
+                    {
+                        _recorder.RecordQuota(analystModel.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
+                    }
+                    else if (!ct.IsCancellationRequested)
+                    {
+                        _healthTracker.RecordFailure(analystModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
+                        _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
+                    }
+                    _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m,
+                        analystSw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: analyst failed",
+                        false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), true, routedTier,
+                        isAdopted: false, fusionRole: "analyst", quotaLimited: quotaLimited);
+                    throw;
+                }
                 var analysis = FusionSynthesis.ParseAnalysis(analystResp);
 
                 if (analysis is not null && (!string.IsNullOrWhiteSpace(analysis.Contradictions) || !string.IsNullOrWhiteSpace(analysis.UniqueInsights) || !string.IsNullOrWhiteSpace(analysis.Gaps)))

@@ -636,4 +636,23 @@ public class RouterOptionsValidatorTests
 
         Assert.True(result.Succeeded);
     }
+
+    [Theory]
+    [InlineData("bandit")]
+    [InlineData("thompson")]
+    [InlineData("latency")]
+    public void LoadBalance_WithAnotherOrderOwner_ShouldFail(string owner)
+    {
+        var options = CreateValidOptions();
+        options.Routing.EnableLoadBalance = true;
+        options.Routing.EnableContextualBandit = owner == "bandit";
+        options.Routing.EnableThompsonSampling = owner == "thompson";
+        options.Routing.EnableLatencyAware = owner == "latency";
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("EnableLoadBalance", result.FailureMessage);
+        Assert.Contains("互斥", result.FailureMessage);
+    }
 }

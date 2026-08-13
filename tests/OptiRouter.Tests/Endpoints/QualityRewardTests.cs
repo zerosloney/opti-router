@@ -12,7 +12,10 @@ namespace OptiRouter.Tests.Endpoints;
 /// </summary>
 public sealed class QualityRewardTests
 {
-    private static OutcomeRecorder CreateRecorder(ThompsonStateStore tsStore, RouterOptions? options = null)
+    private static OutcomeRecorder CreateRecorder(
+        ThompsonStateStore tsStore,
+        RouterOptions? options = null,
+        ContextualBanditState? bandit = null)
     {
         var monitor = new FakeRouterOptionsMonitor(options ?? new RouterOptions());
         return new OutcomeRecorder(
@@ -24,7 +27,8 @@ public sealed class QualityRewardTests
             tsStore: tsStore,
             promptAffinityStore: null!,
             quotaStore: null!,
-            logger: NullLogger<OutcomeRecorder>.Instance);
+            logger: NullLogger<OutcomeRecorder>.Instance,
+            banditStore: bandit);
     }
 
     [Fact]
@@ -90,5 +94,30 @@ public sealed class QualityRewardTests
         // 第二次 reward 0.0: Alpha=1.95*0.95+0=1.8525, Beta=0.95*0.95+1=1.9025
         Assert.Equal(1.8525, stats.Alpha, precision: 4);
         Assert.Equal(1.9025, stats.Beta, precision: 4);
+    }
+
+    [Fact]
+    public void HardFailure_WithClassificationContext_UpdatesBandit()
+    {
+        var options = new RouterOptions();
+        options.Routing.EnableContextualBandit = true;
+        var bandit = new ContextualBanditState();
+        var recorder = CreateRecorder(new ThompsonStateStore(), options, bandit);
+
+        recorder.RecordThompsonOutcome("failing-model", elapsedMs: null, new RouterDecision
+        {
+            Candidates = Array.Empty<ModelEndpointOptions>(),
+            Reason = "test",
+            ClassificationSignal = "code-complex",
+            ClassificationTargetTier = ModelTier.Strong,
+            EstimatedInputTokens = 4095,
+            RequestIsStreaming = true,
+            RequestMessageCount = 3
+        });
+
+        Assert.Equal(1, bandit.GetOrAdd("failing-model").N);
+        var feature = ContextualBanditFeatureBuilder.Build(
+            "code-complex", ModelTier.Strong, 4095, isStreaming: true, messageCount: 3);
+        Assert.Equal(0.0, bandit.Predict("failing-model", feature, alpha: 0.0), precision: 8);
     }
 }

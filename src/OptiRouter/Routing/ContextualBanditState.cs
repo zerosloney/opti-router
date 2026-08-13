@@ -49,10 +49,10 @@ public sealed class ContextualBanditState
     /// <summary>
     /// 构造上下文老虎机状态。
     /// </summary>
-    /// <param name="dim">上下文特征维度（默认 11 = 7 信号 + 3 tier + 1 bias）。</param>
+    /// <param name="dim">上下文特征维度。默认使用 <see cref="ContextualBanditFeatureBuilder.Dimension"/>。</param>
     /// <param name="persistence">持久化接口；null（默认）时不持久化。</param>
     /// <param name="logger">日志记录器（持久化失败时告警）；null（默认）时静默。</param>
-    public ContextualBanditState(int dim = 11, IBanditStateStore? persistence = null, ILogger<ContextualBanditState>? logger = null)
+    public ContextualBanditState(int dim = ContextualBanditFeatureBuilder.Dimension, IBanditStateStore? persistence = null, ILogger<ContextualBanditState>? logger = null)
     {
         _dim = dim;
         _arms = new ConcurrentDictionary<string, ArmState>(StringComparer.OrdinalIgnoreCase);
@@ -63,7 +63,15 @@ public sealed class ContextualBanditState
         {
             foreach (var (model, armState) in _persistence.LoadAll())
             {
-                if (armState.Dim != dim) continue;
+                if (armState.Dim != dim)
+                {
+                    _logger?.LogWarning(
+                        "Skipping persisted bandit state for {Model}: feature dimension {StoredDim} != current {CurrentDim}; arm will relearn",
+                        model,
+                        armState.Dim,
+                        dim);
+                    continue;
+                }
                 _arms[model] = new ArmState(dim)
                 {
                     A = armState.A,
@@ -129,12 +137,14 @@ public sealed class ContextualBanditState
         int nSnapshot;
         lock (arm.Lock)
         {
-            // 历史衰减：A *= discount, b *= discount（旧样本影响力随时间减弱）。
+            // 折扣岭回归：A <- γA + xxᵀ + (1-γ)I。
+            // 恢复被折扣掉的单位阵先验，避免长期未触发的特征对角线退化到 0、UCB 不确定性爆炸。
             for (int i = 0; i < _dim; i++)
             {
                 arm.B[i] *= discount;
                 for (int j = 0; j < _dim; j++)
                     arm.A[i, j] *= discount;
+                arm.A[i, i] += 1.0 - discount;
             }
 
             // A += x·xᵀ
@@ -193,10 +203,8 @@ public sealed class ContextualBanditState
     {
         int n = b.Length;
         // 增广矩阵 [A | b] 拷贝（不修改原 A）。
-        // ridge floor：Update 每步对整个 A 做 *= discount，未触发的 one-hot 特征列对角元按 discount^k
-        // 衰减（discount=0.95 约 538 步、0.5 约 40 步跌破 1e-12）。原实现一旦单列奇异就返回全零，
-        // 使整组 Predict（θ 与 A⁻¹x）作废，bandit 静默退化为 no-op。加未衰减岭项保证非奇异。
-        const double ridge = 1e-6;
+        // 数值抖动仅防持久化旧数据或浮点误差导致的近奇异；单位阵先验由 Update 保持。
+        const double ridge = 1e-9;
         var m = new double[n, n + 1];
         for (int i = 0; i < n; i++)
         {

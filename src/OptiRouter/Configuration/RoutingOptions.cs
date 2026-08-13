@@ -71,6 +71,13 @@ public sealed class RoutingOptions
     public int FailoverHalfOpenRequiredSuccesses { get; set; } = 1;
 
     /// <summary>
+    /// 全局 Failover 请求超时时间（秒）。0 表示不限制（退回单模型 TimeoutSeconds 独立计时）。
+    /// 开启后，单次请求在各候选模型间重试与降级尝试的累计耗时上限；超过此时间终止 Failover 并抛出异常。
+    /// 默认 0。
+    /// </summary>
+    public int FailoverGlobalTimeoutSeconds { get; set; } = 0;
+
+    /// <summary>
     /// 流式响应（SSE）的最大允许累积字节数（保护性硬限制，防止 OOM/恶意无限流输出）。
     /// 默认 20MB。
     /// </summary>
@@ -91,6 +98,17 @@ public sealed class RoutingOptions
     /// 是否启用向量空间语义路由器。
     /// </summary>
     public bool EnableSemanticRouter { get; set; } = true;
+
+    /// <summary>
+    /// 匹配模式："Hybrid"（TF-IDF 高置信短路 + 第二阶段）| "TfIdf" | "Dense"。
+    /// 内置 Dense 是稳定词法特征哈希，不是训练 embedding；仅注入自定义引擎时才具备对应语义能力。
+    /// </summary>
+    public string SemanticRouterMode { get; set; } = "Hybrid";
+
+    /// <summary>
+    /// Hybrid 模式下 TF-IDF 高置信短路阈值。达到阈值直接返回，否则交给第二阶段判定。默认 0.45。
+    /// </summary>
+    public double HybridHighConfidenceThreshold { get; set; } = 0.45;
 
     /// <summary>
     /// 向量余弦相似度匹配阈值。取值范围 [0.0, 1.0]。默认 0.25。

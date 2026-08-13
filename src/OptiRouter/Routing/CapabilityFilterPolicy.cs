@@ -22,7 +22,7 @@ namespace OptiRouter.Routing;
 /// <item>json-mode — <see cref="ChatRequest.ExtensionData"/> 含 response_format.type=="json_object"</item>
 /// </list>
 /// 无能力需求（required 空）时透传，不破坏无能力标注的现有配置。
-/// 过滤后为空时保留原候选 + warning——让上游报错比无候选强，与 <see cref="LongInputPolicy"/> no-fit 语义一致。
+/// 过滤后为空时返回空候选。能力要求是正确性硬约束，不能把请求发送给已知不支持该能力的模型。
 /// </remarks>
 public sealed class CapabilityFilterPolicy : IRouterPolicy
 {
@@ -57,10 +57,9 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
 
         if (filtered.Count == 0)
         {
-            // 无模型满足能力需求：保留原候选 + warning，让上游报能力错。
-            // 比 BudgetGuard 的"返回空"温和——能力过滤是优化，非硬约束（用户可能未标 Tags）。
-            string warning = $"no candidate has {string.Join("/", required)} (tags misconfigured?), keeping original";
-            return previous.Append("capability-filter", warning);
+            string noCandidateReason = $"required {string.Join("/", required)}; no eligible candidate supports all required capabilities";
+            var rejected = previous with { Candidates = Array.Empty<ModelEndpointOptions>() };
+            return rejected.Append("capability-filter", noCandidateReason);
         }
 
         if (filtered.Count == previous.Candidates.Count)

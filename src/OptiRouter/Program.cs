@@ -160,7 +160,7 @@ builder.Services.AddSingleton<ITokenEstimator>(sp =>
     return new TiktokenTokenEstimator(options.Routing.TiktokenEncoding);
 });
 
-builder.Services.AddSingleton<ISemanticVectorEngine, TfIdfSemanticVectorEngine>();
+builder.Services.AddSingleton<ISemanticVectorEngine>(sp => new HybridSemanticVectorEngine());
 
 // Thompson 采样 + Contextual Bandit 状态持久化（共享同一 SQLite 文件）。
 builder.Services.AddSingleton<IThompsonStateStore>(sp =>

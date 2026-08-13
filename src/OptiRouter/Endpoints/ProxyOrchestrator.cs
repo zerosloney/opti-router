@@ -97,6 +97,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         int halfOpenRequiredSuccesses = options.Routing.FailoverHalfOpenRequiredSuccesses;
         bool failoverEnabled = options.Routing.EnableFailover;
 
+        using var globalCts = (failoverEnabled && options.Routing.FailoverGlobalTimeoutSeconds > 0)
+            ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+            : null;
+        if (globalCts is not null)
+        {
+            globalCts.CancelAfter(TimeSpan.FromSeconds(options.Routing.FailoverGlobalTimeoutSeconds));
+        }
+        var effectiveCt = globalCts?.Token ?? ct;
+
         string? lastModelName = null;
         int? lastStatusCode = null;
         string? lastErrorMessage = null;
@@ -117,6 +126,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         while (true)
         {
+            if (globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
+            {
+                throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode ?? 408, lastErrorMessage ?? $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.", $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
+            }
+
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
             int estimatedTokens = decision.EstimatedInputTokens;
             // 本轮路由命中档（首选候选 tier），用于审计追踪路由分档正确性。
@@ -144,7 +158,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 fusionRouterAttempted = true;
                 var fusionResult = await _fusionRouter.ExecuteAsync(
                     request, options, decision, estimatedTokens, routedTier,
-                    sessionId, failedInThisRequest, attemptedModels, ct).ConfigureAwait(false);
+                    sessionId, failedInThisRequest, attemptedModels, effectiveCt).ConfigureAwait(false);
 
                 lastModelName = fusionResult.LastModelName;
                 lastStatusCode = fusionResult.LastStatusCode;
@@ -163,7 +177,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             {
                 var fusionResult = await _raceOrchestrator.ExecuteAsync(
                     request, options, decision, estimatedTokens, routedTier,
-                    sessionId, failedInThisRequest, attemptedModels, ct).ConfigureAwait(false);
+                    sessionId, failedInThisRequest, attemptedModels, effectiveCt).ConfigureAwait(false);
 
                 lastModelName = fusionResult.LastModelName;
                 lastStatusCode = fusionResult.LastStatusCode;
@@ -199,7 +213,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 try
                 {
                     var client = _clientProvider.GetClient(candidate);
-                    var response = await client.CompleteRawAsync(request, ct).ConfigureAwait(false);
+                    var response = await client.CompleteRawAsync(request, effectiveCt).ConfigureAwait(false);
                     attemptSw.Stop();
 
                     if (response.Usage is not null)
@@ -223,8 +237,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
                     _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds,
-                        decision.ClassificationSignal, decision.ClassificationTargetTier);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision);
                     outcomeReported = true;
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
@@ -234,7 +247,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (candidate.Tier == ModelTier.Cheap)
                     {
                         var upgraded = await _cascadeHandler.TryUpgradeAsync(
-                             request, response, decision, candidate, estimatedTokens, routedTier, sessionId, failedInThisRequest, ct).ConfigureAwait(false);
+                             request, response, decision, candidate, estimatedTokens, routedTier, sessionId, failedInThisRequest, effectiveCt).ConfigureAwait(false);
                         if (upgraded is not null)
                             return ProcessResponse(upgraded, piiMap);
                     }
@@ -268,7 +281,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastStatusCode = (int)ex.StatusCode;
                     lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(candidate.Name, null);
+                    _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
                         $"upstream-status-{(int)ex.StatusCode}", false, routedTier);
@@ -282,7 +295,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastStatusCode = 503;
                     lastErrorMessage = "network-error";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(candidate.Name, null);
+                    _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
@@ -293,14 +306,22 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
                     lastStatusCode = 408;
-                    lastErrorMessage = "Request timed out inside the proxy.";
-                    // 客户端内部超时，非外部取消，记失败继续。
+                    bool isGlobalTimeout = globalCts is { IsCancellationRequested: true };
+                    lastErrorMessage = isGlobalTimeout
+                        ? $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded."
+                        : "Request timed out inside the proxy.";
+                    // 客户端内部超时/全局 Failover 超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(candidate.Name, null);
+                    _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "timeout", false, routedTier);
-                    _logger.LogWarning("Model {Name} timed out, trying next{Tripped}",
-                        candidate.Name, tripped ? " (circuit tripped)" : "");
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, isGlobalTimeout ? "global-failover-timeout" : "timeout", false, routedTier);
+                    _logger.LogWarning("Model {Name} timed out ({Reason}), trying next{Tripped}",
+                        candidate.Name, isGlobalTimeout ? "global failover timeout" : "timeout", tripped ? " (circuit tripped)" : "");
+
+                    if (isGlobalTimeout)
+                    {
+                        throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
+                    }
                 }
                 finally
                 {
@@ -338,6 +359,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         int halfOpenRequiredSuccesses = options.Routing.FailoverHalfOpenRequiredSuccesses;
         bool failoverEnabled = options.Routing.EnableFailover;
 
+        using var globalCts = (failoverEnabled && options.Routing.FailoverGlobalTimeoutSeconds > 0)
+            ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+            : null;
+        if (globalCts is not null)
+        {
+            globalCts.CancelAfter(TimeSpan.FromSeconds(options.Routing.FailoverGlobalTimeoutSeconds));
+        }
+        var effectiveCt = globalCts?.Token ?? ct;
+
         string? lastModelName = null;
         int? lastStatusCode = null;
         string? lastErrorMessage = null;
@@ -357,6 +387,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             while (true)
             {
+                if (globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
+                {
+                    throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode ?? 408, lastErrorMessage ?? $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.", $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
+                }
+
                 var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
             ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
 
@@ -381,7 +416,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 bool producedAnyChunk = false;
                 await foreach (var line in _fusionRouter.ExecuteStreamAsync(
                     request, options, decision, decision.EstimatedInputTokens, routedTier,
-                    sessionId, failedInThisRequest, attemptedModels, ct).WithCancellation(ct))
+                    sessionId, failedInThisRequest, attemptedModels, effectiveCt).WithCancellation(effectiveCt))
                 {
                     producedAnyChunk = true;
                     yield return RestorePii(line, piiMap);
@@ -424,7 +459,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
                     try
                     {
-                        enumerator = client.StreamRawAsync(request, ct).GetAsyncEnumerator(ct);
+                        enumerator = client.StreamRawAsync(request, effectiveCt).GetAsyncEnumerator(effectiveCt);
                         if (await enumerator.MoveNextAsync().ConfigureAwait(false))
                         {
                             firstLine = enumerator.Current;
@@ -468,7 +503,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         preStreamFailure = ex;
                         lastModelName = candidate.Name;
                         lastStatusCode = 408;
-                        lastErrorMessage = "Request timed out inside the proxy.";
+                        bool isGlobalTimeout = globalCts is { IsCancellationRequested: true };
+                        lastErrorMessage = isGlobalTimeout
+                            ? $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded."
+                            : "Request timed out inside the proxy.";
                     }
                     finally
                     {
@@ -493,19 +531,27 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         else
                         {
                             tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                            _recorder.RecordThompsonOutcome(candidate.Name, null);
+                            _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                         }
                         probeResolved = true;
+                        bool isGlobalTimeout = globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested;
                         string failure = quotaLimited
                             ? "quota-exhausted"
                             : preStreamFailure is ModelClientException modelFailure
                             ? $"upstream-status-{(int)modelFailure.StatusCode}"
+                            : isGlobalTimeout
+                            ? "global-failover-timeout"
                             : preStreamFailure.Message;
                         _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                             attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier,
                             quotaLimited: quotaLimited);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
+
+                        if (isGlobalTimeout)
+                        {
+                            throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
+                        }
                         continue;
                     }
 
@@ -568,7 +614,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (!isEstimated || cost > 0m)
                         _recorder.RecordCost(cost, sessionId);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision);
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
                     probeResolved = true;
@@ -591,7 +637,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             // 中途失败计入断路器统计（与非流式失败同等对待）。
                             attemptSw.Stop();
                             bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                            _recorder.RecordThompsonOutcome(candidate.Name, null);
+                            _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                             _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                                 attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier);
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",

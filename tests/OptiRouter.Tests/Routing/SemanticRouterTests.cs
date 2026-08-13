@@ -53,6 +53,7 @@ public class SemanticRouterTests
         // Arrange
         var policy = new SemanticRouterPolicy();
         var options = new RouterOptions();
+        options.Routing.SemanticRouterMode = "TfIdf";
         options.Routing.EnableSemanticRouter = true;
         options.Routing.SemanticSimilarityThreshold = 0.25;
         options.Routing.SemanticRoutes = new List<SemanticRouteOptions>
@@ -138,6 +139,7 @@ public class SemanticRouterTests
         // Arrange
         var policy = new SemanticRouterPolicy();
         var options = new RouterOptions();
+        options.Routing.SemanticRouterMode = "TfIdf";
         options.Routing.EnableSemanticRouter = true;
         options.Routing.SemanticSimilarityThreshold = 0.25;
         options.Routing.SemanticRoutes = new List<SemanticRouteOptions>
@@ -246,7 +248,7 @@ public class SemanticRouterTests
     }
 
     [Fact]
-    public void Apply_FiltersWithinPreviousCandidates_PreservesUpstreamFilters()
+    public void Apply_UsesEligiblePoolAndNeverReintroducesFilteredModels()
     {
         var policy = new SemanticRouterPolicy();
         var options = new RouterOptions();
@@ -281,20 +283,59 @@ public class SemanticRouterTests
         var context = new RouterContext
         {
             Request = request,
-            AllModels = allModels,
+            // RouterEngine guarantees AllModels is the monotonic eligibility pool.
+            AllModels = previousCandidates,
             Options = options
         };
 
         var decision = policy.Apply(context, new RouterDecision { Candidates = previousCandidates, Reason = "capability-filtered" });
 
-        // 由于 previousCandidates 中没有 Cheap 模型，SemanticRouterPolicy 尝试在 previousCandidates 中按 Cheap 筛选结果为 0，
-        // 从而不覆盖 previousCandidates（不带回无 vision 标签的 model-cheap-no-vision）。
+        // 资格池中没有 Cheap 模型，语义命中不能带回被能力过滤排除的模型。
         Assert.Single(decision.Candidates);
         Assert.Equal("model-strong-vision", decision.Candidates[0].Name);
         // 锁定 fallback 路径：匹配命中 casual-chat 但 zero tier 候选 → unchanged，
         // 区别于真正无匹配（no-match）。防止误判为「未触发策略」的假绿。
         Assert.Contains("but 0 tier candidates, unchanged", decision.Reason);
         Assert.DoesNotContain("no-match", decision.Reason);
+    }
+
+    [Fact]
+    public void Apply_CanOverrideRuleTierWithinEligiblePool_AndUpdatesLearningSignal()
+    {
+        var options = new RouterOptions();
+        options.Routing.EnableSemanticRouter = true;
+        options.Routing.SemanticRouterMode = "TfIdf";
+        options.Routing.SemanticSimilarityThreshold = 0.2;
+        options.Routing.SemanticRoutes = new List<SemanticRouteOptions>
+        {
+            new()
+            {
+                Name = "deep-analysis",
+                TargetTier = ModelTier.Strong,
+                Phrases = new List<string> { "analyze distributed system failure deeply" }
+            }
+        };
+
+        var allModels = GetMockModels();
+        var request = new ChatRequest
+        {
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "analyze distributed system failure deeply") }
+        };
+        var context = new RouterContext { Request = request, AllModels = allModels, Options = options };
+        var ruleDecision = new RouterDecision
+        {
+            Candidates = allModels.Where(m => m.Tier == ModelTier.Medium).ToList(),
+            Reason = "rule-classifier",
+            ClassificationSignal = "default",
+            ClassificationTargetTier = ModelTier.Medium
+        };
+
+        var result = new SemanticRouterPolicy(new TfIdfSemanticVectorEngine()).Apply(context, ruleDecision);
+
+        Assert.Single(result.Candidates);
+        Assert.Equal("model-strong", result.Primary.Name);
+        Assert.Equal("semantic:deep-analysis", result.ClassificationSignal);
+        Assert.Equal(ModelTier.Strong, result.ClassificationTargetTier);
     }
 
     [Fact]
