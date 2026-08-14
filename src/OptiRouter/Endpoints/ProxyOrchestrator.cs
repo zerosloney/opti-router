@@ -26,6 +26,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly CascadeUpgradeHandler _cascadeHandler;
     private readonly FusionRouter _fusionRouter;
     private readonly RaceOrchestrator _raceOrchestrator;
+    private readonly IResponseCache _responseCache;
     private bool _disposed;
 
     /// <summary>
@@ -40,6 +41,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// <param name="cascadeHandler">Cheap→Strong 级联自校验处理器。</param>
     /// <param name="fusionRouter">panel→analyst→outer 融合路由器。</param>
     /// <param name="raceOrchestrator">并行首试（Fusion-lite）编排器。</param>
+    /// <param name="responseCache">响应缓存（仅非流式幂等请求命中即短路返回，不经路由/上游）。</param>
     /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
@@ -50,6 +52,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         CascadeUpgradeHandler cascadeHandler,
         FusionRouter fusionRouter,
         RaceOrchestrator raceOrchestrator,
+        IResponseCache responseCache,
         ILogger<ProxyOrchestrator> logger)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
@@ -60,6 +63,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(cascadeHandler);
         ArgumentNullException.ThrowIfNull(fusionRouter);
         ArgumentNullException.ThrowIfNull(raceOrchestrator);
+        ArgumentNullException.ThrowIfNull(responseCache);
         ArgumentNullException.ThrowIfNull(logger);
 
         _clientProvider = clientProvider;
@@ -70,6 +74,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _cascadeHandler = cascadeHandler;
         _fusionRouter = fusionRouter;
         _raceOrchestrator = raceOrchestrator;
+        _responseCache = responseCache;
         _logger = logger;
     }
 
@@ -111,6 +116,19 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string? lastErrorMessage = null;
         bool fusionRouterAttempted = false;
         bool fusionModeAttempted = false;
+
+        // 响应缓存（仅非流式）：在 PII 脱敏**前**用原始请求算键，避免不同 PII 脱敏后占位符相同串扰。
+        // 命中即短路返回（不经路由/上游），不记上游成本，仅记一条 cache-hit 审计。
+        string? cacheKey = null;
+        if (options.Routing.EnableResponseCache && !request.Stream)
+        {
+            cacheKey = ResponseCacheKey.Compute(request);
+            if (_responseCache.TryGet(cacheKey, out var cached) && cached is not null)
+            {
+                _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap);
+                return cached;
+            }
+        }
 
         PiiMap? piiMap = null;
         if (options.Routing.EnablePiiAnonymization)
@@ -264,7 +282,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             ? cost.ToString("F6")
                             : "unknown");
 
-                    return ProcessResponse(response, piiMap);
+                    var finalResponse = ProcessResponse(response, piiMap);
+                    if (cacheKey is not null)
+                        _responseCache.Set(cacheKey, finalResponse, TimeSpan.FromSeconds(options.Routing.ResponseCacheTtlSeconds));
+                    return finalResponse;
                 }
                 catch (ModelClientException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
                 {

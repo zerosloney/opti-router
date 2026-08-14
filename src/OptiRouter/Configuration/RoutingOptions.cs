@@ -91,6 +91,22 @@ public sealed class RoutingOptions
     public int StreamFirstTokenTimeoutMs { get; set; } = 0;
 
     /// <summary>
+    /// 是否启用响应缓存（仅非流式）。开启后，按规范化请求 SHA256 精确缓存上游响应，命中即短路返回（不经路由/上游）。
+    /// 适合分类/提取/翻译等幂等请求。缓存键在 PII 脱敏前计算，不会因占位符相同而串扰。默认 false。
+    /// </summary>
+    public bool EnableResponseCache { get; set; } = false;
+
+    /// <summary>
+    /// 响应缓存单条 TTL（秒）。默认 3600。启用 <see cref="EnableResponseCache"/> 时必须 &gt;0。
+    /// </summary>
+    public int ResponseCacheTtlSeconds { get; set; } = 3600;
+
+    /// <summary>
+    /// 响应缓存最大条目数（软上限，防 OOM）。默认 1000。超上限后新条目不再写入。
+    /// </summary>
+    public int ResponseCacheMaxEntries { get; set; } = 1000;
+
+    /// <summary>
     /// 是否启用后台主动健康探活（定时对所有启用模型发探测请求，结果上报断路器）。
     /// 默认 true。关闭则熔断恢复纯靠真实流量半开探测。
     /// </summary>

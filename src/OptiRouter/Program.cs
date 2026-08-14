@@ -219,6 +219,11 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
 // 管理端登录失败限流（单实例内存，按 IP 计数）。
 builder.Services.AddSingleton<LoginRateLimiter>();
 
+builder.Services.AddSingleton<IResponseCache>(sp => new MemoryResponseCache(
+    sp.GetRequiredService<IMemoryCache>(),
+    sp.GetRequiredService<IOptions<RouterOptions>>().Value.Routing.ResponseCacheMaxEntries,
+    useSize: true)); // AddMemoryCache 设了 SizeLimit，entry 须申报 Size
+
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
