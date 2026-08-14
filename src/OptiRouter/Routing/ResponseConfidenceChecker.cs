@@ -14,54 +14,70 @@ public static class ResponseConfidenceChecker
         "请复核上面助手给出的答案是否正确且完整。只回答一个词：CONFIDENT（确信正确）或 UNCERTAIN（不确定或有错）。不要解释。";
 
     /// <summary>
-    /// 从 RawChatResponse.Body 解析 choices[0].message.content 文本。
-    /// 容错：JSON 损坏/无 choices/content 为多模态数组时返回空串，不抛异常。
+    /// 从 RawChatResponse.Body 一次解析 choices[0] 的 (content, finishReason)。
+    /// 容错：JSON 损坏/缺字段时对应分量返回空串，不抛异常。供质量信号提取与置信文本抽取共享单次解析。
     /// </summary>
-    public static string ExtractAssistantText(RawChatResponse response)
+    public static (string Content, string FinishReason) ExtractAssistantContentAndFinishReason(RawChatResponse response)
     {
         ArgumentNullException.ThrowIfNull(response);
-        if (string.IsNullOrWhiteSpace(response.Body)) return string.Empty;
+        if (string.IsNullOrWhiteSpace(response.Body)) return (string.Empty, string.Empty);
 
         try
         {
             using var doc = JsonDocument.Parse(response.Body);
             if (!doc.RootElement.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-                return string.Empty;
+                return (string.Empty, string.Empty);
 
             var firstChoice = choices[0];
+
+            // finish_reason 独立于 message，可能存在于一者缺失的场景，分别解析。
+            string finishReason = string.Empty;
+            if (firstChoice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
+                finishReason = fr.GetString() ?? string.Empty;
+
             if (!firstChoice.TryGetProperty("message", out var message))
-                return string.Empty;
+                return (string.Empty, finishReason);
             if (!message.TryGetProperty("content", out var content))
-                return string.Empty;
+                return (string.Empty, finishReason);
 
             // content 可能是 string 或多模态数组。复用 ChatMessage.GetText 的语义：string 直取，数组拼 text 段。
-            if (content.ValueKind == JsonValueKind.String)
-                return content.GetString() ?? string.Empty;
-
-            if (content.ValueKind == JsonValueKind.Array)
+            string text = content.ValueKind switch
             {
-                var sb = new System.Text.StringBuilder();
-                foreach (var item in content.EnumerateArray())
-                {
-                    if (item.ValueKind == JsonValueKind.Object
-                        && item.TryGetProperty("type", out var typeEl)
-                        && typeEl.ValueKind == JsonValueKind.String
-                        && typeEl.ValueEquals("text")
-                        && item.TryGetProperty("text", out var textEl)
-                        && textEl.ValueKind == JsonValueKind.String)
-                    {
-                        sb.Append(textEl.GetString());
-                    }
-                }
-                return sb.ToString();
-            }
-
-            return string.Empty;
+                JsonValueKind.String => content.GetString() ?? string.Empty,
+                JsonValueKind.Array => ConcatTextArray(content),
+                _ => string.Empty
+            };
+            return (text, finishReason);
         }
         catch (JsonException)
         {
-            return string.Empty;
+            return (string.Empty, string.Empty);
         }
+    }
+
+    /// <summary>
+    /// 从 RawChatResponse.Body 解析 choices[0].message.content 文本。
+    /// 容错：JSON 损坏/无 choices/content 为多模态数组时返回空串，不抛异常。
+    /// </summary>
+    public static string ExtractAssistantText(RawChatResponse response)
+        => ExtractAssistantContentAndFinishReason(response).Content;
+
+    private static string ConcatTextArray(JsonElement content)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var item in content.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Object
+                && item.TryGetProperty("type", out var typeEl)
+                && typeEl.ValueKind == JsonValueKind.String
+                && typeEl.ValueEquals("text")
+                && item.TryGetProperty("text", out var textEl)
+                && textEl.ValueKind == JsonValueKind.String)
+            {
+                sb.Append(textEl.GetString());
+            }
+        }
+        return sb.ToString();
     }
 
     /// <summary>

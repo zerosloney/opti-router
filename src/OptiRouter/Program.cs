@@ -271,6 +271,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
+// regenerate 负反馈跟踪器：进程内状态，供 ProxyOrchestrator 在同键请求重发时注入惩罚 reward。
+builder.Services.AddSingleton<RegenerateFeedbackTracker>();
 builder.Services.AddSingleton<ProxyOrchestrator>();
 
 // Prometheus 指标集合（单例，ProxyOrchestrator 经 DI 注入）。

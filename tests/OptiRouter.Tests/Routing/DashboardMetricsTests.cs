@@ -109,4 +109,35 @@ public class DashboardMetricsTests
         Assert.True(model.GetProperty("avgLatencyMs").ValueKind == JsonValueKind.Null);
         Assert.Equal(0, model.GetProperty("latencySamples").GetInt32());
     }
+
+    [Fact]
+    public async Task Learning_Returns200_WithModelAlphaBetaSamples()
+    {
+        using var factory = new MetricsFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MetricsFactory.Key);
+
+        // 预热 ThompsonStateStore，确保 /api/dashboard/learning 返回非空数据。
+        var tsStore = factory.Services.GetRequiredService<ThompsonStateStore>();
+        tsStore.RecordOutcome("model-a", true, discountFactor: 1.0);
+        tsStore.RecordOutcome("model-b", false, discountFactor: 1.0);
+
+        var resp = await client.GetAsync("/api/dashboard/learning");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var items = doc.RootElement.EnumerateArray().ToList();
+        Assert.NotEmpty(items);
+
+        var a = items.First(i => i.GetProperty("model").GetString() == "model-a");
+        Assert.Equal(2.0, a.GetProperty("alpha").GetDouble(), precision: 4);
+        Assert.Equal(1.0, a.GetProperty("beta").GetDouble(), precision: 4);
+        Assert.Equal(1, a.GetProperty("samples").GetInt64());
+        Assert.False(a.GetProperty("lastUpdateUtc").ValueKind == JsonValueKind.Undefined);
+
+        var b = items.First(i => i.GetProperty("model").GetString() == "model-b");
+        Assert.Equal(1.0, b.GetProperty("alpha").GetDouble(), precision: 4);
+        Assert.Equal(2.0, b.GetProperty("beta").GetDouble(), precision: 4);
+        Assert.Equal(1, b.GetProperty("samples").GetInt64());
+    }
 }

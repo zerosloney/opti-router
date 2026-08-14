@@ -44,6 +44,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     private readonly ThompsonStateStore _tsStore;
     private readonly ContextualBanditState? _banditStore;
     private readonly Func<double, double, double> _sampleBeta;
+    private readonly Func<double> _sampleUniform;
 
     /// <summary>
     /// 构造延迟感知策略。
@@ -58,16 +59,22 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     /// 上下文老虎机状态（LinUCB）。null（默认）= 不启用上下文 bandit（向后兼容）——
     /// 仅当 <see cref="RoutingOptions.EnableContextualBandit"/> 为 true 且传入非 null 时生效。
     /// </param>
+    /// <param name="sampleUniform">
+    /// 均匀 [0,1) 采样委托，用于 ε 探索保底，默认 <see cref="Random.Shared"/>。
+    /// 仅供测试注入确定性采样；生产路径留空。
+    /// </param>
     public LatencyAwarePolicy(
         ILatencyStatsProvider statsProvider,
         ThompsonStateStore tsStore,
         Func<double, double, double>? sampleBeta = null,
-        ContextualBanditState? banditStore = null)
+        ContextualBanditState? banditStore = null,
+        Func<double>? sampleUniform = null)
     {
         _statsProvider = statsProvider ?? throw new ArgumentNullException(nameof(statsProvider));
         _tsStore = tsStore ?? throw new ArgumentNullException(nameof(tsStore));
         _sampleBeta = sampleBeta ?? ThompsonSampler.SampleBeta;
         _banditStore = banditStore;
+        _sampleUniform = sampleUniform ?? Random.Shared.NextDouble;
     }
 
     /// <inheritdoc />
@@ -98,6 +105,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
 
         var result = new List<ModelEndpointOptions>(previous.Candidates.Count);
         int segmentsReordered = 0;
+        int exploredPromotions = 0;
 
         foreach (var seg in segments)
         {
@@ -108,6 +116,12 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             }
 
             var reordered = ReorderSegment(seg, minSamples, context, previous);
+            var explored = MaybePromoteTailForExploration(reordered, context.Options.Routing.ExplorationEpsilon);
+            if (!ReferenceEquals(explored, reordered))
+            {
+                reordered = explored;
+                exploredPromotions++;
+            }
             if (!SameOrder(seg, reordered))
                 segmentsReordered++;
             result.AddRange(reordered);
@@ -121,11 +135,37 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
         string extraTag = context.Options.Routing.EnableContextualBandit && _banditStore is not null
             ? " [Contextual Bandit]"
             : context.Options.Routing.EnableThompsonSampling ? " [Thompson Sampling]" : "";
+        string exploreTag = exploredPromotions > 0 ? $", ε-explore promoted {exploredPromotions}" : "";
         return previous with
         {
             Candidates = result,
-            Reason = $"{previous.Reason}; latency-aware: reordered {segmentsReordered} tier segment(s){extraTag}"
+            Reason = $"{previous.Reason}; latency-aware: reordered {segmentsReordered} tier segment(s){extraTag}{exploreTag}"
         };
+    }
+
+    /// <summary>
+    /// ε 探索保底：概率 ε 把段内一个随机非首位模型提到段首。
+    /// 修低流量下的"尾部锁死"反馈环——重排决定尝试顺序后，链尾模型只在异常场景被尝试，
+    /// 样本全部来自异常场景，学习分长期偏低。ε>0 保证尾部模型持续获得真实流量样本。
+    /// 不触发探索时原样返回同一 list 实例（引用相等），调用方据此区分。
+    /// </summary>
+    private List<ModelEndpointOptions> MaybePromoteTailForExploration(List<ModelEndpointOptions> segment, double epsilon)
+    {
+        if (epsilon <= 0 || epsilon > 1 || segment.Count < 2)
+            return segment;
+        if (_sampleUniform() >= epsilon)
+            return segment;
+
+        int index = 1 + (int)(_sampleUniform() * (segment.Count - 1)); // 均匀取 [1, count-1]
+        index = Math.Min(index, segment.Count - 1);
+
+        var promoted = segment[index];
+        var result = new List<ModelEndpointOptions>(segment.Count) { promoted };
+        for (int i = 0; i < segment.Count; i++)
+        {
+            if (i != index) result.Add(segment[i]);
+        }
+        return result;
     }
 
     /// <summary>同 tier 段内：根据配置选择上下文 bandit / Thompson / 延迟感知重排。</summary>

@@ -25,6 +25,17 @@ public sealed class ThompsonStateStore
         public double Beta { get; set; } = 1.0;
 
         /// <summary>
+        /// 累计更新次数（不衰减）。α+β 在折扣衰减下饱和于 1/(1-factor)，不能反映真实样本量；
+        /// 此计数用于暴露"尾部模型样本饥饿/锁死"，不持久化（重启归零，仅进程内观测）。
+        /// </summary>
+        public long N { get; set; } = 0;
+
+        /// <summary>
+        /// 最近一次 reward 更新时间（UTC）。长期不更新 = 模型拿不到流量（被锁死或已下线）。
+        /// </summary>
+        public DateTimeOffset LastUpdateUtc { get; set; } = DateTimeOffset.MinValue;
+
+        /// <summary>
         /// 独占锁，保证多线程更新的原子性和一致性。
         /// </summary>
         public readonly object Lock = new();
@@ -33,16 +44,19 @@ public sealed class ThompsonStateStore
     private readonly ConcurrentDictionary<string, ModelStats> _states = new(StringComparer.OrdinalIgnoreCase);
     private readonly IThompsonStateStore? _persistence;
     private readonly ILogger<ThompsonStateStore>? _logger;
+    private readonly TimeProvider _timeProvider;
 
     /// <summary>
     /// 构造内存 Thompson 状态存储。可选传入持久化层，使 α/β 跨进程重启保留。
     /// </summary>
     /// <param name="persistence">持久化接口；null（默认）时不持久化。</param>
     /// <param name="logger">日志记录器（持久化失败时告警）；null（默认）时静默。</param>
-    public ThompsonStateStore(IThompsonStateStore? persistence = null, ILogger<ThompsonStateStore>? logger = null)
+    /// <param name="timeProvider">时钟（默认 <see cref="TimeProvider.System"/>）；仅供测试注入确定性时间。</param>
+    public ThompsonStateStore(IThompsonStateStore? persistence = null, ILogger<ThompsonStateStore>? logger = null, TimeProvider? timeProvider = null)
     {
         _persistence = persistence;
         _logger = logger;
+        _timeProvider = timeProvider ?? TimeProvider.System;
 
         if (_persistence is not null)
         {
@@ -68,6 +82,35 @@ public sealed class ThompsonStateStore
     /// <returns>是否实际移除（不存在返回 false）。</returns>
     public bool Remove(string modelName)
         => !string.IsNullOrEmpty(modelName) && _states.TryRemove(modelName, out _);
+
+    /// <summary>单模型学习状态快照，供 dashboard 暴露样本量/最后更新时间。</summary>
+    public sealed record ModelLearningSnapshot(
+        string Model,
+        double Alpha,
+        double Beta,
+        long N,
+        DateTimeOffset LastUpdateUtc)
+    {
+        /// <summary>Beta 后验均值 α/(α+β)，近似当前期望 reward。</summary>
+        public double Mean => Alpha / (Alpha + Beta);
+    }
+
+    /// <summary>
+    /// 全量学习状态快照（按样本数降序）。用于观测低流量下的"尾部锁死"：
+    /// N 长期为 0 的启用中模型 = 拿不到流量样本，学习重排对它永远无据可依。
+    /// </summary>
+    public IReadOnlyList<ModelLearningSnapshot> GetSnapshot()
+    {
+        var result = new List<ModelLearningSnapshot>(_states.Count);
+        foreach (var (model, stats) in _states)
+        {
+            lock (stats.Lock)
+            {
+                result.Add(new ModelLearningSnapshot(model, stats.Alpha, stats.Beta, stats.N, stats.LastUpdateUtc));
+            }
+        }
+        return result.OrderByDescending(s => s.N).ToList();
+    }
 
     /// <summary>
     /// 仅保留指定名称集合对应的模型参数，移除其余条目。
@@ -118,6 +161,8 @@ public sealed class ThompsonStateStore
         {
             stats.Alpha = stats.Alpha * factor + r;
             stats.Beta = stats.Beta * factor + (1.0 - r);
+            stats.N++;
+            stats.LastUpdateUtc = _timeProvider.GetUtcNow();
         }
 
         if (_persistence is null) return;

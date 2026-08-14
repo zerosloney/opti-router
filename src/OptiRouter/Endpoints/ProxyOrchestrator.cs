@@ -27,6 +27,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly FusionRouter _fusionRouter;
     private readonly RaceOrchestrator _raceOrchestrator;
     private readonly IResponseCache _responseCache;
+    private readonly RegenerateFeedbackTracker _regenerateTracker;
     private bool _disposed;
 
     /// <summary>
@@ -42,6 +43,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// <param name="fusionRouter">panel→analyst→outer 融合路由器。</param>
     /// <param name="raceOrchestrator">并行首试（Fusion-lite）编排器。</param>
     /// <param name="responseCache">响应缓存（仅非流式幂等请求命中即短路返回，不经路由/上游）。</param>
+    /// <param name="regenerateTracker">regenerate 负反馈跟踪器（同键请求重发时惩罚上次成功模型）。</param>
     /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
@@ -53,6 +55,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         FusionRouter fusionRouter,
         RaceOrchestrator raceOrchestrator,
         IResponseCache responseCache,
+        RegenerateFeedbackTracker regenerateTracker,
         ILogger<ProxyOrchestrator> logger)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
@@ -64,6 +67,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ArgumentNullException.ThrowIfNull(fusionRouter);
         ArgumentNullException.ThrowIfNull(raceOrchestrator);
         ArgumentNullException.ThrowIfNull(responseCache);
+        ArgumentNullException.ThrowIfNull(regenerateTracker);
         ArgumentNullException.ThrowIfNull(logger);
 
         _clientProvider = clientProvider;
@@ -75,6 +79,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _fusionRouter = fusionRouter;
         _raceOrchestrator = raceOrchestrator;
         _responseCache = responseCache;
+        _regenerateTracker = regenerateTracker;
         _logger = logger;
     }
 
@@ -119,16 +124,35 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         // 响应缓存（仅非流式）：在 PII 脱敏**前**用原始请求算键，避免不同 PII 脱敏后占位符相同串扰。
         // 命中即短路返回（不经路由/上游），不记上游成本，仅记一条 cache-hit 审计。
-        string? cacheKey = null;
-        if (options.Routing.EnableResponseCache && !request.Stream)
+        string? cacheKey = options.Routing.EnableResponseCache && !request.Stream
+            ? ResponseCacheKey.Compute(request)
+            : null;
+
+        // regenerate 负反馈键：与响应缓存同源（规范化请求 SHA256），必须在 PII 脱敏前基于原始请求计算
+        // （脱敏占位符相同的不同请求会串扰键）。
+        string? feedbackKey = options.Routing.EnableRegenerateFeedback
+            ? cacheKey ?? ResponseCacheKey.Compute(request)
+            : null;
+
+        if (cacheKey is not null && _responseCache.TryGet(cacheKey, out var cached) && cached is not null)
         {
-            cacheKey = ResponseCacheKey.Compute(request);
-            if (_responseCache.TryGet(cacheKey, out var cached) && cached is not null)
+            // 缓存命中也要消费 regenerate 信号：用户对同一请求重发 = 对上次答案不满意。
+            // 若此处短路返回而不消费，regenerate 请求会拿到相同缓存答案且上次模型不受惩罚，信号被缓存完全屏蔽。
+            if (feedbackKey is not null
+                && _regenerateTracker.TryConsumeRegenerate(
+                    feedbackKey, TimeSpan.FromSeconds(options.Routing.RegenerateFeedbackWindowSeconds), out string previousModel))
             {
-                _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap);
-                return cached;
+                // 缓存命中路径无 RouterDecision（未路由），只更新 Thompson 状态，bandit 无特征不更新。
+                _recorder.RecordQualityOutcome(previousModel, options.Routing.RegeneratePenaltyReward);
+                _logger.LogInformation(
+                    "Regenerate feedback (cache hit): penalizing previous model {Model} with reward {Reward:0.00}",
+                    previousModel, options.Routing.RegeneratePenaltyReward);
             }
+            _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap);
+            return cached;
         }
+
+        bool regeneratePenaltyApplied = false;
 
         PiiMap? piiMap = null;
         if (options.Routing.EnablePiiAnonymization)
@@ -164,6 +188,22 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (decision.BudgetExhausted)
                     throw new BudgetExhaustedException(decision.Reason);
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
+            }
+
+            // regenerate 负反馈：同键请求在窗口内重发且上次为成功 → 惩罚上次模型（每请求只消费一次）。
+            // 用当前 decision 构造学习特征——同键意味着请求相同，特征与上次决策一致。
+            if (!regeneratePenaltyApplied)
+            {
+                regeneratePenaltyApplied = true;
+                if (feedbackKey is not null
+                    && _regenerateTracker.TryConsumeRegenerate(
+                        feedbackKey, TimeSpan.FromSeconds(options.Routing.RegenerateFeedbackWindowSeconds), out string previousModel))
+                {
+                    _recorder.RecordQualityOutcome(previousModel, options.Routing.RegeneratePenaltyReward, decision);
+                    _logger.LogInformation(
+                        "Regenerate feedback: penalizing previous model {Model} with reward {Reward:0.00}",
+                        previousModel, options.Routing.RegeneratePenaltyReward);
+                }
             }
 
             // 融合路由（quality router）优先于 Fusion-lite。单次请求最多尝试一次，失败后可继续
@@ -262,10 +302,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
                     _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost);
+                    // 质量因子：从非流式响应检测低质量信号（截断/空答/JSON 契约违约），乘性折减延迟 reward。
+                    // 流式路径未累积 content，不接入（qualityFactor 默认 1.0）。
+                    double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, options.Routing.QualityPenaltyFactor, request);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
+                        actualTier: candidate.Tier, qualityFactor: qualityFactor);
                     outcomeReported = true;
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
 
                     // 级联自校验：Cheap 首选 + 启用 + 采样命中 → 自校验，低置信升级 Strong。
                     // 仅非流式（流式首 chunk 已透传无法切模型）。失败不影响主流程，返回原 Cheap 答案。
@@ -299,6 +344,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m,
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "quota-exhausted", false,
                         routedTier, quotaLimited: true);
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     _logger.LogWarning("Model {Name} quota exhausted (status {Status}), trying next candidate",
                         candidate.Name, 429);
                 }
@@ -310,6 +356,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
                         $"upstream-status-{(int)ex.StatusCode}", false, routedTier);
@@ -324,6 +371,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastErrorMessage = "network-error";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
@@ -341,6 +389,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 客户端内部超时/全局 Failover 超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                     _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, isGlobalTimeout ? "global-failover-timeout" : "timeout", false, routedTier);
                     _logger.LogWarning("Model {Name} timed out ({Reason}), trying next{Tripped}",
@@ -405,6 +454,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         // PII 脱敏（与非流式 SendAsync 对称）：流式路径同样必须在上游发送前替换敏感数据，
         // 并在每个 yield 行上反向还原，否则原始 PII 直达上游、占位符泄露给客户端。
+        // regenerate 负反馈键：必须在脱敏前基于原始请求计算（脱敏占位符相同的不同请求会串扰键）。
+        string? feedbackKey = options.Routing.EnableRegenerateFeedback
+            ? ResponseCacheKey.Compute(request)
+            : null;
+        bool regeneratePenaltyApplied = false;
+
         PiiMap? piiMap = null;
         if (options.Routing.EnablePiiAnonymization)
         {
@@ -432,6 +487,21 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (decision.BudgetExhausted)
                     throw new BudgetExhaustedException(decision.Reason);
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
+            }
+
+            // regenerate 负反馈（与非流式对称）：同键请求窗口内重发且上次成功 → 惩罚上次模型。
+            if (!regeneratePenaltyApplied)
+            {
+                regeneratePenaltyApplied = true;
+                if (feedbackKey is not null
+                    && _regenerateTracker.TryConsumeRegenerate(
+                        feedbackKey, TimeSpan.FromSeconds(options.Routing.RegenerateFeedbackWindowSeconds), out string previousModel))
+                {
+                    _recorder.RecordQualityOutcome(previousModel, options.Routing.RegeneratePenaltyReward, decision);
+                    _logger.LogInformation(
+                        "Regenerate feedback: penalizing previous model {Model} with reward {Reward:0.00}",
+                        previousModel, options.Routing.RegeneratePenaltyReward);
+                }
             }
 
             // 融合路由流式支持（Progressive Speculative Streaming）
@@ -576,6 +646,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         {
                             tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                             _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                         }
                         probeResolved = true;
                         bool isGlobalTimeout = globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested;
@@ -662,9 +733,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (!isEstimated || cost > 0m)
                         _recorder.RecordCost(cost, sessionId);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost);
+                    // 流式未累积完整 content/finish_reason，质量因子不接入（默认 1.0）；仅传 actualTier 启用 per-tier 目标。
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
+                        actualTier: candidate.Tier);
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
                     probeResolved = true;
                     attemptSw.Stop();
                     _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
@@ -686,6 +760,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             attemptSw.Stop();
                             bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
                             _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                             _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                                 attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier);
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",

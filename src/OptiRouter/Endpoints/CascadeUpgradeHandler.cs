@@ -66,29 +66,52 @@ public sealed class CascadeUpgradeHandler
 
         var verifyRequest = ResponseConfidenceChecker.BuildVerificationRequest(originalRequest, cheapAnswer, verifyPrompt);
 
+        // 他评校验模型：配置 CascadeUpgradeVerifierModel 时按名匹配已启用模型；找不到则告警回退自评（cheapModel）。
+        // 消除"模型自评"的自利偏差——用一个（通常更强的）异模型校验 Cheap 答案，置信度判定更可信。
+        ModelEndpointOptions verifierModel = cheapModel;
+        string? configuredVerifier = routing.CascadeUpgradeVerifierModel;
+        bool peerReview = false;
+        if (!string.IsNullOrWhiteSpace(configuredVerifier))
+        {
+            var resolved = _options.CurrentValue.Models
+                .FirstOrDefault(m => m.Enabled && string.Equals(m.Name, configuredVerifier, StringComparison.OrdinalIgnoreCase));
+            if (resolved is not null)
+            {
+                verifierModel = resolved;
+                peerReview = !string.Equals(resolved.Name, cheapModel.Name, StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                _logger.LogWarning("CascadeUpgradeVerifierModel '{Verifier}' 未找到或未启用，回退自评（cheap={Cheap})",
+                    configuredVerifier, cheapModel.Name);
+            }
+        }
+
         var verifySw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var cheapClient = _clientProvider.GetClient(cheapModel);
-            var verifyResponse = await cheapClient.CompleteAsync(verifyRequest, ct).ConfigureAwait(false);
+            var verifierClient = _clientProvider.GetClient(verifierModel);
+            var verifyResponse = await verifierClient.CompleteAsync(verifyRequest, ct).ConfigureAwait(false);
             verifySw.Stop();
 
             bool confident = ResponseConfidenceChecker.IsConfident(verifyResponse);
-            // 复核调用真实消耗 token，必须入账成本账本，否则开级联时预算系统性偏低（漂移）。
+            // 复核调用真实消耗 token，必须按实际校验模型价格入账成本账本，否则开级联时预算系统性偏低（漂移）。
             decimal verifyCost = verifyResponse.Usage is not null
-                ? CostCalculator.Compute(verifyResponse.Usage, cheapModel)
+                ? CostCalculator.Compute(verifyResponse.Usage, verifierModel)
                 : 0m;
             if (verifyResponse.Usage is not null)
                 _recorder.RecordCost(verifyCost, sessionId);
 
-            _healthTracker.RecordSuccess(cheapModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
+            // 校验调用的健康/延迟 reward 记到实际校验模型（verifier）；质量信号（confident/uncertain）记到 Cheap 模型。
+            _healthTracker.RecordSuccess(verifierModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
             _recorder.RecordThompsonOutcome(
-                cheapModel.Name,
+                verifierModel.Name,
                 verifySw.ElapsedMilliseconds,
                 decision);
 
-            _recorder.RecordAudit(null, cheapModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
-                decision.Reason + "; cascade: self-verify " + (confident ? "confident" : "uncertain"),
+            string verifyKind = peerReview ? "peer-verify" : "self-verify";
+            _recorder.RecordAudit(null, verifierModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
+                decision.Reason + "; cascade: " + verifyKind + " " + (confident ? "confident" : "uncertain"),
                 true, null, false, routedTier, cascadeTriggered: true);
 
             // 质量信号接入学习状态：自校验置信度此前被丢弃，导致 Thompson/Bandit 系统性偏好"快但不准"的 Cheap。
@@ -173,15 +196,15 @@ public sealed class CascadeUpgradeHandler
             // 参见 CascadeCostAccountingTests.Cascade_VerificationFailure_Only5xxUpdatesHealthAndThompson。
             if (ex is ModelClientException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } quotaError)
             {
-                _recorder.RecordQuota(cheapModel.Name, quotaError.Metadata, rateLimited: true);
+                _recorder.RecordQuota(verifierModel.Name, quotaError.Metadata, rateLimited: true);
             }
             else
             {
                 _healthTracker.RecordFailure(
-                    cheapModel.Name,
+                    verifierModel.Name,
                     routing.FailoverFailureThreshold,
                     routing.FailoverCooldownSeconds);
-                _recorder.RecordThompsonOutcome(cheapModel.Name, null, decision);
+                _recorder.RecordThompsonOutcome(verifierModel.Name, null, decision);
             }
             // 自校验本身失败（含客户端内部超时）：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。
             // 仅放行外界取消，避免内部超时破坏已成功的 Cheap 请求。

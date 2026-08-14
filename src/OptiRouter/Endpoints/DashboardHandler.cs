@@ -71,6 +71,27 @@ public static class DashboardHandler
             });
         });
 
+        // 3b. Learning State API (cached 5s) — Thompson 学习状态快照（α/β/样本数/最后更新）。
+        // 暴露低流量下的"尾部锁死"：samples 长期为 0 的模型拿不到流量，学习重排对它无据可依，
+        // 需配合 ExplorationEpsilon 或流量再分配。样本数为进程内计数（重启归零）。
+        endpoints.MapGet("/api/dashboard/learning", (ThompsonStateStore tsStore, IMemoryCache cache) =>
+        {
+            return cache.GetOrCreate("dashboard:learning", entry =>
+            {
+                entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(5);
+                entry.Size = 1;
+                return Results.Json(tsStore.GetSnapshot().Select(s => new
+                {
+                    model = s.Model,
+                    alpha = Math.Round(s.Alpha, 4),
+                    beta = Math.Round(s.Beta, 4),
+                    mean = Math.Round(s.Mean, 4),
+                    samples = s.N,
+                    lastUpdateUtc = s.LastUpdateUtc
+                }));
+            });
+        });
+
         // 4. Request Audit Log API with Multi-Filter Support
         endpoints.MapGet("/api/dashboard/requests", (IRequestAuditStore auditStore, int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null) =>
         {

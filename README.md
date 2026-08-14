@@ -185,6 +185,11 @@ curl http://localhost:5000/health
 | `MaxResponseStreamBytes` | 流式响应累计字节硬上限，防 OOM/恶意无限流 | `20971520`(20MB) |
 | `EnableCascadeUpgrade` | Cheap→Strong 级联自校验（采样，低置信升级重答） | `false` |
 | `CascadeUpgradeSampleRate` | 级联采样率 `[0.0, 1.0]`，0=关闭，1=全量 | `0.1` |
+| `CascadeUpgradeVerifierModel` | 级联校验模型名（他评，消除"模型自评"自利偏差）；留空=自评，建议填 Strong 模型 | `null` |
+| `EnableRegenerateFeedback` | regenerate 负反馈：同一规范化请求窗口内重发且上次成功 → 惩罚上次命中模型（零额外调用的质量信号；定时任务固定 prompt 场景会误判，需关闭） | `false` |
+| `RegeneratePenaltyReward` | regenerate 注入的低 reward `[0.0, 1.0]`，低于慢成功地板 0.3 | `0.1` |
+| `RegenerateFeedbackWindowSeconds` | regenerate 判定窗口（秒），超过窗口的同键重发视为独立请求 | `600` |
+| `ExplorationEpsilon` | ε 探索保底 `[0.0, 1.0]`：段内重排后以概率 ε 把随机尾部模型提到段首，修低流量"尾部锁死"；自用建议 0.05 | `0.0` |
 | `EnableLatencyAware` | 同 tier 段按历史延迟重排（快模型优先），后台聚合零 I/O | `false` |
 | `LatencyMinSamples` | 延迟排序生效所需最小样本数，低于此值不参与排序 | `10` |
 | `LatencyStatsWindowMinutes` | 延迟聚合统计窗口（分钟），窗口越长越平滑但响应慢 | `60` |

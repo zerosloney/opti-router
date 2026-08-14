@@ -227,4 +227,59 @@ public class LatencyAwarePolicyTests
         Assert.Equal("stable", result.Candidates[0].Name);
         Assert.Equal("spiky", result.Candidates[1].Name);
     }
+
+    [Fact]
+    public void Apply_EpsilonExploration_PromotesTailModel_WhenSampled()
+    {
+        // ε 探索保底：sampleUniform 固定返回 0.1 < epsilon=0.5 时，应把段内非首位模型提到段首。
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m),
+            ("c", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.5;
+
+        // 延迟统计让 a 排第一（顺序 a,b,c）。
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50), ("c", 300.0, 50)),
+            new ThompsonStateStore(),
+            sampleBeta: null,
+            banditStore: null,
+            // 第一次调用返回 0.1（触发探索），第二次调用返回 0.9（决定是否跳过时不触发，但这里只调用一次 MaybePromoteTailForExploration）。
+            sampleUniform: () => 0.1);
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 段首应为 b 或 c（index=1 或 2），不再是 a。
+        Assert.NotEqual("a", result.Candidates[0].Name);
+        Assert.Contains(result.Candidates[0].Name, new[] { "b", "c" });
+        Assert.Contains("ε-explore promoted", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_EpsilonExploration_Disabled_NoPromotion()
+    {
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.0;
+
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50)),
+            new ThompsonStateStore(),
+            sampleBeta: null,
+            banditStore: null,
+            sampleUniform: () => 0.0);
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        Assert.Equal("a", result.Candidates[0].Name);
+        Assert.Equal("b", result.Candidates[1].Name);
+        Assert.DoesNotContain("ε-explore promoted", result.Reason);
+    }
 }

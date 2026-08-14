@@ -102,6 +102,19 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Routing.CostAwareWeight > 0 && options.Routing.CostAwareBaselineUsd <= 0)
             return ValidateOptionsResult.Fail("Routing.CostAwareBaselineUsd 必须大于 0（启用成本感知时）。");
 
+        // 质量惩罚因子：越界会让乘性合成 reward 超出 [0,1]，扭曲 Beta 分布。
+        if (options.Routing.QualityPenaltyFactor < 0.0 || options.Routing.QualityPenaltyFactor > 1.0)
+            return ValidateOptionsResult.Fail("Routing.QualityPenaltyFactor 必须在 [0.0, 1.0] 范围内。");
+
+        // regenerate 负反馈：注入的 reward 必须落在 [0,1]；窗口 <=0 会让所有同键请求都判为 regenerate。
+        if (options.Routing.EnableRegenerateFeedback)
+        {
+            if (options.Routing.RegeneratePenaltyReward < 0.0 || options.Routing.RegeneratePenaltyReward > 1.0)
+                return ValidateOptionsResult.Fail("Routing.RegeneratePenaltyReward 必须在 [0.0, 1.0] 范围内（启用 regenerate 负反馈时）。");
+            if (options.Routing.RegenerateFeedbackWindowSeconds <= 0)
+                return ValidateOptionsResult.Fail("Routing.RegenerateFeedbackWindowSeconds 必须大于 0（启用 regenerate 负反馈时）。");
+        }
+
         if (options.Routing.HealthProbeIntervalSeconds <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.HealthProbeIntervalSeconds 必须大于 0。");
@@ -219,6 +232,14 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             {
                 return ValidateOptionsResult.Fail("Routing.ThompsonRaceCancelledReward 必须在 [0.0, 1.0] 范围内（启用 Thompson Sampling 时）。");
             }
+            // Per-tier 延迟目标：<=0 会让该 tier 的所有成功都压在地板分，等同饿死。
+            foreach (var pair in options.Routing.ThompsonLatencyTargetMsByTier)
+            {
+                if (pair.Value <= 0)
+                {
+                    return ValidateOptionsResult.Fail($"Routing.ThompsonLatencyTargetMsByTier[{pair.Key}] 必须大于 0（启用 Thompson Sampling 时）。");
+                }
+            }
         }
 
         // 级联质量 reward 校验：注入 Thompson/Bandit 的 reward 必须落在 [0,1]，否则
@@ -267,6 +288,10 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
                 return ValidateOptionsResult.Fail("Routing.ContextualBanditDiscountFactor 必须在 [0.5, 0.99] 范围内（启用 Contextual Bandit 时）。");
             }
         }
+
+        // ε 探索保底：越界会让探索概率语义失效（负值禁用、>1 恒探索）。
+        if (options.Routing.ExplorationEpsilon < 0.0 || options.Routing.ExplorationEpsilon > 1.0)
+            return ValidateOptionsResult.Fail("Routing.ExplorationEpsilon 必须在 [0.0, 1.0] 范围内。");
 
         // 审计保留时长校验：<=0 会让后台服务每次循环淘汰全部审计（AlertEngine 失去数据源）。
         if (options.Routing.AuditRetentionHours < 1)

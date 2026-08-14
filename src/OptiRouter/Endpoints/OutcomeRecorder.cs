@@ -261,35 +261,32 @@ public sealed class OutcomeRecorder
     /// </summary>
     /// <param name="modelName">模型名。</param>
     /// <param name="elapsedMs">
-    /// 本次请求端到端延迟（毫秒）。<c>null</c> 表示硬失败（网络/超时/上游错误），奖励 0.0；
-    /// <c>&lt; ThompsonLatencyTargetMs</c> 为快成功，奖励 1.0；<c>&gt;= target</c> 为慢成功，奖励 0.3（部分正反馈）。
+    /// 本次请求端到端延迟（毫秒）。<c>null</c> 表示硬失败（网络/超时/上游错误），reward 0.0；
+    /// 否则经 <see cref="MapLatencyToReward"/> 平滑映射（越快越高，无阶跃），目标由 <paramref name="actualTier"/> 解析。
     /// </param>
     /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
     /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
     /// <param name="cost">本次请求成本（USD），>0 时参与成本感知复合 reward。</param>
+    /// <param name="actualTier">实际路由到的模型 tier，用于 per-tier 延迟目标解析；null（默认）回退全局目标。</param>
+    /// <param name="qualityFactor">质量因子 ∈ [0,1]（默认 1.0=不折减）。由 <see cref="ExtractQualityFactor"/> 从响应计算，
+    /// 低质量信号时乘性折减延迟 reward。仅此路径生效；显式质量入口与竞速取消不乘。</param>
     public void RecordThompsonOutcome(string modelName, long? elapsedMs,
-        string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0)
+        string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0,
+        ModelTier? actualTier = null, double qualityFactor = 1.0)
     {
         var routing = _options.CurrentValue.Routing;
-        double reward = elapsedMs switch
-        {
-            null => 0.0,
-            var ms when ms < routing.ThompsonLatencyTargetMs => 1.0,
-            _ => 0.3
-        };
+        double latencyReward = MapLatencyToReward(elapsedMs, ResolveLatencyTarget(actualTier, routing));
+        double reward = latencyReward * Math.Clamp(qualityFactor, 0.0, 1.0);
         ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
     }
 
     /// <summary>使用完整路由决策记录反馈，确保决策与学习使用相同的请求上下文。</summary>
-    public void RecordThompsonOutcome(string modelName, long? elapsedMs, RouterDecision decision, decimal cost = 0)
+    public void RecordThompsonOutcome(string modelName, long? elapsedMs, RouterDecision decision, decimal cost = 0,
+        ModelTier? actualTier = null, double qualityFactor = 1.0)
     {
         var routing = _options.CurrentValue.Routing;
-        double reward = elapsedMs switch
-        {
-            null => 0.0,
-            var ms when ms < routing.ThompsonLatencyTargetMs => 1.0,
-            _ => 0.3
-        };
+        double latencyReward = MapLatencyToReward(elapsedMs, ResolveLatencyTarget(actualTier, routing));
+        double reward = latencyReward * Math.Clamp(qualityFactor, 0.0, 1.0);
         ApplyOutcome(modelName, reward, cost, decision);
     }
 
@@ -340,10 +337,10 @@ public sealed class OutcomeRecorder
     /// 把 reward 应用到 Thompson 采样状态与（若启用）上下文 bandit。三个上报入口共享此核心，
     /// 区别仅在 reward 来源：延迟映射、竞速取消或显式质量。
     /// </summary>
-    private void ApplyOutcome(string modelName, double reward, decimal cost, string? classificationSignal, ModelTier? classificationTargetTier)
+    private void ApplyOutcome(string modelName, double reward, decimal cost, string? classificationSignal, ModelTier? classificationTargetTier, int tokens = 0)
     {
         var routing = _options.CurrentValue.Routing;
-        reward = ApplyCostWeight(reward, cost, routing);
+        reward = ApplyCostWeight(reward, cost, tokens, routing);
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
 
         if (routing.EnableContextualBandit && _banditStore is not null && classificationSignal is not null)
@@ -356,7 +353,8 @@ public sealed class OutcomeRecorder
     private void ApplyOutcome(string modelName, double reward, decimal cost, RouterDecision decision)
     {
         var routing = _options.CurrentValue.Routing;
-        reward = ApplyCostWeight(reward, cost, routing);
+        // 决策携带 token 估算：成本归一化用它消除"长输入=贵模型"的偏差。
+        reward = ApplyCostWeight(reward, cost, decision.EstimatedInputTokens, routing);
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
 
         if (routing.EnableContextualBandit && _banditStore is not null)
@@ -370,19 +368,158 @@ public sealed class OutcomeRecorder
     }
 
     /// <summary>
-    /// 成本感知复合 reward：(1-α)·原reward + α·costReward，costReward = baseline/(baseline+cost) ∈ (0,1]。
-    /// cost 越低 reward 越高，引导 Bandit/Thompson 在质量/延迟相近时偏好便宜模型。
+    /// 成本感知复合 reward：(1-α)·原reward + α·costReward。
+    /// costReward = baseline/(baseline+pricePerMillion) ∈ (0,1]，pricePerMillion = cost×1e6/tokens
+    /// （按 token 归一化的等效 $/M 价格）。绝对花费随输入长度线性增长，不归一化会把长上下文请求
+    /// 的所有模型都误判为贵；归一化后引导 Bandit/Thompson 在质量/延迟相近时偏好真正便宜的模型。
     /// α = <see cref="RoutingOptions.CostAwareWeight"/>（默认 0=禁用，保持原 reward）；
-    /// cost=0（未知/免费）时不调整，避免"免费=满分"误判。
+    /// cost=0（未知/免费）或 tokens=0（无法归一化，回退绝对花费口径）时不做 token 归一化。
     /// </summary>
-    private static double ApplyCostWeight(double reward, decimal cost, RoutingOptions routing)
+    private static double ApplyCostWeight(double reward, decimal cost, int tokens, RoutingOptions routing)
     {
         if (routing.CostAwareWeight <= 0 || cost <= 0)
             return reward;
         double alpha = routing.CostAwareWeight;
         double baseline = (double)routing.CostAwareBaselineUsd;
-        double costReward = baseline / (baseline + (double)cost);
+        double normalizedCost = tokens > 0
+            ? (double)cost * 1_000_000.0 / tokens
+            : (double)cost;
+        double costReward = baseline / (baseline + normalizedCost);
         return (1.0 - alpha) * reward + alpha * costReward;
+    }
+
+    /// <summary>
+    /// 把端到端延迟平滑映射为 reward ∈ [0,1]。单调分段线性（越快越高，无阶跃）：
+    /// <c>null</c>（失败）→ 0.0；<c>[0, target]</c> 线性 1.0→0.7；<c>(target, 2·target]</c> 线性 0.7→0.3；
+    /// <c>&gt; 2·target</c> → 0.3（慢成功地板，保留正信号，避免极端 outlier 等同失败）。
+    /// 替代原 0/0.3/1.0 三档阶跃，消除"压线突变"与学习曲线粗糙。
+    /// </summary>
+    public static double MapLatencyToReward(long? elapsedMs, double targetMs)
+    {
+        if (!elapsedMs.HasValue) return 0.0;
+        double ms = elapsedMs.Value;
+        if (ms <= 0) return 1.0;
+        if (targetMs <= 0) targetMs = 1.0; // 防御除零；合法 target 由 validator 保证 >0
+        if (ms <= targetMs)
+            return 1.0 - 0.3 * (ms / targetMs);                  // 1.0 → 0.7
+        if (ms <= 2.0 * targetMs)
+            return 0.7 - 0.4 * ((ms - targetMs) / targetMs);     // 0.7 → 0.3
+        return 0.3;                                              // 慢成功地板
+    }
+
+    /// <summary>
+    /// 解析某 tier 的延迟目标：命中 <see cref="RoutingOptions.ThompsonLatencyTargetMsByTier"/> 且 &gt;0 用之，
+    /// 否则回退全局 <see cref="RoutingOptions.ThompsonLatencyTargetMs"/>。
+    /// 消除"全局单 target 系统性偏 Cheap"——强模型天生慢，用更宽松目标避免被系统性惩罚。
+    /// </summary>
+    public static double ResolveLatencyTarget(ModelTier? actualTier, RoutingOptions routing)
+    {
+        if (actualTier.HasValue
+            && routing.ThompsonLatencyTargetMsByTier.TryGetValue(actualTier.Value, out double tierTarget)
+            && tierTarget > 0)
+        {
+            return tierTarget;
+        }
+        return routing.ThompsonLatencyTargetMs;
+    }
+
+    /// <summary>
+    /// 从非流式响应提取质量因子 ∈ [0,1]，用于乘性折减延迟 reward。
+    /// <c>null</c> 响应（无可判内容）→ 1.0（不惩罚，失败由 latency reward=0 处理）；
+    /// 低质量信号（finish_reason=length 截断 / content_filter / 空 content / JSON 契约违约）→ <paramref name="penalty"/>；
+    /// 否则 → 1.0。只判空 content，不引入"极短"主观阈值（避免误伤 "yes"/"42" 等正常短答）。
+    /// JSON 契约违约：请求显式要求 JSON 输出（response_format=json_object/json_schema）但 content
+    /// 不是合法 JSON——客观可验证的质量信号，无需采样/额外调用，每次请求都可用。
+    /// </summary>
+    /// <param name="response">上游原始响应。</param>
+    /// <param name="penalty">低质量惩罚因子。</param>
+    /// <param name="request">原始请求（用于检测 JSON 契约）；null = 跳过契约校验。</param>
+    public static double ExtractQualityFactor(RawChatResponse? response, double penalty, ChatRequest? request = null)
+    {
+        if (response is null) return 1.0;
+        var (content, finishReason) = ResponseConfidenceChecker.ExtractAssistantContentAndFinishReason(response);
+        if (IsLowQualitySignal(content, finishReason))
+            return Math.Clamp(penalty, 0.0, 1.0);
+        if (RequestExpectsJson(request) && !IsValidJson(content))
+            return Math.Clamp(penalty, 0.0, 1.0);
+        return 1.0;
+    }
+
+    private static bool IsLowQualitySignal(string content, string finishReason)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return true;
+        if (finishReason.Equals("length", StringComparison.OrdinalIgnoreCase)) return true;
+        if (finishReason.Equals("content_filter", StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
+
+    /// <summary>
+    /// 检测请求是否显式要求 JSON 输出：ExtensionData 里的 response_format 为
+    /// "json_object"/"json_schema" 字符串，或 { "type": "json_object"/"json_schema" } 对象。
+    /// </summary>
+    private static bool RequestExpectsJson(ChatRequest? request)
+    {
+        if (request?.ExtensionData is not { Count: > 0 } ext)
+            return false;
+        if (!ext.TryGetValue("response_format", out var value))
+            return false;
+
+        return value.ValueKind switch
+        {
+            System.Text.Json.JsonValueKind.String
+                => IsJsonFormatType(value.GetString()),
+            System.Text.Json.JsonValueKind.Object
+                => value.TryGetProperty("type", out var type)
+                   && type.ValueKind == System.Text.Json.JsonValueKind.String
+                   && IsJsonFormatType(type.GetString()),
+            _ => false
+        };
+    }
+
+    private static bool IsJsonFormatType(string? formatType)
+        => formatType is "json_object" or "json_schema";
+
+    private static bool IsValidJson(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        try
+        {
+            _ = System.Text.Json.JsonDocument.Parse(content);
+            return true;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // 常见包装：模型在 JSON 外围加了 ```json 围栏或前后说明文字。
+            // 只剥一层围栏再试一次，仍失败判为契约违约。
+            return TryParseStrippedOfFences(content);
+        }
+    }
+
+    private static bool TryParseStrippedOfFences(string content)
+    {
+        string trimmed = content.Trim();
+        if (trimmed.StartsWith("```", StringComparison.Ordinal))
+        {
+            int firstNewline = trimmed.IndexOf('\n');
+            int closing = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+            if (firstNewline > 0 && closing > firstNewline)
+            {
+                string inner = trimmed.Substring(firstNewline + 1, closing - firstNewline - 1).Trim();
+                if (inner.Length > 0)
+                {
+                    try
+                    {
+                        _ = System.Text.Json.JsonDocument.Parse(inner);
+                        return true;
+                    }
+                    catch (System.Text.Json.JsonException)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /// <summary>

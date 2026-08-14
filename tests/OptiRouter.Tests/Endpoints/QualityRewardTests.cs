@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
 using OptiRouter.Routing;
@@ -86,7 +87,7 @@ public sealed class QualityRewardTests
         var tsStore = new ThompsonStateStore();
         var recorder = CreateRecorder(tsStore);
 
-        recorder.RecordThompsonOutcome("cheap-model", elapsedMs: 100); // 快成功 → reward 1.0
+        recorder.RecordThompsonOutcome("cheap-model", elapsedMs: 0); // 0ms → reward 1.0（平滑曲线边界，避免耦合中间值）
         recorder.RecordQualityOutcome("cheap-model", 0.0);             // 质量差 → reward 0.0
 
         var stats = tsStore.GetOrAdd("cheap-model");
@@ -143,7 +144,90 @@ public sealed class QualityRewardTests
         var tsStore = new ThompsonStateStore();
         var recorder = CreateRecorder(tsStore); // CostAwareWeight 默认 0
 
-        recorder.RecordThompsonOutcome("m", elapsedMs: 100, cost: 0.5m);
-        Assert.Equal(1.95, tsStore.GetOrAdd("m").Alpha, precision: 3); // reward=1.0: Alpha=0.95+1
+        recorder.RecordThompsonOutcome("m", elapsedMs: 0, cost: 0.5m);
+        Assert.Equal(1.95, tsStore.GetOrAdd("m").Alpha, precision: 3); // 0ms→reward 1.0: Alpha=0.95+1
+    }
+
+    /// <summary>
+    /// 平滑延迟→reward 映射的锚点断言（替代旧 0/0.3/1.0 阶跃）。
+    /// </summary>
+    [Fact]
+    public void MapLatencyToReward_SmoothCurve_AnchorPoints()
+    {
+        const double target = 800.0;
+        Assert.Equal(0.0, OutcomeRecorder.MapLatencyToReward(null, target));          // 失败
+        Assert.Equal(1.0, OutcomeRecorder.MapLatencyToReward(0, target));              // 极快
+        Assert.Equal(0.7, OutcomeRecorder.MapLatencyToReward((long)target, target), precision: 6);   // target 点 → 0.7
+        Assert.Equal(0.3, OutcomeRecorder.MapLatencyToReward((long)(2 * target), target), precision: 6); // 2×target → 0.3
+        Assert.Equal(0.3, OutcomeRecorder.MapLatencyToReward((long)(3 * target), target), precision: 6); // 超 2×target 地板 0.3
+
+        // 单调性：越快 reward 越高。
+        Assert.True(OutcomeRecorder.MapLatencyToReward(200, target) > OutcomeRecorder.MapLatencyToReward(500, target));
+        Assert.True(OutcomeRecorder.MapLatencyToReward(900, target) > OutcomeRecorder.MapLatencyToReward(1500, target));
+    }
+
+    [Fact]
+    public void ResolveLatencyTarget_PerTierHit_AndGlobalFallback()
+    {
+        var routing = new RoutingOptions(); // 默认 per-tier {Strong:1500, Medium:1000, Cheap:600}, 全局 800
+        Assert.Equal(1500.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Strong, routing));
+        Assert.Equal(1000.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Medium, routing));
+        Assert.Equal(600.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Cheap, routing));
+        // 未传 tier → 回退全局
+        Assert.Equal(800.0, OutcomeRecorder.ResolveLatencyTarget(null, routing));
+
+        // per-tier 清空后，所有 tier 回退全局
+        routing.ThompsonLatencyTargetMsByTier.Clear();
+        Assert.Equal(800.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Strong, routing));
+    }
+
+    [Fact]
+    public void ExtractQualityFactor_DetectsLowQualitySignals()
+    {
+        const double penalty = 0.3;
+        // null 响应（无可判内容）→ 不惩罚（失败由 latency reward=0 处理）
+        Assert.Equal(1.0, OutcomeRecorder.ExtractQualityFactor(null, penalty));
+        // 正常 stop + 有 content → 1.0
+        var ok = new RawChatResponse("{\"choices\":[{\"message\":{\"content\":\"完整答案\"},\"finish_reason\":\"stop\"}]}", null);
+        Assert.Equal(1.0, OutcomeRecorder.ExtractQualityFactor(ok, penalty));
+        // finish_reason=length（截断）→ penalty
+        var truncated = new RawChatResponse("{\"choices\":[{\"message\":{\"content\":\"部分\"},\"finish_reason\":\"length\"}]}", null);
+        Assert.Equal(penalty, OutcomeRecorder.ExtractQualityFactor(truncated, penalty));
+        // content_filter → penalty
+        var filtered = new RawChatResponse("{\"choices\":[{\"message\":{\"content\":\"x\"},\"finish_reason\":\"content_filter\"}]}", null);
+        Assert.Equal(penalty, OutcomeRecorder.ExtractQualityFactor(filtered, penalty));
+        // 空 content → penalty
+        var empty = new RawChatResponse("{\"choices\":[{\"message\":{\"content\":\"\"},\"finish_reason\":\"stop\"}]}", null);
+        Assert.Equal(penalty, OutcomeRecorder.ExtractQualityFactor(empty, penalty));
+        // 正常短答（"yes"）不误伤 → 1.0
+        var shortOk = new RawChatResponse("{\"choices\":[{\"message\":{\"content\":\"yes\"},\"finish_reason\":\"stop\"}]}", null);
+        Assert.Equal(1.0, OutcomeRecorder.ExtractQualityFactor(shortOk, penalty));
+    }
+
+    [Fact]
+    public void RecordThompsonOutcome_AppliesSmoothLatencyTimesQualityFactor()
+    {
+        var tsStore = new ThompsonStateStore();
+        var recorder = CreateRecorder(tsStore);
+        // 100ms（平滑 reward=0.9625）× 质量因子 0.3（截断）→ reward≈0.28875
+        recorder.RecordThompsonOutcome("m", elapsedMs: 100, qualityFactor: 0.3);
+        double latencyReward = 1.0 - 0.3 * (100.0 / 800.0); // = 0.9625
+        double expected = latencyReward * 0.3;
+        var stats = tsStore.GetOrAdd("m");
+        Assert.Equal(0.95 + expected, stats.Alpha, precision: 4);
+    }
+
+    [Fact]
+    public void RecordThompsonOutcome_UsesPerTierTarget()
+    {
+        var options = new RouterOptions();
+        var tsStore = new ThompsonStateStore();
+        var recorder = CreateRecorder(tsStore, options);
+        // Cheap per-tier target=600。1000ms 落在 (600, 1200]：0.7 - 0.4*((1000-600)/600) ≈ 0.4333。
+        // 若误用全局 800：1000 落在 (800,1600]：0.7-0.4*(200/800)=0.6（更宽松，验证 per-tier 确实生效）。
+        recorder.RecordThompsonOutcome("m", elapsedMs: 1000, actualTier: ModelTier.Cheap);
+        const double cheapTarget = 600.0;
+        double expectedReward = 0.7 - 0.4 * ((1000.0 - cheapTarget) / cheapTarget);
+        Assert.Equal(0.95 + expectedReward, tsStore.GetOrAdd("m").Alpha, precision: 4);
     }
 }

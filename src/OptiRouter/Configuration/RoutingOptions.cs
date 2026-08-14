@@ -113,10 +113,43 @@ public sealed class RoutingOptions
     public double CostAwareWeight { get; set; } = 0.0;
 
     /// <summary>
-    /// 成本归一化基准（USD）。costReward = baseline/(baseline+cost)，cost=baseline 时 reward=0.5。
-    /// 默认 0.01（1¢）。启用 <see cref="CostAwareWeight"/> 时必须 &gt;0。
+    /// 成本归一化基准（美元/每百万 token，即等效 $/M 混合价格）。costReward = baseline/(baseline+pricePerMillion)，
+    /// pricePerMillion 由本次请求花费按 token 数归一化（cost×1e6/tokens），消除"长输入=贵模型"的系统性偏差——
+    /// 绝对花费随输入长度线性增长，不归一化会把长上下文请求的所有模型都误判为贵。
+    /// 模型价格等于 baseline 时 costReward=0.5。默认 1.0（对应中档模型价位：Cheap≈$0.15/M，Strong≈$5-15/M）。
+    /// token 数未知（=0）时回退用绝对花费（USD）对比基准，此时建议把基准配成单请求典型花费。
+    /// 启用 <see cref="CostAwareWeight"/> 时必须 &gt;0。
     /// </summary>
-    public decimal CostAwareBaselineUsd { get; set; } = 0.01m;
+    public decimal CostAwareBaselineUsd { get; set; } = 1.0m;
+
+    /// <summary>
+    /// 质量惩罚因子 ∈ [0.0, 1.0]，由 RouterOptionsValidator 强制。主路径成功请求若检测到低质量信号
+    /// （<c>finish_reason=length</c> 截断 / <c>content_filter</c> / 空 content），reward 按此因子乘性折减：
+    /// <c>finalReward = latencyReward × qualityFactor</c>。默认 0.3（低质量打三折，保留正信号但不鼓励）；1.0=不惩罚。
+    /// 仅作用于延迟映射路径（<c>RecordThompsonOutcome</c>），不影响显式质量入口与竞速取消。
+    /// </summary>
+    public double QualityPenaltyFactor { get; set; } = 0.3;
+
+    /// <summary>
+    /// 是否启用 regenerate 负反馈。开启后，同一规范化请求（SHA256 键，与响应缓存同源）在窗口时间内
+    /// 再次到达且上次为成功响应时，视为用户对上次答案不满意（regenerate），给上次命中的模型
+    /// 注入 <see cref="RegeneratePenaltyReward"/> 低 reward。零额外调用成本的质量信号。
+    /// 注意：对同一请求的例行重复调用（如定时任务固定 prompt）也会被误判为 regenerate，
+    /// 存在此类流量的部署应保持关闭。默认 false。
+    /// </summary>
+    public bool EnableRegenerateFeedback { get; set; } = false;
+
+    /// <summary>
+    /// regenerate 负反馈注入的 reward ∈ [0.0, 1.0]，由 RouterOptionsValidator 强制。
+    /// 默认 0.1（低于慢成功地板 0.3，强负反馈但不等同硬失败 0.0——regenerate 也可能只是想要不同表述）。
+    /// </summary>
+    public double RegeneratePenaltyReward { get; set; } = 0.1;
+
+    /// <summary>
+    /// regenerate 判定窗口（秒）。上次成功响应距今超过窗口的同键请求不再视为 regenerate
+    /// （隔天重发同一问题大概率是独立请求）。默认 600（10 分钟）。必须 &gt; 0。
+    /// </summary>
+    public int RegenerateFeedbackWindowSeconds { get; set; } = 600;
 
     /// <summary>
     /// 是否启用后台主动健康探活（定时对所有启用模型发探测请求，结果上报断路器）。
@@ -223,6 +256,13 @@ public sealed class RoutingOptions
     /// 不置信 = 答案质量不足 → 负反馈惩罚该 Cheap 模型，使后续路由降低对其偏好。
     /// </summary>
     public double CascadeUpgradeUncertainReward { get; set; } = 0.0;
+
+    /// <summary>
+    /// 级联自校验用的校验模型名（他评，消除"模型自评"的自利偏差）。留空（默认）= 回退自评（用 Cheap 模型校验自己的答案）。
+    /// 配置时从已启用模型中按名匹配；找不到则告警并回退自评。建议配置一个更强的模型（如 Strong）做校验，可信度高于自评。
+    /// 校验调用的成本按实际校验模型价格入账。
+    /// </summary>
+    public string? CascadeUpgradeVerifierModel { get; set; } = null;
 
     /// <summary>
     /// 是否启用延迟感知路由。开启后，同 tier 段内按历史平均延迟重排（快模型优先），
@@ -395,10 +435,23 @@ public sealed class RoutingOptions
     public double ThompsonDiscountFactor { get; set; } = 0.95;
 
     /// <summary>
-    /// 理想平均延迟目标（毫秒，必须 &gt; 0，由 RouterOptionsValidator 强制）。
-    /// 实际成功延迟小于该值计为 Alpha 自适应成功增量，否则（超时、大延迟或故障）计为 Beta 惩罚。
+    /// 理想平均延迟目标（毫秒，必须 &gt; 0，由 RouterOptionsValidator 强制）。作为 <see cref="ThompsonLatencyTargetMsByTier"/>
+    /// 未覆盖 tier 的回退目标。实际延迟经 <c>OutcomeRecorder.MapLatencyToReward</c> 平滑映射为 reward（越快越高，非阶跃）。
     /// </summary>
     public double ThompsonLatencyTargetMs { get; set; } = 800.0;
+
+    /// <summary>
+    /// Per-tier 延迟目标（毫秒）。键为 <see cref="ModelTier"/>，值为该 tier 的延迟目标。
+    /// 命中且 &gt;0 时覆盖 <see cref="ThompsonLatencyTargetMs"/>；未配置的 tier 回退全局目标。
+    /// 消除"全局单 target 系统性偏 Cheap"——强模型天生慢，用更宽松的目标避免被系统性惩罚。
+    /// 默认 {Strong:1500, Medium:1000, Cheap:600}。仅 <see cref="EnableThompsonSampling"/> 启用时各值必须 &gt;0。
+    /// </summary>
+    public System.Collections.Generic.Dictionary<ModelTier, double> ThompsonLatencyTargetMsByTier { get; set; } = new()
+    {
+        { ModelTier.Strong, 1500.0 },
+        { ModelTier.Medium, 1000.0 },
+        { ModelTier.Cheap, 600.0 }
+    };
 
     /// <summary>
     /// 竞速失败（并行 racing 中被更快模型比下去而取消）的 Thompson 部分奖励。
@@ -428,6 +481,16 @@ public sealed class RoutingOptions
     /// 值越小，系统对端点性能变化的反应越灵敏。
     /// </summary>
     public double ContextualBanditDiscountFactor { get; set; } = 0.95;
+
+    /// <summary>
+    /// ε 探索保底 ∈ [0.0, 1.0]，由 RouterOptionsValidator 强制。默认 0（关闭）。
+    /// &gt;0 时，延迟感知/Thompson/Bandit 段内重排后以概率 ε 把一个随机非首位模型提到段首，
+    /// 保证尾部模型持续获得真实流量样本。修低流量下的"尾部锁死"反馈环：
+    /// 重排决定尝试顺序 → 链尾模型只在异常场景被尝试 → 样本全部来自异常 → 采样分长期偏低 → 永远翻不了身。
+    /// 自用低流量建议 0.05（5% 请求偶尔慢一次可接受）；0.0 保持纯贪心。
+    /// 仅在同 tier 段 ≥2 候选且段内重排（latency/thompson/bandit 任一启用）时生效。
+    /// </summary>
+    public double ExplorationEpsilon { get; set; } = 0.0;
 
     /// <summary>
     /// 审计记录保留时长（小时）。超出后由后台 AuditRetentionService 周期淘汰，
