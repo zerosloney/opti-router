@@ -200,6 +200,8 @@ builder.Services.AddHttpContextAccessor();
 
 // 管理端登录会话（Cookie）：可视化界面仅管理员登录后可用。
 // /v1/* 代理端点不受此影响（仍走 ProxyApiKey + 租户 ClientKeyService）。
+// 默认强制 HTTPS（Cookie 仅经 HTTPS 下发，防中间人窃取）；纯内网 HTTP 部署可在 appsettings 设 OptiRouter:AdminCookieRequireHttps=false。
+bool adminCookieRequireHttps = builder.Configuration.GetValue<bool?>("OptiRouter:AdminCookieRequireHttps") ?? true;
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
@@ -209,7 +211,13 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Cookie.Name = "OptiRouter.Admin";
         options.Cookie.HttpOnly = true;
         options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SecurePolicy = adminCookieRequireHttps
+            ? CookieSecurePolicy.Always
+            : CookieSecurePolicy.SameAsRequest;
     });
+
+// 管理端登录失败限流（单实例内存，按 IP 计数）。
+builder.Services.AddSingleton<LoginRateLimiter>();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
@@ -345,6 +353,11 @@ builder.Services.AddRateLimiter(options =>
 
 var app = builder.Build();
 
+if (string.IsNullOrWhiteSpace(app.Configuration["OptiRouter:AdminApiKey"]))
+{
+    app.Logger.LogWarning("OptiRouter:AdminApiKey 未配置：管理控制台登录与管理 API 鉴权将全部失败。请配置独立的 AdminApiKey（不应与 ProxyApiKey 复用）。");
+}
+
 // 配置热重载时清理 Thompson 采样状态：剔除已删除/改名的模型条目，防 _states 无界泄漏。
 // OnChange 在 models-config.json 写入触发 IConfigurationRoot.Reload 后派发。
 var tsStoreForReload = app.Services.GetRequiredService<ThompsonStateStore>();
@@ -435,11 +448,9 @@ app.Use(async (context, next) =>
         || context.Request.Path.StartsWithSegments("/api/models");
     bool isV1Path = context.Request.Path.StartsWithSegments("/v1");
     string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
-    string adminKey = isAdminPath
-        ? (app.Configuration["OptiRouter:AdminApiKey"] ?? "").Length > 0
-            ? app.Configuration["OptiRouter:AdminApiKey"]!
-            : proxyKey ?? ""
-        : proxyKey ?? "";
+    // 管理端密钥仅 AdminApiKey（不再回退 ProxyApiKey）：ProxyApiKey 发给 API 客户端，
+    // 允许它登录管理台构成权限越界。未配 AdminApiKey 时管理台鉴权总失败（仅剩已登录会话，会话过期即不可用）。
+    string adminKey = app.Configuration["OptiRouter:AdminApiKey"] ?? "";
 
     if (isV1Path && AdminKeyVerifier.IsValid(proxyKey, ExtractBearerToken(context)))
     {
@@ -504,7 +515,7 @@ app.Use(async (context, next) =>
             return;
         }
     }
-    else if (!AdminKeyVerifier.IsValid(adminKey, ExtractBearerToken(context)))
+    else if (!AdminKeyVerifier.IsValid(proxyKey, ExtractBearerToken(context)))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
         return;
