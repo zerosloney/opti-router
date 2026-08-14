@@ -120,4 +120,30 @@ public sealed class QualityRewardTests
             "code-complex", ModelTier.Strong, 4095, isStreaming: true, messageCount: 3);
         Assert.Equal(0.0, bandit.Predict("failing-model", feature, alpha: 0.0), precision: 8);
     }
+
+    [Fact]
+    public void CostAware_HighCost_LowersReward_MoreThanFree()
+    {
+        var options = new RouterOptions();
+        options.Routing.CostAwareWeight = 0.5;
+        options.Routing.CostAwareBaselineUsd = 0.01m;
+        var tsStore = new ThompsonStateStore();
+        var recorder = CreateRecorder(tsStore, options);
+
+        recorder.RecordThompsonOutcome("expensive", elapsedMs: 100, cost: 0.1m);
+        recorder.RecordThompsonOutcome("free", elapsedMs: 100, cost: 0m);
+
+        Assert.True(tsStore.GetOrAdd("expensive").Alpha < tsStore.GetOrAdd("free").Alpha,
+            "高成本模型 Alpha 应低于免费模型（成本感知压低 reward）");
+    }
+
+    [Fact]
+    public void CostAware_Disabled_NoAdjustment()
+    {
+        var tsStore = new ThompsonStateStore();
+        var recorder = CreateRecorder(tsStore); // CostAwareWeight 默认 0
+
+        recorder.RecordThompsonOutcome("m", elapsedMs: 100, cost: 0.5m);
+        Assert.Equal(1.95, tsStore.GetOrAdd("m").Alpha, precision: 3); // reward=1.0: Alpha=0.95+1
+    }
 }

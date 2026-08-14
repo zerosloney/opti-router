@@ -266,8 +266,9 @@ public sealed class OutcomeRecorder
     /// </param>
     /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
     /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
+    /// <param name="cost">本次请求成本（USD），>0 时参与成本感知复合 reward。</param>
     public void RecordThompsonOutcome(string modelName, long? elapsedMs,
-        string? classificationSignal = null, ModelTier? classificationTargetTier = null)
+        string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0)
     {
         var routing = _options.CurrentValue.Routing;
         double reward = elapsedMs switch
@@ -276,11 +277,11 @@ public sealed class OutcomeRecorder
             var ms when ms < routing.ThompsonLatencyTargetMs => 1.0,
             _ => 0.3
         };
-        ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
+        ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
     }
 
     /// <summary>使用完整路由决策记录反馈，确保决策与学习使用相同的请求上下文。</summary>
-    public void RecordThompsonOutcome(string modelName, long? elapsedMs, RouterDecision decision)
+    public void RecordThompsonOutcome(string modelName, long? elapsedMs, RouterDecision decision, decimal cost = 0)
     {
         var routing = _options.CurrentValue.Routing;
         double reward = elapsedMs switch
@@ -289,7 +290,7 @@ public sealed class OutcomeRecorder
             var ms when ms < routing.ThompsonLatencyTargetMs => 1.0,
             _ => 0.3
         };
-        ApplyOutcome(modelName, reward, decision);
+        ApplyOutcome(modelName, reward, cost, decision);
     }
 
     /// <summary>
@@ -301,16 +302,17 @@ public sealed class OutcomeRecorder
     /// <param name="modelName">模型名。</param>
     /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
     /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
+    /// <param name="cost">本次请求成本（USD），>0 时参与成本感知复合 reward。</param>
     public void RecordThompsonRaceCancelled(string modelName,
-        string? classificationSignal = null, ModelTier? classificationTargetTier = null)
+        string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0)
     {
         double reward = _options.CurrentValue.Routing.ThompsonRaceCancelledReward;
-        ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
+        ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
     }
 
     /// <summary>使用完整路由决策记录竞速取消反馈。</summary>
-    public void RecordThompsonRaceCancelled(string modelName, RouterDecision decision)
-        => ApplyOutcome(modelName, _options.CurrentValue.Routing.ThompsonRaceCancelledReward, decision);
+    public void RecordThompsonRaceCancelled(string modelName, RouterDecision decision, decimal cost = 0)
+        => ApplyOutcome(modelName, _options.CurrentValue.Routing.ThompsonRaceCancelledReward, cost, decision);
 
     /// <summary>
     /// 上报显式质量驱动的 reward（绕过延迟映射）。用于已有质量判定信号（如级联自校验置信度）接入学习状态。
@@ -322,24 +324,26 @@ public sealed class OutcomeRecorder
     /// <param name="qualityReward">质量 reward，将在内部 Clamp 到 [0,1]。</param>
     /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
     /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
+    /// <param name="cost">本次请求成本（USD），>0 时参与成本感知复合 reward。</param>
     public void RecordQualityOutcome(string modelName, double qualityReward,
-        string? classificationSignal = null, ModelTier? classificationTargetTier = null)
+        string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0)
     {
         double reward = Math.Clamp(qualityReward, 0.0, 1.0);
-        ApplyOutcome(modelName, reward, classificationSignal, classificationTargetTier);
+        ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
     }
 
     /// <summary>使用完整路由决策记录质量反馈。</summary>
-    public void RecordQualityOutcome(string modelName, double qualityReward, RouterDecision decision)
-        => ApplyOutcome(modelName, Math.Clamp(qualityReward, 0.0, 1.0), decision);
+    public void RecordQualityOutcome(string modelName, double qualityReward, RouterDecision decision, decimal cost = 0)
+        => ApplyOutcome(modelName, Math.Clamp(qualityReward, 0.0, 1.0), cost, decision);
 
     /// <summary>
     /// 把 reward 应用到 Thompson 采样状态与（若启用）上下文 bandit。三个上报入口共享此核心，
     /// 区别仅在 reward 来源：延迟映射、竞速取消或显式质量。
     /// </summary>
-    private void ApplyOutcome(string modelName, double reward, string? classificationSignal, ModelTier? classificationTargetTier)
+    private void ApplyOutcome(string modelName, double reward, decimal cost, string? classificationSignal, ModelTier? classificationTargetTier)
     {
         var routing = _options.CurrentValue.Routing;
+        reward = ApplyCostWeight(reward, cost, routing);
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
 
         if (routing.EnableContextualBandit && _banditStore is not null && classificationSignal is not null)
@@ -349,9 +353,10 @@ public sealed class OutcomeRecorder
         }
     }
 
-    private void ApplyOutcome(string modelName, double reward, RouterDecision decision)
+    private void ApplyOutcome(string modelName, double reward, decimal cost, RouterDecision decision)
     {
         var routing = _options.CurrentValue.Routing;
+        reward = ApplyCostWeight(reward, cost, routing);
         _tsStore.RecordOutcome(modelName, reward, routing.ThompsonDiscountFactor);
 
         if (routing.EnableContextualBandit && _banditStore is not null)
@@ -362,6 +367,22 @@ public sealed class OutcomeRecorder
                 reward,
                 routing.ContextualBanditDiscountFactor);
         }
+    }
+
+    /// <summary>
+    /// 成本感知复合 reward：(1-α)·原reward + α·costReward，costReward = baseline/(baseline+cost) ∈ (0,1]。
+    /// cost 越低 reward 越高，引导 Bandit/Thompson 在质量/延迟相近时偏好便宜模型。
+    /// α = <see cref="RoutingOptions.CostAwareWeight"/>（默认 0=禁用，保持原 reward）；
+    /// cost=0（未知/免费）时不调整，避免"免费=满分"误判。
+    /// </summary>
+    private static double ApplyCostWeight(double reward, decimal cost, RoutingOptions routing)
+    {
+        if (routing.CostAwareWeight <= 0 || cost <= 0)
+            return reward;
+        double alpha = routing.CostAwareWeight;
+        double baseline = (double)routing.CostAwareBaselineUsd;
+        double costReward = baseline / (baseline + (double)cost);
+        return (1.0 - alpha) * reward + alpha * costReward;
     }
 
     /// <summary>

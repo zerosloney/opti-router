@@ -97,6 +97,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
                 return ValidateOptionsResult.Fail("Routing.ResponseCacheMaxEntries 必须大于 0（启用响应缓存时）。");
         }
 
+        if (options.Routing.CostAwareWeight < 0 || options.Routing.CostAwareWeight > 1)
+            return ValidateOptionsResult.Fail("Routing.CostAwareWeight 必须在 [0.0, 1.0] 范围内。");
+        if (options.Routing.CostAwareWeight > 0 && options.Routing.CostAwareBaselineUsd <= 0)
+            return ValidateOptionsResult.Fail("Routing.CostAwareBaselineUsd 必须大于 0（启用成本感知时）。");
+
         if (options.Routing.HealthProbeIntervalSeconds <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.HealthProbeIntervalSeconds 必须大于 0。");

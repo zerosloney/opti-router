@@ -163,7 +163,7 @@ public sealed class RaceOrchestrator
 
                 _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision);
+                _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision, cost);
                 _recorder.RecordAffinity(sessionId, model.Name, AffinitySignal.Weak);
                 _recorder.RecordPromptCacheAffinity(request, model.Name);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,

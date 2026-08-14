@@ -107,6 +107,18 @@ public sealed class RoutingOptions
     public int ResponseCacheMaxEntries { get; set; } = 1000;
 
     /// <summary>
+    /// 成本感知权重 α ∈ [0,1]。0=禁用（默认，reward 仅看延迟/质量）。
+    /// &gt;0 时 reward = (1-α)·原reward + α·costReward，引导学习状态在质量/延迟相近时偏好便宜模型。建议 0.2~0.4。
+    /// </summary>
+    public double CostAwareWeight { get; set; } = 0.0;
+
+    /// <summary>
+    /// 成本归一化基准（USD）。costReward = baseline/(baseline+cost)，cost=baseline 时 reward=0.5。
+    /// 默认 0.01（1¢）。启用 <see cref="CostAwareWeight"/> 时必须 &gt;0。
+    /// </summary>
+    public decimal CostAwareBaselineUsd { get; set; } = 0.01m;
+
+    /// <summary>
     /// 是否启用后台主动健康探活（定时对所有启用模型发探测请求，结果上报断路器）。
     /// 默认 true。关闭则熔断恢复纯靠真实流量半开探测。
     /// </summary>

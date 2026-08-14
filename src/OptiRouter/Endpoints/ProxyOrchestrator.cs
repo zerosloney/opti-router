@@ -262,7 +262,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
                     _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost);
                     outcomeReported = true;
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
@@ -662,7 +662,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (!isEstimated || cost > 0m)
                         _recorder.RecordCost(cost, sessionId);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision);
+                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost);
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
                     probeResolved = true;
