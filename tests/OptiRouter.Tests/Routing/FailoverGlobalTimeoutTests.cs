@@ -185,6 +185,95 @@ public class FailoverGlobalTimeoutTests
         Assert.Contains("ALL_CANDIDATES_FAILED", body);
     }
 
+    /// <summary>
+    /// TTFT fixture：两个 Cheap 候选，启用 Failover + 流式首字节专项超时（500ms），不依赖全局超时。
+    /// </summary>
+    private sealed class TtftFactory : WebApplicationFactory<Program>
+    {
+        public const string Key = "ttft-test-key";
+        public Dictionary<string, IModelClient> MockClients { get; } = new();
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
+            builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
+            builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+            builder.ConfigureServices(services =>
+            {
+                services.Configure<RouterOptions>(opt =>
+                {
+                    opt.Models.Clear();
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "m1", BaseUrl = "https://example.com", ApiKey = "k",
+                        Tier = ModelTier.Cheap, MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m, OutputPricePerMillion = 2m, Enabled = true
+                    });
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "m2", BaseUrl = "https://example.com", ApiKey = "k",
+                        Tier = ModelTier.Cheap, MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m, OutputPricePerMillion = 2m, Enabled = true
+                    });
+
+                    opt.Routing.EnableRuleClassifier = false;
+                    opt.Routing.EnableTokenEstimator = false;
+                    opt.Routing.EnableBudgetGuard = false;
+                    opt.Routing.EnableFailover = true;
+                    opt.Routing.FailoverGlobalTimeoutSeconds = 0; // 不依赖全局超时，仅 TTFT
+                    opt.Routing.StreamFirstTokenTimeoutMs = 500; // 500ms 首字节超时
+                    opt.Routing.EnableSemanticRouter = false;
+                    opt.Routing.EnableSessionAffinity = false;
+                    opt.Routing.EnableLoadBalance = false;
+                    opt.Routing.EnableFusionMode = false;
+                    opt.Routing.EnableHealthProbe = false;
+                });
+                services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
+            });
+        }
+    }
+
+    [Fact]
+    public async Task StreamAsync_FirstTokenTimeout_FailsOverToFastCandidate()
+    {
+        using var factory = new TtftFactory();
+        // m1 首字节延迟 3s（远超 500ms TTFT）→ TTFT 超时 → 记断路器失败 + failover 到 m2。
+        factory.MockClients["m1"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "m1", BaseUrl = "https://example.com" },
+            streamRawFunc: (req, ct) => StreamDelay(3000, ct));
+        // m2 首字节立即 yield 标记内容，应被采纳。
+        factory.MockClients["m2"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "m2", BaseUrl = "https://example.com" },
+            streamRawFunc: (req, ct) => StreamFromFast());
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", TtftFactory.Key);
+
+        var json = JsonSerializer.Serialize(new ChatRequest
+        {
+            Model = "any",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") },
+            Stream = true
+        });
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        var body = await response.Content.ReadAsStringAsync(cts.Token);
+        Assert.Contains("fast-m2", body); // failover 到 m2，其内容到达客户端
+        Assert.DoesNotContain("ALL_CANDIDATES_FAILED", body);
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> StreamFromFast([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        yield return new RawStreamLine("data: {\"from\":\"fast-m2\"}", null, null);
+        yield return new RawStreamLine("data: [DONE]", null, null);
+        await Task.CompletedTask;
+    }
+
     private static async IAsyncEnumerable<RawStreamLine> StreamDelay(int delayMs, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         await Task.Delay(delayMs, cancellationToken).ConfigureAwait(false);

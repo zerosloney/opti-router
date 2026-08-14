@@ -424,6 +424,116 @@ public class FusionModeTests
         Assert.Equal("fast-model", doc.RootElement.GetProperty("model").GetString());
     }
 
+    /// <summary>
+    /// Hedging fixture：两个同 tier 模型，启用并行首试 + 延迟 hedging（主立即，hedged 延迟 500ms 才启动）。
+    /// </summary>
+    private sealed class HedgeFactory : WebApplicationFactory<Program>
+    {
+        public const string Key = "hedge-test-key";
+        public Dictionary<string, IModelClient> MockClients { get; } = new();
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
+            builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
+            builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+            builder.ConfigureServices(services =>
+            {
+                services.Configure<RouterOptions>(opt =>
+                {
+                    opt.Models.Clear();
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "fast-model", BaseUrl = "https://example.com", ApiKey = "k",
+                        Tier = ModelTier.Medium, MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m, OutputPricePerMillion = 2m, Enabled = true
+                    });
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "slow-model", BaseUrl = "https://example.com", ApiKey = "k",
+                        Tier = ModelTier.Medium, MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m, OutputPricePerMillion = 2m, Enabled = true
+                    });
+
+                    opt.Routing.EnableRuleClassifier = false;
+                    opt.Routing.EnableTokenEstimator = false;
+                    opt.Routing.EnableBudgetGuard = false;
+                    opt.Routing.EnableFailover = true;
+                    opt.Routing.EnableSemanticRouter = false;
+                    opt.Routing.EnableSessionAffinity = false;
+                    opt.Routing.EnableLoadBalance = false;
+                    opt.Routing.EnableFusionMode = true;
+                    opt.Routing.FusionMaxParallel = 2;
+                    opt.Routing.FusionHedgeDelayMs = 500; // 主立即，hedged 延迟 500ms
+                    opt.Routing.EnableHealthProbe = false;
+                });
+                services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
+            });
+        }
+    }
+
+    [Fact]
+    public async Task Fusion_Hedge_PrimaryFast_HedgedNotLaunched()
+    {
+        // 主（fast-model，admitted[0]）立即成功（< HedgeDelayMs 500）→ raceCts 取消 → hedged 不启动（1× 成本）。
+        using var factory = new HedgeFactory();
+        bool slowCalled = false;
+        factory.MockClients["fast-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "fast-model" },
+            (req, ct) => Task.FromResult(MakeResponse("fast-model", 10, 5)));
+        factory.MockClients["slow-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "slow-model" },
+            (req, ct) => { slowCalled = true; return Task.FromResult(MakeResponse("slow-model", 10, 5)); });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", HedgeFactory.Key);
+
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync(cts.Token);
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("fast-model", doc.RootElement.GetProperty("model").GetString());
+        Assert.False(slowCalled, "主请求快成功时 hedged 不应启动（不应调用 slow 上游）");
+    }
+
+    [Fact]
+    public async Task Fusion_Hedge_PrimarySlow_HedgedLaunchedAndAdopted()
+    {
+        // 主（fast-model）慢：1s 后才返回（> HedgeDelayMs 500）→ hedged（slow-model）延迟到期启动并采纳。
+        using var factory = new HedgeFactory();
+        factory.MockClients["fast-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "fast-model" },
+            async (req, ct) =>
+            {
+                try { await Task.Delay(1000, ct).ConfigureAwait(false); }
+                catch (TaskCanceledException) { throw new OperationCanceledException(ct); }
+                return MakeResponse("fast-model", 10, 5);
+            });
+        // hedged（slow-model）延迟 500ms 后启动，立即返回 → 应被采纳。
+        factory.MockClients["slow-model"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "slow-model" },
+            (req, ct) => Task.FromResult(MakeResponse("slow-model", 10, 5)));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", HedgeFactory.Key);
+
+        var json = JsonSerializer.Serialize(BuildRequest());
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync(cts.Token);
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("slow-model", doc.RootElement.GetProperty("model").GetString());
+    }
+
     private static async IAsyncEnumerable<RawStreamLine> StreamLinesAsync(string[] lines)
     {
         foreach (var line in lines)

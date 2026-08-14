@@ -84,6 +84,13 @@ public sealed class RoutingOptions
     public long MaxResponseStreamBytes { get; set; } = 20 * 1024 * 1024; // 20 MB
 
     /// <summary>
+    /// 流式首字节（TTFT, Time To First Token）专项超时（毫秒）。0 = 禁用（退回整体 timeoutSeconds/globalTimeout 计时）。
+    /// &gt;0 时，上游建立连接后若首字节在此时间内未到达，视为该候选首字节前失败：记断路器失败并 failover 到下一候选，
+    /// 而非干等到整体超时。仅作用于流式（StreamAsync）；非流式已有整体超时覆盖。默认 0。
+    /// </summary>
+    public int StreamFirstTokenTimeoutMs { get; set; } = 0;
+
+    /// <summary>
     /// 是否启用后台主动健康探活（定时对所有启用模型发探测请求，结果上报断路器）。
     /// 默认 true。关闭则熔断恢复纯靠真实流量半开探测。
     /// </summary>
@@ -231,6 +238,14 @@ public sealed class RoutingOptions
     /// 半开模型探测槽位满时自动降级为串行单独尝试。
     /// </summary>
     public int FusionMaxParallel { get; set; } = 2;
+
+    /// <summary>
+    /// Hedged request 延迟触发阈值（毫秒）。0 = 总是并行（当前默认行为，每次 N× 成本）。
+    /// &gt;0 时改为 hedging：admitted[0]（路由主）立即启动；admitted[1..]（hedged）先等待此延迟，
+    /// 延迟内主请求成功（raceCts 取消）则 hedged 不启动（1× 成本），否则延迟到期启动 hedged 并行。
+    /// 显著降低正常情况下的成本（仅尾延迟场景才并行）。仅非流式。默认 0。
+    /// </summary>
+    public int FusionHedgeDelayMs { get; set; } = 0;
 
     /// <summary>
     /// 是否启用融合路由（OpenRouter Fusion 式）。开启后，非流式请求首轮并行叫 panel 模型作答，

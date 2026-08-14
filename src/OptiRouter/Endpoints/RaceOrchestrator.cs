@@ -88,26 +88,43 @@ public sealed class RaceOrchestrator
         // 2. 并行发起。每个候选配 linked CTS，首个成功后 cancel 其余。
         using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var perCandidateCts = new Dictionary<string, CancellationTokenSource>(StringComparer.Ordinal);
-        var tasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs, bool WasHalfOpen)>>();
+        var tasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs, bool WasHalfOpen, bool RequestSent)>>();
+        int hedgeDelayMs = options.Routing.FusionHedgeDelayMs;
 
-        foreach (var (model, wasHalfOpen) in admitted)
+        for (int idx = 0; idx < admitted.Count; idx++)
         {
+            var (model, wasHalfOpen) = admitted[idx];
             var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(raceCts.Token);
             perCandidateCts[model.Name] = linkedCts;
+            // 主候选（admitted[0]）立即启动；hedged 候选（admitted[1..]）在 HedgeDelayMs 后启动（若期间主已成功则不启动）。
+            bool isHedged = idx > 0 && hedgeDelayMs > 0;
             tasks.Add(Task.Run(async () =>
             {
+                // hedged：先等待延迟；延迟内 raceCts 取消（主已成功或请求被取消）则不发请求（1× 成本）。
+                if (isHedged)
+                {
+                    try
+                    {
+                        await Task.Delay(hedgeDelayMs, raceCts.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return (model, (RawChatResponse?)null, (Exception?)null, 0L, wasHalfOpen, false);
+                    }
+                }
+
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 try
                 {
                     var client = _clientProvider.GetClient(model);
                     var response = await client.CompleteRawAsync(request, linkedCts.Token).ConfigureAwait(false);
                     sw.Stop();
-                    return (model, response, (Exception?)null, sw.ElapsedMilliseconds, wasHalfOpen);
+                    return (model, response, (Exception?)null, sw.ElapsedMilliseconds, wasHalfOpen, true);
                 }
                 catch (Exception ex)
                 {
                     sw.Stop();
-                    return (model, (RawChatResponse?)null, ex, sw.ElapsedMilliseconds, wasHalfOpen);
+                    return (model, (RawChatResponse?)null, ex, sw.ElapsedMilliseconds, wasHalfOpen, true);
                 }
             }, linkedCts.Token));
         }
@@ -125,7 +142,15 @@ public sealed class RaceOrchestrator
             var done = await Task.WhenAny(remaining).ConfigureAwait(false);
             remaining.Remove(done);
 
-            var (model, response, error, elapsedMs, wasHalfOpen) = await done.ConfigureAwait(false);
+            var (model, response, error, elapsedMs, wasHalfOpen, requestSent) = await done.ConfigureAwait(false);
+
+            // hedged 未启动（延迟期内主已成功，raceCts 取消）：未调上游，仅释放槽位，不计成本、不记断路器。
+            if (!requestSent)
+            {
+                _healthTracker.ReleaseProbe(model.Name);
+                accounted.Add(model.Name);
+                continue;
+            }
 
             // 成功路径：采纳，cancel 其余。
             if (response is not null && error is null)
@@ -242,11 +267,19 @@ public sealed class RaceOrchestrator
         //    WhenWhenAll 已使任务全部完成，此处再 await 立即返回缓存结果。
         foreach (var task in remaining)
         {
-            var (m, response, error, elapsedMs, _) = await task.ConfigureAwait(false);
+            var (m, response, error, elapsedMs, _, requestSent) = await task.ConfigureAwait(false);
 
             // 跳过循环内已记审计的（成功采纳/失败/被取消）。
             if (accounted.Contains(m.Name))
                 continue;
+
+            // hedged 未启动（延迟期内主成功）：未调上游，仅释放槽位，不计成本。
+            if (!requestSent)
+            {
+                _healthTracker.ReleaseProbe(m.Name);
+                accounted.Add(m.Name);
+                continue;
+            }
 
             // 竞态窗口内该候选在 cancel 传播前已收到成功响应：计真实成功 + 真实成本。
             // 否则模型熔断器收不到成功信号（可能误开路），且成本被低估为估算值。

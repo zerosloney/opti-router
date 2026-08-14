@@ -466,22 +466,38 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
                     try
                     {
-                        enumerator = client.StreamRawAsync(request, effectiveCt).GetAsyncEnumerator(effectiveCt);
-                        if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                        // TTFT 专项超时：首字节迟迟不到时尽快 failover，而非干等到整体超时。
+                        // 超时抛 OperationCanceledException，落入下方 !ct.IsCancellationRequested 的 catch（记断路器 + continue）。
+                        CancellationTokenSource? ttftCts = options.Routing.StreamFirstTokenTimeoutMs > 0
+                            ? CancellationTokenSource.CreateLinkedTokenSource(effectiveCt)
+                            : null;
+                        try
                         {
-                            firstLine = enumerator.Current;
-                            _recorder.RecordQuota(candidate.Name, firstLine.Metadata);
-                            if (firstLine.Usage is not null)
-                                finalUsage = firstLine.Usage;
-                            hasFirstLine = true;
+                            if (ttftCts is not null)
+                                ttftCts.CancelAfter(TimeSpan.FromMilliseconds(options.Routing.StreamFirstTokenTimeoutMs));
+                            var firstTokenCt = ttftCts?.Token ?? effectiveCt;
+
+                            enumerator = client.StreamRawAsync(request, firstTokenCt).GetAsyncEnumerator(firstTokenCt);
+                            if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                            {
+                                firstLine = enumerator.Current;
+                                _recorder.RecordQuota(candidate.Name, firstLine.Metadata);
+                                if (firstLine.Usage is not null)
+                                    finalUsage = firstLine.Usage;
+                                hasFirstLine = true;
+                            }
+                            else
+                            {
+                                // 空流：视为成功但无内容，继续尝试下一个候选。
+                                await enumerator.DisposeAsync().ConfigureAwait(false);
+                                enumerator = null;
+                                // 无健康信号：外层 finally 会释放探测槽位。
+                                continue;
+                            }
                         }
-                        else
+                        finally
                         {
-                            // 空流：视为成功但无内容，继续尝试下一个候选。
-                            await enumerator.DisposeAsync().ConfigureAwait(false);
-                            enumerator = null;
-                            // 无健康信号：外层 finally 会释放探测槽位。
-                            continue;
+                            ttftCts?.Dispose();
                         }
                     }
                     catch (ModelClientException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)

@@ -84,6 +84,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.FailoverGlobalTimeoutSeconds 不能为负数。");
         }
 
+        if (options.Routing.StreamFirstTokenTimeoutMs < 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.StreamFirstTokenTimeoutMs 不能为负数。");
+        }
+
         if (options.Routing.HealthProbeIntervalSeconds <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.HealthProbeIntervalSeconds 必须大于 0。");
@@ -110,6 +115,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Routing.FusionMaxParallel < 2 || options.Routing.FusionMaxParallel > 5)
         {
             return ValidateOptionsResult.Fail("Routing.FusionMaxParallel 必须在 [2, 5] 范围内。");
+        }
+
+        if (options.Routing.FusionHedgeDelayMs < 0)
+        {
+            return ValidateOptionsResult.Fail("Routing.FusionHedgeDelayMs 不能为负数。");
         }
 
         if (options.Routing.FusionRouterPanelSize < 2 || options.Routing.FusionRouterPanelSize > 5)
