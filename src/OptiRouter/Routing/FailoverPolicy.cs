@@ -71,12 +71,17 @@ public sealed class FailoverPolicy : IRouterPolicy
         }
 
         // 全部排除，需要补充降级链。
-        // 感知原决策 tier：原 tier 失败后优先升档（如 Cheap 失败先试 Medium 再 Strong），
-        // 而非固定 Strong->Medium->Cheap 顺序（否则 Cheap 失败会跳到最贵的 Strong，跳过 Medium）。
+        // 优先用失败首选模型配置的显式 FallbackChain（确定性）；未配则回退自动 tier 降级。
         var originalTier = previous.Candidates.Count > 0 ? previous.Candidates[0].Tier : ModelTier.Medium;
-        var fallback = BuildFallbackChain(context.AllModels, previous.Candidates, excluded, originalTier);
+        var fallback = TryExplicitFallback(context.AllModels, previous.Candidates, excluded);
+        string source = "explicit";
+        if (fallback.Count == 0)
+        {
+            fallback = BuildFallbackChain(context.AllModels, previous.Candidates, excluded, originalTier);
+            source = "auto-tier";
+        }
         var withFallback = previous with { Candidates = fallback };
-        return withFallback.Append("failover", $"all candidates failed, fallback to [{string.Join(", ", fallback.Select(m => m.Name))}]");
+        return withFallback.Append("failover", $"all candidates failed, {source} fallback to [{string.Join(", ", fallback.Select(m => m.Name))}]");
     }
 
     private static List<ModelEndpointOptions> BuildFallbackChain(
@@ -114,5 +119,35 @@ public sealed class FailoverPolicy : IRouterPolicy
             .ToList();
 
         return anyAvailable.Count > 0 ? anyAvailable : new List<ModelEndpointOptions>();
+    }
+
+    /// <summary>
+    /// 显式 fallback：遍历失败的首选候选，取第一个配了非空 <see cref="ModelEndpointOptions.FallbackChain"/> 的模型，
+    /// 解析其链中模型（过滤 Enabled + 未被排除，按链顺序）。链中已失败/熔断的模型天然跳过（excluded 防循环）。
+    /// 返回空表示无可用的显式链，调用方应回退 <see cref="BuildFallbackChain"/>。
+    /// </summary>
+    private static List<ModelEndpointOptions> TryExplicitFallback(
+        IReadOnlyList<ModelEndpointOptions> allModels,
+        IReadOnlyList<ModelEndpointOptions> previousCandidates,
+        IReadOnlySet<string> excludedModels)
+    {
+        foreach (var candidate in previousCandidates)
+        {
+            if (candidate.FallbackChain is null || candidate.FallbackChain.Count == 0)
+                continue;
+
+            var resolved = new List<ModelEndpointOptions>();
+            foreach (var name in candidate.FallbackChain)
+            {
+                var model = allModels.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.OrdinalIgnoreCase));
+                if (model is not null && model.Enabled && !excludedModels.Contains(model.Name))
+                    resolved.Add(model);
+            }
+
+            if (resolved.Count > 0)
+                return resolved;
+        }
+
+        return new List<ModelEndpointOptions>();
     }
 }

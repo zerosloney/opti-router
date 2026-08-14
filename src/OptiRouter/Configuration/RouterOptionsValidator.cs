@@ -295,6 +295,18 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
                 string.Join(", ", unknownTags), string.Join(", ", ModelCapabilities.KnownTags));
         }
 
+        // FallbackChain 引用校验：链中模型名必须指向已配置的模型。
+        var knownModelNames = new HashSet<string>(options.Models.Select(m => m.Name), StringComparer.OrdinalIgnoreCase);
+        foreach (var model in options.Models)
+        {
+            if (model.FallbackChain is null) continue;
+            foreach (var chainName in model.FallbackChain)
+            {
+                if (!knownModelNames.Contains(chainName))
+                    return ValidateOptionsResult.Fail($"模型 {model.Name} 的 FallbackChain 引用了不存在的模型 '{chainName}'。");
+            }
+        }
+
         return ValidateOptionsResult.Success;
     }
 
@@ -332,6 +344,14 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
 
         if (model.MaxRetries < 0)
             return $"模型 {model.Name} 的 MaxRetries 不能为负数。";
+
+        if (model.FallbackChain is not null && model.FallbackChain.Count > 0)
+        {
+            if (model.FallbackChain.Any(n => string.Equals(n, model.Name, StringComparison.OrdinalIgnoreCase)))
+                return $"模型 {model.Name} 的 FallbackChain 不能包含自身。";
+            if (model.FallbackChain.Distinct(StringComparer.OrdinalIgnoreCase).Count() != model.FallbackChain.Count)
+                return $"模型 {model.Name} 的 FallbackChain 包含重复模型名。";
+        }
 
         return null;
     }

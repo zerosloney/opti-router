@@ -102,6 +102,18 @@ public sealed class ModelEndpointOptions
     /// </summary>
     public IDictionary<string, double> Capabilities { get; set; } = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
 
+    private Collection<string> _fallbackChain = new();
+
+    /// <summary>
+    /// 显式 fallback 模型链（按优先级的模型名列表）。模型失败后优先按此链切换到指定模型，
+    /// 而非自动 tier 降级。用于合规/成本敏感场景需要确定性 fallback。未配置（空）时走自动 tier fallback。
+    /// </summary>
+    public IList<string> FallbackChain
+    {
+        get => _fallbackChain;
+        set => _fallbackChain = value is null ? new Collection<string>() : new Collection<string>(value);
+    }
+
     /// <summary>
     /// 未显式配置能力时的按维度 tier 回退表。
     /// 维度分两类：语言是「廉价维度」（模型间差距小，档距近扁平），推理/代码是「昂贵维度」（档距陡）。
