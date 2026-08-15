@@ -67,6 +67,7 @@ public sealed class ModelsJsonConfigurationProvider : ConfigurationProvider
     {
         var invariant = System.Globalization.CultureInfo.InvariantCulture;
         data[$"{prefix}Name"] = m.Name;
+        data[$"{prefix}Id"] = m.Id;
         data[$"{prefix}BaseUrl"] = m.BaseUrl;
         data[$"{prefix}ApiKey"] = m.ApiKey;
         data[$"{prefix}Provider"] = m.Provider;

@@ -10,9 +10,22 @@ public sealed class ModelEndpointOptions
     private IList<string> _tags = new Collection<string>();
 
     /// <summary>
-    /// 模型唯一标识，如 "gpt-4o"、"deepseek-chat"。
+    /// 模型唯一标识（路由名），如 "gpt-4o"、"deepseek/deepseek-chat"。
+    /// 客户端请求 <c>model</c> 字段与 /v1/models 的 <c>id</c> 均指此名。
+    /// 留空且配置了 <see cref="Id"/> 时，启动归一化为 "{供应商}/{Id}"（同供应商同模型重复时追加序号）。
     /// </summary>
     public string Name { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 上游真实模型 id，即实际发往供应商 API 的 <c>model</c> 值，如 "deepseek-chat"、"gpt-4o"。
+    /// 留空时回退 <see cref="Name"/>（向后兼容）。可在多家供应商配置相同 Id（同一模型多供应商/多 Key）。
+    /// </summary>
+    public string Id { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 发往上游的真实模型 id：<see cref="Id"/> 留空时回退 <see cref="Name"/>。
+    /// </summary>
+    public string UpstreamModelId => string.IsNullOrWhiteSpace(Id) ? Name : Id;
 
     /// <summary>
     /// OpenAI 兼容 API base url，如 "https://api.openai.com/v1"。

@@ -187,7 +187,7 @@ public class ChatCompletionsEndpointTests
         };
     }
 
-    private static async Task<HttpResponseMessage> PostChatAsync(HttpClient client, string model = "model-a")
+    private static async Task<HttpResponseMessage> PostChatAsync(HttpClient client, string model = "auto")
     {
         using var content = new StringContent(
             JsonSerializer.Serialize(BuildRequest(model)),
@@ -364,7 +364,7 @@ public class ChatCompletionsEndpointTests
         using var factory = CreateSecurityFactory(() => attempts++);
         factory.ProxyApiKey = configuredKey;
         using var client = factory.CreateClient(providedKey);
-        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
 
         // Act
         var response = await client.PostAsync("/v1/chat/completions", content);
@@ -381,7 +381,7 @@ public class ChatCompletionsEndpointTests
         int attempts = 0;
         using var factory = CreateSecurityFactory(() => attempts++);
         using var client = factory.CreateClient(TestWebApplicationFactory.TestProxyApiKey);
-        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
 
         // Act
         var response = await client.PostAsync("/v1/chat/completions", content);
@@ -501,11 +501,11 @@ public class ChatCompletionsEndpointTests
         using var authorizedClient = factory.CreateClient(TestWebApplicationFactory.TestProxyApiKey);
 
         // Act
-        using var unauthorizedContent = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var unauthorizedContent = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
         var unauthorized = await unauthorizedClient.PostAsync("/v1/chat/completions", unauthorizedContent);
-        using var firstContent = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var firstContent = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
         var first = await authorizedClient.PostAsync("/v1/chat/completions", firstContent);
-        using var secondContent = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var secondContent = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
         var second = await authorizedClient.PostAsync("/v1/chat/completions", secondContent);
 
         // Assert
@@ -577,7 +577,7 @@ public class ChatCompletionsEndpointTests
         });
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: false);
+        var request = BuildRequest("auto", stream: false);
         var json = JsonSerializer.Serialize(request);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
@@ -629,7 +629,7 @@ public class ChatCompletionsEndpointTests
                 new ChatUsage()));
         });
 
-        var validRequest = BuildRequest("model-a");
+        var validRequest = BuildRequest("auto");
         var request = invalidField switch
         {
             "messages" => validRequest with { Messages = new List<ChatMessage>() },
@@ -692,7 +692,7 @@ public class ChatCompletionsEndpointTests
         });
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: false);
+        var request = BuildRequest("auto", stream: false);
         var json = JsonSerializer.Serialize(request);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
@@ -737,7 +737,7 @@ public class ChatCompletionsEndpointTests
             Task.FromResult(new RawChatResponse("{\"model\":\"model-b\",\"choices\":[]}", new ChatUsage())));
 
         using var client = factory.CreateClient();
-        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
         var response = await client.PostAsync("/v1/chat/completions", content);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -774,7 +774,7 @@ public class ChatCompletionsEndpointTests
             Task.FromResult(new RawChatResponse("{\"model\":\"model-b\",\"choices\":[]}", new ChatUsage())));
 
         using var client = factory.CreateClient();
-        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
         var response = await client.PostAsync("/v1/chat/completions", content);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -812,7 +812,7 @@ public class ChatCompletionsEndpointTests
 
         using var client = factory.CreateClient();
         using var content = new StringContent(
-            JsonSerializer.Serialize(BuildRequest("model-a", stream: true)), Encoding.UTF8, "application/json");
+            JsonSerializer.Serialize(BuildRequest("auto", stream: true)), Encoding.UTF8, "application/json");
         using var response = await client.PostAsync("/v1/chat/completions", content);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -860,7 +860,7 @@ public class ChatCompletionsEndpointTests
 
         using var client = factory.CreateClient();
         using var content = new StringContent(
-            JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+            JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
         using var response = await client.PostAsync("/v1/chat/completions", content);
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
@@ -911,7 +911,7 @@ public class ChatCompletionsEndpointTests
         using var client = factory.CreateClient();
         var request = new ChatRequest
         {
-            Model = "strong-model",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "public class Example {}") }
         };
         using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
@@ -962,7 +962,7 @@ public class ChatCompletionsEndpointTests
         });
 
         using var client = factory.CreateClient();
-        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("model-a")), Encoding.UTF8, "application/json");
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
 
         // Act
         var response = await client.PostAsync("/v1/chat/completions", content);
@@ -1002,7 +1002,7 @@ public class ChatCompletionsEndpointTests
             throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "model-b boom"));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: false);
+        var request = BuildRequest("auto", stream: false);
         var json = JsonSerializer.Serialize(request);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
@@ -1087,7 +1087,7 @@ public class ChatCompletionsEndpointTests
         factory.MockClients["model-a"] = new MockModelClient(endpoint, streamRawFunc: (req, ct) => CreateStreamChunks("hello world", ct));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -1156,7 +1156,7 @@ public class ChatCompletionsEndpointTests
             streamRawFunc: (req, ct) => CreateStreamChunksWithoutUsage(ct));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -1208,7 +1208,7 @@ public class ChatCompletionsEndpointTests
             throw new ModelClientException(HttpStatusCode.ServiceUnavailable, "model-b failed"));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -1278,7 +1278,7 @@ public class ChatCompletionsEndpointTests
                 new IOException("upstream connection reset mid-stream"), ct));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -1349,7 +1349,7 @@ public class ChatCompletionsEndpointTests
                 new OperationCanceledException("upstream read timed out"), ct));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -1404,7 +1404,7 @@ public class ChatCompletionsEndpointTests
                 new ResponseSizeLimitExceededException(110, "Response size limit exceeded (110 bytes)."), ct));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -1460,7 +1460,7 @@ public class ChatCompletionsEndpointTests
                 new InvalidOperationException("unexpected internal state"), ct));
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -1528,7 +1528,7 @@ public class ChatCompletionsEndpointTests
         using var client = factory.CreateClient();
         var request = new ChatRequest
         {
-            Model = "strong-model",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "public class Example {}") },
             Stream = true
         };
@@ -1578,7 +1578,7 @@ public class ChatCompletionsEndpointTests
         });
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
 
         // Act
@@ -1652,7 +1652,7 @@ public class ChatCompletionsEndpointTests
         ledger.Record(20m);
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("strong-model", stream: false);
+        var request = BuildRequest("auto", stream: false);
         var json = JsonSerializer.Serialize(request);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
@@ -1718,13 +1718,22 @@ public class ChatCompletionsEndpointTests
 
         Assert.Equal("list", doc.RootElement.GetProperty("object").GetString());
         var data = doc.RootElement.GetProperty("data");
-        Assert.Equal(1, data.GetArrayLength());
+        // 首位是虚拟 auto 模型，其后是启用的真实模型（禁用的 legacy 不出现）。
+        Assert.Equal(2, data.GetArrayLength());
 
-        var entry = data[0];
-        Assert.Equal("gpt-4o", entry.GetProperty("id").GetString());
+        var autoEntry = data[0];
+        Assert.Equal("auto", autoEntry.GetProperty("id").GetString());
+        Assert.Equal("auto", autoEntry.GetProperty("routing").GetString());
+
+        var entry = data[1];
+        Assert.Equal("example.com/gpt-4o", entry.GetProperty("id").GetString());
         Assert.Equal("model", entry.GetProperty("object").GetString());
         Assert.Equal("opti-router", entry.GetProperty("owned_by").GetString());
         Assert.Equal("strong", entry.GetProperty("tier").GetString());
+        Assert.Equal("direct", entry.GetProperty("routing").GetString());
+        // 显示 id 为「{供应商}/{真实模型 Id}」；upstream_id 即发往上游的 model 值。
+        Assert.Equal("gpt-4o", entry.GetProperty("upstream_id").GetString());
+        Assert.Equal("gpt-4o", entry.GetProperty("name").GetString());
 
         // ApiKey 不应出现在响应中（脱敏）
         var raw = body;

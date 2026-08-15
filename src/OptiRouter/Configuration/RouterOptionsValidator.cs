@@ -39,7 +39,8 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         {
             if (string.IsNullOrWhiteSpace(model.Name))
             {
-                return ValidateOptionsResult.Fail("每个模型端点都必须有非空 Name。");
+                return ValidateOptionsResult.Fail(
+                    "每个模型端点都必须有非空 Name 或 Id（只配置 Id 时 Name 自动生成为「供应商/模型」）。");
             }
 
             if (!names.Add(model.Name))

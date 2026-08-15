@@ -119,6 +119,51 @@ public class OpenAICompatibleModelClientTests
     }
 
     [Fact]
+    public async Task CompleteAsync_SendsUpstreamModelId_WhenIdConfigured()
+    {
+        // Name 是路由名，Id 是发往上游的真实模型；两者分离时上游应收到 Id。
+        var endpoint = CreateEndpoint(name: "deepseek/deepseek-chat");
+        endpoint.Id = "deepseek-chat";
+        Assert.Equal("deepseek-chat", endpoint.UpstreamModelId);
+
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        await client.CompleteAsync(new ChatRequest { Model = "deepseek/deepseek-chat", Messages = new List<ChatMessage>() });
+
+        var sentBody = handler.GetLastRequestContent();
+        Assert.NotNull(sentBody);
+        using var doc = JsonDocument.Parse(sentBody);
+        Assert.Equal("deepseek-chat", doc.RootElement.GetProperty("model").GetString());
+    }
+
+    [Fact]
+    public async Task CompleteAsync_SendsNameAsModel_WhenIdAbsent()
+    {
+        // 未配置 Id 时回退 Name，保持既有行为。
+        var endpoint = CreateEndpoint(name: "gpt-4o");
+        Assert.Equal("gpt-4o", endpoint.UpstreamModelId);
+
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        await client.CompleteAsync(new ChatRequest { Model = "whatever", Messages = new List<ChatMessage>() });
+
+        var sentBody = handler.GetLastRequestContent();
+        Assert.NotNull(sentBody);
+        using var doc = JsonDocument.Parse(sentBody);
+        Assert.Equal("gpt-4o", doc.RootElement.GetProperty("model").GetString());
+    }
+
+    [Fact]
     public async Task CompleteAsync_SerializesRequestInSnakeCase()
     {
         // Arrange

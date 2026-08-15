@@ -221,7 +221,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
         => new()
         {
             Id = "1",
-            Model = "m",
+            Model = "auto",
             Choices = new List<Clients.ChatChoice>
             {
                 new() { Index = 0, Message = ChatMessage.FromText("assistant", content), FinishReason = "stop" }
@@ -254,7 +254,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         var req = new ChatRequest
         {
-            Model = "any",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") }, // 单条短消息 → RuleClassifier simple-qa → Cheap
             Stream = false
         };
@@ -367,7 +367,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         var req = new ChatRequest
         {
-            Model = "any",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = false
         };
@@ -414,7 +414,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         var req = new ChatRequest
         {
-            Model = "any",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = false
         };
@@ -457,7 +457,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CascadeFactory.Key);
         var request = new ChatRequest
         {
-            Model = "any",
+            Model = "auto",
             Messages = [ChatMessage.FromText("user", "Hi")]
         };
         using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
@@ -500,7 +500,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         var req = new ChatRequest
         {
-            Model = "any",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = false
         };

@@ -39,6 +39,7 @@
 
 ## 核心特性
 
+- 🤖 **auto 虚拟模型与显式固定路由**：`GET /v1/models` 首位暴露虚拟模型 `auto`——请求 `model="auto"` 或缺省时走全链路智能路由；真实模型以 `{供应商}/{真实模型Id}` 格式展示（如 `deepseek/deepseek-chat`，同供应商同模型多 Key 追加 ` #2`），请求该格式 id 时自动解析并转换为上游内部模型 ID 发送，也接受路由名或裸模型 Id（多端点提供同一模型时固定为提供方集合，路由器在其中择优/降级）；仅数据合规/预算/熔断等硬约束可否决，不静默换模型，未知模型名按 OpenAI 兼容语义返回 404 `model_not_found`。模型配置的 `Id` 对应上游真实请求模型（如 `deepseek-chat`），`Name` 留空时自动生成为「供应商/模型」。
 - 🚀 **渐进式投机流 (Progressive Speculative Streaming)**：融合路由流式输出首字延迟 TTFT < 200ms，Anchor 节点即时推流，背景 Panel 模型与 Analyst 异步分析增量 Patch 补丁。
 - ⚡ **Prompt Cache 蒸馏 & APC 自动对齐**：Panel 文本蒸馏过滤无用废话（节省 50%~70% Token），Top-loaded 静态前缀（`[SYSTEM_PREFIX_INSTRUCTION]`）实现 Automatic Prefix Caching 高高效对齐。
 - 🛡️ **P1 合规防护与 JSON AST 自动修复**：

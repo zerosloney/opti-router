@@ -91,7 +91,7 @@ public class EndToEndSmokeTests : IDisposable
 
         using var factory = CreateFactory(("model-a", ModelTier.Medium, 1m));
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: false);
+        var request = BuildRequest("auto", stream: false);
         var json = JsonSerializer.Serialize(request);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
 
@@ -130,7 +130,7 @@ public class EndToEndSmokeTests : IDisposable
 
         using var factory = CreateFactory(("model-a", ModelTier.Medium, 1m));
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: true);
+        var request = BuildRequest("auto", stream: true);
         var json = JsonSerializer.Serialize(request);
         using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
@@ -234,7 +234,7 @@ public class EndToEndSmokeTests : IDisposable
         };
 
         using var client = factory.CreateClient();
-        var request = BuildRequest("model-a", stream: false);
+        var request = BuildRequest("auto", stream: false);
         var json = JsonSerializer.Serialize(request);
         using var content = new StringContent(json, Encoding.UTF8, "application/json");
 

@@ -23,6 +23,7 @@ public static class ModelsConfigHandler
             var models = cfg.LoadModels().Select(m => new
             {
                 m.Name,
+                m.Id,
                 m.BaseUrl,
                 m.Provider,
                 m.Family,
@@ -48,6 +49,7 @@ public static class ModelsConfigHandler
             var models = cfg.LoadModels().Select(m => new
             {
                 m.Name,
+                m.Id,
                 m.BaseUrl,
                 Tier = m.Tier.ToString(),
                 m.MaxContextTokens,
@@ -70,18 +72,16 @@ public static class ModelsConfigHandler
         // 4. POST create new model
         endpoints.MapPost("/api/models", (ModelsConfigService cfg, CreateModelRequest req) =>
         {
-            if (string.IsNullOrWhiteSpace(req.Name))
-                return Results.BadRequest(new { error = "Model name is required" });
+            // Name 与 Id 至少提供一个；只提供 Id 时自动生成「供应商/模型」路由名（冲突追加序号）。
+            if (string.IsNullOrWhiteSpace(req.Name) && string.IsNullOrWhiteSpace(req.Id))
+                return Results.BadRequest(new { error = "Model name or id is required" });
             if (string.IsNullOrWhiteSpace(req.BaseUrl))
                 return Results.BadRequest(new { error = "BaseUrl is required" });
 
-            var models = cfg.LoadModels();
-            if (models.Any(m => string.Equals(m.Name, req.Name, StringComparison.Ordinal)))
-                return Results.Conflict(new { error = $"Model '{req.Name}' already exists" });
-
             var model = new ModelEndpointOptions
             {
-                Name = req.Name.Trim(),
+                Name = req.Name?.Trim() ?? string.Empty,
+                Id = req.Id?.Trim() ?? string.Empty,
                 BaseUrl = req.BaseUrl.Trim().TrimEnd('/'),
                 ApiKey = req.ApiKey,
                 Provider = req.Provider?.Trim() ?? string.Empty,
@@ -101,6 +101,16 @@ public static class ModelsConfigHandler
                 foreach (var tag in req.Tags)
                     model.Tags.Add(tag);
 
+            // 与既有模型一起归一化：生成名 + 冲突去重（如 deepseek/deepseek-chat #2）。
+            var existing = cfg.LoadModels();
+            var pending = new List<ModelEndpointOptions>(existing) { model };
+            ModelNameNormalizer.Normalize(pending);
+
+            if (string.IsNullOrWhiteSpace(model.Name))
+                return Results.BadRequest(new { error = "Model name is required when id is absent" });
+            if (existing.Any(m => string.Equals(m.Name, model.Name, StringComparison.Ordinal)))
+                return Results.Conflict(new { error = $"Model '{model.Name}' already exists" });
+
             try
             {
                 cfg.UpsertModel(model);
@@ -109,7 +119,7 @@ public static class ModelsConfigHandler
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
-            return Results.Created($"/api/models/{model.Name}", new { message = $"Model '{model.Name}' created", model = new { model.Name, model.BaseUrl, model.Tier, model.Enabled } });
+            return Results.Created($"/api/models/{model.Name}", new { message = $"Model '{model.Name}' created", model = new { model.Name, model.Id, model.BaseUrl, model.Tier, model.Enabled } });
         });
 
         // 5. PUT update single model (持久化到文件 + 热重载)
@@ -121,6 +131,7 @@ public static class ModelsConfigHandler
                 return Results.NotFound(new { error = $"Model '{name}' not found" });
 
             if (req.BaseUrl is not null && !string.IsNullOrWhiteSpace(req.BaseUrl)) model.BaseUrl = req.BaseUrl.TrimEnd('/');
+            if (req.Id is not null) model.Id = req.Id.Trim(); // 空字符串表示清除（回退 Name 作上游 id）
             if (req.ApiKey is not null) model.ApiKey = req.ApiKey; // 空字符串表示清除
             if (req.Tier is not null) model.Tier = req.Tier.Value;
             if (req.MaxContextTokens is > 0) model.MaxContextTokens = req.MaxContextTokens.Value;
@@ -143,7 +154,7 @@ public static class ModelsConfigHandler
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
-            return Results.Ok(new { message = $"Model '{name}' updated", model = new { model.Name, model.BaseUrl, model.Tier, model.MaxContextTokens, model.TimeoutSeconds, model.MaxRetries, model.Enabled, model.InputPricePerMillion, model.OutputPricePerMillion, HasApiKey = !string.IsNullOrEmpty(model.ApiKey) } });
+            return Results.Ok(new { message = $"Model '{name}' updated", model = new { model.Name, model.Id, model.BaseUrl, model.Tier, model.MaxContextTokens, model.TimeoutSeconds, model.MaxRetries, model.Enabled, model.InputPricePerMillion, model.OutputPricePerMillion, HasApiKey = !string.IsNullOrEmpty(model.ApiKey) } });
         });
 
         // 6. DELETE remove model
@@ -188,12 +199,13 @@ public static class ModelsConfigHandler
         decimal? OutputPricePerMillion,
         string? Provider = null,
         string? Family = null,
+        string? Id = null,
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null);
 
     private record CreateModelRequest(
-        string Name,
+        string? Name,
         string BaseUrl,
         string? ApiKey,
         ModelTier? Tier,
@@ -206,6 +218,7 @@ public static class ModelsConfigHandler
         List<string>? Tags,
         string? Provider = null,
         string? Family = null,
+        string? Id = null,
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null);

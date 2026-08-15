@@ -68,6 +68,9 @@ builder.Services.AddOptions<RouterOptions>()
         foreach (var model in modelsConfig.LoadModels())
             options.Models.Add(model);
     })
+    // Name 留空且配置了 Id 的模型在此归一化为 "{供应商}/{Id}"（冲突时追加序号），
+    // 后续 Validate 与所有消费方（路由/客户端/显示）看到的都是最终路由名。
+    .PostConfigure(options => ModelNameNormalizer.Normalize(options.Models))
     .ValidateOnStart();
 
 builder.Services.AddSingleton<IValidateOptions<RouterOptions>>(sp =>
@@ -238,6 +241,9 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
     var policies = new List<IRouterPolicy>
     {
+        // 显式模型固定必须最先执行：把资格池缩到指定模型后，
+        // 后续 Filter/Classify/Order 策略只能在单元素池内工作，不会换模型。
+        new ExplicitModelPolicy(),
         new DataSovereigntyPolicy(),
         new CapabilityFilterPolicy(),
         new RuleClassifierPolicy(),

@@ -61,7 +61,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var body = request with { Model = _endpoint.Name, Stream = false };
+        var body = request with { Model = _endpoint.UpstreamModelId, Stream = false };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
@@ -88,7 +88,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var body = request with { Model = _endpoint.Name, Stream = true };
+        var body = request with { Model = _endpoint.UpstreamModelId, Stream = true };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
@@ -189,7 +189,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     {
         var probeRequest = new ChatRequest
         {
-            Model = _endpoint.Name,
+            Model = _endpoint.UpstreamModelId,
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "ping") },
             MaxTokens = 1,
             Stream = false
@@ -228,7 +228,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var body = request with { Model = _endpoint.Name, Stream = false };
+        var body = request with { Model = _endpoint.UpstreamModelId, Stream = false };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         int maxRetries = _endpoint.MaxRetries;
@@ -275,7 +275,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var body = request with { Model = _endpoint.Name, Stream = true };
+        var body = request with { Model = _endpoint.UpstreamModelId, Stream = true };
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         HttpResponseMessage? response = null;

@@ -87,7 +87,7 @@ public class FusionModeTests
 
     private static ChatRequest BuildRequest(bool stream = false) => new()
     {
-        Model = "any",
+        Model = "auto",
         Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") },
         Stream = stream
     };

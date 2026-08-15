@@ -1,7 +1,9 @@
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
+using OptiRouter.Configuration;
 
 namespace OptiRouter.Endpoints;
 
@@ -18,7 +20,7 @@ public static class ChatCompletionsEndpoint
     /// <returns>同一个 <paramref name="app"/>，便于链式调用。</returns>
     public static IEndpointRouteBuilder MapChatCompletions(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/v1/chat/completions", async (ChatRequest request, HttpContext httpContext, ProxyOrchestrator orchestrator, CancellationToken ct) =>
+        app.MapPost("/v1/chat/completions", async (ChatRequest request, HttpContext httpContext, IOptionsMonitor<OptiRouter.Configuration.RouterOptions> optionsMonitor, ProxyOrchestrator orchestrator, CancellationToken ct) =>
         {
             if (TryGetValidationError(request, out var validationError))
             {
@@ -26,6 +28,14 @@ public static class ChatCompletionsEndpoint
                     title: "Invalid request",
                     detail: validationError,
                     statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            // 未知模型名按 OpenAI 兼容语义拒绝（404 model_not_found），不静默改路由：
+            // 显式指定模型是对路由结果的强约束，拼错的模型名应尽早暴露给客户端。
+            var modelProblem = ValidateRequestedModel(request, optionsMonitor.CurrentValue);
+            if (modelProblem is not null)
+            {
+                return modelProblem;
             }
 
             string? sessionId = httpContext.Request.Headers.TryGetValue("X-Session-Id", out var sid) && !string.IsNullOrWhiteSpace(sid)
@@ -166,6 +176,36 @@ public static class ChatCompletionsEndpoint
         });
 
         return app;
+    }
+
+    /// <summary>
+    /// 校验请求的 model 字段：auto 语义（空/auto）与可解析的模型引用放行——
+    /// 路由名、显示 ID "{供应商}/{Id}"（可带 #N）或裸上游 Id；未知模型名返回 OpenAI 兼容 404。
+    /// </summary>
+    private static IResult? ValidateRequestedModel(ChatRequest request, OptiRouter.Configuration.RouterOptions options)
+    {
+        if (Routing.ExplicitModelPolicy.IsAutoRouting(request.Model))
+        {
+            return null;
+        }
+
+        var enabled = options.Models.Where(m => m.Enabled).ToList();
+        if (ModelDisplayIds.Resolve(enabled, request.Model).Count > 0)
+        {
+            return null;
+        }
+
+        return Results.Json(
+            new
+            {
+                error = new
+                {
+                    message = $"The model '{request.Model}' does not exist or is not enabled. Use 'auto' for smart routing, or GET /v1/models for available model ids.",
+                    type = "invalid_request_error",
+                    code = "model_not_found"
+                }
+            },
+            statusCode: StatusCodes.Status404NotFound);
     }
 
     private static bool TryGetValidationError(ChatRequest request, out string error)
