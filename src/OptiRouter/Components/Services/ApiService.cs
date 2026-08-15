@@ -240,7 +240,7 @@ public class ApiService
         string? RequestId,
         DateTime Timestamp,
         string Model,
-        string RoutedTier,
+        ModelTier RoutedTier,
         int PromptTokens,
         int CompletionTokens,
         double LatencyMs,
@@ -314,7 +314,7 @@ public class ApiService
         bool QuotaLimited = false,
         string? RequestId = null,
         string? TraceId = null,
-        string? RoutedTier = null,
+        ModelTier RoutedTier = ModelTier.Medium,
         string? RoutingReason = null,
         string? ErrorMessage = null,
         string? RequestContent = null);

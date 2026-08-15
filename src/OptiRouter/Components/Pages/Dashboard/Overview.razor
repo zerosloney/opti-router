@@ -162,7 +162,7 @@
             <table class="log-table">
                 <thead>
                     <tr>
-                        <th>时间</th><th>请求 ID</th><th>路由模型</th><th>分档 Tier</th><th>Tokens (In/Out)</th><th>延迟 / TTFT</th><th>成本</th><th>类型</th><th>状态</th>
+                        <th>时间</th><th>请求 ID</th><th>路由模型</th><th>分档 Tier</th><th>请求内容</th><th>Tokens (In/Out)</th><th>延迟 / TTFT</th><th>成本</th><th>类型</th><th>状态</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -175,6 +175,7 @@
                                 <td><code style="font-size: 0.8rem; color: #a7f3d0;">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
                                 <td><strong>@r.Model</strong></td>
                                 <td><span class="tag tag-info">@r.RoutedTier</span></td>
+                                <td><span style="font-size: 0.8rem; color: #94a3b8; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
                                 <td>@r.PromptTokens / @r.CompletionTokens</td>
                                 <td>@r.LatencyMs.ToString("F0") ms / @(r.TimeToFirstTokenMs is { } reqTtft ? $"{reqTtft:F0} ms" : "--")</td>
                                 <td style="color: #34d399; font-weight: bold;">$@r.Cost.ToString("F6")</td>
@@ -193,7 +194,7 @@
                     }
                     else
                     {
-                        <tr><td colspan="9" class="text-center text-secondary">暂无实时请求流数据</td></tr>
+                        <tr><td colspan="10" class="text-center text-secondary">暂无实时请求流数据</td></tr>
                     }
                 </tbody>
             </table>
