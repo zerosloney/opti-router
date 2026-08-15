@@ -57,30 +57,30 @@
     <!-- 审计日志 -->
     <div class="glass-card">
         <div class="card-label">历史请求审计日志 (点击任意行查看 Debugger Trace 详情)</div>
-        <div class="log-controls" style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; align-items: center;">
-            <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" style="width: 140px; background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;" />
-            <select @bind="LogFilterTier" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+        <div class="log-controls">
+            <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" style="width: 140px;" />
+            <select @bind="LogFilterTier">
                 <option value="">全能力分档</option>
                 <option value="Strong">Strong</option>
                 <option value="Medium">Medium</option>
                 <option value="Cheap">Cheap</option>
             </select>
-            <select @bind="LogFilterStatus" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+            <select @bind="LogFilterStatus">
                 <option value="">全请求状态</option>
                 <option value="200">仅成功 (200 OK)</option>
                 <option value="error">仅失败/异常</option>
             </select>
-            <select @bind="LogFilterMinLatency" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+            <select @bind="LogFilterMinLatency">
                 <option value="0">任意耗时</option>
                 <option value="500">耗时 &gt; 500ms</option>
                 <option value="1000">耗时 &gt; 1000ms</option>
                 <option value="3000">耗时 &gt; 3000ms</option>
             </select>
-            <select @bind="LogLimit" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
+            <select @bind="LogLimit">
                 <option value="50">每页 50 条</option>
                 <option value="100">每页 100 条</option>
             </select>
-            <button class="btn-primary" @onclick="LoadLogs" style="padding: 4px 16px;">🔍 组合筛选</button>
+            <button class="btn-primary" @onclick="LoadLogs">🔍 组合筛选</button>
         </div>
         <div class="table-wrap">
             <table class="log-table">
@@ -94,14 +94,14 @@
                     {
                         @foreach (var item in AuditItems)
                         {
-                            <tr @onclick="() => SelectLogItem(item)" style="cursor: pointer; transition: background 0.2s;" class="hover-row">
+                            <tr @onclick="() => SelectLogItem(item)" style="cursor: pointer;" class="hover-row">
                                 <td>@item.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
                                 <td><strong>@item.Model</strong></td>
-                                <td><span class="badge badge-info" style="font-size: 0.75rem;">@item.RoutedTier</span></td>
-                                <td><span style="font-size: 0.8rem; color: #94a3b8; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(item.RequestContent) ? "-" : Truncate(item.RequestContent, 30))</span></td>
+                                <td><span class="badge badge-info">@item.RoutedTier</span></td>
+                                <td><span style="font-size: 0.8rem; color: var(--text-secondary); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(item.RequestContent) ? "-" : Truncate(item.RequestContent, 30))</span></td>
                                 <td>@(item.PromptTokens + item.CompletionTokens)</td>
                                 <td>@item.CachedInputTokens / @item.CacheWriteInputTokens</td>
-                                <td>
+                                <td style="color: var(--success); font-weight: 600;">
                                     $@item.Cost.ToString("F6")
                                     @if (item.IsEstimated)
                                     {
@@ -110,11 +110,11 @@
                                 </td>
                                 <td>@item.LatencyMs.ToString("F0") ms</td>
                                 <td>@(item.TimeToFirstTokenMs is { } auditTtft ? $"{auditTtft:F0} ms" : "--")</td>
-                                <td class="@(item.Success ? "text-success" : "text-danger")">
-                                    @(item.Success ? "成功" : item.QuotaLimited ? "配额受限" : "失败")
+                                <td class="@(item.Success ? "text-success" : "text-danger")" style="font-weight: 500;">
+                                    @(item.Success ? "✓ 成功" : item.QuotaLimited ? "⚠ 配额受限" : "✗ 失败")
                                 </td>
                                 <td>
-                                    <button class="btn-ghost btn-sm" @onclick:stopPropagation="true" @onclick="() => SelectLogItem(item)">🔍 详情</button>
+                                    <button class="btn-ghost btn-sm" @onclick:stopPropagation="true" @onclick="() => SelectLogItem(item)">详情</button>
                                 </td>
                             </tr>
                         }
@@ -138,59 +138,96 @@
 
 @if (SelectedLogItem != null)
 {
-    <div class="drawer-backdrop" @onclick="() => SelectedLogItem = null" style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); z-index: 9999; display: flex; justify-content: flex-end;">
-        <div class="drawer-content" @onclick:stopPropagation="true" style="width: 520px; max-width: 90vw; height: 100%; background: #0f172a; border-left: 1px solid rgba(56,189,248,0.3); padding: 20px; overflow-y: auto; color: #e2e8f0; box-shadow: -10px 0 25px rgba(0,0,0,0.5);">
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 12px; margin-bottom: 16px;">
-                <span style="font-weight: bold; font-size: 1.1rem; color: #38bdf8;">📌 请求全链路 Debugger Trace</span>
-                <button class="btn-ghost" @onclick="() => SelectedLogItem = null" style="font-size: 1.2rem; cursor: pointer;">&times;</button>
+    <div class="drawer-backdrop" @onclick="() => SelectedLogItem = null" style="justify-content: flex-end;">
+        <div class="drawer-content" @onclick:stopPropagation="true" style="width: 520px; max-width: 90vw; height: 100%; padding: 24px; overflow-y: auto;">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 16px;">
+                <span style="font-weight: 600; font-size: 1.05rem; color: var(--text-primary);">📌 请求全链路 Debugger Trace</span>
+                <button class="btn-ghost btn-sm" @onclick="() => SelectedLogItem = null">&times;</button>
             </div>
 
             <div style="display: flex; flex-direction: column; gap: 12px;">
-                <div style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 12px;">
-                    <div style="color: #9ca3af; font-size: 0.8rem; margin-bottom: 4px;">REQUEST & TRACE ID</div>
-                    <div style="font-family: monospace; font-size: 0.85rem; color: #f43f5e; word-break: break-all;">ReqId: @(SelectedLogItem.RequestId ?? "-")</div>
-                    <div style="font-family: monospace; font-size: 0.85rem; color: #38bdf8; word-break: break-all; margin-top: 2px;">TraceId: @(SelectedLogItem.TraceId ?? "-")</div>
+                <div class="sub-card">
+                    <div style="color: var(--text-muted); font-size: 0.75rem; letter-spacing: 0.05em; margin-bottom: 6px;">REQUEST & TRACE ID</div>
+                    <div class="table-mono" style="font-size: 0.82rem; color: var(--danger); word-break: break-all;">ReqId: @(SelectedLogItem.RequestId ?? "-")</div>
+                    <div class="table-mono" style="font-size: 0.82rem; color: var(--primary); word-break: break-all; margin-top: 2px;">TraceId: @(SelectedLogItem.TraceId ?? "-")</div>
                 </div>
 
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.85rem;">
-                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
-                        <span style="color: #9ca3af;">命中 Model:</span> <span style="font-weight: bold; color: #38bdf8;">@SelectedLogItem.Model</span>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.82rem;">
+                    <div class="sub-card" style="padding: 10px;">
+                        <span class="text-muted">命中 Model:</span> <strong style="color: var(--primary); margin-left: 4px;">@SelectedLogItem.Model</strong>
                     </div>
-                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
-                        <span style="color: #9ca3af;">路由 Target Tier:</span> <span class="badge badge-info">@SelectedLogItem.RoutedTier</span>
+                    <div class="sub-card" style="padding: 10px;">
+                        <span class="text-muted">路由 Tier:</span> <span class="badge badge-info" style="margin-left: 4px;">@SelectedLogItem.RoutedTier</span>
                     </div>
-                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
-                        <span style="color: #9ca3af;">端到端耗时:</span> <span style="font-weight: bold; color: #34d399;">@SelectedLogItem.LatencyMs ms</span>
+                    <div class="sub-card" style="padding: 10px;">
+                        <span class="text-muted">端到端耗时:</span> <span style="font-weight: 600; color: var(--success); margin-left: 4px;">@SelectedLogItem.LatencyMs ms</span>
                     </div>
-                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
-                        <span style="color: #9ca3af;">流式 TTFT:</span> <span>@(SelectedLogItem.TimeToFirstTokenMs is { } t ? $"{t} ms" : "--")</span>
+                    <div class="sub-card" style="padding: 10px;">
+                        <span class="text-muted">流式 TTFT:</span> <span style="margin-left: 4px;">@(SelectedLogItem.TimeToFirstTokenMs is { } t ? $"{t} ms" : "--")</span>
                     </div>
-                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
-                        <span style="color: #9ca3af;">Token 计费:</span> <span>Prompt: @SelectedLogItem.PromptTokens / Comp: @SelectedLogItem.CompletionTokens</span>
+                    <div class="sub-card" style="padding: 10px;">
+                        <span class="text-muted">Tokens:</span> <span style="margin-left: 4px;">@SelectedLogItem.PromptTokens / @SelectedLogItem.CompletionTokens</span>
                     </div>
-                    <div style="background: rgba(255,255,255,0.03); padding: 8px 10px; border-radius: 6px;">
-                        <span style="color: #9ca3af;">计算费用:</span> <span style="color: #34d399; font-weight: bold;">$@SelectedLogItem.Cost.ToString("F6")</span>
+                    <div class="sub-card" style="padding: 10px;">
+                        <span class="text-muted">费用:</span> <span style="color: var(--success); font-weight: 600; margin-left: 4px;">$@SelectedLogItem.Cost.ToString("F6")</span>
                     </div>
                 </div>
 
-                <div style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 12px; margin-top: 4px;">
-                    <div style="color: #38bdf8; font-size: 0.85rem; font-weight: bold; margin-bottom: 6px;">🧠 路由决策 Reasons 链</div>
-                    <div style="font-size: 0.8rem; color: #cbd5e1; font-family: monospace; white-space: pre-wrap; word-break: break-all; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px;">@SelectedLogItem.RoutingReason</div>
+                <div class="sub-card" style="margin-top: 4px;">
+                    <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px;">🧠 路由决策 Reasons 链</div>
+                    <div class="table-mono" style="font-size: 0.78rem; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; background: var(--bg-input); padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">@SelectedLogItem.RoutingReason</div>
                 </div>
+
+                @if (SelectedLogItem.Reward is not null
+                   || !string.IsNullOrEmpty(SelectedLogItem.EpsilonPromotedModel)
+                   || !string.IsNullOrEmpty(SelectedLogItem.FusionRole)
+                   || !string.IsNullOrEmpty(SelectedLogItem.ParallelGroupId)
+                   || !string.IsNullOrEmpty(SelectedLogItem.UpgradedFrom)
+                   || SelectedLogItem.CascadeTriggered)
+                {
+                    <div class="sub-card" style="margin-top: 4px;">
+                        <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px;">🔬 学习反馈与融合调度</div>
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.78rem;">
+                            @if (SelectedLogItem.Reward is { } reward)
+                            {
+                                <div><span class="text-muted">Reward (成本加权后):</span> <span class="table-mono" style="color: var(--purple); font-weight: 600;">@reward.ToString("F3")</span></div>
+                            }
+                            @if (!string.IsNullOrEmpty(SelectedLogItem.EpsilonPromotedModel))
+                            {
+                                <div><span class="text-muted">ε 探索提升:</span> <strong style="color: var(--warning); margin-left: 4px;">@SelectedLogItem.EpsilonPromotedModel</strong></div>
+                            }
+                            @if (!string.IsNullOrEmpty(SelectedLogItem.FusionRole))
+                            {
+                                <div><span class="text-muted">融合角色:</span> <span class="badge badge-info" style="margin-left: 4px;">@SelectedLogItem.FusionRole</span></div>
+                            }
+                            @if (!string.IsNullOrEmpty(SelectedLogItem.ParallelGroupId))
+                            {
+                                <div><span class="text-muted">并行组:</span> <span class="table-mono" style="margin-left: 4px;">@Truncate(SelectedLogItem.ParallelGroupId, 18)</span></div>
+                            }
+                            @if (!string.IsNullOrEmpty(SelectedLogItem.UpgradedFrom))
+                            {
+                                <div><span class="text-muted">级联升级自:</span> <strong style="margin-left: 4px;">@SelectedLogItem.UpgradedFrom</strong></div>
+                            }
+                            @if (SelectedLogItem.CascadeTriggered)
+                            {
+                                <div><span class="tag tag-warning">⚡ 触发级联升级</span></div>
+                            }
+                        </div>
+                    </div>
+                }
 
                 @if (!string.IsNullOrEmpty(SelectedLogItem.RequestContent))
                 {
-                    <div style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 12px; margin-top: 4px;">
-                        <div style="color: #38bdf8; font-size: 0.85rem; font-weight: bold; margin-bottom: 6px;">📝 请求内容（脱敏后）</div>
-                        <div style="font-size: 0.8rem; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow-y: auto; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 4px;">@SelectedLogItem.RequestContent</div>
+                    <div class="sub-card" style="margin-top: 4px;">
+                        <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px;">📝 请求内容（脱敏后）</div>
+                        <div style="font-size: 0.8rem; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; background: var(--bg-input); padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">@SelectedLogItem.RequestContent</div>
                     </div>
                 }
 
                 @if (!string.IsNullOrEmpty(SelectedLogItem.ErrorMessage))
                 {
-                    <div style="background: rgba(244,63,94,0.1); border: 1px solid rgba(244,63,94,0.3); border-radius: 6px; padding: 12px;">
-                        <div style="color: #f43f5e; font-size: 0.85rem; font-weight: bold;">❌ 异常日志信息</div>
-                        <div style="font-size: 0.8rem; color: #fca5a5; font-family: monospace; margin-top: 4px;">@SelectedLogItem.ErrorMessage</div>
+                    <div class="alert-banner alert-error" style="margin-top: 4px;">
+                        <div style="font-size: 0.8rem; font-family: 'JetBrains Mono', monospace;">❌ @SelectedLogItem.ErrorMessage</div>
                     </div>
                 }
             </div>

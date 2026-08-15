@@ -34,6 +34,9 @@ public sealed class UpstreamQuotaStateStore
     public UpstreamQuotaSnapshot? GetSnapshot(string modelName)
         => _snapshots.TryGetValue(modelName, out var snapshot) ? snapshot : null;
 
+    /// <summary>全部模型的配额快照（dashboard 状态端点用；进程本地，重启清空）。</summary>
+    public IReadOnlyList<UpstreamQuotaSnapshot> GetAllSnapshots() => _snapshots.Values.ToArray();
+
     public void Record(string modelName, UpstreamResponseMetadata? metadata, bool rateLimited)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(modelName);

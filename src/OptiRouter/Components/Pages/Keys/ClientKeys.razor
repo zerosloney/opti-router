@@ -7,27 +7,27 @@
 <div class="models-page">
     <!-- 🔑 客户端 API Key 与租户配额控制台 -->
     <div class="glass-card">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; color: #c084fc;">
+        <div class="card-label">
             <span>🔑 客户端 API Key 与租户配额控制台 (Client Quota Studio)</span>
-            <button class="btn-primary" @onclick="ToggleAddKeyForm" style="padding: 4px 12px; font-size: 0.85rem;">
+            <button class="btn-primary btn-sm" @onclick="ToggleAddKeyForm">
                 @(ShowAddKeyForm ? "- 取消签发" : "+ 签发租户 API Key")
             </button>
         </div>
 
         @if (ShowAddKeyForm)
         {
-            <div style="background: rgba(15,23,42,0.7); border: 1px solid rgba(168,85,247,0.3); border-radius: 8px; padding: 14px; margin-top: 12px; margin-bottom: 12px;">
+            <div class="add-form" style="margin-top: 12px;">
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
-                    <input type="text" placeholder="租户/部门名称 (如: 财务部 App)" @bind="NewTenantName" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 6px 10px; width: 220px;" />
+                    <input type="text" placeholder="租户/部门名称 (如: 财务部 App)" @bind="NewTenantName" style="width: 240px;" />
                     <div style="display: flex; align-items: center; gap: 6px;">
-                        <span style="color: #9ca3af; font-size: 0.85rem;">日预算 ($):</span>
-                        <input type="number" step="10" min="0" @bind="NewTenantBudget" style="width: 100px; background: rgba(15,23,42,0.8); color: #34d399; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 6px 10px;" />
+                        <span class="text-secondary" style="font-size: 0.85rem;">日预算 ($):</span>
+                        <input type="number" step="10" min="0" @bind="NewTenantBudget" style="width: 100px; color: var(--success); font-weight: 600;" />
                     </div>
                     <div style="display: flex; align-items: center; gap: 6px;">
-                        <span style="color: #9ca3af; font-size: 0.85rem;">QPS 上限:</span>
-                        <input type="number" step="5" min="1" @bind="NewTenantQps" style="width: 80px; background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 6px 10px;" />
+                        <span class="text-secondary" style="font-size: 0.85rem;">QPS 上限:</span>
+                        <input type="number" step="5" min="1" @bind="NewTenantQps" style="width: 80px;" />
                     </div>
-                    <button class="btn-primary" @onclick="CreateClientKey" style="padding: 6px 16px;">确认签发</button>
+                    <button class="btn-primary" @onclick="CreateClientKey">确认签发</button>
                 </div>
             </div>
         }
@@ -46,11 +46,11 @@
                         {
                             <tr>
                                 <td><strong>@k.TenantName</strong></td>
-                                <td style="font-family: monospace; color: #c084fc;">@k.KeyPrefix</td>
+                                <td class="table-mono" style="color: var(--primary);">@k.KeyPrefix</td>
                                 <td>$@k.DailyBudgetUsd.ToString("N0")</td>
                                 <td>@k.MaxQps QPS</td>
                                 <td>
-                                    <span class="@(k.Enabled ? "text-success" : "text-secondary")" style="font-weight: bold;">@(k.Enabled ? "正常" : "已禁用")</span>
+                                    <span class="@(k.Enabled ? "text-success" : "text-secondary")" style="font-weight: 600;">@(k.Enabled ? "正常" : "已禁用")</span>
                                 </td>
                                 <td>@k.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
                                 <td style="display: flex; gap: 6px;">
@@ -72,7 +72,7 @@
 
 @if (IssuedPlaintextKey != null)
 {
-    <div class="drawer-backdrop" @onclick="CloseIssuedKey" style="position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9999; display: flex; align-items: center; justify-content: center;">
+    <div class="drawer-backdrop" @onclick="CloseIssuedKey">
         <div class="key-modal" @onclick:stopPropagation="true">
             <div class="key-modal-title">🔑 新租户密钥（仅显示一次）</div>
             <div class="key-modal-warn">租户「@IssuedTenant」——请立即复制保存，关闭后无法再次获取。</div>

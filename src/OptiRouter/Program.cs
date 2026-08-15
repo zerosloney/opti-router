@@ -223,6 +223,8 @@ builder.Services.AddSingleton<IResponseCache>(sp => new MemoryResponseCache(
     sp.GetRequiredService<IMemoryCache>(),
     sp.GetRequiredService<IOptions<RouterOptions>>().Value.Routing.ResponseCacheMaxEntries,
     useSize: true)); // AddMemoryCache 设了 SizeLimit，entry 须申报 Size
+// 同一实例的具体类型注册：MaxEntries 在构造时绑定（重启生效），dashboard 状态端点借它读命中/写入统计。
+builder.Services.AddSingleton(sp => (MemoryResponseCache)sp.GetRequiredService<IResponseCache>());
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {

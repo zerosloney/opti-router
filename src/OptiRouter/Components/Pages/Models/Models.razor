@@ -22,9 +22,9 @@
         <!-- 添加表单 -->
         @if (ShowAddForm)
         {
-            <div class="add-form" style="background: rgba(15,23,42,0.85); border: 1px solid rgba(56,189,248,0.3); border-radius: 8px; padding: 18px; margin-bottom: 20px;">
-                <div style="margin-bottom: 14px; font-weight: 600; color: #38bdf8; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                    <span>⚡ 快捷预设模板填入：</span>
+            <div class="add-form">
+                <div style="margin-bottom: 1rem; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <span class="text-secondary" style="font-size: 0.82rem;">⚡ 预设模板：</span>
                     <button class="btn-ghost btn-sm" @onclick='() => ApplyPreset("openai")'>GPT-4o (OpenAI)</button>
                     <button class="btn-ghost btn-sm" @onclick='() => ApplyPreset("deepseek")'>DeepSeek-V3</button>
                     <button class="btn-ghost btn-sm" @onclick='() => ApplyPreset("claude")'>Claude 3.5 Sonnet</button>

@@ -36,67 +36,274 @@
     </div>
 
     <!-- 系统策略与预算动态控制面板 -->
-    <div class="glass-card" style="background: linear-gradient(135deg, rgba(30,41,59,0.9), rgba(15,23,42,0.9)); border: 1px solid rgba(56,189,248,0.3); padding: 18px 20px;">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; color: #38bdf8;">
+    <div class="glass-card">
+        <div class="card-label">
             <span>⚙️ 系统路由策略与预算配置控制台 (UI Config Studio)</span>
-            <button class="btn-primary" @onclick="SaveSystemConfig" disabled="@IsConfigSaving" style="padding: 4px 16px; font-size: 0.85rem;">
+            <button class="btn-primary btn-sm" @onclick="SaveSystemConfig" disabled="@IsConfigSaving">
                 @(IsConfigSaving ? "热更新保存中..." : "💾 保存并热生效")
             </button>
         </div>
 
         @if (!string.IsNullOrEmpty(ConfigStatusMsg))
         {
-            <div class="tag tag-success" style="margin: 8px 0; padding: 6px 12px; font-size: 0.85rem;">@ConfigStatusMsg</div>
+            <div class="alert-banner @(ConfigStatusOk ? "alert-success" : "alert-error")" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">@ConfigStatusMsg</div>
         }
 
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 14px;">
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgFailover" /> 故障转移策略
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgBudgetGuard" /> 预算防护策略
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgRuleClassifier" /> 规则分类器
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgLatencyAware" /> 历史延迟感知重排
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgSemanticRouter" /> 语义向量路由
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgPiiAnonymization" /> PII 隐私脱敏
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgDataSovereignty" /> 数据不出域隔离
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgJsonAstAutoRepair" /> JSON AST 自动修复
             </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: #cbd5e1; font-size: 0.85rem; cursor: pointer;">
+            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
                 <input type="checkbox" @bind="CfgFusionRouter" /> Fusion MoA 融合路由
             </label>
         </div>
 
-        <div style="display: flex; gap: 20px; align-items: center; margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="color: #9ca3af; font-size: 0.85rem;">日预算 (USD):</span>
-                <input type="number" step="1.0" min="0" @bind="CfgDailyBudgetUsd" style="width: 100px; background: rgba(15,23,42,0.8); color: #34d399; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px; font-weight: bold;" />
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-subtle);">
+            <!-- 学习与探索 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">🧠 学习与探索</div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
+                        <input type="checkbox" @bind="CfgThompson" /> Thompson 采样重排
+                    </label>
+                    <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
+                        <input type="checkbox" @bind="CfgBandit" /> Contextual Bandit (LinUCB)
+                    </label>
+                    @if (CfgThompson && CfgBandit)
+                    {
+                        <div class="alert-banner alert-error" style="padding: 6px 10px; font-size: 0.75rem;">Thompson 与 Bandit 互斥，同时开启会被后端拒绝保存</div>
+                    }
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">ε 探索保底:</span>
+                        <input type="number" step="0.01" min="0" max="1" @bind="CfgEpsilon" style="width: 80px;" />
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">饥饿定向阈值 N:</span>
+                        <input type="number" step="1" min="0" @bind="CfgStarvedN" style="width: 80px;" />
+                    </div>
+                    <div class="meta-text" style="font-size: 0.72rem;">由「历史延迟感知重排」承载段内重排；ε ∈ [0,1]，低流量建议 0.05，N&gt;0 时探索优先提升样本饥饿模型。</div>
+                </div>
             </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="color: #9ca3af; font-size: 0.85rem;">预算耗尽行为:</span>
-                <select @bind="CfgEnforceBehavior" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 4px 8px;">
-                    <option value="Degrade">Degrade (降级至 Cheap)</option>
-                    <option value="Reject">Reject (直接拒绝 429)</option>
-                </select>
+
+            <!-- 响应缓存 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">💾 响应缓存</div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
+                        <input type="checkbox" @bind="CfgResponseCache" /> 启用响应缓存
+                    </label>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">单条 TTL (秒):</span>
+                        <input type="number" step="60" min="1" @bind="CfgCacheTtl" style="width: 90px;" />
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">最大条目数:</span>
+                        <input type="number" step="100" min="1" @bind="CfgCacheMaxEntries" style="width: 90px;" />
+                    </div>
+                    <div class="meta-text" style="font-size: 0.72rem;">仅非流式请求生效；命中直接返回缓存答案，不产生上游调用成本。</div>
+                </div>
             </div>
+
+            <!-- 故障转移 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">🛡️ 故障转移</div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">熔断失败阈值:</span>
+                        <input type="number" step="1" min="1" @bind="CfgFailoverThreshold" style="width: 70px;" />
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">冷却时长 (秒):</span>
+                        <input type="number" step="10" min="1" @bind="CfgFailoverCooldown" style="width: 80px;" />
+                    </div>
+                    <div class="meta-text" style="font-size: 0.72rem;">连续失败 N 次熔断进入隔离；冷却期后半开探测，成功才恢复全流量。</div>
+                </div>
+            </div>
+
+            <!-- 预算 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">💰 预算</div>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">日预算 (USD):</span>
+                        <input type="number" step="1.0" min="0" @bind="CfgDailyBudgetUsd" style="width: 100px; color: var(--success); font-weight: 600;" />
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                        <span class="text-secondary" style="font-size: 0.85rem;">预算耗尽行为:</span>
+                        <select @bind="CfgEnforceBehavior">
+                            <option value="Degrade">Degrade (降级至 Cheap)</option>
+                            <option value="Reject">Reject (直接拒绝 429)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Thompson 学习状态监控 -->
+    <div class="glass-card">
+        <div class="card-label">
+            <span>🧠 强化学习状态监控 (Thompson Sampling Explorer)</span>
+            <span class="tag @(Metrics?.System.Routing.EnableLatencyAware == true ? "tag-success" : "tag-warning")">
+                延迟感知重排 @(Metrics?.System.Routing.EnableLatencyAware == true ? "已启用" : "未启用")
+            </span>
+        </div>
+        @if (LearningStates.Any())
+        {
+            <div class="table-wrap">
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th>模型</th>
+                            <th>期望奖励均值 (α/(α+β))</th>
+                            <th>α / β</th>
+                            <th>样本数</th>
+                            <th>最后更新</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var s in LearningStates)
+                        {
+                            string meanColor = s.Mean >= 0.6 ? "var(--success)" : s.Mean >= 0.35 ? "var(--warning)" : "var(--danger)";
+                            <tr>
+                                <td>
+                                    <strong>@s.Model</strong>
+                                    @if (s.Samples == 0)
+                                    {
+                                        <span class="tag tag-warning" style="margin-left: 6px; font-size: 0.7rem;">饥饿</span>
+                                    }
+                                </td>
+                                <td>
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <div style="flex: 1; min-width: 80px; background: var(--bg-input); border-radius: var(--radius-full); height: 10px; overflow: hidden;">
+                                            <div style="background: @meanColor; width: @(Math.Clamp(s.Mean * 100, 2, 100).ToString("F0"))%; height: 100%; border-radius: var(--radius-full); transition: width 0.3s ease;"></div>
+                                        </div>
+                                        <span class="table-mono" style="width: 52px; color: @meanColor;">@s.Mean.ToString("F3")</span>
+                                    </div>
+                                </td>
+                                <td class="table-mono">@s.Alpha.ToString("F2") / @s.Beta.ToString("F2")</td>
+                                <td>@s.Samples.ToString("N0")</td>
+                                <td class="text-secondary">@(s.LastUpdateUtc.Year > 1 ? s.LastUpdateUtc.ToLocalTime().ToString("MM-dd HH:mm:ss") : "--")</td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+            <div class="meta-text">
+                样本数为进程内计数（重启归零）；标"饥饿"的模型长期拿不到流量，学习重排对它无据可依，需配合 ExplorationEpsilon 探索或流量再分配。
+            </div>
+        }
+        else
+        {
+            <div class="text-secondary text-center" style="padding: 16px;">暂无 Thompson 学习状态数据</div>
+        }
+    </div>
+
+    <!-- 语义路由规则管理 -->
+    <div class="glass-card">
+        <div class="card-label">
+            <span>🧭 语义路由规则工作室 (Semantic Routes Studio)</span>
+            <span class="tag @(SemanticRouterEnabled ? "tag-success" : "tag-warning")">
+                语义路由 @(SemanticRouterEnabled ? "已启用" : "未启用") · 阈值 @SemanticThreshold.ToString("F2")
+            </span>
+        </div>
+        @if (!string.IsNullOrEmpty(SrStatusMsg))
+        {
+            <div class="alert-banner @(SrStatusOk ? "alert-success" : "alert-error")" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">@SrStatusMsg</div>
+        }
+
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; margin-top: 10px;">
+            <!-- 规则列表（本地暂存，保存才落盘） -->
+            <div class="sub-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+                    <span style="font-weight: 600; font-size: 0.9rem;">规则列表 (@SemanticRoutes.Count)</span>
+                    <button class="btn-primary btn-sm" @onclick="SaveSemanticRoutes" disabled="@IsSrSaving">
+                        @(IsSrSaving ? "保存中..." : "💾 保存全部并热生效")
+                    </button>
+                </div>
+                @if (SemanticRoutes.Any())
+                {
+                    <div style="display: flex; flex-direction: column; gap: 6px;">
+                        @foreach (var route in SemanticRoutes)
+                        {
+                            <div class="sub-card" style="padding: 8px 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <div style="min-width: 0; flex: 1;">
+                                    <div style="display: flex; gap: 8px; align-items: center;">
+                                        <strong>@route.Name</strong>
+                                        <span class="badge badge-info">@route.TargetTier</span>
+                                    </div>
+                                    <div class="meta-text" style="font-size: 0.72rem; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                        @(string.Join(" | ", route.Phrases))
+                                    </div>
+                                </div>
+                                <div style="display: flex; gap: 6px;">
+                                    <button class="btn-ghost btn-sm" @onclick="() => EditSemanticRoute(route)">编辑</button>
+                                    <button class="btn-danger btn-sm" @onclick="() => RemoveSemanticRoute(route)">删除</button>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="text-secondary text-center" style="padding: 16px; font-size: 0.85rem;">暂无规则——规则表为空时语义路由自动跳过。</div>
+                }
+            </div>
+
+            <!-- 新增 / 编辑表单 -->
+            <div class="sub-card">
+                <div style="font-weight: 600; font-size: 0.9rem; margin-bottom: 8px;">@(SrEditingName is null ? "➕ 添加规则" : $"✏️ 编辑规则: {SrEditingName}")</div>
+                @if (SrEditingName is not null)
+                {
+                    <div class="meta-text" style="font-size: 0.72rem; margin-bottom: 8px;">修改名称等同删除旧规则并新建。</div>
+                }
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <input type="text" class="form-control" placeholder="规则名称（如: code-generation）" @bind="SrName" />
+                    <select class="form-control" @bind="SrTier">
+                        <option value="Strong">Strong（强模型档）</option>
+                        <option value="Medium">Medium（中档）</option>
+                        <option value="Cheap">Cheap（廉价快速档）</option>
+                    </select>
+                    <textarea class="form-control" rows="4" placeholder="示例短语，每行一条（如：写一个实现快速排序的函数）" @bind="SrPhrases"></textarea>
+                    <div style="display: flex; gap: 8px; justify-content: flex-end;">
+                        @if (SrEditingName is not null)
+                        {
+                            <button class="btn-ghost btn-sm" @onclick="CancelSemanticRouteEdit">取消编辑</button>
+                        }
+                        <button class="btn-primary btn-sm" @onclick="ApplySemanticRouteForm">@(SrEditingName is null ? "加入列表" : "更新规则")</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="meta-text" style="margin-top: 8px;">
+            增删改先暂存本地，「保存全部」才写入 appsettings.json 并热生效（策略每请求读取路由表）；相似度阈值与开关在上方配置台调整。
         </div>
     </div>
 
     <!-- 分布式 DAG 链路拓扑与 Fusion MoA 瀑布流 -->
     <div class="glass-card">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+        <div class="card-label">
             <span>分布式 DAG 链路拓扑与 Fusion MoA 甘特图 (DAG Trace Visualizer)</span>
             <span class="tag tag-info">W3C Traceparent 标准</span>
         </div>
@@ -104,10 +311,10 @@
         {
             @foreach (var dag in Metrics.System.DagTraces)
             {
-                <div style="background: rgba(15,23,42,0.6); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 12px; margin-top: 12px;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-                        <span style="font-family: monospace; color: #38bdf8; font-weight: 600;">Group ID: @Truncate(dag.GroupId ?? "-", 16)</span>
-                        <span style="color: #34d399; font-weight: bold;">DAG 总成本: $@dag.TotalCost.ToString("F6") | 最大延迟: @dag.MaxLatencyMs.ToString("F0") ms</span>
+                <div class="sub-card" style="margin-top: 12px;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+                        <span class="table-mono" style="color: var(--primary); font-weight: 600;">Group ID: @Truncate(dag.GroupId ?? "-", 16)</span>
+                        <span style="color: var(--success); font-weight: 600;">DAG 总成本: $@dag.TotalCost.ToString("F6") | 最大延迟: @dag.MaxLatencyMs.ToString("F0") ms</span>
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 6px;">
                         @foreach (var span in dag.Spans)
@@ -115,20 +322,20 @@
                             double widthPct = dag.MaxLatencyMs > 0 ? Math.Min(100.0, Math.Max(10.0, (span.LatencyMs / dag.MaxLatencyMs) * 100.0)) : 100.0;
                             string roleBg = span.Role switch
                             {
-                                "panel" => "#3b82f6",
-                                "analyst" => "#8b5cf6",
-                                "outer" => "#10b981",
-                                "cascade" => "#f59e0b",
-                                _ => "#64748b"
+                                "panel" => "var(--primary)",
+                                "analyst" => "var(--purple)",
+                                "outer" => "var(--success)",
+                                "cascade" => "var(--warning)",
+                                _ => "var(--text-muted)"
                             };
-                            <div style="display: flex; align-items: center; gap: 10px; font-size: 0.85rem;">
-                                <span style="width: 80px; text-transform: uppercase; font-weight: bold; color: @roleBg;">[@span.Role]</span>
-                                <span style="width: 120px; font-weight: 600; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">@span.Model</span>
-                                <div style="flex: 1; background: rgba(255,255,255,0.05); border-radius: 4px; height: 18px; overflow: hidden; position: relative;">
-                                    <div style="background: @roleBg; width: @widthPct.ToString("F0")%; height: 100%; border-radius: 4px; transition: width 0.3s ease;"></div>
+                            <div style="display: flex; align-items: center; gap: 10px; font-size: 0.82rem;">
+                                <span style="width: 80px; text-transform: uppercase; font-weight: 600; color: @roleBg;">[@span.Role]</span>
+                                <span style="width: 120px; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">@span.Model</span>
+                                <div style="flex: 1; background: var(--bg-input); border-radius: var(--radius-full); height: 14px; overflow: hidden; position: relative;">
+                                    <div style="background: @roleBg; width: @widthPct.ToString("F0")%; height: 100%; border-radius: var(--radius-full); transition: width 0.3s ease;"></div>
                                 </div>
-                                <span style="width: 90px; text-align: right; color: #cbd5e1;">@span.LatencyMs.ToString("F0") ms</span>
-                                <span style="width: 80px; text-align: right; color: #34d399;">$@span.Cost.ToString("F6")</span>
+                                <span style="width: 90px; text-align: right; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">@span.LatencyMs.ToString("F0") ms</span>
+                                <span style="width: 80px; text-align: right; color: var(--success); font-family: 'JetBrains Mono', monospace; font-weight: 600;">$@span.Cost.ToString("F6")</span>
                             </div>
                         }
                     </div>
@@ -143,37 +350,37 @@
 
     <!-- 交互式路由匹配沙盒 -->
     <div class="glass-card">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+        <div class="card-label">
             <span>交互式路由决策沙盒 (Route Playground Sandbox)</span>
             <span class="tag tag-success">即时路由仿真</span>
         </div>
         <div style="margin-top: 10px; display: flex; gap: 12px; flex-direction: column;">
-            <textarea class="form-control" rows="3" placeholder="在此输入测试 Prompt（如：写个快速排序、求微积分积分、翻译文本...）" @bind="SandboxInputPrompt" style="background: rgba(15,23,42,0.8); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 10px; font-family: inherit; width: 100%;"></textarea>
+            <textarea class="form-control" rows="3" placeholder="在此输入测试 Prompt（如：写个快速排序、求微积分积分、翻译文本...）" @bind="SandboxInputPrompt"></textarea>
             <div style="display: flex; justify-content: flex-end;">
-                <button class="btn-primary" @onclick="RunSandbox" disabled="@IsSandboxRunning" style="padding: 6px 18px;">
+                <button class="btn-primary" @onclick="RunSandbox" disabled="@IsSandboxRunning">
                     @(IsSandboxRunning ? "路由仿真中..." : "🚀 运行路由匹配测试")
                 </button>
             </div>
         </div>
         @if (SandboxResultData != null)
         {
-            <div style="background: rgba(15,23,42,0.7); border: 1px solid rgba(56,189,248,0.3); border-radius: 8px; padding: 14px; margin-top: 12px;">
-                <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 10px;">
-                    <span style="font-weight: bold;">命中 Target Tier:</span>
-                    <span class="badge badge-info" style="font-size: 0.9rem;">@SandboxResultData.TargetTier</span>
-                    <span style="color: #9ca3af; font-size: 0.85rem;">估算 Prompt Tokens: @SandboxResultData.EstimatedTokens</span>
+            <div class="sub-card" style="margin-top: 12px;">
+                <div style="display: flex; gap: 14px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
+                    <span style="font-weight: 600;">命中 Target Tier:</span>
+                    <span class="badge badge-info" style="font-size: 0.85rem;">@SandboxResultData.TargetTier</span>
+                    <span class="text-secondary" style="font-size: 0.82rem;">估算 Prompt Tokens: @SandboxResultData.EstimatedTokens</span>
                 </div>
-                <div style="margin-bottom: 8px; font-size: 0.85rem; color: #cbd5e1;">
-                    <strong>匹配 Policy 逻辑链：</strong>
+                <div style="margin-bottom: 8px; font-size: 0.82rem; color: var(--text-secondary);">
+                    <strong style="color: var(--text-primary);">匹配 Policy 逻辑链：</strong>
                     <ul style="margin: 4px 0 0 16px; padding: 0;">
                         @foreach (var reason in SandboxResultData.Reasons)
                         {
-                            <li><span style="color: #38bdf8;">[@reason.PolicyName]</span> @reason.Message</li>
+                            <li><span style="color: var(--primary);">[@reason.PolicyName]</span> @reason.Message</li>
                         }
                     </ul>
                 </div>
-                <div style="font-size: 0.85rem; color: #34d399;">
-                    <strong>推荐模型候选链：</strong> @string.Join(" → ", SandboxResultData.CandidateModels)
+                <div style="font-size: 0.82rem; color: var(--success); font-weight: 500;">
+                    <strong style="color: var(--text-primary);">推荐模型候选链：</strong> @string.Join(" → ", SandboxResultData.CandidateModels)
                 </div>
             </div>
         }
@@ -181,37 +388,153 @@
 
     <!-- Golden Dataset 离线回归评测中心 -->
     <div class="glass-card">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+        <div class="card-label">
             <span>Golden Dataset 离线回归评测工作室 (Eval Studio)</span>
-            <button class="btn-primary" @onclick="RunEval" disabled="@IsEvalRunning" style="padding: 4px 12px; font-size: 0.85rem;">
-                @(IsEvalRunning ? "自动化评测中..." : "🧪 一键运行 Golden 题库回归评测")
+            <button class="btn-primary btn-sm" @onclick="RunEval" disabled="@IsEvalRunning">
+                @(IsEvalRunning ? "自动化评测中..." : "🧪 一键运行回归评测")
             </button>
         </div>
+        <div class="meta-text" style="margin-top: 6px;">评测经真实路由管线执行（路由 → 上游 → 计费 → 审计），非桩仿真；运行消耗计入当日预算与审计日志。</div>
+        @if (!string.IsNullOrEmpty(EvalStatusMsg))
+        {
+            <div class="alert-banner @(EvalStatusOk ? "alert-success" : "alert-error")" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">@EvalStatusMsg</div>
+        }
+
+        <div style="display: flex; gap: 8px; margin-top: 10px; align-items: center; flex-wrap: wrap;">
+            <button class="btn-ghost btn-sm" @onclick="ToggleCustomCases">@(ShowCustomCases ? "- 收起自定义题库" : "+ 自定义题库 (JSON)")</button>
+            <span class="text-secondary" style="font-size: 0.78rem;">不填则使用内置 4 题黄金集；每条需含 question 与 expectedAnswer，上限 50 条</span>
+        </div>
+        @if (ShowCustomCases)
+        {
+            <textarea class="form-control" rows="6" style="margin-top: 8px; font-size: 0.78rem;" placeholder='[{"id":"q1","question":"你的问题","expectedAnswer":"期望答案要点","category":"math","maxLatencyThresholdMs":5000}]' @bind="CustomCasesJson"></textarea>
+            <div style="display: flex; justify-content: flex-end; margin-top: 6px;">
+                <button class="btn-ghost btn-sm" @onclick="FillSampleCases">填入示例</button>
+            </div>
+        }
+
         @if (EvalReportData != null)
         {
-            <div style="background: rgba(15,23,42,0.7); border: 1px solid rgba(168,85,247,0.3); border-radius: 8px; padding: 14px; margin-top: 12px;">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 12px; align-items: center;">
-                    <span style="font-family: monospace; color: #c084fc; font-weight: bold;">Batch ID: @EvalReportData.BatchId</span>
-                    <div style="display: flex; gap: 12px;">
-                        <span class="tag tag-success">准确率: @((EvalReportData.AccuracyRate * 100).ToString("F1"))%</span>
+            <div class="sub-card" style="margin-top: 12px;">
+                <div style="display: flex; justify-content: space-between; margin-bottom: 12px; align-items: center; flex-wrap: wrap; gap: 8px;">
+                    <span class="table-mono" style="color: var(--purple); font-weight: 600;">Batch ID: @EvalReportData.BatchId</span>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <span class="tag tag-success">通过率: @((EvalReportData.AccuracyRate * 100).ToString("F1"))%</span>
                         <span class="tag tag-info">平均延迟: @EvalReportData.AvgLatencyMs.ToString("F0") ms</span>
                         <span class="tag tag-secondary">总 Tokens: @EvalReportData.TotalTokens.ToString("N0")</span>
+                        <span class="tag tag-secondary">总成本: $@EvalReportData.TotalCost.ToString("F4")</span>
                     </div>
                 </div>
                 <div style="display: flex; flex-direction: column; gap: 8px;">
                     @foreach (var res in EvalReportData.Results)
                     {
-                        <div style="background: rgba(255,255,255,0.03); border-radius: 6px; padding: 8px 12px; font-size: 0.85rem; display: flex; justify-content: space-between; align-items: center;">
+                        <div class="sub-card" style="padding: 8px 12px; font-size: 0.82rem; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
                             <div>
-                                <span style="color: #e2e8f0; font-weight: 600;">[@res.TestCase.Category] @res.TestCase.Question</span>
-                                <div style="color: #9ca3af; font-size: 0.75rem; margin-top: 2px;">输出: @Truncate(res.ActualAnswer, 40)</div>
+                                <span style="color: var(--text-primary); font-weight: 600;">[@res.TestCase.Category] @res.TestCase.Question</span>
+                                <div style="color: var(--text-muted); font-size: 0.75rem; margin-top: 2px;">
+                                    输出: @Truncate(res.ActualAnswer, 40)
+                                    @if (!string.IsNullOrEmpty(res.SelectedModel))
+                                    {
+                                        <span style="margin-left: 6px; color: var(--primary);">↳ @res.SelectedModel ($@res.Cost.ToString("F6"))</span>
+                                    }
+                                </div>
                             </div>
-                            <div style="display: flex; align-items: center; gap: 12px;">
-                                <span style="color: #38bdf8; font-size: 0.8rem;">Jaccard 相似度: @((res.SimilarityScore * 100).ToString("F0"))%</span>
-                                <span class="@(res.Passed ? "text-success" : "text-danger")" style="font-weight: bold;">@(res.Passed ? "✓ 通过" : "✗ 未通过")</span>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span style="color: var(--primary); font-size: 0.8rem;">Jaccard: @((res.SimilarityScore * 100).ToString("F0"))%</span>
+                                <span class="@(res.Passed ? "text-success" : "text-danger")" style="font-weight: 600;">@(res.Passed ? "✓ 通过" : "✗ 未通过")</span>
                             </div>
                         </div>
                     }
+                </div>
+            </div>
+        }
+
+        @if (EvalBatches.Any())
+        {
+            <div class="sub-card" style="margin-top: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
+                    <span style="font-weight: 600; font-size: 0.9rem;">📚 历史批次（最近 @EvalBatches.Count 批，进程内保留、重启清空）</span>
+                    <button class="btn-ghost btn-sm" @onclick="RunCompare" disabled="@(string.IsNullOrEmpty(CompareBaselineId) || string.IsNullOrEmpty(CompareCandidateId) || IsComparing)">
+                        @(IsComparing ? "对比中..." : "🆚 对比选中批次")
+                    </button>
+                </div>
+                <div class="table-wrap">
+                    <table class="config-table">
+                        <thead>
+                            <tr>
+                                <th>基线</th>
+                                <th>候选</th>
+                                <th>批次</th>
+                                <th>用例</th>
+                                <th>通过率</th>
+                                <th>均延迟</th>
+                                <th>Tokens</th>
+                                <th>成本</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var b in EvalBatches)
+                            {
+                                <tr>
+                                    <td><input type="radio" name="eval-baseline" value="@b.BatchId" @bind="CompareBaselineId" /></td>
+                                    <td><input type="radio" name="eval-candidate" value="@b.BatchId" @bind="CompareCandidateId" /></td>
+                                    <td class="table-mono" style="color: var(--purple);">@b.BatchId</td>
+                                    <td>@b.TotalCases</td>
+                                    <td>@((b.AccuracyRate * 100).ToString("F1"))%</td>
+                                    <td>@b.AvgLatencyMs.ToString("F0") ms</td>
+                                    <td>@b.TotalTokens.ToString("N0")</td>
+                                    <td>$@b.TotalCost.ToString("F4")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        }
+
+        @if (CompareResult != null)
+        {
+            <div class="sub-card" style="margin-top: 12px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+                    <span style="font-weight: 600; font-size: 0.9rem;">🆚 A/B 成对对比</span>
+                    <span class="text-secondary" style="font-size: 0.78rem;">
+                        @CompareResult.BaselineBatchId → @CompareResult.CandidateBatchId（按用例 ID 配对 @CompareResult.PairedCases 条）
+                    </span>
+                </div>
+                <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
+                    <span class="tag tag-success">候选胜: @CompareResult.CandidateWins</span>
+                    <span class="tag tag-danger">候选负: @CompareResult.CandidateLosses</span>
+                    <span class="tag tag-secondary">平局: @CompareResult.Ties</span>
+                    <span class="@(CompareResult.PassRateDelta >= 0 ? "tag tag-success" : "tag tag-danger")">通过率 Δ: @(CompareResult.PassRateDelta * 100 >= 0 ? "+" : "")@((CompareResult.PassRateDelta * 100).ToString("F1"))%</span>
+                    <span class="tag tag-secondary">平均延迟 Δ: @(CompareResult.AvgLatencyDeltaMs >= 0 ? "+" : "")@CompareResult.AvgLatencyDeltaMs.ToString("F0") ms</span>
+                    <span class="tag tag-secondary">Tokens Δ: @(CompareResult.TotalTokenDelta >= 0 ? "+" : "")@CompareResult.TotalTokenDelta.ToString("N0")</span>
+                    <span class="tag tag-secondary">成本 Δ: @(CompareResult.TotalCostDelta >= 0 ? "+" : "")$@CompareResult.TotalCostDelta.ToString("F4")</span>
+                </div>
+                <div class="table-wrap">
+                    <table class="config-table">
+                        <thead>
+                            <tr>
+                                <th>用例</th>
+                                <th>基线</th>
+                                <th>候选</th>
+                                <th>相似度 Δ</th>
+                                <th>延迟 Δ</th>
+                                <th>成本 Δ</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var c in CompareResult.Cases)
+                            {
+                                <tr>
+                                    <td class="table-mono">@c.TestCaseId</td>
+                                    <td>@(c.BaselinePassed ? "✓" : "✗")</td>
+                                    <td>@(c.CandidatePassed ? "✓" : "✗")</td>
+                                    <td class="@(c.QualityScoreDelta >= 0 ? "text-success" : "text-danger")">@((c.QualityScoreDelta * 100).ToString("F0"))%</td>
+                                    <td class="@(c.LatencyDeltaMs <= 0 ? "text-success" : "text-danger")">@c.LatencyDeltaMs.ToString("F0") ms</td>
+                                    <td>@(c.CostDelta >= 0 ? "+" : "")$@c.CostDelta.ToString("F4")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
                 </div>
             </div>
         }
@@ -220,6 +543,7 @@
 
 @code {
     private ApiService.DashboardMetrics? Metrics;
+    private List<ApiService.LearningStateDto> LearningStates = new();
 
     private bool CfgFailover = true;
     private bool CfgBudgetGuard = true;
@@ -230,10 +554,20 @@
     private bool CfgDataSovereignty = false;
     private bool CfgJsonAstAutoRepair = true;
     private bool CfgFusionRouter = false;
+    private bool CfgThompson = false;
+    private bool CfgBandit = false;
+    private double CfgEpsilon = 0.0;
+    private long CfgStarvedN = 0;
+    private bool CfgResponseCache = false;
+    private int CfgCacheTtl = 3600;
+    private int CfgCacheMaxEntries = 1000;
+    private int CfgFailoverThreshold = 3;
+    private int CfgFailoverCooldown = 60;
     private decimal CfgDailyBudgetUsd = 10.0m;
     private string CfgEnforceBehavior = "Degrade";
     private bool IsConfigSaving = false;
     private string ConfigStatusMsg = "";
+    private bool ConfigStatusOk = true;
 
     private string SandboxInputPrompt = "写一个 C# 快速排序算法，并说明空间复杂度";
     private bool IsSandboxRunning = false;
@@ -241,6 +575,27 @@
 
     private bool IsEvalRunning = false;
     private ApiService.EvalReportDto? EvalReportData;
+    private bool ShowCustomCases = false;
+    private string CustomCasesJson = "";
+    private string EvalStatusMsg = "";
+    private bool EvalStatusOk = true;
+    private List<ApiService.EvalReportDto> EvalBatches = new();
+    private string? CompareBaselineId;
+    private string? CompareCandidateId;
+    private bool IsComparing = false;
+    private ApiService.PairedEvalDto? CompareResult;
+
+    // 语义路由规则：本地暂存列表 + 编辑表单。保存全部才 PUT 落盘。
+    private List<ApiService.SemanticRouteDto> SemanticRoutes = new();
+    private bool SemanticRouterEnabled;
+    private double SemanticThreshold;
+    private string SrName = "";
+    private string SrTier = "Medium";
+    private string SrPhrases = "";
+    private string? SrEditingName;
+    private string SrStatusMsg = "";
+    private bool SrStatusOk = true;
+    private bool IsSrSaving = false;
 
     private PeriodicTimer? _timer;
     private CancellationTokenSource _cts = new();
@@ -261,6 +616,15 @@
                 CfgDataSovereignty = cfg.Routing.EnableDataSovereignty;
                 CfgJsonAstAutoRepair = cfg.Routing.EnableJsonAstAutoRepair;
                 CfgFusionRouter = cfg.Routing.EnableFusionRouter;
+                CfgThompson = cfg.Routing.EnableThompsonSampling;
+                CfgBandit = cfg.Routing.EnableContextualBandit;
+                CfgEpsilon = cfg.Routing.ExplorationEpsilon;
+                CfgStarvedN = cfg.Routing.ExplorationStarvedN;
+                CfgResponseCache = cfg.Routing.EnableResponseCache;
+                CfgCacheTtl = cfg.Routing.ResponseCacheTtlSeconds;
+                CfgCacheMaxEntries = cfg.Routing.ResponseCacheMaxEntries;
+                CfgFailoverThreshold = cfg.Routing.FailoverFailureThreshold;
+                CfgFailoverCooldown = cfg.Routing.FailoverCooldownSeconds;
                 CfgDailyBudgetUsd = cfg.Budget.DailyBudgetUsd;
                 CfgEnforceBehavior = cfg.Budget.EnforceOnExhausted;
             }
@@ -277,27 +641,47 @@
             var req = new ApiService.UpdateSystemConfigRequest(
                 CfgFailover, CfgBudgetGuard, CfgRuleClassifier, CfgLatencyAware,
                 CfgSemanticRouter, CfgPiiAnonymization, CfgDataSovereignty,
-                CfgJsonAstAutoRepair, CfgFusionRouter, CfgDailyBudgetUsd, CfgEnforceBehavior);
+                CfgJsonAstAutoRepair, CfgFusionRouter,
+                CfgThompson, CfgBandit, CfgEpsilon, CfgStarvedN,
+                CfgResponseCache, CfgCacheTtl, CfgCacheMaxEntries,
+                CfgFailoverThreshold, CfgFailoverCooldown,
+                CfgDailyBudgetUsd, CfgEnforceBehavior);
 
-            bool ok = await Api.UpdateSystemConfigAsync(req);
+            var (ok, error) = await Api.UpdateSystemConfigAsync(req);
             if (ok)
             {
+                ConfigStatusOk = true;
                 ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
                 await LoadMetrics();
             }
             else
             {
-                ConfigStatusMsg = "✗ 保存失败，请检查 API Key。";
+                ConfigStatusOk = false;
+                ConfigStatusMsg = "✗ 保存被拒绝: " + ExtractErrorBody(error);
             }
         }
         catch (Exception ex)
         {
+            ConfigStatusOk = false;
             ConfigStatusMsg = "✗ 错误: " + ex.Message;
         }
         finally
         {
             IsConfigSaving = false;
         }
+    }
+
+    /// <summary>从失败响应体提取可读错误（后端 400 返回 {"error":"..."} 校验消息）。</summary>
+    private static string ExtractErrorBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return "请求失败（无响应体）";
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(body)?["error"];
+            if (node is not null) return node.ToString();
+        }
+        catch { }
+        return body;
     }
 
     private async Task RunSandbox()
@@ -317,15 +701,95 @@
 
     private async Task RunEval()
     {
+        List<ApiService.EvalCaseDto>? cases = null;
+        if (ShowCustomCases && !string.IsNullOrWhiteSpace(CustomCasesJson))
+        {
+            try
+            {
+                cases = System.Text.Json.JsonSerializer.Deserialize<List<ApiService.EvalCaseDto>>(
+                    CustomCasesJson,
+                    new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            }
+            catch (Exception ex)
+            {
+                EvalStatusOk = false;
+                EvalStatusMsg = "✗ 题库 JSON 解析失败: " + ex.Message;
+                return;
+            }
+            if (cases is null || cases.Count == 0)
+            {
+                EvalStatusOk = false;
+                EvalStatusMsg = "✗ 题库 JSON 不是有效数组或为空。";
+                return;
+            }
+        }
+
         IsEvalRunning = true;
+        EvalStatusMsg = "";
         try
         {
-            EvalReportData = await Api.RunEvalBenchmarkAsync();
+            var (report, error) = await Api.RunEvalBenchmarkAsync(cases);
+            if (report != null)
+            {
+                EvalReportData = report;
+                EvalStatusOk = true;
+                await LoadEvalBatches();
+            }
+            else
+            {
+                EvalStatusOk = false;
+                EvalStatusMsg = "✗ 评测失败: " + ExtractErrorBody(error);
+            }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            EvalStatusOk = false;
+            EvalStatusMsg = "✗ 错误: " + ex.Message;
+        }
         finally
         {
             IsEvalRunning = false;
+        }
+    }
+
+    private void ToggleCustomCases() => ShowCustomCases = !ShowCustomCases;
+
+    private void FillSampleCases()
+    {
+        CustomCasesJson = System.Text.Json.JsonSerializer.Serialize(new List<ApiService.EvalCaseDto>
+        {
+            new("q-01", "解释 TCP 三次握手的过程", "SYN → SYN+ACK → ACK，建立可靠连接", "tech", 5000),
+            new("q-02", "写一个 JavaScript 防抖函数", "debounce 返回包装函数，延迟触发最后一次调用", "coding", 5000),
+            new("q-03", "1+1 等于几?", "2", "math", 3000)
+        }, new System.Text.Json.JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private async Task LoadEvalBatches()
+    {
+        EvalBatches = await Api.GetEvalBatchesAsync();
+    }
+
+    private async Task RunCompare()
+    {
+        if (string.IsNullOrEmpty(CompareBaselineId) || string.IsNullOrEmpty(CompareCandidateId)) return;
+        IsComparing = true;
+        EvalStatusMsg = "";
+        try
+        {
+            var (report, error) = await Api.CompareEvalBatchesAsync(CompareBaselineId, CompareCandidateId);
+            if (report != null)
+            {
+                CompareResult = report;
+            }
+            else
+            {
+                EvalStatusOk = false;
+                EvalStatusMsg = "✗ 对比失败: " + ExtractErrorBody(error);
+            }
+        }
+        finally
+        {
+            IsComparing = false;
         }
     }
 
@@ -333,6 +797,9 @@
     {
         await LoadSystemConfig();
         await LoadMetrics();
+        await LoadLearning();
+        await LoadEvalBatches();
+        await LoadSemanticRoutes();
 
         _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         _ = PollMetricsLoopAsync();
@@ -345,6 +812,7 @@
             while (await _timer!.WaitForNextTickAsync(_cts.Token))
             {
                 await LoadMetrics();
+                await LoadLearning();
                 await InvokeAsync(StateHasChanged);
             }
         }
@@ -359,6 +827,120 @@
             Metrics = await Api.GetMetricsAsync();
         }
         catch { }
+    }
+
+    private async Task LoadLearning()
+    {
+        try
+        {
+            LearningStates = await Api.GetLearningAsync();
+        }
+        catch { }
+    }
+
+    private async Task LoadSemanticRoutes()
+    {
+        try
+        {
+            var dto = await Api.GetSemanticRoutesAsync();
+            if (dto != null)
+            {
+                SemanticRoutes = dto.Routes?.ToList() ?? new List<ApiService.SemanticRouteDto>();
+                SemanticRouterEnabled = dto.Enabled;
+                SemanticThreshold = dto.SimilarityThreshold;
+            }
+        }
+        catch { }
+    }
+
+    private void ApplySemanticRouteForm()
+    {
+        string name = SrName.Trim();
+        var phrases = SrPhrases
+            .Split('\n')
+            .Select(p => p.Trim())
+            .Where(p => p.Length > 0)
+            .ToList();
+
+        if (name.Length == 0 || phrases.Count == 0)
+        {
+            SrStatusOk = false;
+            SrStatusMsg = "✗ 规则名称与至少一条示例短语为必填。";
+            return;
+        }
+        // 查重排除自身（同名编辑合法）；改名等同删旧建新。先非破坏性校验，再更新列表。
+        bool isSelf = SrEditingName is not null && string.Equals(SrEditingName, name, StringComparison.OrdinalIgnoreCase);
+        if (!isSelf && SemanticRoutes.Any(r => string.Equals(r.Name, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            SrStatusOk = false;
+            SrStatusMsg = $"✗ 规则名称已存在: {name}";
+            return;
+        }
+        if (SrEditingName is not null)
+        {
+            SemanticRoutes.RemoveAll(r => string.Equals(r.Name, SrEditingName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        SemanticRoutes.Add(new ApiService.SemanticRouteDto(name, phrases, SrTier));
+        SrName = "";
+        SrPhrases = "";
+        SrEditingName = null;
+        SrStatusMsg = "";
+    }
+
+    private void EditSemanticRoute(ApiService.SemanticRouteDto route)
+    {
+        SrEditingName = route.Name;
+        SrName = route.Name;
+        SrTier = route.TargetTier;
+        SrPhrases = string.Join("\n", route.Phrases);
+        SrStatusMsg = "";
+    }
+
+    private void CancelSemanticRouteEdit()
+    {
+        SrEditingName = null;
+        SrName = "";
+        SrPhrases = "";
+    }
+
+    private void RemoveSemanticRoute(ApiService.SemanticRouteDto route)
+    {
+        SemanticRoutes.RemoveAll(r => string.Equals(r.Name, route.Name, StringComparison.OrdinalIgnoreCase));
+        if (string.Equals(SrEditingName, route.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            CancelSemanticRouteEdit();
+        }
+    }
+
+    private async Task SaveSemanticRoutes()
+    {
+        IsSrSaving = true;
+        SrStatusMsg = "";
+        try
+        {
+            var payload = SemanticRoutes
+                .Select(r => new ApiService.SemanticRouteUpsertDto(r.Name, r.Phrases, r.TargetTier))
+                .ToList();
+            var (ok, error) = await Api.UpdateSemanticRoutesAsync(payload);
+            SrStatusOk = ok;
+            SrStatusMsg = ok
+                ? $"✓ {SemanticRoutes.Count} 条语义路由已保存并热生效。"
+                : "✗ 保存被拒绝: " + ExtractErrorBody(error);
+            if (ok)
+            {
+                await LoadSemanticRoutes();
+            }
+        }
+        catch (Exception ex)
+        {
+            SrStatusOk = false;
+            SrStatusMsg = "✗ 错误: " + ex.Message;
+        }
+        finally
+        {
+            IsSrSaving = false;
+        }
     }
 
     private static string Truncate(string val, int maxLen)

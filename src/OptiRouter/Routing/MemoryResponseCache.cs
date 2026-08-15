@@ -12,6 +12,9 @@ public sealed class MemoryResponseCache : IResponseCache
     private readonly int _maxEntries;
     private readonly bool _useSize;
     private int _count;
+    private long _hits;
+    private long _misses;
+    private long _sets;
 
     public MemoryResponseCache(IMemoryCache cache, int maxEntries, bool useSize = false)
     {
@@ -22,9 +25,18 @@ public sealed class MemoryResponseCache : IResponseCache
         _useSize = useSize;
     }
 
+    /// <summary>命中/未命中/写入累计计数与当前条目数（dashboard 状态端点用；进程内统计，重启归零）。</summary>
+    public (long Hits, long Misses, long Sets, int CurrentEntries, int MaxEntries) GetStats()
+        => (_hits, _misses, _sets, _count, _maxEntries);
+
     /// <inheritdoc />
     public bool TryGet(string key, out RawChatResponse? response)
-        => _cache.TryGetValue(key, out response);
+    {
+        bool found = _cache.TryGetValue(key, out response);
+        if (found) System.Threading.Interlocked.Increment(ref _hits);
+        else System.Threading.Interlocked.Increment(ref _misses);
+        return found;
+    }
 
     /// <inheritdoc />
     public void Set(string key, RawChatResponse response, TimeSpan ttl)
@@ -35,6 +47,7 @@ public sealed class MemoryResponseCache : IResponseCache
             System.Threading.Interlocked.Decrement(ref _count);
             return;
         }
+        System.Threading.Interlocked.Increment(ref _sets);
 
         var options = new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = ttl };
         if (_useSize)

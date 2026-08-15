@@ -49,15 +49,15 @@
     </div>
 
     <!-- 智能降本 ROI 归因卡片 -->
-    <div class="glass-card roi-card" style="background: linear-gradient(135deg, rgba(16,185,129,0.12), rgba(59,130,246,0.12)); border: 1px solid rgba(16,185,129,0.3); padding: 18px 20px;">
-        <div class="card-label" style="color: #34d399; font-weight: 600; font-size: 1rem;">智能降本 ROI 归因看板</div>
-        <div style="display: flex; align-items: baseline; gap: 16px; margin: 10px 0;">
-            <div class="stat-value" style="color: #10b981; font-size: 2.2rem; font-weight: 700;">$@((Metrics?.System.Roi?.SavedUsd ?? 0).ToString("F6"))</div>
-            <div style="background: rgba(16,185,129,0.2); color: #34d399; padding: 4px 12px; border-radius: 12px; font-weight: bold; font-size: 1rem;">
+    <div class="glass-card roi-card">
+        <div class="card-label" style="color: var(--success); font-weight: 600; font-size: 0.95rem;">智能降本 ROI 归因看板</div>
+        <div style="display: flex; align-items: baseline; gap: 14px; margin: 8px 0;">
+            <div class="stat-value" style="color: var(--success); font-size: 2rem; font-weight: 700;">$@((Metrics?.System.Roi?.SavedUsd ?? 0).ToString("F6"))</div>
+            <div class="badge badge-success" style="font-size: 0.85rem; padding: 0.3rem 0.75rem;">
                 智能路由降本 @((Metrics?.System.Roi?.SavingRatePercent ?? 0).ToString("F1"))%
             </div>
         </div>
-        <div class="meta-text" style="color: #9ca3af; font-size: 0.85rem;">
+        <div class="meta-text">
             基线预估成本（全使用强模型）：$@((Metrics?.System.Roi?.BaselineCostUsd ?? 0).ToString("F6")) | 实际优化处理成本：$@((Metrics?.System.Roi?.ActualCostUsd ?? 0).ToString("F6"))
         </div>
     </div>
@@ -77,14 +77,14 @@
 
         <!-- 数据安全与 PII 脱敏防护看板 -->
         <div class="glass-card">
-            <div class="card-label" style="color: #c084fc; font-weight: 600; font-size: 1rem; display: flex; justify-content: space-between;">
+            <div class="card-label" style="display: flex; justify-content: space-between; align-items: center;">
                 <span>数据合规与 PII 防护</span>
                 <span class="tag tag-info">数据不出域: @(Metrics?.System.Security?.DataSovereigntyEnabled == true ? "已开启" : "未开启")</span>
             </div>
-            <div style="display: flex; align-items: baseline; gap: 16px; margin: 10px 0;">
-                <div class="stat-value" style="color: #a855f7; font-size: 2.2rem; font-weight: 700;">@((Metrics?.System.Security?.PiiProtectedTotal ?? 0).ToString("N0")) <span style="font-size: 1rem; font-weight: normal; color: #d8b4fe;">次敏感项脱敏</span></div>
+            <div style="display: flex; align-items: baseline; gap: 12px; margin: 8px 0;">
+                <div class="stat-value" style="font-size: 2rem; font-weight: 700;">@((Metrics?.System.Security?.PiiProtectedTotal ?? 0).ToString("N0")) <span style="font-size: 0.9rem; font-weight: normal; color: var(--text-secondary);">次敏感项脱敏</span></div>
             </div>
-            <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
                 <span class="tag tag-secondary">📱 手机号: @((Metrics?.System.Security?.PhoneProtected ?? 0).ToString("N0"))</span>
                 <span class="tag tag-secondary">📧 邮箱: @((Metrics?.System.Security?.EmailProtected ?? 0).ToString("N0"))</span>
                 <span class="tag tag-secondary">🆔 身份证: @((Metrics?.System.Security?.IdCardProtected ?? 0).ToString("N0"))</span>
@@ -96,14 +96,13 @@
 
     <!-- 多窗口统计 -->
     <div class="glass-card">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; flex-wrap: wrap; gap: 8px;">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
             <span>多窗口统计</span>
-            <div style="display: flex; gap: 4px; flex-wrap: wrap;">
+            <div class="trend-controls" style="margin-bottom: 0;">
                 @foreach (var w in WindowOptions)
                 {
                     var isActive = w == WindowKey;
-                    <button @onclick="() => SetWindow(w)"
-                            style="background: @(isActive ? "rgba(56,189,248,0.25)" : "transparent"); border: 1px solid rgba(56,189,248,0.3); color: @(isActive ? "#7dd3fc" : "#cbd5e1"); padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8rem;">
+                    <button class="@(isActive ? "active" : "")" @onclick="() => SetWindow(w)">
                         @WindowLabels[w]
                     </button>
                 }
@@ -150,6 +149,92 @@
         {
             <div class="text-center text-secondary" style="padding: 20px;">加载中...</div>
         }
+    </div>
+
+    <!-- 路由内部状态 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span>路由内部状态 (Internal Routing State)</span>
+            <span class="tag tag-secondary">进程内状态 · 重启清空</span>
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 10px;">
+            <!-- 上游配额水位 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">⚡ 上游配额水位</div>
+                @if (QuotaStates.Any())
+                {
+                    <div style="display: flex; flex-direction: column; gap: 6px; font-size: 0.78rem;">
+                        @foreach (var q in QuotaStates)
+                        {
+                            <div style="display: flex; justify-content: space-between; gap: 8px; align-items: center;">
+                                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600;">@q.ModelName</span>
+                                @if (q.IsExhausted)
+                                {
+                                    <span class="tag tag-danger" style="font-size: 0.7rem;">耗尽至 @(q.ExhaustedUntil is { } eu ? eu.ToLocalTime().ToString("HH:mm") : "--")</span>
+                                }
+                                else
+                                {
+                                    <span class="text-secondary">Req: @(q.RequestsRemaining?.ToString("N0") ?? "--") · Tok: @(q.TokensRemaining?.ToString("N0") ?? "--")</span>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="text-secondary text-center" style="padding: 12px; font-size: 0.8rem;">暂无上游配额观测数据</div>
+                }
+            </div>
+
+            <!-- 提示词缓存亲和 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">🔗 提示词缓存亲和</div>
+                <div style="font-size: 0.85rem; margin-bottom: 6px;">
+                    总条目: <strong>@AffinityState.TotalCount.ToString("N0")</strong>
+                    <span class="text-secondary" style="font-size: 0.72rem;">（仅展示最近 5 条）</span>
+                </div>
+                @if (AffinityState.Items.Any())
+                {
+                    <div style="display: flex; flex-direction: column; gap: 5px; font-size: 0.75rem;">
+                        @foreach (var e in AffinityState.Items.Take(5))
+                        {
+                            <div style="display: flex; justify-content: space-between; gap: 8px; align-items: center;">
+                                <span class="table-mono" style="color: var(--text-muted);">@(e.Fingerprint.Length > 12 ? e.Fingerprint[..12] : e.Fingerprint)…</span>
+                                <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--primary);">→ @e.ModelName</span>
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="text-secondary text-center" style="padding: 12px; font-size: 0.8rem;">暂无亲和映射（需开启 PromptCacheAffinity）</div>
+                }
+            </div>
+
+            <!-- 响应缓存 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">💾 响应缓存</div>
+                @if (ResponseCacheStats != null)
+                {
+                    <div style="display: flex; flex-direction: column; gap: 6px; font-size: 0.8rem;">
+                        <div>
+                            命中率: <strong style="color: @(ResponseCacheStats.HitRatePercent >= 50 ? "var(--success)" : ResponseCacheStats.HitRatePercent > 0 ? "var(--warning)" : "var(--text-secondary)");">@ResponseCacheStats.HitRatePercent.ToString("F1")%</strong>
+                        </div>
+                        <div class="text-secondary">
+                            命中 @ResponseCacheStats.Hits.ToString("N0") · 未命中 @ResponseCacheStats.Misses.ToString("N0") · 累计写入 @ResponseCacheStats.Sets.ToString("N0")
+                        </div>
+                        <div class="text-secondary">
+                            当前条目 @ResponseCacheStats.CurrentEntries.ToString("N0") / 上限 @ResponseCacheStats.MaxEntries.ToString("N0")
+                        </div>
+                        <div class="meta-text" style="font-size: 0.72rem;">全为 0 且未波动说明响应缓存未开启（路由页可热启用）。</div>
+                    </div>
+                }
+                else
+                {
+                    <div class="text-secondary text-center" style="padding: 12px; font-size: 0.8rem;">统计不可用</div>
+                }
+            </div>
+        </div>
     </div>
 
     <!-- 实时请求流预览 -->
@@ -207,6 +292,12 @@
     private List<ApiService.DailySpend> Trends = new();
     private List<ApiService.AlertInfo> Alerts => Metrics?.System.Alerts ?? new();
 
+    // 路由内部状态：上游配额 / 缓存亲和 / 响应缓存。低频刷新（每 3 个轮询周期一次）。
+    private List<ApiService.QuotaStateDto> QuotaStates = new();
+    private ApiService.AffinityPageDto AffinityState = new(0, new List<ApiService.AffinityStateDto>());
+    private ApiService.ResponseCacheStatsDto? ResponseCacheStats;
+    private int _stateTick;
+
     // 多窗口统计：Tab 选项 + 当前选中窗口 + 数据。默认 24h。
     private static readonly string[] WindowOptions = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };
     private static readonly Dictionary<string, string> WindowLabels = new()
@@ -242,6 +333,7 @@
         await LoadMetrics();
         await LoadTrends();
         await LoadWindowSummary();
+        await LoadInternalState();
 
         _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         _ = PollMetricsLoopAsync();
@@ -264,11 +356,31 @@
             {
                 await LoadMetrics();
                 await LoadWindowSummary();
+                _stateTick++;
+                if (_stateTick % 3 == 0)
+                {
+                    await LoadInternalState();
+                }
                 await InvokeAsync(StateHasChanged);
             }
         }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { } // circuit 拆除后 dispatcher 失效，轮询自行退出
+    }
+
+    private async Task LoadInternalState()
+    {
+        try
+        {
+            var quotaTask = Api.GetQuotaStateAsync();
+            var affinityTask = Api.GetCacheAffinityAsync();
+            var cacheStatsTask = Api.GetResponseCacheStatsAsync();
+            await Task.WhenAll(quotaTask, affinityTask, cacheStatsTask);
+            QuotaStates = quotaTask.Result;
+            AffinityState = affinityTask.Result;
+            ResponseCacheStats = cacheStatsTask.Result;
+        }
+        catch { }
     }
 
     private async Task LoadMetrics()

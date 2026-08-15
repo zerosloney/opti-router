@@ -44,6 +44,12 @@ public class ApiService
         return result ?? new List<DailySpend>();
     }
 
+    public async Task<List<LearningStateDto>> GetLearningAsync()
+    {
+        var result = await _http.GetFromJsonAsync<List<LearningStateDto>>(Url("/api/dashboard/learning"));
+        return result ?? new List<LearningStateDto>();
+    }
+
     public async Task<AuditPage> GetAuditLogAsync(int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null)
     {
         var url = $"/api/dashboard/requests?limit={limit}&offset={offset}";
@@ -80,21 +86,130 @@ public class ApiService
         return null;
     }
 
-    public async Task<EvalReportDto?> RunEvalBenchmarkAsync()
+    /// <summary>运行回归评测（可传自定义题库；空则后端回落内置题库）。返回 (报告, 失败原因)。</summary>
+    public async Task<(EvalReportDto? Report, string? Error)> RunEvalBenchmarkAsync(List<EvalCaseDto>? cases)
     {
-        using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/eval/run"), new { });
-        if (resp.IsSuccessStatusCode)
-            return await resp.Content.ReadFromJsonAsync<EvalReportDto>();
-        return null;
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/eval/run"), new EvalRunRequestDto(cases));
+            if (resp.IsSuccessStatusCode)
+                return (await resp.Content.ReadFromJsonAsync<EvalReportDto>(), null);
+            string body = await resp.Content.ReadAsStringAsync();
+            return (null, body);
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
+    public async Task<List<EvalReportDto>> GetEvalBatchesAsync()
+    {
+        try
+        {
+            var result = await _http.GetFromJsonAsync<List<EvalReportDto>>(Url("/api/dashboard/eval/batches"));
+            return result ?? new List<EvalReportDto>();
+        }
+        catch
+        {
+            return new List<EvalReportDto>();
+        }
+    }
+
+    public async Task<(PairedEvalDto? Report, string? Error)> CompareEvalBatchesAsync(string baselineBatchId, string candidateBatchId)
+    {
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/eval/compare"), new { baselineBatchId, candidateBatchId });
+            if (resp.IsSuccessStatusCode)
+                return (await resp.Content.ReadFromJsonAsync<PairedEvalDto>(), null);
+            string body = await resp.Content.ReadAsStringAsync();
+            return (null, body);
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
+    public async Task<List<QuotaStateDto>> GetQuotaStateAsync()
+    {
+        try
+        {
+            var page = await _http.GetFromJsonAsync<QuotaPageDto>(Url("/api/dashboard/state/quota"));
+            return page?.Items ?? new List<QuotaStateDto>();
+        }
+        catch
+        {
+            return new List<QuotaStateDto>();
+        }
+    }
+
+    public async Task<AffinityPageDto> GetCacheAffinityAsync()
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<AffinityPageDto>(Url("/api/dashboard/state/cache-affinity"))
+                   ?? new AffinityPageDto(0, new List<AffinityStateDto>());
+        }
+        catch
+        {
+            return new AffinityPageDto(0, new List<AffinityStateDto>());
+        }
+    }
+
+    public async Task<ResponseCacheStatsDto?> GetResponseCacheStatsAsync()
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<ResponseCacheStatsDto>(Url("/api/dashboard/state/response-cache"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<SemanticRoutesDto?> GetSemanticRoutesAsync()
+    {
+        try
+        {
+            return await _http.GetFromJsonAsync<SemanticRoutesDto>(Url("/api/dashboard/semantic-routes"));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>整表替换语义路由规则（空列表 = 清空）。返回 (是否成功, 失败原因)。</summary>
+    public async Task<(bool Ok, string? Error)> UpdateSemanticRoutesAsync(List<SemanticRouteUpsertDto>? routes)
+    {
+        try
+        {
+            using var resp = await _http.PutAsJsonAsync(Url("/api/dashboard/semantic-routes"), new UpdateSemanticRoutesRequestDto(routes));
+            if (resp.IsSuccessStatusCode)
+                return (true, null);
+            string body = await resp.Content.ReadAsStringAsync();
+            return (false, body);
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 
     public Task<SystemConfigDto?> GetSystemConfigAsync()
         => _http.GetFromJsonAsync<SystemConfigDto>(Url("/api/dashboard/config"));
 
-    public async Task<bool> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
+    /// <summary>返回 (是否成功, 失败原因)。400 校验错误时 Error 含 RouterOptionsValidator 的具体消息。</summary>
+    public async Task<(bool Ok, string? Error)> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
     {
         using var resp = await _http.PutAsJsonAsync(Url("/api/dashboard/config"), req);
-        return resp.IsSuccessStatusCode;
+        if (resp.IsSuccessStatusCode)
+            return (true, null);
+        string body = await resp.Content.ReadAsStringAsync();
+        return (false, body);
     }
 
     public async Task<bool> OverrideCircuitStateAsync(string modelName, string targetState)
@@ -295,6 +410,15 @@ public class ApiService
 
     public record DailySpend(string Date, decimal Amount);
 
+    /// <summary>Thompson 学习状态快照。Samples 为进程内计数（重启归零）；LastUpdateUtc 为 MinValue 表示从未收到反馈。</summary>
+    public record LearningStateDto(
+        string Model,
+        double Alpha,
+        double Beta,
+        double Mean,
+        int Samples,
+        DateTimeOffset LastUpdateUtc);
+
     public record AuditPage(List<AuditItem> Items, int TotalCount);
 
     public record AuditItem(
@@ -317,7 +441,15 @@ public class ApiService
         ModelTier RoutedTier = ModelTier.Medium,
         string? RoutingReason = null,
         string? ErrorMessage = null,
-        string? RequestContent = null);
+        string? RequestContent = null,
+        bool CascadeTriggered = false,
+        string? UpgradedFrom = null,
+        string? ParallelGroupId = null,
+        string? FusionRole = null,
+        string? SpanId = null,
+        string? ParentSpanId = null,
+        double? Reward = null,
+        string? EpsilonPromotedModel = null);
 
     public record ModelDto(
         string Name,
@@ -393,7 +525,10 @@ public class ApiService
         double AccuracyRate,
         double AvgLatencyMs,
         int TotalTokens,
-        List<EvalItemDto> Results);
+        List<EvalItemDto> Results,
+        decimal TotalCost = 0,
+        int QualityPassedCases = 0,
+        int LatencyPassedCases = 0);
 
     public record EvalItemDto(
         OptiRouter.Routing.EvalTestCase TestCase,
@@ -403,7 +538,86 @@ public class ApiService
         long LatencyMs,
         int PromptTokens,
         int CompletionTokens,
-        string? ErrorMessage);
+        string? ErrorMessage,
+        string? SelectedModel = null,
+        decimal Cost = 0,
+        bool QualityPassed = false,
+        bool LatencyPassed = false);
+
+    public record EvalRunRequestDto(List<EvalCaseDto>? Cases);
+
+    public record EvalCaseDto(
+        string? Id,
+        string? Question,
+        string? ExpectedAnswer,
+        string? Category = null,
+        long? MaxLatencyThresholdMs = null);
+
+    /// <summary>两个评测批次的成对 A/B 对比（按用例 ID 配对）。</summary>
+    public record PairedEvalDto(
+        string BaselineBatchId,
+        string CandidateBatchId,
+        int PairedCases,
+        int CandidateWins,
+        int CandidateLosses,
+        int Ties,
+        double PassRateDelta,
+        double QualityPassRateDelta,
+        double LatencyPassRateDelta,
+        double AvgLatencyDeltaMs,
+        int TotalTokenDelta,
+        decimal TotalCostDelta,
+        List<PairedCaseDto> Cases = null!);
+
+    public record PairedCaseDto(
+        string TestCaseId,
+        bool BaselinePassed,
+        bool CandidatePassed,
+        double QualityScoreDelta,
+        long LatencyDeltaMs,
+        int TokenDelta,
+        decimal CostDelta);
+
+    /// <summary>上游配额快照（进程本地，重启清空）。</summary>
+    public record QuotaPageDto(List<QuotaStateDto> Items);
+
+    public record QuotaStateDto(
+        string ModelName,
+        long? RequestsRemaining,
+        long? TokensRemaining,
+        DateTimeOffset? RequestsResetAt,
+        DateTimeOffset? TokensResetAt,
+        DateTimeOffset? ExhaustedUntil,
+        int? LastStatusCode,
+        DateTimeOffset ObservedAt,
+        bool IsExhausted);
+
+    /// <summary>提示词缓存亲和：SHA-256 指纹 → 上次成功服务的模型。Items 最多 50 条。</summary>
+    public record AffinityPageDto(int TotalCount, List<AffinityStateDto> Items);
+
+    public record AffinityStateDto(
+        string Fingerprint,
+        string ModelName,
+        DateTimeOffset RecordedAt,
+        DateTimeOffset ExpiresAt);
+
+    /// <summary>响应缓存命中统计（进程内计数，重启归零）。</summary>
+    public record ResponseCacheStatsDto(
+        long Hits,
+        long Misses,
+        long Sets,
+        int CurrentEntries,
+        int MaxEntries,
+        double HitRatePercent);
+
+    /// <summary>语义路由规则集：Enabled/阈值为当前配置只读快照，修改走配置台。</summary>
+    public record SemanticRoutesDto(bool Enabled, double SimilarityThreshold, List<SemanticRouteDto> Routes = null!);
+
+    public record SemanticRouteDto(string Name, List<string> Phrases, string TargetTier);
+
+    public record UpdateSemanticRoutesRequestDto(List<SemanticRouteUpsertDto>? Routes);
+
+    public record SemanticRouteUpsertDto(string? Name, List<string>? Phrases, string? TargetTier);
 
     public record SystemConfigDto(
         RoutingConfigDto Routing,
@@ -418,7 +632,16 @@ public class ApiService
         bool EnablePiiAnonymization,
         bool EnableDataSovereignty,
         bool EnableJsonAstAutoRepair,
-        bool EnableFusionRouter);
+        bool EnableFusionRouter,
+        bool EnableThompsonSampling = false,
+        bool EnableContextualBandit = false,
+        double ExplorationEpsilon = 0.0,
+        long ExplorationStarvedN = 0,
+        bool EnableResponseCache = false,
+        int ResponseCacheTtlSeconds = 3600,
+        int ResponseCacheMaxEntries = 1000,
+        int FailoverFailureThreshold = 3,
+        int FailoverCooldownSeconds = 60);
 
     public record BudgetConfigDto(
         decimal DailyBudgetUsd,
@@ -434,6 +657,15 @@ public class ApiService
         bool? EnableDataSovereignty,
         bool? EnableJsonAstAutoRepair,
         bool? EnableFusionRouter,
+        bool? EnableThompsonSampling,
+        bool? EnableContextualBandit,
+        double? ExplorationEpsilon,
+        long? ExplorationStarvedN,
+        bool? EnableResponseCache,
+        int? ResponseCacheTtlSeconds,
+        int? ResponseCacheMaxEntries,
+        int? FailoverFailureThreshold,
+        int? FailoverCooldownSeconds,
         decimal? DailyBudgetUsd,
         string? EnforceOnExhausted);
 

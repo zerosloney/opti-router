@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
@@ -160,27 +161,149 @@ public static class DashboardHandler
         });
 
         // 6. Golden Dataset Offline Regression Runner API
-        endpoints.MapPost("/api/dashboard/eval/run", async () =>
+        //    经 ProxyOrchestrator.SendAsync 走完整真实管线（路由→上游→计费→审计），
+        //    取代旧桩实现（伪造固定回复，评测结果无意义）。Cases 为空时回落内置题库。
+        endpoints.MapPost("/api/dashboard/eval/run", async (
+            ProxyOrchestrator orchestrator,
+            IMemoryCache cache,
+            EvalRunRequest? req) =>
         {
-            var testCases = new List<EvalTestCase>
+            var dataset = BuildEvalDataset(req?.Cases);
+            if (dataset.Count == 0)
             {
-                new("tc-01", "解释什么是 C# 中的 async/await 与 Task 机制", "async/await 是 C# 异步编程关键字，编译为状态机，避免线程阻塞", "tech", 5000),
-                new("tc-02", "写一个快速排序算法的 Python 实现", "def quicksort(arr): if len(arr) <= 1: return arr", "coding", 5000),
-                new("tc-03", "求解微积分积分 ∫ x^2 dx", "∫ x^2 dx = (1/3)x^3 + C", "math", 5000),
-                new("tc-04", "把 'Artificial Intelligence' 翻译为中文", "人工智能", "translation", 5000)
-            };
+                return Results.BadRequest(new { error = "Cases 为空或全部非法：每条需含非空 question 与 expectedAnswer，上限 50 条。" });
+            }
 
             var report = await OfflineEvalRunner.RunBatchEvalAsync(
                 $"eval-batch-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
-                testCases,
-                (req, ct) =>
-                {
-                    string userText = req.Messages?.LastOrDefault()?.GetText() ?? "";
-                    string jsonBody = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"模型正确回答：" + userText.Replace("\"", "\\\"") + "\"}}]}";
-                    return Task.FromResult(new RawChatResponse(jsonBody, new ChatUsage { PromptTokens = 50, CompletionTokens = 30, TotalTokens = 80 }));
-                });
+                dataset,
+                orchestrator.SendAsync);
 
+            RecordEvalBatch(cache, report);
             return Results.Ok(report);
+        });
+
+        // 6b. Eval Batch History API（进程内保留最近 10 批，重启清空）
+        endpoints.MapGet("/api/dashboard/eval/batches", (IMemoryCache cache) =>
+        {
+            var batches = GetEvalHistory(cache)
+                .OrderByDescending(r => r.Timestamp)
+                .ToList();
+            return Results.Ok(batches);
+        });
+
+        // 6c. Paired A/B Compare API——复用 OfflineEvalRunner.Compare 按用例 ID 成对比较两个批次
+        endpoints.MapPost("/api/dashboard/eval/compare", (IMemoryCache cache, EvalCompareRequest req) =>
+        {
+            var history = GetEvalHistory(cache);
+            var baseline = history.FirstOrDefault(r => string.Equals(r.BatchId, req.BaselineBatchId, StringComparison.Ordinal));
+            var candidate = history.FirstOrDefault(r => string.Equals(r.BatchId, req.CandidateBatchId, StringComparison.Ordinal));
+            if (baseline is null || candidate is null)
+            {
+                return Results.NotFound(new { error = "批次不存在。评测历史为进程内状态（重启清空），请先运行评测。" });
+            }
+
+            return Results.Ok(OfflineEvalRunner.Compare(baseline, candidate));
+        });
+
+        // 10b. Internal Routing State APIs（进程内状态可见性：上游配额 / 缓存亲和 / 响应缓存）
+        endpoints.MapGet("/api/dashboard/state/quota", (UpstreamQuotaStateStore quotaStore) =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var items = quotaStore.GetAllSnapshots()
+                .OrderByDescending(s => s.IsExhausted(now))
+                .ThenBy(s => s.ModelName, StringComparer.OrdinalIgnoreCase)
+                .Select(s => new
+                {
+                    s.ModelName,
+                    s.RequestsRemaining,
+                    s.TokensRemaining,
+                    s.RequestsResetAt,
+                    s.TokensResetAt,
+                    s.ExhaustedUntil,
+                    s.LastStatusCode,
+                    s.ObservedAt,
+                    IsExhausted = s.IsExhausted(now)
+                });
+            return Results.Ok(new { items });
+        });
+
+        endpoints.MapGet("/api/dashboard/state/cache-affinity", (PromptCacheAffinityStore store) =>
+        {
+            var entries = store.GetEntries();
+            return Results.Ok(new
+            {
+                totalCount = entries.Count,
+                // 条目可达上万，只下发最近 50 条；指纹已是最短可辨前缀展示由前端截断
+                items = entries.Take(50)
+            });
+        });
+
+        endpoints.MapGet("/api/dashboard/state/response-cache", (MemoryResponseCache responseCache) =>
+        {
+            var (hits, misses, sets, current, max) = responseCache.GetStats();
+            long total = hits + misses;
+            return Results.Ok(new
+            {
+                hits,
+                misses,
+                sets,
+                currentEntries = current,
+                maxEntries = max,
+                hitRatePercent = total > 0 ? (double)hits / total * 100.0 : 0.0
+            });
+        });
+
+        // 10c. Semantic Routes Management APIs——语义路由此前是唯一只能手改配置文件的路由策略。
+        //     SemanticRouterPolicy 每请求从 context.Options 读取路由表，reload 后立即热生效。
+        endpoints.MapGet("/api/dashboard/semantic-routes", (IOptionsMonitor<RouterOptions> options) =>
+        {
+            var opt = options.CurrentValue.Routing;
+            var routes = (opt.SemanticRoutes ?? new List<SemanticRouteOptions>())
+                .Select(r => new { r.Name, r.Phrases, TargetTier = r.TargetTier.ToString() })
+                .ToList();
+            return Results.Ok(new
+            {
+                enabled = opt.EnableSemanticRouter,
+                similarityThreshold = opt.SemanticSimilarityThreshold,
+                routes
+            });
+        });
+
+        endpoints.MapPut("/api/dashboard/semantic-routes", (
+            IConfiguration config,
+            IWebHostEnvironment env,
+            UpdateSemanticRoutesRequest req) =>
+        {
+            var (routes, error) = BuildSemanticRoutes(req.Routes);
+            if (error is not null)
+            {
+                return Results.BadRequest(new { error });
+            }
+
+            PersistAppsettings(config, env, root =>
+            {
+                var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
+                var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
+                var array = new JsonArray();
+                foreach (var route in routes)
+                {
+                    var phrases = new JsonArray();
+                    foreach (var phrase in route.Phrases)
+                    {
+                        phrases.Add(phrase);
+                    }
+                    array.Add(new JsonObject
+                    {
+                        ["name"] = route.Name,
+                        ["phrases"] = phrases,
+                        ["targetTier"] = route.TargetTier.ToString()
+                    });
+                }
+                routing["SemanticRoutes"] = array;
+            });
+
+            return Results.Ok(new { message = $"Semantic routes persisted ({routes.Count} rules) and hot-applied via reload." });
         });
 
         // 7. GET System Config API（读 IOptionsMonitor.CurrentValue，反映 reload 后的真值）
@@ -199,7 +322,16 @@ public static class DashboardHandler
                     opt.Routing.EnablePiiAnonymization,
                     opt.Routing.EnableDataSovereignty,
                     opt.Routing.EnableJsonAstAutoRepair,
-                    opt.Routing.EnableFusionRouter
+                    opt.Routing.EnableFusionRouter,
+                    opt.Routing.EnableThompsonSampling,
+                    opt.Routing.EnableContextualBandit,
+                    opt.Routing.ExplorationEpsilon,
+                    opt.Routing.ExplorationStarvedN,
+                    opt.Routing.EnableResponseCache,
+                    opt.Routing.ResponseCacheTtlSeconds,
+                    opt.Routing.ResponseCacheMaxEntries,
+                    opt.Routing.FailoverFailureThreshold,
+                    opt.Routing.FailoverCooldownSeconds
                 },
                 Budget = new
                 {
@@ -215,64 +347,59 @@ public static class DashboardHandler
         endpoints.MapPut("/api/dashboard/config", (
             IConfiguration config,
             IWebHostEnvironment env,
+            IOptionsMonitor<RouterOptions> optionsMonitor,
             UpdateSystemConfigRequest req) =>
         {
-            string appsettingsPath = Path.Combine(env.ContentRootPath, "appsettings.json");
-            var root = JsonNode.Parse(File.ReadAllText(appsettingsPath))?.AsObject()
-                ?? throw new InvalidOperationException("appsettings.json is unreadable; cannot persist config.");
-            var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
-            var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
-            var budget = (optiRouter["Budget"] as JsonObject) ?? (JsonObject)(optiRouter["Budget"] = new JsonObject());
-
-            if (req.EnableFailover is not null) routing["EnableFailover"] = req.EnableFailover.Value;
-            if (req.EnableBudgetGuard is not null) routing["EnableBudgetGuard"] = req.EnableBudgetGuard.Value;
-            if (req.EnableRuleClassifier is not null) routing["EnableRuleClassifier"] = req.EnableRuleClassifier.Value;
-            if (req.EnableLatencyAware is not null) routing["EnableLatencyAware"] = req.EnableLatencyAware.Value;
-            if (req.EnableSemanticRouter is not null) routing["EnableSemanticRouter"] = req.EnableSemanticRouter.Value;
-            if (req.EnablePiiAnonymization is not null) routing["EnablePiiAnonymization"] = req.EnablePiiAnonymization.Value;
-            if (req.EnableDataSovereignty is not null) routing["EnableDataSovereignty"] = req.EnableDataSovereignty.Value;
-            if (req.EnableJsonAstAutoRepair is not null) routing["EnableJsonAstAutoRepair"] = req.EnableJsonAstAutoRepair.Value;
-            if (req.EnableFusionRouter is not null) routing["EnableFusionRouter"] = req.EnableFusionRouter.Value;
-
-            if (req.DailyBudgetUsd is >= 0) budget["DailyBudgetUsd"] = req.DailyBudgetUsd.Value;
-            if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
+            // 落盘前把变更应用到"当前配置的克隆"并复用启动校验器（RouterOptionsValidator）：
+            // 坏配置一旦落盘，reload 会被 IOptionsMonitor 静默拒绝（表面保存成功、实际未生效），
+            // 更糟的是重启时 ValidateOnStart 直接失败导致进程起不来。
+            // 克隆 = 从组合配置重新绑定（与启动同源）+ 用权威 models-config.json 的模型列表校正
+            // （启动绑定时 Models 由 Configure<ModelsConfigService> 覆盖，纯 config 绑定拿不到）。
+            var candidate = new RouterOptions();
+            config.GetSection("OptiRouter").Bind(candidate);
+            candidate.Models.Clear();
+            foreach (var model in optionsMonitor.CurrentValue.Models)
             {
-                budget["EnforceOnExhausted"] = behavior.ToString();
+                candidate.Models.Add(model);
+            }
+            ApplyRequestToOptions(candidate, req);
+            var validation = new RouterOptionsValidator().Validate(name: null, options: candidate);
+            if (validation.Failed)
+            {
+                return Results.BadRequest(new { error = string.Join("; ", validation.Failures) });
             }
 
-            string directory = Path.GetDirectoryName(appsettingsPath) ?? env.ContentRootPath;
-            string tempPath = Path.Combine(directory, $".appsettings.{Guid.NewGuid():N}.tmp");
-            try
+            PersistAppsettings(config, env, root =>
             {
-                File.WriteAllText(tempPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-                int attempts = 0;
-                while (true)
+                var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
+                var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
+                var budget = (optiRouter["Budget"] as JsonObject) ?? (JsonObject)(optiRouter["Budget"] = new JsonObject());
+
+                if (req.EnableFailover is not null) routing["EnableFailover"] = req.EnableFailover.Value;
+                if (req.EnableBudgetGuard is not null) routing["EnableBudgetGuard"] = req.EnableBudgetGuard.Value;
+                if (req.EnableRuleClassifier is not null) routing["EnableRuleClassifier"] = req.EnableRuleClassifier.Value;
+                if (req.EnableLatencyAware is not null) routing["EnableLatencyAware"] = req.EnableLatencyAware.Value;
+                if (req.EnableSemanticRouter is not null) routing["EnableSemanticRouter"] = req.EnableSemanticRouter.Value;
+                if (req.EnablePiiAnonymization is not null) routing["EnablePiiAnonymization"] = req.EnablePiiAnonymization.Value;
+                if (req.EnableDataSovereignty is not null) routing["EnableDataSovereignty"] = req.EnableDataSovereignty.Value;
+                if (req.EnableJsonAstAutoRepair is not null) routing["EnableJsonAstAutoRepair"] = req.EnableJsonAstAutoRepair.Value;
+                if (req.EnableFusionRouter is not null) routing["EnableFusionRouter"] = req.EnableFusionRouter.Value;
+                if (req.EnableThompsonSampling is not null) routing["EnableThompsonSampling"] = req.EnableThompsonSampling.Value;
+                if (req.EnableContextualBandit is not null) routing["EnableContextualBandit"] = req.EnableContextualBandit.Value;
+                if (req.ExplorationEpsilon is not null) routing["ExplorationEpsilon"] = req.ExplorationEpsilon.Value;
+                if (req.ExplorationStarvedN is not null) routing["ExplorationStarvedN"] = req.ExplorationStarvedN.Value;
+                if (req.EnableResponseCache is not null) routing["EnableResponseCache"] = req.EnableResponseCache.Value;
+                if (req.ResponseCacheTtlSeconds is > 0) routing["ResponseCacheTtlSeconds"] = req.ResponseCacheTtlSeconds.Value;
+                if (req.ResponseCacheMaxEntries is > 0) routing["ResponseCacheMaxEntries"] = req.ResponseCacheMaxEntries.Value;
+                if (req.FailoverFailureThreshold is > 0) routing["FailoverFailureThreshold"] = req.FailoverFailureThreshold.Value;
+                if (req.FailoverCooldownSeconds is > 0) routing["FailoverCooldownSeconds"] = req.FailoverCooldownSeconds.Value;
+
+                if (req.DailyBudgetUsd is >= 0) budget["DailyBudgetUsd"] = req.DailyBudgetUsd.Value;
+                if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
                 {
-                    try
-                    {
-                        if (File.Exists(appsettingsPath))
-                            File.Replace(tempPath, appsettingsPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
-                        else
-                            File.Move(tempPath, appsettingsPath);
-                        break;
-                    }
-                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                    {
-                        attempts++;
-                        if (attempts >= 10) throw;
-                        Thread.Sleep(10 * attempts);
-                    }
+                    budget["EnforceOnExhausted"] = behavior.ToString();
                 }
-            }
-            finally
-            {
-                if (File.Exists(tempPath))
-                {
-                    try { File.Delete(tempPath); } catch { }
-                }
-            }
-
-            ((IConfigurationRoot)config).Reload();
+            });
 
             return Results.Ok(new { message = "System configuration persisted to appsettings.json and hot-applied via reload." });
         });
@@ -349,8 +476,217 @@ public static class DashboardHandler
         bool? EnableDataSovereignty,
         bool? EnableJsonAstAutoRepair,
         bool? EnableFusionRouter,
+        bool? EnableThompsonSampling,
+        bool? EnableContextualBandit,
+        double? ExplorationEpsilon,
+        long? ExplorationStarvedN,
+        bool? EnableResponseCache,
+        int? ResponseCacheTtlSeconds,
+        int? ResponseCacheMaxEntries,
+        int? FailoverFailureThreshold,
+        int? FailoverCooldownSeconds,
         decimal? DailyBudgetUsd,
         string? EnforceOnExhausted);
+
+    /// <summary>
+    /// 把 PUT 请求的字段应用到配置克隆上，写入条件与落盘 JsonObject 的分支一一对应，
+    /// 确保校验器看到的"候选配置"与实际持久化的内容一致。
+    /// </summary>
+    private static void ApplyRequestToOptions(RouterOptions candidate, UpdateSystemConfigRequest req)
+    {
+        var routing = candidate.Routing;
+        if (req.EnableFailover is not null) routing.EnableFailover = req.EnableFailover.Value;
+        if (req.EnableBudgetGuard is not null) routing.EnableBudgetGuard = req.EnableBudgetGuard.Value;
+        if (req.EnableRuleClassifier is not null) routing.EnableRuleClassifier = req.EnableRuleClassifier.Value;
+        if (req.EnableLatencyAware is not null) routing.EnableLatencyAware = req.EnableLatencyAware.Value;
+        if (req.EnableSemanticRouter is not null) routing.EnableSemanticRouter = req.EnableSemanticRouter.Value;
+        if (req.EnablePiiAnonymization is not null) routing.EnablePiiAnonymization = req.EnablePiiAnonymization.Value;
+        if (req.EnableDataSovereignty is not null) routing.EnableDataSovereignty = req.EnableDataSovereignty.Value;
+        if (req.EnableJsonAstAutoRepair is not null) routing.EnableJsonAstAutoRepair = req.EnableJsonAstAutoRepair.Value;
+        if (req.EnableFusionRouter is not null) routing.EnableFusionRouter = req.EnableFusionRouter.Value;
+        if (req.EnableThompsonSampling is not null) routing.EnableThompsonSampling = req.EnableThompsonSampling.Value;
+        if (req.EnableContextualBandit is not null) routing.EnableContextualBandit = req.EnableContextualBandit.Value;
+        if (req.ExplorationEpsilon is not null) routing.ExplorationEpsilon = req.ExplorationEpsilon.Value;
+        if (req.ExplorationStarvedN is not null) routing.ExplorationStarvedN = req.ExplorationStarvedN.Value;
+        if (req.EnableResponseCache is not null) routing.EnableResponseCache = req.EnableResponseCache.Value;
+        if (req.ResponseCacheTtlSeconds is > 0) routing.ResponseCacheTtlSeconds = req.ResponseCacheTtlSeconds.Value;
+        if (req.ResponseCacheMaxEntries is > 0) routing.ResponseCacheMaxEntries = req.ResponseCacheMaxEntries.Value;
+        if (req.FailoverFailureThreshold is > 0) routing.FailoverFailureThreshold = req.FailoverFailureThreshold.Value;
+        if (req.FailoverCooldownSeconds is > 0) routing.FailoverCooldownSeconds = req.FailoverCooldownSeconds.Value;
+        if (req.DailyBudgetUsd is >= 0) candidate.Budget.DailyBudgetUsd = req.DailyBudgetUsd.Value;
+        if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
+        {
+            candidate.Budget.EnforceOnExhausted = behavior;
+        }
+    }
+
+    public record EvalRunRequest(List<EvalCaseRequest>? Cases);
+
+    public record EvalCaseRequest(
+        string? Id,
+        string? Question,
+        string? ExpectedAnswer,
+        string? Category = null,
+        long? MaxLatencyThresholdMs = null);
+
+    public record EvalCompareRequest(string BaselineBatchId, string CandidateBatchId);
+
+    public record UpdateSemanticRoutesRequest(List<SemanticRouteUpsertRequest>? Routes);
+
+    public record SemanticRouteUpsertRequest(string? Name, List<string>? Phrases, string? TargetTier);
+
+    /// <summary>
+    /// 校验并归一化语义路由规则（整表替换语义）：名称唯一必填、每条至少一句 phrase、tier 合法。
+    /// 允许空列表 = 清空全部规则（policy 对空表按 disabled 处理）。
+    /// </summary>
+    private static (List<SemanticRouteOptions> Routes, string? Error) BuildSemanticRoutes(List<SemanticRouteUpsertRequest>? request)
+    {
+        const int maxRoutes = 100;
+        const int maxPhrasesPerRoute = 50;
+        if (request is null || request.Count == 0)
+        {
+            return (new List<SemanticRouteOptions>(), null);
+        }
+        if (request.Count > maxRoutes)
+        {
+            return (new List<SemanticRouteOptions>(), $"语义路由规则上限 {maxRoutes} 条。");
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var routes = new List<SemanticRouteOptions>(request.Count);
+        foreach (var r in request)
+        {
+            if (string.IsNullOrWhiteSpace(r.Name))
+            {
+                return (new List<SemanticRouteOptions>(), "每条规则必须有非空 name。");
+            }
+            string name = r.Name.Trim();
+            if (!seen.Add(name))
+            {
+                return (new List<SemanticRouteOptions>(), $"规则 name 重复: {name}。");
+            }
+
+            var phrases = (r.Phrases ?? new List<string>())
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => p.Trim())
+                .Take(maxPhrasesPerRoute)
+                .ToList();
+            if (phrases.Count == 0)
+            {
+                return (new List<SemanticRouteOptions>(), $"规则 '{name}' 至少需要一条非空 phrase。");
+            }
+
+            if (!Enum.TryParse<ModelTier>(r.TargetTier, ignoreCase: true, out var tier))
+            {
+                return (new List<SemanticRouteOptions>(), $"规则 '{name}' 的 targetTier 非法（Strong/Medium/Cheap）: {r.TargetTier}。");
+            }
+
+            routes.Add(new SemanticRouteOptions { Name = name, Phrases = phrases, TargetTier = tier });
+        }
+        return (routes, null);
+    }
+
+    /// <summary>校验并归一化自定义题库；null/空回落内置 4 题黄金集。非法条目直接丢弃，全部非法返回空列表。</summary>
+    private static List<EvalTestCase> BuildEvalDataset(List<EvalCaseRequest>? cases)
+    {
+        const int maxCases = 50;
+        if (cases is null || cases.Count == 0)
+        {
+            return new List<EvalTestCase>
+            {
+                new("tc-01", "解释什么是 C# 中的 async/await 与 Task 机制", "async/await 是 C# 异步编程关键字，编译为状态机，避免线程阻塞", "tech", 5000),
+                new("tc-02", "写一个快速排序算法的 Python 实现", "def quicksort(arr): if len(arr) <= 1: return arr", "coding", 5000),
+                new("tc-03", "求解微积分积分 ∫ x^2 dx", "∫ x^2 dx = (1/3)x^3 + C", "math", 5000),
+                new("tc-04", "把 'Artificial Intelligence' 翻译为中文", "人工智能", "translation", 5000)
+            };
+        }
+
+        var dataset = new List<EvalTestCase>(Math.Min(cases.Count, maxCases));
+        for (int i = 0; i < cases.Count && dataset.Count < maxCases; i++)
+        {
+            var c = cases[i];
+            if (string.IsNullOrWhiteSpace(c.Question) || string.IsNullOrWhiteSpace(c.ExpectedAnswer)) continue;
+            dataset.Add(new EvalTestCase(
+                string.IsNullOrWhiteSpace(c.Id) ? $"custom-{i + 1:D2}" : c.Id.Trim(),
+                c.Question.Trim(),
+                c.ExpectedAnswer.Trim(),
+                string.IsNullOrWhiteSpace(c.Category) ? "custom" : c.Category.Trim(),
+                c.MaxLatencyThresholdMs is > 0 ? c.MaxLatencyThresholdMs.Value : 5000));
+        }
+        return dataset;
+    }
+
+    private const string EvalHistoryCacheKey = "dashboard:eval-history";
+    private const int EvalHistoryMaxBatches = 10;
+    private static readonly object EvalHistoryLock = new();
+
+    private static List<BatchEvalReport> GetEvalHistory(IMemoryCache cache)
+        => cache.Get<List<BatchEvalReport>>(EvalHistoryCacheKey) ?? new List<BatchEvalReport>();
+
+    private static void RecordEvalBatch(IMemoryCache cache, BatchEvalReport report)
+    {
+        lock (EvalHistoryLock)
+        {
+            var history = cache.GetOrCreate(EvalHistoryCacheKey, entry =>
+            {
+                entry.Size = 1;
+                entry.Priority = CacheItemPriority.NeverRemove;
+                return new List<BatchEvalReport>();
+            })!;
+            history.Add(report);
+            if (history.Count > EvalHistoryMaxBatches)
+            {
+                history.RemoveRange(0, history.Count - EvalHistoryMaxBatches);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 把对 appsettings.json 的修改原子落盘并触发 IConfigurationRoot.Reload，
+    /// IOptionsMonitor 随即把新值派发到所有消费方（配置 PUT 与语义路由 PUT 共用）。
+    /// 临时文件 + File.Replace 保证读端（reload / 其他进程）不会读到半截 JSON。
+    /// </summary>
+    private static void PersistAppsettings(IConfiguration config, IWebHostEnvironment env, Action<JsonObject> mutate)
+    {
+        string appsettingsPath = Path.Combine(env.ContentRootPath, "appsettings.json");
+        var root = JsonNode.Parse(File.ReadAllText(appsettingsPath))?.AsObject()
+            ?? throw new InvalidOperationException("appsettings.json is unreadable; cannot persist config.");
+        mutate(root);
+
+        string directory = Path.GetDirectoryName(appsettingsPath) ?? env.ContentRootPath;
+        string tempPath = Path.Combine(directory, $".appsettings.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            File.WriteAllText(tempPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            int attempts = 0;
+            while (true)
+            {
+                try
+                {
+                    if (File.Exists(appsettingsPath))
+                        File.Replace(tempPath, appsettingsPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                    else
+                        File.Move(tempPath, appsettingsPath);
+                    break;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    attempts++;
+                    if (attempts >= 10) throw;
+                    Thread.Sleep(10 * attempts);
+                }
+            }
+        }
+        finally
+        {
+            if (File.Exists(tempPath))
+            {
+                try { File.Delete(tempPath); } catch { }
+            }
+        }
+
+        ((IConfigurationRoot)config).Reload();
+    }
 
     private static readonly string[] ValidWindows = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };
 

@@ -47,6 +47,24 @@ public sealed class PromptCacheAffinityStore
 
     public IReadOnlyCollection<string> GetStoredFingerprints() => _entries.Keys.ToArray();
 
+    /// <summary>缓存亲和条目（dashboard 状态端点用）：已过期的不返回，按录入时间倒序。</summary>
+    public IReadOnlyList<PromptAffinityEntry> GetEntries()
+    {
+        var now = _timeProvider.GetUtcNow();
+        return _entries
+            .Where(p => p.Value.ExpiresAt > now)
+            .Select(p => new PromptAffinityEntry(p.Key, p.Value.ModelName, p.Value.RecordedAt, p.Value.ExpiresAt))
+            .OrderByDescending(e => e.RecordedAt)
+            .ToList();
+    }
+
+    /// <summary>单条缓存亲和映射：SHA-256 指纹 → 上次成功服务的模型。</summary>
+    public sealed record PromptAffinityEntry(
+        string Fingerprint,
+        string ModelName,
+        DateTimeOffset RecordedAt,
+        DateTimeOffset ExpiresAt);
+
     private void Trim(DateTimeOffset now)
     {
         if (_entries.Count <= _maxEntries) return;
