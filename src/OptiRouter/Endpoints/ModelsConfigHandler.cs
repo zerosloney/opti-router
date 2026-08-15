@@ -91,7 +91,7 @@ public static class ModelsConfigHandler
                 Provider = req.Provider?.Trim() ?? string.Empty,
                 Family = req.Family?.Trim() ?? string.Empty,
                 Tier = req.Tier ?? ModelTier.Medium,
-                MaxContextTokens = (req.MaxContextTokens is > 0) ? req.MaxContextTokens.Value : 8192,
+                MaxContextTokens = (req.MaxContextTokens is > 0) ? req.MaxContextTokens.Value : 200_000,
                 InputPricePerMillion = (req.InputPricePerMillion ?? 0) < 0 ? 0 : req.InputPricePerMillion!.Value,
                 OutputPricePerMillion = (req.OutputPricePerMillion ?? 0) < 0 ? 0 : req.OutputPricePerMillion!.Value,
                 CachedInputPricePerMillion = req.CachedInputPricePerMillion is >= 0 ? req.CachedInputPricePerMillion : null,

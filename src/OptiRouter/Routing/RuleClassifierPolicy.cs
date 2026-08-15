@@ -16,28 +16,44 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     public PolicyGroup Group => PolicyGroup.Classify;
 
     /// <summary>
-    /// 数学/公式标记：LaTeX 环境、分数、函数式、中文求解/计算方程。
-    /// 仅匹配明确的数学符号/结构，避免自然语言误报（"等于" / "平均" 不触发）。
+    /// 数学/公式标记：LaTeX 环境、Unicode 数学符号、函数式、中英文数学词汇。
+    /// 仅匹配明确的数学符号/结构/术语，避免自然语言误报（"等于" / "平均" 不触发）。
     /// </summary>
     /// <remarks>
-    /// intentional-simple: 正则覆盖常见 LaTeX 与中文数学请求，非穷尽。
+    /// intentional-simple: 覆盖常见 LaTeX、Unicode 符号（∑∫√π≤≥≠∞±×÷）与中英文数学
+    /// 词汇（解方程/微积分/矩阵/概率分布/derivative/eigenvalue 等）；裸词如"概率""统计"
+    /// 歧义大不收录，需组合形式（概率分布/统计检验）。
     /// </remarks>
     private static readonly Regex MathIndicatorRegex = new(
-        @"\\begin\{equation\}|\\frac\{|\\sum_|\\int_|f\([^)]*\)\s*=|求解|计算.*方程|证明.*不等式|求导|积分",
+        @"\\begin\{equation\}|\\frac\{|\\sum_|\\int_|f\([^)]*\)\s*=" +
+        // Unicode 数学符号：正文出现即数学性极强的信号。
+        @"|[∑∫√≤≥≠∞±≡⊂⊃∈∉⊙⊗⊕∇∂²³ⁿ]" +
+        @"|求解|解方程|方程组|计算.*方程|证明|不等式|求导|求积分|积分|微分方程|微积分|导数|偏导" +
+        @"|极限|级数|收敛|发散|矩阵|特征值|特征向量|线性代数|排列组合|数列|因式分解|概率分布" +
+        @"|期望值|方差|标准差|贝叶斯|统计检验|几何证明|充分必要|充要条件" +
+        @"|\bsolve\s+(?:for\s+)?\w|\bequation|\bderivative|\bintegral\b|\bmatrix|\beigen" +
+        @"|\bprove\s+(?:that|the)|\btheorem|\bcalculus|\bfactorial|\blimit\s+of\b" +
+        @"|\bpower\s+series\b|\blinear\s+algebra\b|\bcombinatoric|\bprobability\s+distribution\b" +
+        @"|\bstandard\s+deviation\b|\bprime\s+number\b|\blcm\b|\bgcd\b",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>
-    /// 翻译请求模式：英文 "translate X to/into Y" 与中文 "翻译...为/成/到"。
-    /// 要求动词 + 方向结构，避免 "translation of" / "翻译质量" 等讨论性误报。
+    /// 翻译请求模式：结构化形式（动词 + 方向词）与口语化指令。
+    /// 要求动词/方向结构，避免 "translation of" / "翻译质量" 等讨论性误报。
     /// </summary>
     /// <remarks>
-    /// intentional-simple: 限定 translate/翻译 作动词（后接内容 + 方向词），降低误报。
-    /// "translate this book to French" 命中；"the translation of this book" 不命中。
+    /// intentional-simple: "translate this book to French" 命中；"the translation of this book"
+    /// 不命中。"帮我翻译/翻译一下/中译英" 等口语指令是明确的翻译意图，一并收录；
+    /// "翻译理论/翻译质量" 等讨论话题不含这些指令结构，不误报。
     /// </remarks>
     private static readonly Regex TranslationPatternRegex = new(
         @"translate\s+\S.{0,80}?\s+(?:to|into)\s+\S|" +
+        @"\btranslate\s+(?:this|that|it|the\s+\w+)\b|" +
         @"翻译.{1,60}?(?:为|成|到)\S|" +
-        @"把.{1,40}?翻译成",
+        @"把.{1,40}?翻译成|" +
+        @"(?:帮我|请|麻烦|给我)翻译|" +
+        @"翻译(?:一下|这段|这个|过来)|" +
+        @"中译英|英译中|日译中|中译日|韩译中|中译韩|中英互译|中日互译",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <summary>分类原因常量，ClassifyRequest 与 GetWeightsForClassification 共用，避免字符串漂移。</summary>
@@ -47,6 +63,7 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     private const string ReasonMathDetected = "math-detected";
     private const string ReasonComplexInstruction = "complex-instruction";
     private const string ReasonTranslationRequest = "translation-request";
+    private const string ReasonWritingRequest = "writing-request";
     private const string ReasonSimpleQA = "simple-qa";
     private const string ReasonDefault = "default";
     private const string ReasonFallbackToDefault = "fallback-to-default";
@@ -113,6 +130,36 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
     private static readonly Regex SimpleCodeIntentRegex = new(
         @"\bhello\s*world\b|\b(?:scaffold|boilerplate)\b|" +
         @"hello ?world|简单|脚手架|模板|示例|入门",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// 复杂指令特征：深度分析/多步骤/结构化长文任务。命中 → Strong。
+    /// 与 <see cref="SimpleCodeIntentRegex"/> 独立（本正则不限于代码请求）。
+    /// 收录语义明确的组合词（深入分析/可行性分析/step by step/pros and cons），
+    /// 裸词如"分析""总结"歧义大不收录。
+    /// </summary>
+    private static readonly Regex ComplexInstructionRegex = new(
+        @"深入分析|详细分析|可行性分析|对比分析|利弊分析|竞品分析|多角度分析" +
+        @"|架构设计|方案设计|技术选型|技术方案|系统设计" +
+        @"|论文|研究报告|调研报告|文献综述|开题报告" +
+        @"|一步一步(?:教|推导|讲|说明|解释|实现|走完)|分步骤|逐步推导|详细说明|详细解释|深入探讨|头脑风暴" +
+        @"|\bstep[- ]by[- ]step\b|\bin[- ]depth\s+analysis\b|\bpros\s+and\s+cons\b" +
+        @"|\bcompare\s+and\s+contrast\b|\btrade[- ]offs?\b|\bliterature\s+review\b" +
+        @"|\bresearch\s+(?:report|proposal)\b|\bfeasibility\s+(?:study|analysis)\b" +
+        @"|\bessay\s+outline\b|\bline\s+by\s+line\b",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// 写作类任务：邮件/文案/报告/简历等语言生成为主的请求。命中 → Medium
+    /// （语言能力主导、推理需求低，多维路由下让语言能力足够且便宜的模型胜出）。
+    /// 收录明确的体裁信号，"写作"裸词与"帮我写代码"（先命中代码路径）不受影响。
+    /// </summary>
+    private static readonly Regex WritingRequestRegex = new(
+        @"写一封|写封|帮我写.{0,12}(?:邮件|信|文案|周报|月报|总结|简历|通知|公告)" +
+        @"|起草|润色|改写.{0,8}(?:成|为)|文案撰写|标题党" +
+        @"|\bwrite\s+(?:an?\s+)?(?:email|letter|poem|essay|blog|copy|speech|slogan|headline)" +
+        @"|\bdraft\s+(?:an?\s+)?(?:email|letter|proposal|memo|press\s+release)" +
+        @"|\bpolish\s+(?:my|the|this)\b.{0,30}\b(?:email|essay|letter|paragraph|text)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     /// <inheritdoc />
@@ -229,6 +276,11 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
                 weights["language"] = 1.0;
                 weights["coding"] = 0.1;
                 break;
+            case ReasonWritingRequest:
+                // 写作类：语言能力主导，推理需求低——能力相近时让便宜的语言模型胜出。
+                weights["language"] = 1.0;
+                weights["reasoning"] = 0.2;
+                break;
             case ReasonSimpleQA:
                 weights["language"] = 1.0;
                 weights["reasoning"] = 0.1;
@@ -292,16 +344,26 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
             return (ModelTier.Strong, ReasonMathDetected, RequestComplexity.Complex);
         }
 
-        if (totalMessageCount > 1 && hasLongSystemPrompt)
+        // 翻译：Medium 足够（现代中等模型翻译质量已达实用水平，Strong 边际收益低）。
+        // 放在复杂指令之前——"帮我翻译这篇论文"是翻译任务，不应被"论文"关键词抢入 Strong。
+        if (ContainsTranslationPattern(request))
+        {
+            return (ModelTier.Medium, ReasonTranslationRequest, RequestComplexity.Standard);
+        }
+
+        // 复杂指令：长系统提示的多轮任务（agent 编排类），或指令文本命中深度分析/
+        // 多步骤/结构化长文信号。需 Strong 推理。
+        var instructionText = ExtractInstructionText(request);
+        if ((totalMessageCount > 1 && hasLongSystemPrompt)
+            || ComplexInstructionRegex.IsMatch(instructionText))
         {
             return (ModelTier.Strong, ReasonComplexInstruction, RequestComplexity.Complex);
         }
 
-        // 翻译：Medium 足够（现代中等模型翻译质量已达实用水平，Strong 边际收益低）。
-        // 放在 simple-qa 检测之前——翻译请求即使单轮短消息也应走 Medium 而非 Cheap。
-        if (ContainsTranslationPattern(request))
+        // 写作类：邮件/文案/周报等体裁明确的语言生成，Medium 足够。
+        if (WritingRequestRegex.IsMatch(instructionText))
         {
-            return (ModelTier.Medium, ReasonTranslationRequest, RequestComplexity.Standard);
+            return (ModelTier.Medium, ReasonWritingRequest, RequestComplexity.Standard);
         }
 
         if (isSingleShortMessage)

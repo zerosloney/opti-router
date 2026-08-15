@@ -43,9 +43,10 @@ public sealed class ModelEndpointOptions
     public ModelTier Tier { get; set; } = ModelTier.Medium;
 
     /// <summary>
-    /// 最大上下文窗口（token 数）。
+    /// 最大上下文窗口（token 数）。默认 200k 对齐当前主流模型；
+    /// 小窗口模型（本地小模型等）务必显式配置，长输入过滤据此淘汰装不下的候选。
     /// </summary>
-    public int MaxContextTokens { get; set; } = 8192;
+    public int MaxContextTokens { get; set; } = 200_000;
 
     /// <summary>
     /// 输入 token 价格（USD / 百万 token）。

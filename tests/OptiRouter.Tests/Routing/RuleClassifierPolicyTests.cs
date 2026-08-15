@@ -473,4 +473,150 @@ public class RuleClassifierPolicyTests
         Assert.Null(result.ClassificationSignal);
         Assert.Null(result.ClassificationTargetTier);
     }
+
+    [Theory]
+    // 数学扩展：Unicode 符号、中文术语、英文词汇。
+    [InlineData("计算 ∑(i=1..n) i 的值")]
+    [InlineData("求 √2 + √3 的近似值")]
+    [InlineData("当 x → ∞ 时求极限")]
+    [InlineData("矩阵 A 的特征值怎么求")]
+    [InlineData("解这个方程组: x+y=3, x-y=1")]
+    [InlineData("线性代数中的秩是什么")]
+    [InlineData("贝叶斯公式的推导")]
+    [InlineData("find the derivative of sin(x)")]
+    [InlineData("prove that √2 is irrational")]
+    [InlineData("calculate the standard deviation of this dataset")]
+    [InlineData("what is the eigenvalue problem")]
+    public void Apply_DetectsMathExpanded_SelectsStrongTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("math-detected", result.Reason);
+    }
+
+    [Theory]
+    // 翻译扩展：口语化指令与语言对缩写。
+    [InlineData("帮我翻译")]
+    [InlineData("请翻译")]
+    [InlineData("翻译一下")]
+    [InlineData("翻译这段")]
+    [InlineData("中译英")]
+    [InlineData("英译中")]
+    [InlineData("can you translate this for me")]
+    [InlineData("please translate the following text")]
+    public void Apply_DetectsTranslationExpanded_SelectsMediumTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 8000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Medium, m.Tier));
+        Assert.Contains("translation-request", result.Reason);
+    }
+
+    [Theory]
+    // 复杂指令扩展：深度分析/多步骤/结构化长文。
+    [InlineData("帮我做一个深入的可行性分析")]
+    [InlineData("对比分析这两个方案的利弊")]
+    [InlineData("一步一步推导这个结论")]
+    [InlineData("一步一步教我搭这个环境")]
+    [InlineData("我要写一篇关于气候变化的论文")]
+    [InlineData("explain step by step how quicksort works")]
+    [InlineData("compare and contrast REST and GraphQL")]
+    [InlineData("list the pros and cons of microservices")]
+    public void Apply_DetectsComplexInstruction_SelectsStrongTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Strong, m.Tier));
+        Assert.Contains("complex-instruction", result.Reason);
+    }
+
+    [Theory]
+    // 写作类：体裁明确的语言生成 → Medium。
+    [InlineData("帮我写一封请假邮件")]
+    [InlineData("写封感谢信给客户")]
+    [InlineData("帮我写本周周报")]
+    [InlineData("起草一份合作备忘录")]
+    [InlineData("润色这段文案")]
+    [InlineData("write an email to my manager")]
+    [InlineData("draft a press release for the launch")]
+    public void Apply_DetectsWritingRequest_SelectsMediumTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m),
+            ("cheap", ModelTier.Cheap, 8000, 0.01m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Medium, m.Tier));
+        Assert.Contains("writing-request", result.Reason);
+    }
+
+    [Theory]
+    // 翻译优先于复杂指令：明确翻译意图不应被"论文"等关键词抢入 Strong。
+    [InlineData("帮我翻译这篇论文的摘要")]
+    [InlineData("translate this research report into Chinese")]
+    public void Apply_TranslationWinsOverComplexKeywords_SelectsMediumTier(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.All(result.Candidates, m => Assert.Equal(ModelTier.Medium, m.Tier));
+    }
+
+    [Theory]
+    // 扩展后的误报防护：讨论性/闲聊文本不应升档。
+    [InlineData("翻译理论在语言学中很重要")]
+    [InlineData("统计学家的就业前景如何")]
+    [InlineData("这部电影一步一步展现了主角的成长")]
+    [InlineData("she works as a research assistant")]
+    [InlineData("my essay got a good grade last semester")]
+    public void Apply_ExpandedPatterns_DoNotFalsePositive(string content)
+    {
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var policy = new RuleClassifierPolicy();
+        var request = TestHelpers.BuildRequest(("user", content));
+
+        var result = Apply(policy, options, request);
+
+        Assert.DoesNotContain("math-detected", result.Reason);
+        Assert.DoesNotContain("translation-request", result.Reason);
+        Assert.DoesNotContain("complex-instruction", result.Reason);
+        Assert.DoesNotContain("writing-request", result.Reason);
+    }
 }
