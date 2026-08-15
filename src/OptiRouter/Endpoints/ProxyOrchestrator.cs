@@ -282,11 +282,20 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     decimal cost = response.Usage is not null
                         ? CostCalculator.Compute(response.Usage, candidate)
                         : 0m;
+                    // 质量因子：从非流式响应检测低质量信号（截断/空答/JSON 契约违约），乘性折减延迟 reward。
+                    // 流式路径未累积 content，不接入（qualityFactor 默认 1.0）。
+                    double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, options.Routing.QualityPenaltyFactor, request);
+                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
+                        actualTier: candidate.Tier, qualityFactor: qualityFactor, completionTokens: response.Usage?.CompletionTokens ?? 0);
+                    outcomeReported = true;
+                    _recorder.RecordAffinity(sessionId, candidate.Name);
+                    _recorder.RecordPromptCacheAffinity(request, candidate.Name);
+
                     if (response.Usage is not null)
                     {
                         _recorder.RecordCost(cost, sessionId);
                         _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
-                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
+                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     }
                     else
                     {
@@ -298,18 +307,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             _recorder.RecordCost(estCost, sessionId);
                         _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
                             isEstimated: estCost > 0m,
-                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
+                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     }
                     _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    // 质量因子：从非流式响应检测低质量信号（截断/空答/JSON 契约违约），乘性折减延迟 reward。
-                    // 流式路径未累积 content，不接入（qualityFactor 默认 1.0）。
-                    double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, options.Routing.QualityPenaltyFactor, request);
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
-                        actualTier: candidate.Tier, qualityFactor: qualityFactor);
-                    outcomeReported = true;
-                    _recorder.RecordAffinity(sessionId, candidate.Name);
-                    _recorder.RecordPromptCacheAffinity(request, candidate.Name);
 
                     // 级联自校验：Cheap 首选 + 启用 + 采样命中 → 自校验，低置信升级 Strong。
                     // 仅非流式（流式首 chunk 已透传无法切模型）。失败不影响主流程，返回原 Cheap 答案。
@@ -363,11 +364,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastStatusCode = (int)ex.StatusCode;
                     lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
-                        $"upstream-status-{(int)ex.StatusCode}", false, routedTier);
+                        $"upstream-status-{(int)ex.StatusCode}", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 }
@@ -378,10 +379,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastStatusCode = 503;
                     lastErrorMessage = "network-error";
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -396,10 +397,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         : "Request timed out inside the proxy.";
                     // 客户端内部超时/全局 Failover 超时，非外部取消，记失败继续。
                     bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, isGlobalTimeout ? "global-failover-timeout" : "timeout", false, routedTier);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, isGlobalTimeout ? "global-failover-timeout" : "timeout", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     _logger.LogWarning("Model {Name} timed out ({Reason}), trying next{Tripped}",
                         candidate.Name, isGlobalTimeout ? "global failover timeout" : "timeout", tripped ? " (circuit tripped)" : "");
 
@@ -644,6 +645,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         bool quotaLimited = preStreamFailure is ModelClientException
                         { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
                         bool tripped = false;
+                        double? preStreamReward = null;
                         if (quotaLimited)
                         {
                             var quotaError = (ModelClientException)preStreamFailure;
@@ -653,7 +655,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         else
                         {
                             tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                            _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                            preStreamReward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                             _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                         }
                         probeResolved = true;
@@ -667,7 +669,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             : preStreamFailure.Message;
                         _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                             attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier,
-                            quotaLimited: quotaLimited);
+                            quotaLimited: quotaLimited,
+                            reward: preStreamReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
 
@@ -742,8 +745,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         _recorder.RecordCost(cost, sessionId);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
                     // 流式未累积完整 content/finish_reason，质量因子不接入（默认 1.0）；仅传 actualTier 启用 per-tier 目标。
-                    _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
-                        actualTier: candidate.Tier);
+                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
+                        actualTier: candidate.Tier, completionTokens: finalUsage?.CompletionTokens ?? 0, timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
@@ -753,7 +756,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         cost,
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier,
                         isEstimated: isEstimated,
-                        timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
+                        timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
+                        reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, cost.ToString("F6"));
                     yield break;
@@ -767,10 +771,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             // 中途失败计入断路器统计（与非流式失败同等对待）。
                             attemptSw.Stop();
                             bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                            _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                            double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                             _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                             _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier);
+                                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier,
+                                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                                 candidate.Name, tripped ? " (circuit tripped)" : "");
                         }

@@ -116,11 +116,19 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             }
 
             var reordered = ReorderSegment(seg, minSamples, context, previous);
-            var explored = MaybePromoteTailForExploration(reordered, context.Options.Routing.ExplorationEpsilon);
+            var (explored, promotedModel) = MaybePromoteTailForExploration(
+                reordered,
+                context.Options.Routing.ExplorationEpsilon,
+                context.Options.Routing.ExplorationStarvedN);
             if (!ReferenceEquals(explored, reordered))
             {
                 reordered = explored;
                 exploredPromotions++;
+                // 记录被提升的模型名到决策
+                if (promotedModel != null)
+                {
+                    previous = previous with { EpsilonPromotedModel = promotedModel };
+                }
             }
             if (!SameOrder(seg, reordered))
                 segmentsReordered++;
@@ -147,25 +155,67 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
     /// ε 探索保底：概率 ε 把段内一个随机非首位模型提到段首。
     /// 修低流量下的"尾部锁死"反馈环——重排决定尝试顺序后，链尾模型只在异常场景被尝试，
     /// 样本全部来自异常场景，学习分长期偏低。ε>0 保证尾部模型持续获得真实流量样本。
-    /// 不触发探索时原样返回同一 list 实例（引用相等），调用方据此区分。
+    /// 当 starvedThreshold &gt; 0 时，优先从样本饥饿的模型中选（进程内 N 小于阈值）；
+    /// 饥饿集合为空时回退均匀随机（保留探索保底语义）。
+    /// 返回 (重排后的列表, 被提升的模型名)。无提升时返回 (原列表实例, null)，调用方通过引用相等区分。
     /// </summary>
-    private List<ModelEndpointOptions> MaybePromoteTailForExploration(List<ModelEndpointOptions> segment, double epsilon)
+    private (List<ModelEndpointOptions> Reordered, string? PromotedModel) MaybePromoteTailForExploration(
+        List<ModelEndpointOptions> segment,
+        double epsilon,
+        long starvedThreshold)
     {
         if (epsilon <= 0 || epsilon > 1 || segment.Count < 2)
-            return segment;
+            return (segment, null);
         if (_sampleUniform() >= epsilon)
-            return segment;
+            return (segment, null);
 
-        int index = 1 + (int)(_sampleUniform() * (segment.Count - 1)); // 均匀取 [1, count-1]
-        index = Math.Min(index, segment.Count - 1);
+        ModelEndpointOptions promoted;
+        List<ModelEndpointOptions> result;
+        int selectedIndex;
 
-        var promoted = segment[index];
-        var result = new List<ModelEndpointOptions>(segment.Count) { promoted };
+        // 定向探索：优先提升样本饥饿的模型
+        if (starvedThreshold > 0)
+        {
+            // 筛出段内饥饿模型（N < 阈值）。N 为 long，tearing 风险忽略——读取偏差仅影响本次探索选型，不破坏正确性。
+            var starvedIndices = new List<int>();
+            for (int i = 0; i < segment.Count; i++)
+            {
+                var stats = _tsStore.GetOrAdd(segment[i].Name);
+                // 只读 N，无需加锁（short lock 或不加锁均可，此处选择不加锁——单次读取性能优先）
+                if (stats.N < starvedThreshold)
+                    starvedIndices.Add(i);
+            }
+
+            if (starvedIndices.Count > 0)
+            {
+                // 饥饿集合非空：从饥饿模型中随机选一个提升（可能是当前首位，等价无变化，可接受）
+                int starvedIndex = starvedIndices[(int)(_sampleUniform() * starvedIndices.Count)];
+                starvedIndex = Math.Min(starvedIndex, starvedIndices.Count - 1);
+                selectedIndex = starvedIndices[starvedIndex];
+
+                promoted = segment[selectedIndex];
+                result = new List<ModelEndpointOptions>(segment.Count) { promoted };
+                for (int i = 0; i < segment.Count; i++)
+                {
+                    if (i != selectedIndex) result.Add(segment[i]);
+                }
+                return (result, promoted.Name);
+            }
+
+            // 饥饿集合为空：回退均匀随机（原逻辑）
+        }
+
+        // 阈值为 0 或饥饿集合为空时，保持原均匀随机逻辑
+        selectedIndex = 1 + (int)(_sampleUniform() * (segment.Count - 1)); // 均匀取 [1, count-1]
+        selectedIndex = Math.Min(selectedIndex, segment.Count - 1);
+
+        promoted = segment[selectedIndex];
+        result = new List<ModelEndpointOptions>(segment.Count) { promoted };
         for (int i = 0; i < segment.Count; i++)
         {
-            if (i != index) result.Add(segment[i]);
+            if (i != selectedIndex) result.Add(segment[i]);
         }
-        return result;
+        return (result, promoted.Name);
     }
 
     /// <summary>同 tier 段内：根据配置选择上下文 bandit / Thompson / 延迟感知重排。</summary>

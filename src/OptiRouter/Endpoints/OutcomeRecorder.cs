@@ -85,7 +85,9 @@ public sealed class OutcomeRecorder
         bool isEstimated = false,
         string? fusionRole = null,
         long? timeToFirstTokenMs = null,
-        bool quotaLimited = false)
+        bool quotaLimited = false,
+        double? reward = null,
+        string? epsilonPromotedModel = null)
     {
         try
         {
@@ -117,7 +119,9 @@ public sealed class OutcomeRecorder
                 QuotaLimited: quotaLimited,
                 TraceId: TraceScope.Current?.TraceId,
                 SpanId: TraceScope.Current?.SpanId,
-                ParentSpanId: TraceScope.Current?.ParentSpanId));
+                ParentSpanId: TraceScope.Current?.ParentSpanId,
+                Reward: reward,
+                EpsilonPromotedModel: epsilonPromotedModel));
         }
         catch
         {
@@ -258,6 +262,7 @@ public sealed class OutcomeRecorder
     /// <summary>
     /// 上报 Thompson 采样反馈，读 <see cref="RoutingOptions.ThompsonDiscountFactor"/> 作衰减。
     /// 若启用上下文 bandit（<see cref="RoutingOptions.EnableContextualBandit"/>），同步更新 LinUCB 状态。
+    /// 返回应用后的 reward（成本加权后）。
     /// </summary>
     /// <param name="modelName">模型名。</param>
     /// <param name="elapsedMs">
@@ -270,24 +275,25 @@ public sealed class OutcomeRecorder
     /// <param name="actualTier">实际路由到的模型 tier，用于 per-tier 延迟目标解析；null（默认）回退全局目标。</param>
     /// <param name="qualityFactor">质量因子 ∈ [0,1]（默认 1.0=不折减）。由 <see cref="ExtractQualityFactor"/> 从响应计算，
     /// 低质量信号时乘性折减延迟 reward。仅此路径生效；显式质量入口与竞速取消不乘。</param>
-    public void RecordThompsonOutcome(string modelName, long? elapsedMs,
+    public double RecordThompsonOutcome(string modelName, long? elapsedMs,
         string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0,
         ModelTier? actualTier = null, double qualityFactor = 1.0)
     {
         var routing = _options.CurrentValue.Routing;
         double latencyReward = MapLatencyToReward(elapsedMs, ResolveLatencyTarget(actualTier, routing));
         double reward = latencyReward * Math.Clamp(qualityFactor, 0.0, 1.0);
-        ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
+        return ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
     }
 
-    /// <summary>使用完整路由决策记录反馈，确保决策与学习使用相同的请求上下文。</summary>
-    public void RecordThompsonOutcome(string modelName, long? elapsedMs, RouterDecision decision, decimal cost = 0,
-        ModelTier? actualTier = null, double qualityFactor = 1.0)
+    /// <summary>使用完整路由决策记录反馈，确保决策与学习使用相同的请求上下文。返回应用后的 reward。</summary>
+    public double RecordThompsonOutcome(string modelName, long? elapsedMs, RouterDecision decision, decimal cost = 0,
+        ModelTier? actualTier = null, double qualityFactor = 1.0, int completionTokens = 0, long? timeToFirstTokenMs = null)
     {
         var routing = _options.CurrentValue.Routing;
-        double latencyReward = MapLatencyToReward(elapsedMs, ResolveLatencyTarget(actualTier, routing));
+        long? effectiveLatencyMs = ComputeEffectiveLatencyMs(elapsedMs, decision, routing, completionTokens, timeToFirstTokenMs);
+        double latencyReward = MapLatencyToReward(effectiveLatencyMs, ResolveLatencyTarget(actualTier, routing));
         double reward = latencyReward * Math.Clamp(qualityFactor, 0.0, 1.0);
-        ApplyOutcome(modelName, reward, cost, decision);
+        return ApplyOutcome(modelName, reward, cost, decision);
     }
 
     /// <summary>
@@ -295,20 +301,21 @@ public sealed class OutcomeRecorder
     /// 计部分正奖励（<see cref="RoutingOptions.ThompsonRaceCancelledReward"/>，默认 0.5），
     /// 不完全惩罚——模型可能只是慢/运气差，未必坏。值可运行时配置，按观测效果调参。
     /// 若启用上下文 bandit，同步更新 LinUCB 状态。
+    /// 返回应用后的 reward（成本加权后）。
     /// </summary>
     /// <param name="modelName">模型名。</param>
     /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
     /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
     /// <param name="cost">本次请求成本（USD），>0 时参与成本感知复合 reward。</param>
-    public void RecordThompsonRaceCancelled(string modelName,
+    public double RecordThompsonRaceCancelled(string modelName,
         string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0)
     {
         double reward = _options.CurrentValue.Routing.ThompsonRaceCancelledReward;
-        ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
+        return ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
     }
 
-    /// <summary>使用完整路由决策记录竞速取消反馈。</summary>
-    public void RecordThompsonRaceCancelled(string modelName, RouterDecision decision, decimal cost = 0)
+    /// <summary>使用完整路由决策记录竞速取消反馈。返回应用后的 reward。</summary>
+    public double RecordThompsonRaceCancelled(string modelName, RouterDecision decision, decimal cost = 0)
         => ApplyOutcome(modelName, _options.CurrentValue.Routing.ThompsonRaceCancelledReward, cost, decision);
 
     /// <summary>
@@ -316,28 +323,30 @@ public sealed class OutcomeRecorder
     /// 此前质量信号被丢弃，Thompson/Bandit 只看延迟+硬失败，系统性偏好"快但不一定准"的模型——
     /// 此方法把质量事件显式注入，使学习状态能感知"答得对不对"，而非仅"快不快/崩没崩"。
     /// reward 被 Clamp 到 [0,1]：1.0=质量高（强化），0.0=质量差（惩罚）。衰减与 bandit 更新同主路径。
+    /// 返回应用后的 reward（成本加权后）。
     /// </summary>
     /// <param name="modelName">模型名。</param>
     /// <param name="qualityReward">质量 reward，将在内部 Clamp 到 [0,1]。</param>
     /// <param name="classificationSignal">分类信号（供上下文 bandit 特征构造）；null = 不更新 bandit。</param>
     /// <param name="classificationTargetTier">目标 tier（供上下文 bandit 特征构造）。</param>
     /// <param name="cost">本次请求成本（USD），>0 时参与成本感知复合 reward。</param>
-    public void RecordQualityOutcome(string modelName, double qualityReward,
+    public double RecordQualityOutcome(string modelName, double qualityReward,
         string? classificationSignal = null, ModelTier? classificationTargetTier = null, decimal cost = 0)
     {
         double reward = Math.Clamp(qualityReward, 0.0, 1.0);
-        ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
+        return ApplyOutcome(modelName, reward, cost, classificationSignal, classificationTargetTier);
     }
 
-    /// <summary>使用完整路由决策记录质量反馈。</summary>
-    public void RecordQualityOutcome(string modelName, double qualityReward, RouterDecision decision, decimal cost = 0)
+    /// <summary>使用完整路由决策记录质量反馈。返回应用后的 reward。</summary>
+    public double RecordQualityOutcome(string modelName, double qualityReward, RouterDecision decision, decimal cost = 0)
         => ApplyOutcome(modelName, Math.Clamp(qualityReward, 0.0, 1.0), cost, decision);
 
     /// <summary>
     /// 把 reward 应用到 Thompson 采样状态与（若启用）上下文 bandit。三个上报入口共享此核心，
     /// 区别仅在 reward 来源：延迟映射、竞速取消或显式质量。
+    /// 返回应用后的 reward（成本加权后）。
     /// </summary>
-    private void ApplyOutcome(string modelName, double reward, decimal cost, string? classificationSignal, ModelTier? classificationTargetTier, int tokens = 0)
+    private double ApplyOutcome(string modelName, double reward, decimal cost, string? classificationSignal, ModelTier? classificationTargetTier, int tokens = 0)
     {
         var routing = _options.CurrentValue.Routing;
         reward = ApplyCostWeight(reward, cost, tokens, routing);
@@ -348,9 +357,10 @@ public sealed class OutcomeRecorder
             var feature = ContextualBanditFeatureBuilder.Build(classificationSignal, classificationTargetTier);
             _banditStore.Update(modelName, feature, reward, routing.ContextualBanditDiscountFactor);
         }
+        return reward;
     }
 
-    private void ApplyOutcome(string modelName, double reward, decimal cost, RouterDecision decision)
+    private double ApplyOutcome(string modelName, double reward, decimal cost, RouterDecision decision)
     {
         var routing = _options.CurrentValue.Routing;
         // 决策携带 token 估算：成本归一化用它消除"长输入=贵模型"的偏差。
@@ -365,6 +375,7 @@ public sealed class OutcomeRecorder
                 reward,
                 routing.ContextualBanditDiscountFactor);
         }
+        return reward;
     }
 
     /// <summary>
@@ -386,6 +397,41 @@ public sealed class OutcomeRecorder
             : (double)cost;
         double costReward = baseline / (baseline + normalizedCost);
         return (1.0 - alpha) * reward + alpha * costReward;
+    }
+
+    /// <summary>
+    /// 按优先级计算有效延迟：
+    /// 1. elapsedMs 为 null → null（硬失败）
+    /// 2. 流式请求且有 TTFT → 用 TTFT（交互体验由首 token 延迟主导，不做输出归一化）
+    /// 3. 输出归一化启用且 completionTokens 超过基准 → 折算延迟（elapsedMs × refTokens / completionTokens）
+    /// 4. 否则 → 原延迟值
+    /// </summary>
+    private static long? ComputeEffectiveLatencyMs(
+        long? elapsedMs,
+        RouterDecision decision,
+        RoutingOptions routing,
+        int completionTokens,
+        long? timeToFirstTokenMs)
+    {
+        // a. 硬失败
+        if (!elapsedMs.HasValue)
+            return null;
+
+        // b. TTFT 优先：流式下输出未完成，不做归一化
+        if (decision.RequestIsStreaming && timeToFirstTokenMs is > 0)
+            return timeToFirstTokenMs.Value;
+
+        // c. 输出归一化：仅当输出超过基准时折算
+        int refTokens = routing.ThompsonLatencyNormalizeRefTokens;
+        if (refTokens > 0 && completionTokens > refTokens)
+        {
+            // 用 double 计算避免整数溢出，结果恒 ≤ elapsedMs
+            double normalized = elapsedMs.Value * refTokens / (double)completionTokens;
+            return (long)normalized;
+        }
+
+        // d. 默认：不折算
+        return elapsedMs;
     }
 
     /// <summary>

@@ -461,6 +461,15 @@ public sealed class RoutingOptions
     public double ThompsonRaceCancelledReward { get; set; } = 0.5;
 
     /// <summary>
+    /// 延迟归一化基准输出 token 数。0 = 禁用（默认，完全保持现行为）。
+    /// &gt;0 时，completionTokens 超过基准的请求，其延迟按 <c>elapsedMs × refTokens / completionTokens</c> 折算后再映射 reward——
+    /// 输出比基准长多少倍，延迟就宽恕多少倍，消除"长答案=慢模型"的系统性惩罚。
+    /// 例如 refTokens=500、completionTokens=2000、elapsed=2000ms → 有效延迟 500ms（折算后），奖励显著高于未归一化时的值。
+    /// 归一化仅应用于输出长度超出基准的请求（短于基准的请求延迟不变，避免反向惩罚简洁模型）。
+    /// </summary>
+    public int ThompsonLatencyNormalizeRefTokens { get; set; } = 0;
+
+    /// <summary>
     /// 是否启用上下文老虎机（Contextual Bandit / LinUCB）路由。默认 false。
     /// 用分类信号（one-hot）+ tier 构造上下文特征向量，每模型维护线性 θ + 协方差，
     /// 段内按 LinUCB 打分（θ·x + α·sqrt(xᵀA⁻¹x)）重排，替代非上下文 Thompson。
@@ -491,6 +500,14 @@ public sealed class RoutingOptions
     /// 仅在同 tier 段 ≥2 候选且段内重排（latency/thompson/bandit 任一启用）时生效。
     /// </summary>
     public double ExplorationEpsilon { get; set; } = 0.0;
+
+    /// <summary>
+    /// 探索饥饿阈值（样本数）。默认 0（关闭定向探索，保持旧行为：均匀随机提升）。
+    /// &gt;0 时，ε 探索优先提升样本饥饿的模型（进程内 ThompsonStateStore.ModelStats.N 低于此值），
+    /// 把探索预算定向给最缺样本的模型。段内所有模型样本充足时回退均匀随机（保留探索保底语义）。
+    /// 样本计数为进程内统计（重启归零），反映该模型在本进程内的真实请求积累。
+    /// </summary>
+    public long ExplorationStarvedN { get; set; } = 0;
 
     /// <summary>
     /// 审计记录保留时长（小时）。超出后由后台 AuditRetentionService 周期淘汰，

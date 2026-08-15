@@ -35,9 +35,11 @@ namespace OptiRouter.Routing;
 /// <param name="CacheWriteInputTokens">缓存写入输入 token。</param>
 /// <param name="UncachedInputTokens">未缓存输入 token。</param>
 /// <param name="QuotaLimited">是否为上游配额拒绝。</param>
-/// <param name="TraceId">W3C 规范的分布式 Trace ID。</param>
-/// <param name="SpanId">W3C 规范的子节点 Span ID。</param>
-/// <param name="ParentSpanId">父节点 Span ID（用于构建 DAG 树）。</param>
+    /// <param name="TraceId">W3C 规范的分布式 Trace ID。</param>
+    /// <param name="SpanId">W3C 规范的子节点 Span ID。</param>
+    /// <param name="ParentSpanId">父节点 Span ID（用于构建 DAG 树）。</param>
+    /// <param name="Reward">本次尝试写入学习状态（Thompson/Bandit）的最终复合 reward（成本加权后）。null = 未记录（如缓存命中行）。</param>
+    /// <param name="EpsilonPromotedModel">本次路由决策中被 ε 探索提升到段首的模型名（决策级信息，同决策的所有尝试行共享同一值）；null = 无探索提升。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -66,4 +68,6 @@ public sealed record RequestAuditRecord(
     bool QuotaLimited = false,
     string? TraceId = null,
     string? SpanId = null,
-    string? ParentSpanId = null);
+    string? ParentSpanId = null,
+    double? Reward = null,
+    string? EpsilonPromotedModel = null);

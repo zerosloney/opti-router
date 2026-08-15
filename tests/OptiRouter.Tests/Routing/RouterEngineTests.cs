@@ -326,4 +326,39 @@ public class RouterEngineTests
         Assert.Equal(PolicyGroup.Constraint, new SessionAffinityPolicy(new MemoryCache(new MemoryCacheOptions())).Group);
         Assert.Equal(PolicyGroup.Constraint, new LoadBalancePolicy().Group);
     }
+
+    [Fact]
+    public void Decide_FillsNewFeatureFields()
+    {
+        // 验证 RouterEngine.Decide 正确填充新特征字段
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("gpt-4o-mini", ModelTier.Medium, 128000, 0.15m));
+
+        var engine = new RouterEngine(ledger, new IRouterPolicy[]
+        {
+            new RuleClassifierPolicy(),
+            new BudgetGuardPolicy(ledger)
+        });
+
+        // 构造带 MaxTokens 和 tools 的 ChatRequest
+        var request = TestHelpers.BuildRequest(("user", "你好，世界"));
+        // 使用反射设置 MaxTokens 和 ExtensionData（因为 ChatRequest 是 record）
+        var requestWithTokens = request with
+        {
+            MaxTokens = 2048,
+            ExtensionData = new System.Collections.Generic.Dictionary<string, System.Text.Json.JsonElement>
+            {
+                ["tools"] = System.Text.Json.JsonSerializer.Deserialize<System.Text.Json.JsonElement>(@"[{""type"":""code""}]")
+            }
+        };
+
+        var result = engine.Decide(requestWithTokens, options);
+
+        // 断言新字段被正确填充
+        Assert.True(result.CjkRatio > 0, "CJK ratio should be positive for Chinese text");
+        Assert.Equal(2048, result.MaxTokens);
+        Assert.True(result.HasTools, "HasTools should be true when tools are present");
+    }
 }

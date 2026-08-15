@@ -500,6 +500,34 @@ public class RouterOptionsValidatorTests
         Assert.True(result.Succeeded);
     }
 
+    [Theory]
+    [InlineData(-1)]
+    public void ThompsonLatencyNormalizeRefTokensNegative_ShouldReturnFailure(int value)
+    {
+        // 延迟归一化基准不能为负数。
+        var options = CreateValidOptions();
+        options.Routing.ThompsonLatencyNormalizeRefTokens = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("ThompsonLatencyNormalizeRefTokens", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(500)]
+    public void ThompsonLatencyNormalizeRefTokensValid_ShouldSucceed(int value)
+    {
+        // 边界值 [0, ∞) 均应通过。
+        var options = CreateValidOptions();
+        options.Routing.ThompsonLatencyNormalizeRefTokens = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
     /// <summary>捕获日志条目用于断言。</summary>
     private sealed class CaptureLogger : ILogger<RouterOptionsValidator>
     {
@@ -654,5 +682,35 @@ public class RouterOptionsValidatorTests
         Assert.False(result.Succeeded);
         Assert.Contains("EnableLoadBalance", result.FailureMessage);
         Assert.Contains("互斥", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(-100)]
+    public void ExplorationStarvedNNegative_ShouldReturnFailure(long value)
+    {
+        // 探索饥饿阈值不能为负数。
+        var options = CreateValidOptions();
+        options.Routing.ExplorationStarvedN = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("ExplorationStarvedN", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(100)]
+    public void ExplorationStarvedNValid_ShouldSucceed(long value)
+    {
+        // 边界值 [0, ∞) 均应通过。
+        var options = CreateValidOptions();
+        options.Routing.ExplorationStarvedN = value;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
     }
 }

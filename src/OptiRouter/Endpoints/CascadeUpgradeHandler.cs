@@ -105,15 +105,17 @@ public sealed class CascadeUpgradeHandler
 
             // 校验调用的健康/延迟 reward 记到实际校验模型（verifier）；质量信号（confident/uncertain）记到 Cheap 模型。
             _healthTracker.RecordSuccess(verifierModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
-            _recorder.RecordThompsonOutcome(
+            double verifierReward = _recorder.RecordThompsonOutcome(
                 verifierModel.Name,
                 verifySw.ElapsedMilliseconds,
-                decision);
+                decision,
+                completionTokens: verifyResponse.Usage?.CompletionTokens ?? 0);
 
             string verifyKind = peerReview ? "peer-verify" : "self-verify";
             _recorder.RecordAudit(null, verifierModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; cascade: " + verifyKind + " " + (confident ? "confident" : "uncertain"),
-                true, null, false, routedTier, cascadeTriggered: true);
+                true, null, false, routedTier, cascadeTriggered: true,
+                reward: verifierReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
 
             // 质量信号接入学习状态：自校验置信度此前被丢弃，导致 Thompson/Bandit 系统性偏好"快但不准"的 Cheap。
             // 置信=答案质量高→正反馈强化；不置信→负反馈惩罚，降低后续对该 Cheap 的偏好。reward 值可配置。
@@ -151,10 +153,11 @@ public sealed class CascadeUpgradeHandler
                 _recorder.RecordQuota(upgradeTarget.Name, strongResponse.Metadata);
                 _healthTracker.RecordSuccess(upgradeTarget.Name,
                     routing.FailoverHalfOpenRequiredSuccesses);
-                _recorder.RecordThompsonOutcome(
+                double upgradeReward = _recorder.RecordThompsonOutcome(
                     upgradeTarget.Name,
                     strongSw.ElapsedMilliseconds,
-                    decision);
+                    decision,
+                    completionTokens: strongResponse.Usage?.CompletionTokens ?? 0);
                 _recorder.RecordAffinity(sessionId, upgradeTarget.Name, AffinitySignal.Weak);
                 _recorder.RecordPromptCacheAffinity(originalRequest, upgradeTarget.Name);
 
@@ -162,7 +165,8 @@ public sealed class CascadeUpgradeHandler
                     upgradeCost,
                     strongSw.ElapsedMilliseconds, sessionId, decision.Reason + "; cascade: upgraded from " + cheapModel.Name,
                     true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name,
-                    timeToFirstTokenMs: strongResponse.Metadata?.ResponseHeaderLatencyMs);
+                    timeToFirstTokenMs: strongResponse.Metadata?.ResponseHeaderLatencyMs,
+                    reward: upgradeReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
 
                 _logger.LogInformation("Cascade upgrade: {Cheap} -> {Strong} (self-verify uncertain)",
                     cheapModel.Name, upgradeTarget.Name);

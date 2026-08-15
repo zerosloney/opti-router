@@ -282,4 +282,211 @@ public class LatencyAwarePolicyTests
         Assert.Equal("b", result.Candidates[1].Name);
         Assert.DoesNotContain("ε-explore promoted", result.Reason);
     }
+
+    [Fact]
+    public void Apply_EpsilonExploration_SetsPromotedModelInDecision()
+    {
+        // ε 探索保底：验证被提升的模型名被写入 RouterDecision.EpsilonPromotedModel
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m),
+            ("c", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.5;
+
+        // 模拟 sampleUniform 返回 0.4（触发探索），0.4 * 2 = 0.8 → index=1，提升 b
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50), ("c", 300.0, 50)),
+            new ThompsonStateStore(),
+            sampleBeta: null,
+            banditStore: null,
+            sampleUniform: () => 0.4); // 0.4 * (3-1) = 0.8 → int index=1 → b
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 验证 b 被提升到段首
+        Assert.Equal("b", result.Candidates[0].Name);
+        Assert.Contains("ε-explore promoted", result.Reason);
+        
+        // 验证 RouterDecision.EpsilonPromotedModel 被设置为被提升的模型名
+        Assert.Equal("b", result.EpsilonPromotedModel);
+    }
+
+    [Fact]
+    public void Apply_NoEpsilonExploration_PromotedModelRemainsNull()
+    {
+        // 无探索时，EpsilonPromotedModel 应保持 null
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.0;
+
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50)),
+            new ThompsonStateStore(),
+            sampleBeta: null,
+            banditStore: null,
+            sampleUniform: () => 0.9); // > epsilon，不触发探索
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 验证无提升发生
+        Assert.DoesNotContain("ε-explore promoted", result.Reason);
+
+        // 验证 EpsilonPromotedModel 为 null
+        Assert.Null(result.EpsilonPromotedModel);
+    }
+
+    [Fact]
+    public void Apply_StarvedExploration_PromotesFromStarvedSet()
+    {
+        // 定向探索：阈值>0 且段内有饥饿模型（N=0）时，提升的模型应来自饥饿集合
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m),
+            ("c", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.5;
+        options.Routing.ExplorationStarvedN = 10; // 阈值 10
+
+        // 延迟统计让 a 排第一（顺序 a,b,c）
+        var tsStore = new ThompsonStateStore();
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50), ("c", 300.0, 50)),
+            tsStore,
+            sampleBeta: null,
+            banditStore: null,
+            sampleUniform: () => 0.1); // 触发探索
+
+        // 预填样本：a=20（充足），b=0（饥饿），c=0（饥饿）
+        for (int i = 0; i < 20; i++) tsStore.RecordOutcome("a", 0.8, discountFactor: 1.0);
+        // b、c 保持 N=0
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 段首应为 b 或 c（饥饿模型），不再是 a
+        Assert.NotEqual("a", result.Candidates[0].Name);
+        Assert.Contains(result.Candidates[0].Name, new[] { "b", "c" });
+        Assert.Contains("ε-explore promoted", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_StarvedExploration_AllSatisfied_FallbackToUniform()
+    {
+        // 定向探索：阈值>0 但所有模型样本充足时，回退均匀行为（与旧行为一致）
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m),
+            ("c", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.5;
+        options.Routing.ExplorationStarvedN = 5; // 阈值 5
+
+        var tsStore = new ThompsonStateStore();
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50), ("c", 300.0, 50)),
+            tsStore,
+            sampleBeta: null,
+            banditStore: null,
+            sampleUniform: () => 0.4); // 触发探索，0.4 * 2 = 0.8 → index=1 → b
+
+        // 预填样本：a=20，b=20，c=20（全部充足）
+        for (int i = 0; i < 20; i++)
+        {
+            tsStore.RecordOutcome("a", 0.8, discountFactor: 1.0);
+            tsStore.RecordOutcome("b", 0.7, discountFactor: 1.0);
+            tsStore.RecordOutcome("c", 0.6, discountFactor: 1.0);
+        }
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 回退均匀行为：应提升 index=1 的 b（0.4 * (3-1) = 0.8）
+        Assert.Equal("b", result.Candidates[0].Name);
+        Assert.Contains("ε-explore promoted", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_StarvedExploration_ThresholdZero_BehavesLikeLegacy()
+    {
+        // 定向探索：阈值=0 时行为与改前一致（回归测试）
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m),
+            ("c", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.5;
+        options.Routing.ExplorationStarvedN = 0; // 阈值 0 = 关闭定向
+
+        var tsStore = new ThompsonStateStore();
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50), ("c", 300.0, 50)),
+            tsStore,
+            sampleBeta: null,
+            banditStore: null,
+            sampleUniform: () => 0.4); // 触发探索，0.4 * 2 = 0.8 → index=1 → b
+
+        // 预填样本：a=20，b=0，c=0（即使有饥饿模型，阈值=0 也不定向）
+        for (int i = 0; i < 20; i++) tsStore.RecordOutcome("a", 0.8, discountFactor: 1.0);
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 均匀行为：应提升 index=1 的 b
+        Assert.Equal("b", result.Candidates[0].Name);
+        Assert.Contains("ε-explore promoted", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_StarvedExploration_SetsPromotedModelInDecision()
+    {
+        // 验证定向探索时，EpsilonPromotedModel 字段同样正确写入决策
+        var options = TestHelpers.BuildOptions(
+            ("a", ModelTier.Medium, 8000, 1m),
+            ("b", ModelTier.Medium, 8000, 1m),
+            ("c", ModelTier.Medium, 8000, 1m));
+        options.Routing.EnableLatencyAware = true;
+        options.Routing.LatencyMinSamples = 1;
+        options.Routing.ExplorationEpsilon = 0.5;
+        options.Routing.ExplorationStarvedN = 10;
+
+        var tsStore = new ThompsonStateStore();
+        // 模拟 sampleUniform 返回 0.5（触发探索），0.5 * 1 = 0.5 → 饥饿集合 [b, c] 的 index=0 → b
+        double uniformCallCount = 0;
+        var policy = new LatencyAwarePolicy(
+            new StubLatencyStatsProvider(("a", 100.0, 50), ("b", 200.0, 50), ("c", 300.0, 50)),
+            tsStore,
+            sampleBeta: null,
+            banditStore: null,
+            sampleUniform: () =>
+            {
+                uniformCallCount++;
+                // 第一次调用判断是否触发探索（0.5 < 0.5 触发）
+                // 第二次调用从饥饿集合选（0.5 * 2 = 1.0 → index=1，取整为 1 → 饥饿集合 index=1 → c）
+                // 但实际上我们控制逻辑：第一次 0.1，第二次 0.9（选择第二个饥饿模型）
+                return uniformCallCount == 1 ? 0.1 : 0.9;
+            });
+
+        // 预填样本：a=20（充足），b=0（饥饿），c=0（饥饿）
+        for (int i = 0; i < 20; i++) tsStore.RecordOutcome("a", 0.8, discountFactor: 1.0);
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 验证 c 被提升到段首（第二个饥饿模型）
+        Assert.Equal("c", result.Candidates[0].Name);
+        Assert.Contains("ε-explore promoted", result.Reason);
+
+        // 验证 RouterDecision.EpsilonPromotedModel 被设置为被提升的模型名
+        Assert.Equal("c", result.EpsilonPromotedModel);
+    }
 }

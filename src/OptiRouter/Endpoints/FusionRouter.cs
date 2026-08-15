@@ -176,11 +176,12 @@ public sealed class FusionRouter
 
                 _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision);
+                double reward = _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision, completionTokens: usage?.CompletionTokens ?? 0);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion-router: panel success", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "panel",
-                    timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs);
+                    timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
             }
             else
             {
@@ -189,6 +190,7 @@ public sealed class FusionRouter
                 lastModelName = model.Name;
                 bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(error);
                 bool tripped = false;
+                double? failureReward = null;
                 if (quotaLimited)
                 {
                     var quotaError = (ModelClientException)error!;
@@ -198,7 +200,7 @@ public sealed class FusionRouter
                 else
                 {
                     tripped = _healthTracker.RecordFailure(model.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(model.Name, null, decision);
+                    failureReward = _recorder.RecordThompsonOutcome(model.Name, null, decision);
                 }
 
                 int status = error switch
@@ -221,7 +223,8 @@ public sealed class FusionRouter
                     decision.Reason + $"; fusion-router: {failureKind}" + (tripped ? " (circuit tripped)" : ""),
                     false, lastErrorMessage, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m, fusionRole: "panel",
-                    quotaLimited: quotaLimited);
+                    quotaLimited: quotaLimited,
+                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
             }
         }
 
@@ -267,14 +270,16 @@ public sealed class FusionRouter
 
             _recorder.RecordQuota(analystModel.Name, analystResponse.Metadata);
             _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
-            _recorder.RecordThompsonOutcome(
+            double analystReward = _recorder.RecordThompsonOutcome(
                 analystModel.Name,
                 analystElapsedMs,
-                decision);
+                decision,
+                completionTokens: analystUsage?.CompletionTokens ?? 0);
             _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, analystUsage, analystCost, analystElapsedMs, sessionId,
                 decision.Reason + "; fusion-router: analyst", true, null, false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
-                timeToFirstTokenMs: analystResponse.Metadata?.ResponseHeaderLatencyMs);
+                timeToFirstTokenMs: analystResponse.Metadata?.ResponseHeaderLatencyMs,
+                reward: analystReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
 
             analysis = FusionSynthesis.ParseAnalysis(analystResponse);
         }
@@ -284,6 +289,7 @@ public sealed class FusionRouter
             analystElapsedMs = analystSw.ElapsedMilliseconds;
             bool quotaLimited = ex is ModelClientException
             { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+            double? analystFailureReward = null;
             if (quotaLimited)
             {
                 var quotaError = (ModelClientException)ex;
@@ -293,13 +299,14 @@ public sealed class FusionRouter
             else
             {
                 _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
-                _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
+                analystFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
             _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m, analystElapsedMs,
                 sessionId, decision.Reason + "; fusion-router: analyst failed", false,
                 UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), false, routedTier, isAdopted: false,
-                parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: quotaLimited);
+                parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: quotaLimited,
+                reward: analystFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
             _logger.LogWarning("Fusion router analyst call failed (model {Model}, status {Status}), falling back to serial",
                 analystModel.Name, status);
             // 配额限流的 analyst 已记入 failedInThisRequest（串行降级不再重试该 429 模型）；
@@ -332,11 +339,12 @@ public sealed class FusionRouter
                     _recorder.RecordCost(retryCost, sessionId);
                 _recorder.RecordQuota(analystModel.Name, retryResponse.Metadata);
                 _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
-                _recorder.RecordThompsonOutcome(analystModel.Name, retryElapsedMs, decision);
+                double retryReward = _recorder.RecordThompsonOutcome(analystModel.Name, retryElapsedMs, decision, completionTokens: retryUsage?.CompletionTokens ?? 0);
                 _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, retryUsage, retryCost, retryElapsedMs,
                     sessionId, decision.Reason + "; fusion-router: analyst retry(parse)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
-                    timeToFirstTokenMs: retryResponse.Metadata?.ResponseHeaderLatencyMs);
+                    timeToFirstTokenMs: retryResponse.Metadata?.ResponseHeaderLatencyMs,
+                    reward: retryReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
 
                 analysis = FusionSynthesis.ParseAnalysis(retryResponse);
 
@@ -366,6 +374,7 @@ public sealed class FusionRouter
                 long retryElapsedMs = retrySw.ElapsedMilliseconds;
                 bool retryQuotaLimited = ex is ModelClientException
                 { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+                double? retryFailureReward = null;
                 if (retryQuotaLimited)
                 {
                     var quotaError = (ModelClientException)ex;
@@ -374,13 +383,14 @@ public sealed class FusionRouter
                 else
                 {
                     _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
-                    _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
+                    retryFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                 }
                 int retryStatus = UpstreamFailureClassifier.GetStatus(ex);
                 _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m, retryElapsedMs,
                     sessionId, decision.Reason + "; fusion-router: analyst retry failed", false,
                     UpstreamFailureClassifier.SafeMessage(ex, retryQuotaLimited), false, routedTier, isAdopted: false,
-                    parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: retryQuotaLimited);
+                    parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: retryQuotaLimited,
+                    reward: retryFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                 _logger.LogWarning(
                     "Fusion router analyst retry failed (model {Model}, status {Status}), falling back to serial",
                     analystModel.Name, retryStatus);
@@ -415,13 +425,14 @@ public sealed class FusionRouter
 
             _recorder.RecordQuota(outerModel.Name, outerResponse.Metadata);
             _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses);
-            _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds, decision);
+            double outerReward = _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds, decision, completionTokens: outerUsage?.CompletionTokens ?? 0);
             _recorder.RecordAffinity(sessionId, outerModel.Name, AffinitySignal.Weak);
             _recorder.RecordPromptCacheAffinity(request, outerModel.Name);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, outerUsage, outerCost, outerSw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; fusion-router: outer", true, null, false, routedTier,
                 isAdopted: true, parallelGroupId: groupId, isEstimated: false, fusionRole: "outer",
-                timeToFirstTokenMs: outerResponse.Metadata?.ResponseHeaderLatencyMs);
+                timeToFirstTokenMs: outerResponse.Metadata?.ResponseHeaderLatencyMs,
+                reward: outerReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
 
             _logger.LogInformation("Fusion router: completed (group {GroupId}), panel={PanelCount}, analyst={Analyst}, outer={Outer}",
                 groupId, panelAnswers.Count, analystModel.Name, outerModel.Name);
@@ -433,6 +444,7 @@ public sealed class FusionRouter
             outerSw.Stop();
             bool quotaLimited = ex is ModelClientException
             { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+            double? outerFailureReward = null;
             if (quotaLimited)
             {
                 var quotaError = (ModelClientException)ex;
@@ -442,13 +454,14 @@ public sealed class FusionRouter
             else
             {
                 _healthTracker.RecordFailure(outerModel.Name, threshold, cooldown);
-                _recorder.RecordThompsonOutcome(outerModel.Name, null, decision);
+                outerFailureReward = _recorder.RecordThompsonOutcome(outerModel.Name, null, decision);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, null, 0m, outerSw.ElapsedMilliseconds,
                 sessionId, decision.Reason + "; fusion-router: outer failed", false,
                 UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), false, routedTier, isAdopted: false,
-                parallelGroupId: groupId, fusionRole: "outer", quotaLimited: quotaLimited);
+                parallelGroupId: groupId, fusionRole: "outer", quotaLimited: quotaLimited,
+                reward: outerFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
             _logger.LogWarning("Fusion router outer call failed (model {Model}, status {Status}), falling back to serial",
                 outerModel.Name, status);
             return new FusionAttemptResult(null, outerModel.Name, status,
@@ -565,17 +578,19 @@ public sealed class FusionRouter
                         _recorder.RecordCost(cost, sessionId);
                     _recorder.RecordQuota(m.Name, resp.Metadata);
                     _healthTracker.RecordSuccess(m.Name, routing.FailoverHalfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(m.Name, secondarySw.ElapsedMilliseconds, decision);
+                    double secondaryReward = _recorder.RecordThompsonOutcome(m.Name, secondarySw.ElapsedMilliseconds, decision, completionTokens: usage?.CompletionTokens ?? 0);
                     _recorder.RecordAudit(null, m.Name, estimatedTokens, usage, cost,
                         secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary",
                         true, null, true, routedTier, isAdopted: false, fusionRole: "secondary",
-                        timeToFirstTokenMs: resp.Metadata?.ResponseHeaderLatencyMs);
+                        timeToFirstTokenMs: resp.Metadata?.ResponseHeaderLatencyMs,
+                        reward: secondaryReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     return (m.Name, ResponseConfidenceChecker.ExtractAssistantText(resp));
                 }
                 catch (Exception ex)
                 {
                     secondarySw.Stop();
                     bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
+                    double? secondaryFailureReward = null;
                     if (quotaLimited)
                     {
                         _recorder.RecordQuota(m.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
@@ -585,7 +600,7 @@ public sealed class FusionRouter
                     else if (!ct.IsCancellationRequested)
                     {
                         _healthTracker.RecordFailure(m.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
-                        _recorder.RecordThompsonOutcome(m.Name, null, decision);
+                        secondaryFailureReward = _recorder.RecordThompsonOutcome(m.Name, null, decision);
                     }
                     else
                     {
@@ -595,7 +610,8 @@ public sealed class FusionRouter
                     _recorder.RecordAudit(null, m.Name, estimatedTokens, null, 0m,
                         secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary failed",
                         false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), true, routedTier,
-                        isAdopted: false, fusionRole: "secondary", quotaLimited: quotaLimited);
+                        isAdopted: false, fusionRole: "secondary", quotaLimited: quotaLimited,
+                        reward: secondaryFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     return (m.Name, string.Empty);
                 }
             }, ct));
@@ -641,10 +657,11 @@ public sealed class FusionRouter
                 if (anchorUsage is not null)
                     _recorder.RecordCost(anchorCost, sessionId);
                 _healthTracker.RecordSuccess(anchorModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
-                _recorder.RecordThompsonOutcome(anchorModel.Name, anchorElapsedMs, decision);
+                double anchorReward = _recorder.RecordThompsonOutcome(anchorModel.Name, anchorElapsedMs, decision, completionTokens: anchorUsage?.CompletionTokens ?? 0);
                 _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, anchorUsage, anchorCost,
                     anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier,
-                    isEstimated: anchorUsage is null);
+                    isEstimated: anchorUsage is null,
+                    reward: anchorReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
             }
             else
             {
@@ -652,9 +669,10 @@ public sealed class FusionRouter
                 {
                     // 真实故障（非客户端取消）：计入断路器 + 审计（RecordFailure 顺带释放准入时占用的探测槽位）。
                     bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
-                    _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
+                    double anchorFailureReward = _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
                     _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
-                        anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier);
+                        anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier,
+                        reward: anchorFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     _logger.LogWarning("Fusion anchor {Name} stream faulted{Tripped}", anchorModel.Name, tripped ? " (circuit tripped)" : "");
                 }
                 else
@@ -713,16 +731,18 @@ public sealed class FusionRouter
                         _recorder.RecordCost(cost, sessionId);
                     _recorder.RecordQuota(analystModel.Name, analystResp.Metadata);
                     _healthTracker.RecordSuccess(analystModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
-                    _recorder.RecordThompsonOutcome(analystModel.Name, analystSw.ElapsedMilliseconds, decision);
+                    double streamAnalystReward = _recorder.RecordThompsonOutcome(analystModel.Name, analystSw.ElapsedMilliseconds, decision);
                     _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, usage, cost,
                         analystSw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: analyst",
                         true, null, true, routedTier, isAdopted: false, fusionRole: "analyst",
-                        timeToFirstTokenMs: analystResp.Metadata?.ResponseHeaderLatencyMs);
+                        timeToFirstTokenMs: analystResp.Metadata?.ResponseHeaderLatencyMs,
+                        reward: streamAnalystReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                 }
                 catch (Exception ex)
                 {
                     analystSw.Stop();
                     bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
+                    double? streamAnalystFailureReward = null;
                     if (quotaLimited)
                     {
                         _recorder.RecordQuota(analystModel.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
@@ -730,12 +750,13 @@ public sealed class FusionRouter
                     else if (!ct.IsCancellationRequested)
                     {
                         _healthTracker.RecordFailure(analystModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
-                        _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
+                        streamAnalystFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                     }
                     _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m,
                         analystSw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: analyst failed",
                         false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), true, routedTier,
-                        isAdopted: false, fusionRole: "analyst", quotaLimited: quotaLimited);
+                        isAdopted: false, fusionRole: "analyst", quotaLimited: quotaLimited,
+                        reward: streamAnalystFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
                     throw;
                 }
                 var analysis = FusionSynthesis.ParseAnalysis(analystResp);

@@ -17,13 +17,13 @@ public class ContextualBanditTests
         var x = ContextualBanditFeatureBuilder.Build("code-complex", ModelTier.Strong);
 
         Assert.Equal(ContextualBanditFeatureBuilder.Dimension, x.Length);
-        Assert.Equal(15, x.Length);
+        Assert.Equal(24, x.Length);
         // code-complex 是信号列表第 2 位（index 1）。
         Assert.Equal(1.0, x[1]);
         // Strong 是 tier 列表第 1 位（8 个信号之后的 index 8）。
         Assert.Equal(1.0, x[8]);
-        // bias 恒 1。
-        Assert.Equal(1.0, x[14]);
+        // bias 恒 1（最后一维）。
+        Assert.Equal(1.0, x[23]);
         // 其余位为 0。
         Assert.Equal(0.0, x[0]);
         Assert.Equal(0.0, x[2]);
@@ -34,10 +34,10 @@ public class ContextualBanditTests
     {
         var x = ContextualBanditFeatureBuilder.Build("unknown-signal", ModelTier.Cheap);
 
-        // 未知信号 → 信号位全零；Cheap 是 tier 第 3 位（index 9）；bias=1。
+        // 未知信号 → 信号位全零；Cheap 是 tier 第 3 位（index 10）；bias=1（最后一维）。
         Assert.Equal(0.0, x[0]);
         Assert.Equal(1.0, x[10]);
-        Assert.Equal(1.0, x[14]);
+        Assert.Equal(1.0, x[23]);
     }
 
     [Fact]
@@ -45,8 +45,8 @@ public class ContextualBanditTests
     {
         var x = ContextualBanditFeatureBuilder.Build(null, null);
 
-        Assert.Equal(1.0, x[14]);
-        for (int i = 0; i < 14; i++)
+        Assert.Equal(1.0, x[23]);
+        for (int i = 0; i < 23; i++)
             Assert.Equal(0.0, x[i]);
     }
 
@@ -60,10 +60,15 @@ public class ContextualBanditTests
             isStreaming: true,
             messageCount: 3);
 
+        // semantic-route one-hot at index 7
         Assert.Equal(1.0, x[7]);
+        // Strong tier at index 8
         Assert.Equal(1.0, x[8]);
+        // input token bucket at index 11 (log2(4096)/20 ≈ 0.6)
         Assert.InRange(x[11], 0.59, 0.61);
+        // streaming at index 12
         Assert.Equal(1.0, x[12]);
+        // message count at index 13
         Assert.Equal(1.0, x[13]);
     }
 
@@ -288,5 +293,246 @@ public class ContextualBanditTests
             EstimatedInputTokens = 0
         };
         return (context, initial);
+    }
+
+    // ---- 新增特征测试（24 维扩展）----
+
+    [Fact]
+    public void FeatureBuilder_SemanticHash_Deterministic()
+    {
+        // 同一路由名两次 Build 结果一致
+        var x1 = ContextualBanditFeatureBuilder.Build("semantic:code-review", ModelTier.Strong);
+        var x2 = ContextualBanditFeatureBuilder.Build("semantic:code-review", ModelTier.Strong);
+
+        Assert.Equal(x1.Length, x2.Length);
+        for (int i = 0; i < x1.Length; i++)
+            Assert.Equal(x1[i], x2[i]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_SemanticHash_HashDistribution()
+    {
+        // 选 4 个测试路由名，断言至少落 2 个不同桶（碰撞可接受，但不应该全碰撞）
+        var routes = new[] { "semantic:code-review", "semantic:translation", "semantic:math-solving", "semantic:general-qa" };
+        var buckets = new HashSet<int>();
+
+        foreach (var route in routes)
+        {
+            var x = ContextualBanditFeatureBuilder.Build(route, ModelTier.Strong);
+            // 哈希位在 14-17
+            for (int i = 14; i <= 17; i++)
+            {
+                if (x[i] == 1.0)
+                {
+                    buckets.Add(i);
+                    break;
+                }
+            }
+        }
+
+        Assert.True(buckets.Count >= 2, $"Expected at least 2 different buckets, got {buckets.Count}");
+    }
+
+    [Fact]
+    public void FeatureBuilder_CjkRatio_CalculatesCorrectly()
+    {
+        // 纯英文：占比 0
+        var x1 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0.0);
+        Assert.Equal(0.0, x1[18]);
+
+        // 纯 CJK：占比 1
+        var x2 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 1.0);
+        Assert.Equal(1.0, x2[18]);
+
+        // 混合：占比 0.5
+        var x3 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0.5);
+        Assert.Equal(0.5, x3[18]);
+
+        // Clamp 测试：超过 [0,1] 被限制
+        var x4 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 1.5);
+        Assert.Equal(1.0, x4[18]);
+
+        var x5 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: -0.5);
+        Assert.Equal(0.0, x5[18]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_MaxTokens_BucketCalculation()
+    {
+        // MaxTokens=0 → 输出预算位为 0
+        var x1 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0);
+        Assert.Equal(0.0, x1[19]);
+
+        // MaxTokens=1024 → log2(1025)/20 ≈ 0.5
+        var x2 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 1024);
+        Assert.InRange(x2[19], 0.49, 0.51);
+
+        // MaxTokens=4096 → log2(4097)/20 ≈ 0.6
+        var x3 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 4096);
+        Assert.InRange(x3[19], 0.59, 0.61);
+
+        // Clamp 测试：大值被限制到 1（需要 maxTokens >= 2^20 - 1 = 1,048,575）
+        var x4 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 1100000);
+        Assert.Equal(1.0, x4[19]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_HasTools_BitSet()
+    {
+        // 无工具：位为 0
+        var x1 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.Equal(0.0, x1[20]);
+
+        // 有工具：位为 1
+        var x2 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Cheap,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: true);
+        Assert.Equal(1.0, x2[20]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_InteractionBits_CodeSignals()
+    {
+        // code-detected + streaming → 交互位 21 = 1
+        var x1 = ContextualBanditFeatureBuilder.Build(
+            "code-detected", ModelTier.Strong,
+            estimatedInputTokens: 0, isStreaming: true, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.Equal(1.0, x1[21]);
+
+        // code-complex + streaming → 交互位 21 = 1
+        var x2 = ContextualBanditFeatureBuilder.Build(
+            "code-complex", ModelTier.Strong,
+            estimatedInputTokens: 0, isStreaming: true, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.Equal(1.0, x2[21]);
+
+        // code-simple + streaming → 交互位 21 = 1
+        var x3 = ContextualBanditFeatureBuilder.Build(
+            "code-simple", ModelTier.Strong,
+            estimatedInputTokens: 0, isStreaming: true, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.Equal(1.0, x3[21]);
+
+        // code 信号 + 非流式 → 交互位 21 = 0
+        var x4 = ContextualBanditFeatureBuilder.Build(
+            "code-detected", ModelTier.Strong,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.Equal(0.0, x4[21]);
+
+        // 非代码信号 + 流式 → 交互位 21 = 0
+        var x5 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Strong,
+            estimatedInputTokens: 0, isStreaming: true, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.Equal(0.0, x5[21]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_InteractionBits_CodeTimesInputBucket()
+    {
+        // code 信号 + 输入桶 0.5 → 交互位 22 = 0.5
+        var x1 = ContextualBanditFeatureBuilder.Build(
+            "code-detected", ModelTier.Strong,
+            estimatedInputTokens: 1024, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.InRange(x1[22], 0.49, 0.51);
+
+        // 非代码信号 + 输入桶 0.5 → 交互位 22 = 0
+        var x2 = ContextualBanditFeatureBuilder.Build(
+            "simple-qa", ModelTier.Strong,
+            estimatedInputTokens: 1024, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+        Assert.Equal(0.0, x2[22]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_UnknownSignal_AllNewFeaturesZero()
+    {
+        // 未知信号：新特征位（哈希位、语言、预算、工具、交互）应全零
+        var x = ContextualBanditFeatureBuilder.Build(
+            "unknown-signal", ModelTier.Strong,
+            estimatedInputTokens: 0, isStreaming: false, messageCount: 0,
+            cjkRatio: 0, maxTokens: 0, hasTools: false);
+
+        // 14-17：哈希位全零
+        Assert.Equal(0.0, x[14]);
+        Assert.Equal(0.0, x[15]);
+        Assert.Equal(0.0, x[16]);
+        Assert.Equal(0.0, x[17]);
+        // 18-20：语言、预算、工具全零
+        Assert.Equal(0.0, x[18]);
+        Assert.Equal(0.0, x[19]);
+        Assert.Equal(0.0, x[20]);
+        // 21-22：交互位全零
+        Assert.Equal(0.0, x[21]);
+        Assert.Equal(0.0, x[22]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_DecisionPathEqualsFeedbackPath()
+    {
+        // 从同一 RouterDecision 构造，决策路径与反馈路径特征应相同
+        var decision = new RouterDecision
+        {
+            Candidates = new List<ModelEndpointOptions>(),
+            Reason = "test",
+            EstimatedInputTokens = 2048,
+            RequestIsStreaming = true,
+            RequestMessageCount = 2,
+            CjkRatio = 0.3,
+            MaxTokens = 1024,
+            HasTools = true,
+            ClassificationSignal = "code-complex",
+            ClassificationTargetTier = ModelTier.Strong
+        };
+
+        var feature1 = ContextualBanditFeatureBuilder.Build(
+            decision.ClassificationSignal,
+            decision.ClassificationTargetTier,
+            decision.EstimatedInputTokens,
+            decision.RequestIsStreaming,
+            decision.RequestMessageCount,
+            decision.CjkRatio,
+            decision.MaxTokens,
+            decision.HasTools);
+
+        var feature2 = ContextualBanditFeatureBuilder.Build(decision);
+
+        Assert.Equal(feature1.Length, feature2.Length);
+        for (int i = 0; i < feature1.Length; i++)
+            Assert.Equal(feature1[i], feature2[i], precision: 10);
     }
 }

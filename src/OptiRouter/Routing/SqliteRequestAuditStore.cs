@@ -91,6 +91,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
         EnsureColumn("trace_id", "TEXT");
         EnsureColumn("span_id", "TEXT");
         EnsureColumn("parent_span_id", "TEXT");
+        EnsureColumn("reward", "REAL");
+        EnsureColumn("epsilon_promoted_model", "TEXT");
 
         _processTask = Task.Run(ProcessQueueAsync);
     }
@@ -182,11 +184,11 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                              success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                              is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
                              cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-                             trace_id, span_id, parent_span_id)
+                             trace_id, span_id, parent_span_id, reward, epsilon_promoted_model)
                         VALUES
                             (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
                              @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
-                             @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent);
+                             @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent, @reward, @epsilon);
                         """;
                     cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
                     cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
@@ -216,6 +218,8 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                     cmd.Parameters.AddWithValue("@trace", (object?)record.TraceId ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@span", (object?)record.SpanId ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@parent", (object?)record.ParentSpanId ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@reward", (object?)record.Reward ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@epsilon", (object?)record.EpsilonPromotedModel ?? DBNull.Value);
                     cmd.ExecuteNonQuery();
                 }
 
@@ -249,7 +253,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                        is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
                        cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-                       trace_id, span_id, parent_span_id
+                       trace_id, span_id, parent_span_id, reward, epsilon_promoted_model
                 FROM request_audit
                 ORDER BY id DESC
                 LIMIT @limit;
@@ -276,7 +280,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                        is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
                        cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-                       trace_id, span_id, parent_span_id
+                       trace_id, span_id, parent_span_id, reward, epsilon_promoted_model
                 FROM request_audit
                 WHERE model = @model
                 ORDER BY id DESC
@@ -316,7 +320,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                        success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                        is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
                        cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-                       trace_id, span_id, parent_span_id
+                       trace_id, span_id, parent_span_id, reward, epsilon_promoted_model
                 FROM request_audit
                 WHERE timestamp >= @from AND timestamp <= @to
                 ORDER BY id DESC
@@ -530,7 +534,9 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 QuotaLimited: !reader.IsDBNull(24) && reader.GetInt32(24) != 0,
                 TraceId: reader.IsDBNull(25) ? null : reader.GetString(25),
                 SpanId: reader.IsDBNull(26) ? null : reader.GetString(26),
-                ParentSpanId: reader.IsDBNull(27) ? null : reader.GetString(27)));
+                ParentSpanId: reader.IsDBNull(27) ? null : reader.GetString(27),
+                Reward: reader.IsDBNull(28) ? null : (double?)reader.GetDouble(28),
+                EpsilonPromotedModel: reader.IsDBNull(29) ? null : reader.GetString(29)));
         }
         return list;
     }

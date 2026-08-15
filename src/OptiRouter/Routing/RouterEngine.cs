@@ -1,5 +1,6 @@
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
+using System.Text.Json;
 
 namespace OptiRouter.Routing;
 
@@ -56,13 +57,21 @@ public sealed class RouterEngine
             .ThenByDescending(m => m.MaxContextTokens)
             .ToList();
 
+        // 计算新特征
+        double cjkRatio = CalculateCjkRatio(request);
+        int maxTokens = request.MaxTokens ?? 0;
+        bool hasTools = HasTools(request);
+
         var decision = new RouterDecision
         {
             Candidates = initialCandidates,
             Reason = $"initial: {initialCandidates.Count} candidates, est {estTokens} tokens",
             EstimatedInputTokens = estTokens,
             RequestIsStreaming = request.Stream,
-            RequestMessageCount = request.Messages?.Count ?? 0
+            RequestMessageCount = request.Messages?.Count ?? 0,
+            CjkRatio = cjkRatio,
+            MaxTokens = maxTokens,
+            HasTools = hasTools
         };
 
         // 4. 按分组依赖序应用策略（Filter→Classify→Order→Constraint），组内保留串行。
@@ -103,5 +112,75 @@ public sealed class RouterEngine
         return candidates
             .Where(model => eligibleNames.Contains(model.Name))
             .ToList();
+    }
+
+    /// <summary>
+    /// 计算请求文本的 CJK 字符占比。
+    /// </summary>
+    private static double CalculateCjkRatio(ChatRequest request)
+    {
+        int totalNonWhitespace = 0;
+        int cjkCount = 0;
+
+        foreach (var msg in request.Messages ?? [])
+        {
+            string text = msg.GetText();
+            foreach (char c in text)
+            {
+                if (!char.IsWhiteSpace(c))
+                {
+                    totalNonWhitespace++;
+                    // CJK 范围：U+4E00-U+9FFF（CJK 统一表意文字）、U+3400-U+4DBF（CJK 扩展A）、
+                    // U+20000-U+2A6DF（CJK 扩展B）、U+2A700-U+2B73F（CJK 扩展C）、U+2B740-U+2B81F（CJK 扩展D）、
+                    // U+2B820-U+2CEAF（CJK 扩展E）、U+2CEB0-U+2EBEF（CJK 扩展F）、
+                    // U+3000-U+303F（CJK 符号和标点）、U+FF00-U+FFEF（半角及全角形式）
+                    if (IsCjkCharacter(c))
+                        cjkCount++;
+                }
+            }
+        }
+
+        return totalNonWhitespace > 0 ? (double)cjkCount / totalNonWhitespace : 0.0;
+    }
+
+    /// <summary>
+    /// 判断字符是否为 CJK 字符。
+    /// </summary>
+    private static bool IsCjkCharacter(char c)
+    {
+        // CJK 统一表意文字
+        if (c >= 0x4E00 && c <= 0x9FFF) return true;
+        // CJK 扩展 A
+        if (c >= 0x3400 && c <= 0x4DBF) return true;
+        // CJK 符号和标点
+        if (c >= 0x3000 && c <= 0x303F) return true;
+        // 半角及全角形式
+        if (c >= 0xFF00 && c <= 0xFFEF) return true;
+        // 谚文（可选，根据需求是否包含韩文）
+        // if (c >= 0xAC00 && c <= 0xD7AF) return true;
+        // 日文假名（可选）
+        // if (c >= 0x3040 && c <= 0x309F) return true; // 平假名
+        // if (c >= 0x30A0 && c <= 0x30FF) return true; // 片假名
+
+        return false;
+    }
+
+    /// <summary>
+    /// 检测请求是否携带工具调用。
+    /// </summary>
+    private static bool HasTools(ChatRequest request)
+    {
+        if (request.ExtensionData is null) return false;
+
+        // 检查是否存在 "tools" 键且值为非空数组
+        if (request.ExtensionData.TryGetValue("tools", out var toolsElement))
+        {
+            if (toolsElement.ValueKind == JsonValueKind.Array)
+            {
+                return toolsElement.GetArrayLength() > 0;
+            }
+        }
+
+        return false;
     }
 }

@@ -68,4 +68,25 @@ public sealed record RouterDecision
     /// <see cref="Reason"/> 保持人类可读拼接（向后兼容日志/审计/测试断言）。
     /// </summary>
     public IReadOnlyList<ReasonEvent> ReasonEvents { get; init; } = Array.Empty<ReasonEvent>();
+
+    /// <summary>
+    /// 本次路由决策中被 ε 探索提升到段首的模型名（决策级信息，同决策的所有尝试行共享同一值）。
+    /// null = 无探索提升。由 <c>LatencyAwarePolicy</c> 填充。
+    /// </summary>
+    public string? EpsilonPromotedModel { get; init; }
+
+    /// <summary>
+    /// 请求文本的 CJK 字符占比 [0,1]。由 <c>RouterEngine</c> 填充。
+    /// </summary>
+    public double CjkRatio { get; init; }
+
+    /// <summary>
+    /// 请求的最大生成 token 数。由 <c>RouterEngine</c> 填充。
+    /// </summary>
+    public int MaxTokens { get; init; }
+
+    /// <summary>
+    /// 请求是否携带工具调用。由 <c>RouterEngine</c> 填充。
+    /// </summary>
+    public bool HasTools { get; init; }
 }

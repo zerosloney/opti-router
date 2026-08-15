@@ -196,4 +196,169 @@ public class OutcomeRecorderTests
         // 100 tokens @ $10/M = 100 * 10 / 1_000_000 = 0.001
         Assert.Equal(0.001m, OutcomeRecorder.EstimateInputCost(model, estimatedTokens: 100));
     }
+
+    [Fact]
+    public void RecordThompsonOutcome_DefaultConfig_NoNormalization()
+    {
+        // 默认配置（refTokens=0）行为与改动前完全一致：不归一化
+        var routing = new RoutingOptions { ThompsonLatencyNormalizeRefTokens = 0 };
+        var options = new RouterOptions { Routing = routing };
+        var recorder = CreateRecorder(routing);
+
+        var decision = new RouterDecision
+        {
+            Reason = "test",
+            Candidates = [new ModelEndpointOptions { Name = "m1", Tier = ModelTier.Medium, MaxContextTokens = 10000, BaseUrl = "https://example.com", InputPricePerMillion = 1m, OutputPricePerMillion = 1m }],
+            EstimatedInputTokens = 0,
+            RequestIsStreaming = false,
+            RequestMessageCount = 1
+        };
+
+        // 非流式，无 TTFT，completionTokens=2000，但 refTokens=0 时不归一化
+        double reward = recorder.RecordThompsonOutcome("m1", 2000L, decision, cost: 0m, completionTokens: 2000);
+
+        // 应该用原始 2000ms 映射 reward
+        double expected = OutcomeRecorder.MapLatencyToReward(2000L, routing.ThompsonLatencyTargetMs);
+        Assert.Equal(expected, reward, precision: 10);
+    }
+
+    [Fact]
+    public void RecordThompsonOutcome_WithOutputNormalization_ReducesEffectiveLatency()
+    {
+        // refTokens=500、completionTokens=2000、elapsed=2000ms → 有效延迟 500ms
+        var routing = new RoutingOptions
+        {
+            ThompsonLatencyTargetMs = 1000,
+            ThompsonLatencyNormalizeRefTokens = 500
+        };
+        var options = new RouterOptions { Routing = routing };
+        var recorder = CreateRecorder(routing);
+
+        var decision = new RouterDecision
+        {
+            Reason = "test",
+            Candidates = [new ModelEndpointOptions { Name = "m1", Tier = ModelTier.Medium, MaxContextTokens = 10000, BaseUrl = "https://example.com", InputPricePerMillion = 1m, OutputPricePerMillion = 1m }],
+            EstimatedInputTokens = 0,
+            RequestIsStreaming = false,
+            RequestMessageCount = 1
+        };
+
+        // 非流式，有 completionTokens，无 TTFT
+        double reward = recorder.RecordThompsonOutcome("m1", 2000L, decision, cost: 0m, completionTokens: 2000);
+
+        // 有效延迟应为 500ms（2000 * 500 / 2000）
+        double expected = OutcomeRecorder.MapLatencyToReward(500L, routing.ThompsonLatencyTargetMs);
+        Assert.Equal(expected, reward, precision: 10);
+
+        // 验证 reward 高于未归一化时的值（未归一化时 2000ms 映射到更低 reward）
+        double withoutNorm = OutcomeRecorder.MapLatencyToReward(2000L, routing.ThompsonLatencyTargetMs);
+        Assert.True(reward > withoutNorm, $"归一化后 reward {reward} 应高于未归一化 {withoutNorm}");
+    }
+
+    [Fact]
+    public void RecordThompsonOutcome_CompletionTokensBelowRef_NoNormalization()
+    {
+        // completionTokens < refTokens 时不归一化
+        var routing = new RoutingOptions
+        {
+            ThompsonLatencyTargetMs = 1000,
+            ThompsonLatencyNormalizeRefTokens = 500
+        };
+        var options = new RouterOptions { Routing = routing };
+        var recorder = CreateRecorder(routing);
+
+        var decision = new RouterDecision
+        {
+            Reason = "test",
+            Candidates = [new ModelEndpointOptions { Name = "m1", Tier = ModelTier.Medium, MaxContextTokens = 10000, BaseUrl = "https://example.com", InputPricePerMillion = 1m, OutputPricePerMillion = 1m }],
+            EstimatedInputTokens = 0,
+            RequestIsStreaming = false,
+            RequestMessageCount = 1
+        };
+
+        double reward = recorder.RecordThompsonOutcome("m1", 2000L, decision, cost: 0m, completionTokens: 300);
+
+        // 有效延迟仍为 2000ms（300 < 500，不归一化）
+        double expected = OutcomeRecorder.MapLatencyToReward(2000L, routing.ThompsonLatencyTargetMs);
+        Assert.Equal(expected, reward, precision: 10);
+    }
+
+    [Fact]
+    public void RecordThompsonOutcome_StreamingWithTTFT_UsesTTFTNotTotalLatency()
+    {
+        // 流式 + TTFT → 用 TTFT，忽略总耗时
+        var routing = new RoutingOptions
+        {
+            ThompsonLatencyTargetMs = 1000,
+            ThompsonLatencyNormalizeRefTokens = 500
+        };
+        var options = new RouterOptions { Routing = routing };
+        var recorder = CreateRecorder(routing);
+
+        var decision = new RouterDecision
+        {
+            Reason = "test",
+            Candidates = [new ModelEndpointOptions { Name = "m1", Tier = ModelTier.Medium, MaxContextTokens = 10000, BaseUrl = "https://example.com", InputPricePerMillion = 1m, OutputPricePerMillion = 1m }],
+            EstimatedInputTokens = 0,
+            RequestIsStreaming = true,
+            RequestMessageCount = 1
+        };
+
+        // 流式：总耗时 5000ms，TTFT=300ms，completionTokens=2000
+        double reward = recorder.RecordThompsonOutcome("m1", 5000L, decision, cost: 0m, completionTokens: 2000, timeToFirstTokenMs: 300L);
+
+        // 有效延迟应为 300ms（TTFT），不做归一化（流式下输出未完成）
+        double expected = OutcomeRecorder.MapLatencyToReward(300L, routing.ThompsonLatencyTargetMs);
+        Assert.Equal(expected, reward, precision: 10);
+    }
+
+    [Fact]
+    public void RecordThompsonOutcome_NonStreamingWithTTFT_IgnoresTTFT()
+    {
+        // 非流式 + TTFT → 忽略 TTFT，仍用总耗时
+        var routing = new RoutingOptions
+        {
+            ThompsonLatencyTargetMs = 1000,
+            ThompsonLatencyNormalizeRefTokens = 500
+        };
+        var options = new RouterOptions { Routing = routing };
+        var recorder = CreateRecorder(routing);
+
+        var decision = new RouterDecision
+        {
+            Reason = "test",
+            Candidates = [new ModelEndpointOptions { Name = "m1", Tier = ModelTier.Medium, MaxContextTokens = 10000, BaseUrl = "https://example.com", InputPricePerMillion = 1m, OutputPricePerMillion = 1m }],
+            EstimatedInputTokens = 0,
+            RequestIsStreaming = false,
+            RequestMessageCount = 1
+        };
+
+        // 非流式：总耗时 2000ms，TTFT=300ms（应被忽略），completionTokens=2000
+        double reward = recorder.RecordThompsonOutcome("m1", 2000L, decision, cost: 0m, completionTokens: 2000, timeToFirstTokenMs: 300L);
+
+        // 有效延迟应为 500ms（归一化后），TTFT 被忽略（非流式）
+        double expected = OutcomeRecorder.MapLatencyToReward(500L, routing.ThompsonLatencyTargetMs);
+        Assert.Equal(expected, reward, precision: 10);
+    }
+
+    [Fact]
+    public void RecordThompsonOutcome_NullElapsed_ReturnsZero()
+    {
+        // elapsedMs=null → reward=0（硬失败）
+        var routing = new RoutingOptions { ThompsonLatencyTargetMs = 1000 };
+        var recorder = CreateRecorder(routing);
+
+        var decision = new RouterDecision
+        {
+            Reason = "test",
+            Candidates = [new ModelEndpointOptions { Name = "m1", Tier = ModelTier.Medium, MaxContextTokens = 10000, BaseUrl = "https://example.com", InputPricePerMillion = 1m, OutputPricePerMillion = 1m }],
+            EstimatedInputTokens = 0,
+            RequestIsStreaming = false,
+            RequestMessageCount = 1
+        };
+
+        double reward = recorder.RecordThompsonOutcome("m1", null, decision, cost: 0m, completionTokens: 2000);
+
+        Assert.Equal(0.0, reward);
+    }
 }

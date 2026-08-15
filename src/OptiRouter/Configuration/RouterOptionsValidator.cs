@@ -293,6 +293,14 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Routing.ExplorationEpsilon < 0.0 || options.Routing.ExplorationEpsilon > 1.0)
             return ValidateOptionsResult.Fail("Routing.ExplorationEpsilon 必须在 [0.0, 1.0] 范围内。");
 
+        // 探索饥饿阈值：负数无语义（>=0，0=关闭定向探索）。
+        if (options.Routing.ExplorationStarvedN < 0)
+            return ValidateOptionsResult.Fail("Routing.ExplorationStarvedN 不能为负数。");
+
+        // 延迟归一化基准 token 数：负数无语义（>=0，0=禁用）。
+        if (options.Routing.ThompsonLatencyNormalizeRefTokens < 0)
+            return ValidateOptionsResult.Fail("Routing.ThompsonLatencyNormalizeRefTokens 不能为负数。");
+
         // 审计保留时长校验：<=0 会让后台服务每次循环淘汰全部审计（AlertEngine 失去数据源）。
         if (options.Routing.AuditRetentionHours < 1)
         {
