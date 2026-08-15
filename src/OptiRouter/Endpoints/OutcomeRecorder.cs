@@ -87,7 +87,8 @@ public sealed class OutcomeRecorder
         long? timeToFirstTokenMs = null,
         bool quotaLimited = false,
         double? reward = null,
-        string? epsilonPromotedModel = null)
+        string? epsilonPromotedModel = null,
+        string? requestContent = null)
     {
         try
         {
@@ -121,7 +122,8 @@ public sealed class OutcomeRecorder
                 SpanId: TraceScope.Current?.SpanId,
                 ParentSpanId: TraceScope.Current?.ParentSpanId,
                 Reward: reward,
-                EpsilonPromotedModel: epsilonPromotedModel));
+                EpsilonPromotedModel: epsilonPromotedModel,
+                RequestContent: requestContent));
         }
         catch
         {

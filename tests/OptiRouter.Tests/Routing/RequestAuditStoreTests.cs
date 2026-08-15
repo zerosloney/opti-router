@@ -764,13 +764,57 @@ public class RequestAuditStoreTests
         Assert.Null(roundTrip.EpsilonPromotedModel);
     }
 
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_RoundTripsRequestContent(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var content = "This is a test request content that should be stored and retrieved properly.";
+        var record = SampleRecord() with { RequestContent = content };
+
+        store.Append(record);
+        var roundTrip = Assert.Single(store.GetRecent(1));
+
+        Assert.Equal(content, roundTrip.RequestContent);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_NullRequestContent_RoundTrips(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var record = SampleRecord() with { RequestContent = null };
+
+        store.Append(record);
+        var roundTrip = Assert.Single(store.GetRecent(1));
+
+        Assert.Null(roundTrip.RequestContent);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_LongRequestContent_StoredAsIs(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        // 存储层应该原样存储 RequestContent，截断逻辑在业务层
+        var longContent = new string('A', 600);
+        var record = SampleRecord() with { RequestContent = longContent };
+
+        store.Append(record);
+        var roundTrip = Assert.Single(store.GetRecent(1));
+
+        // 存储层原样存储，不自动截断
+        Assert.Equal(600, roundTrip.RequestContent?.Length);
+        Assert.Equal(longContent, roundTrip.RequestContent);
+    }
+
     [Fact]
-    public void SqliteStore_OldSchema_AutoAddsNewColumns()
+    public void SqliteStore_MigratesOldDb_AddsRequestContentColumn()
     {
         string path = TempDbPath();
         try
         {
-            // 创建旧 schema（无 Reward、EpsilonPromotedModel 列）。
+            // 构造旧 schema（无 request_content 列）。
             using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={path}"))
             {
                 conn.Open();
@@ -790,51 +834,28 @@ public class RequestAuditStoreTests
                         routing_reason TEXT NOT NULL,
                         success INTEGER NOT NULL,
                         error_message TEXT,
-                        is_streaming INTEGER NOT NULL DEFAULT 0,
-                        routed_tier TEXT,
-                        cascade_triggered INTEGER NOT NULL DEFAULT 0,
-                        upgraded_from TEXT,
-                        is_adopted INTEGER NOT NULL DEFAULT 1,
-                        parallel_group_id TEXT,
-                        is_estimated INTEGER NOT NULL DEFAULT 0,
-                        fusion_role TEXT,
-                        ttft_ms INTEGER,
-                        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
-                        cache_write_input_tokens INTEGER NOT NULL DEFAULT 0,
-                        uncached_input_tokens INTEGER NOT NULL DEFAULT 0,
-                        quota_limited INTEGER NOT NULL DEFAULT 0,
-                        trace_id TEXT,
-                        span_id TEXT,
-                        parent_span_id TEXT
+                        is_streaming INTEGER NOT NULL DEFAULT 0
                     );
-                    INSERT INTO request_audit
-                        (timestamp, request_id, model, estimated_tokens, prompt_tokens,
-                         completion_tokens, cost, latency_ms, session_id, routing_reason,
-                         success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
-                         is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
-                         cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-                         trace_id, span_id, parent_span_id)
-                    VALUES ('2026-01-01T00:00:00.0000000Z', 'r1', 'old', 10, 5, 5, 0.01, 100, null, 'old', 1, null, 0, 'Medium', 0, null,
-                        1, null, 0, null, null, 0, 0, 0, 0, null, null, null);
+                    INSERT INTO request_audit (timestamp, request_id, model, estimated_tokens, prompt_tokens,
+                        completion_tokens, cost, latency_ms, session_id, routing_reason, success, error_message, is_streaming)
+                    VALUES ('2026-01-01T00:00:00.0000000Z', 'r1', 'old', 10, 5, 5, 0.01, 100, null, 'old', 1, null, 0);
                     """;
                 cmd.ExecuteNonQuery();
             }
 
             using var store = new SqliteRequestAuditStore(path);
 
-            // 旧记录读回，新字段取默认值（null）。
+            // 旧记录读回，RequestContent 取默认值 null。
             var old = store.GetRecent(10);
             Assert.Single(old);
-            Assert.Null(old[0].Reward);
-            Assert.Null(old[0].EpsilonPromotedModel);
+            Assert.Null(old[0].RequestContent);
 
-            // 新记录带新字段可写入读回。
-            store.Append(SampleRecord("new") with { Reward = 0.75, EpsilonPromotedModel = "gpt-4" });
+            // 新记录带 RequestContent 可写入读回。
+            store.Append(SampleRecord("new") with { RequestContent = "new content" });
             var all = store.GetRecent(10);
             Assert.Equal(2, all.Count);
             var newRecord = all.First(r => r.Model == "new");
-            Assert.Equal(0.75, newRecord.Reward);
-            Assert.Equal("gpt-4", newRecord.EpsilonPromotedModel);
+            Assert.Equal("new content", newRecord.RequestContent);
         }
         finally
         {

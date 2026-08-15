@@ -54,6 +54,22 @@ public sealed class CascadeUpgradeHandler
         var routing = _options.CurrentValue.Routing;
         if (!routing.EnableCascadeUpgrade) return null;
 
+        // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
+        string? requestContent = null;
+        for (int i = originalRequest.Messages.Count - 1; i >= 0; i--)
+        {
+            var msg = originalRequest.Messages[i];
+            if (msg.Role == "user")
+            {
+                var text = msg.GetText();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
+                    break;
+                }
+            }
+        }
+
         double rate = routing.CascadeUpgradeSampleRate;
         if (rate <= 0 || Random.Shared.NextDouble() >= rate) return null;
 
@@ -115,7 +131,7 @@ public sealed class CascadeUpgradeHandler
             _recorder.RecordAudit(null, verifierModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; cascade: " + verifyKind + " " + (confident ? "confident" : "uncertain"),
                 true, null, false, routedTier, cascadeTriggered: true,
-                reward: verifierReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
+                reward: verifierReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
 
             // 质量信号接入学习状态：自校验置信度此前被丢弃，导致 Thompson/Bandit 系统性偏好"快但不准"的 Cheap。
             // 置信=答案质量高→正反馈强化；不置信→负反馈惩罚，降低后续对该 Cheap 的偏好。reward 值可配置。
@@ -166,7 +182,7 @@ public sealed class CascadeUpgradeHandler
                     strongSw.ElapsedMilliseconds, sessionId, decision.Reason + "; cascade: upgraded from " + cheapModel.Name,
                     true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name,
                     timeToFirstTokenMs: strongResponse.Metadata?.ResponseHeaderLatencyMs,
-                    reward: upgradeReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
+                    reward: upgradeReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
 
                 _logger.LogInformation("Cascade upgrade: {Cheap} -> {Strong} (self-verify uncertain)",
                     cheapModel.Name, upgradeTarget.Name);

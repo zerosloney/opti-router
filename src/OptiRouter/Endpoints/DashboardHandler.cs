@@ -484,7 +484,8 @@ public static class DashboardHandler
             r.IsStreaming,
             r.Success,
             r.ErrorMessage,
-            r.FusionRole
+            r.FusionRole,
+            r.RequestContent
         }).ToList();
 
         var modelsList = options.Models.Select(m =>

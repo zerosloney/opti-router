@@ -40,6 +40,7 @@ namespace OptiRouter.Routing;
     /// <param name="ParentSpanId">父节点 Span ID（用于构建 DAG 树）。</param>
     /// <param name="Reward">本次尝试写入学习状态（Thompson/Bandit）的最终复合 reward（成本加权后）。null = 未记录（如缓存命中行）。</param>
     /// <param name="EpsilonPromotedModel">本次路由决策中被 ε 探索提升到段首的模型名（决策级信息，同决策的所有尝试行共享同一值）；null = 无探索提升。</param>
+    /// <param name="RequestContent">请求内容摘要（截断到 500 字符，用于 dashboard 展示）。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -70,4 +71,5 @@ public sealed record RequestAuditRecord(
     string? SpanId = null,
     string? ParentSpanId = null,
     double? Reward = null,
-    string? EpsilonPromotedModel = null);
+    string? EpsilonPromotedModel = null,
+    string? RequestContent = null);

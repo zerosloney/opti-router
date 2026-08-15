@@ -249,7 +249,8 @@ public class ApiService
         bool IsStreaming,
         bool Success,
         string? ErrorMessage,
-        string? FusionRole);
+        string? FusionRole,
+        string? RequestContent = null);
 
     public record RoutingPolicyInfo(
         bool EnableFailover,
@@ -315,7 +316,8 @@ public class ApiService
         string? TraceId = null,
         string? RoutedTier = null,
         string? RoutingReason = null,
-        string? ErrorMessage = null);
+        string? ErrorMessage = null,
+        string? RequestContent = null);
 
     public record ModelDto(
         string Name,

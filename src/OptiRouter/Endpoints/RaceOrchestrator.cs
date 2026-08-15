@@ -57,6 +57,23 @@ public sealed class RaceOrchestrator
         // 1. 选参与并行的候选：前 N 个中能拿到探测许可的（闭合直接放行；半开占槽位；打开/槽位满跳过）。
         //    拿到许可的候选必须最终上报结果（成功/失败/释放），否则槽位泄漏。
         string groupId = Guid.NewGuid().ToString("N");
+
+        // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
+        string? requestContent = null;
+        for (int i = request.Messages.Count - 1; i >= 0; i--)
+        {
+            var msg = request.Messages[i];
+            if (msg.Role == "user")
+            {
+                var text = msg.GetText();
+                if (!string.IsNullOrEmpty(text))
+                {
+                    requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
+                    break;
+                }
+            }
+        }
+
         var admitted = new List<(ModelEndpointOptions Model, bool WasHalfOpenProbe)>();
         var skipped = new List<ModelEndpointOptions>();
 
@@ -170,7 +187,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,
                     isAdopted: true, parallelGroupId: groupId,
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
                 accounted.Add(model.Name);
 
                 adopted = response;
@@ -206,7 +223,7 @@ public sealed class RaceOrchestrator
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: cancelled-by-race", false, "cancelled", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
                 accounted.Add(model.Name);
                 continue;
             }
@@ -248,7 +265,7 @@ public sealed class RaceOrchestrator
                 false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited), false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m,
                 quotaLimited: quotaLimited,
-                reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
+                reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
             accounted.Add(model.Name);
         }
 
@@ -300,7 +317,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId,
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
                 accounted.Add(m.Name);
                 continue;
             }
@@ -328,7 +345,7 @@ public sealed class RaceOrchestrator
                 postBreakQuotaLimited ? "quota-exhausted" : "cancelled", false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
                 quotaLimited: postBreakQuotaLimited,
-                reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel);
+                reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
             accounted.Add(m.Name);
         }
 
