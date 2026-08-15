@@ -23,9 +23,10 @@ public static class ModelsEndpoint
     /// </summary>
     public static IEndpointRouteBuilder MapModelsEndpoint(this IEndpointRouteBuilder app)
     {
-        app.MapGet("/v1/models", (IOptions<OptiRouter.Configuration.RouterOptions> options) =>
+        app.MapGet("/v1/models", (IOptionsMonitor<OptiRouter.Configuration.RouterOptions> options) =>
         {
-            var enabled = options.Value.Models.Where(m => m.Enabled).ToList();
+            // IOptionsMonitor 而非 IOptions：models-config.json 热重载后列表即时反映新端点。
+            var enabled = options.CurrentValue.Models.Where(m => m.Enabled).ToList();
 
             // 显示 ID 统一为 "{供应商}/{真实模型 Id}"；同基础 ID 重复时追加 " #2"、" #3"。
             var displayIds = ModelDisplayIds.Compute(enabled);

@@ -20,9 +20,11 @@ public static class ModelsConfigHandler
         // 2. GET all (不暴露完整 ApiKey，只返回是否已配置)
         endpoints.MapGet("/api/models", (ModelsConfigService cfg) =>
         {
-            var models = cfg.LoadModels().Select(m => new
+            var models = cfg.LoadModels();
+            var names = EffectiveNames(models);
+            var data = models.Select((m, i) => new
             {
-                m.Name,
+                Name = names[i],
                 m.Id,
                 m.BaseUrl,
                 m.Provider,
@@ -40,15 +42,17 @@ public static class ModelsConfigHandler
                 m.Tags,
                 HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
             }).ToList();
-            return Results.Json(models);
+            return Results.Json(data);
         });
 
         // 3. GET full JSON (用于编辑表单；剥除 ApiKey 明文，仅保留是否已配置)
         endpoints.MapGet("/api/models/raw", (ModelsConfigService cfg) =>
         {
-            var models = cfg.LoadModels().Select(m => new
+            var models = cfg.LoadModels();
+            var names = EffectiveNames(models);
+            var data = models.Select((m, i) => new
             {
-                m.Name,
+                Name = names[i],
                 m.Id,
                 m.BaseUrl,
                 Tier = m.Tier.ToString(),
@@ -66,7 +70,7 @@ public static class ModelsConfigHandler
                 m.Tags,
                 HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
             });
-            return Results.Json(new { models, configFile = cfg.ConfigFilePath });
+            return Results.Json(new { models = data, configFile = cfg.ConfigFilePath });
         });
 
         // 4. POST create new model
@@ -123,68 +127,125 @@ public static class ModelsConfigHandler
         });
 
         // 5. PUT update single model (持久化到文件 + 热重载)
-        endpoints.MapPut("/api/models/{name}", (string name, ModelsConfigService cfg, UpdateModelRequest req) =>
-        {
-            var models = cfg.LoadModels();
-            var model = models.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.Ordinal));
-            if (model is null)
-                return Results.NotFound(new { error = $"Model '{name}' not found" });
+        // 显示名含 "/"（如 "sensenova/deepseek-chat"），无法作为路由段，另提供 ?name= 查询参数形式。
+        endpoints.MapPut("/api/models/{name}", (string name, ModelsConfigService cfg, UpdateModelRequest req)
+            => UpdateModel(name, cfg, req));
+        endpoints.MapPut("/api/models", (string name, ModelsConfigService cfg, UpdateModelRequest req)
+            => UpdateModel(name, cfg, req));
 
-            if (req.BaseUrl is not null && !string.IsNullOrWhiteSpace(req.BaseUrl)) model.BaseUrl = req.BaseUrl.TrimEnd('/');
-            if (req.Id is not null) model.Id = req.Id.Trim(); // 空字符串表示清除（回退 Name 作上游 id）
-            if (req.ApiKey is not null) model.ApiKey = req.ApiKey; // 空字符串表示清除
-            if (req.Tier is not null) model.Tier = req.Tier.Value;
-            if (req.MaxContextTokens is > 0) model.MaxContextTokens = req.MaxContextTokens.Value;
-            if (req.TimeoutSeconds is > 0) model.TimeoutSeconds = req.TimeoutSeconds.Value;
-            if (req.MaxRetries is >= 0) model.MaxRetries = req.MaxRetries.Value;
-            if (req.Enabled is not null) model.Enabled = req.Enabled.Value;
-            if (req.IsLocalOrPrivate is not null) model.IsLocalOrPrivate = req.IsLocalOrPrivate.Value;
-            if (req.Provider is not null) model.Provider = req.Provider.Trim();
-            if (req.Family is not null) model.Family = req.Family.Trim();
-            if (req.InputPricePerMillion >= 0) model.InputPricePerMillion = req.InputPricePerMillion.Value;
-            if (req.OutputPricePerMillion >= 0) model.OutputPricePerMillion = req.OutputPricePerMillion.Value;
-            if (req.CachedInputPricePerMillion >= 0) model.CachedInputPricePerMillion = req.CachedInputPricePerMillion.Value;
-            if (req.CacheWriteInputPricePerMillion >= 0) model.CacheWriteInputPricePerMillion = req.CacheWriteInputPricePerMillion.Value;
-
-            try
-            {
-                cfg.UpsertModel(model);
-            }
-            catch (ArgumentException ex)
-            {
-                return Results.BadRequest(new { error = ex.Message });
-            }
-            return Results.Ok(new { message = $"Model '{name}' updated", model = new { model.Name, model.Id, model.BaseUrl, model.Tier, model.MaxContextTokens, model.TimeoutSeconds, model.MaxRetries, model.Enabled, model.InputPricePerMillion, model.OutputPricePerMillion, HasApiKey = !string.IsNullOrEmpty(model.ApiKey) } });
-        });
-
-        // 6. DELETE remove model
-        endpoints.MapDelete("/api/models/{name}", (string name, ModelsConfigService cfg) =>
-        {
-            bool deleted = cfg.DeleteModel(name);
-            if (!deleted)
-                return Results.NotFound(new { error = $"Model '{name}' not found" });
-            return Results.Ok(new { message = $"Model '{name}' deleted" });
-        });
+        // 6. DELETE remove model（?name= 形式同上，兼容含 "/" 的显示名）
+        endpoints.MapDelete("/api/models/{name}", (string name, ModelsConfigService cfg)
+            => DeleteModel(name, cfg));
+        endpoints.MapDelete("/api/models", (string name, ModelsConfigService cfg)
+            => DeleteModel(name, cfg));
 
         // 7. POST Test Endpoint Connectivity
-        endpoints.MapPost("/api/models/{name}/test", async (string name, ModelsConfigService cfg, IModelClientProvider clientProvider) =>
-        {
-            var models = cfg.LoadModels();
-            var model = models.FirstOrDefault(m => string.Equals(m.Name, name, StringComparison.Ordinal));
-            if (model is null)
-                return Results.NotFound(new { success = false, error = $"Model '{name}' not found" });
+        // 显示名含 "/"（如 "sensenova/deepseek-chat"），无法作为路由段，另提供 ?name= 查询参数形式。
+        endpoints.MapPost("/api/models/{name}/test", (string name, ModelsConfigService cfg, IModelClientProvider clientProvider)
+            => TestEndpointConnectivity(name, cfg, clientProvider));
+        endpoints.MapPost("/api/models/test", (string name, ModelsConfigService cfg, IModelClientProvider clientProvider)
+            => TestEndpointConnectivity(name, cfg, clientProvider));
+    }
 
-            var client = clientProvider.GetClient(model);
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Min(10, model.TimeoutSeconds)));
-            var result = await client.ProbeAsync(cts.Token);
-            return Results.Ok(new
-            {
-                success = result.Healthy,
-                latencyMs = (long)result.LatencyMs,
-                message = result.Healthy ? "连接正常 (OK)" : "连接异常",
-                error = result.Error
-            });
+    private static IResult UpdateModel(string name, ModelsConfigService cfg, UpdateModelRequest req)
+    {
+        var models = cfg.LoadModels();
+        var names = EffectiveNames(models);
+        int idx = names.FindIndex(n => string.Equals(n, name, StringComparison.Ordinal));
+        if (idx < 0)
+            return Results.NotFound(new { error = $"Model '{name}' not found" });
+        var model = models[idx];
+
+        if (req.BaseUrl is not null && !string.IsNullOrWhiteSpace(req.BaseUrl)) model.BaseUrl = req.BaseUrl.TrimEnd('/');
+        if (req.Id is not null) model.Id = req.Id.Trim(); // 空字符串表示清除（回退 Name 作上游 id）
+        if (req.ApiKey is not null) model.ApiKey = req.ApiKey; // 空字符串表示清除
+        if (req.Tier is not null) model.Tier = req.Tier.Value;
+        if (req.MaxContextTokens is > 0) model.MaxContextTokens = req.MaxContextTokens.Value;
+        if (req.TimeoutSeconds is > 0) model.TimeoutSeconds = req.TimeoutSeconds.Value;
+        if (req.MaxRetries is >= 0) model.MaxRetries = req.MaxRetries.Value;
+        if (req.Enabled is not null) model.Enabled = req.Enabled.Value;
+        if (req.IsLocalOrPrivate is not null) model.IsLocalOrPrivate = req.IsLocalOrPrivate.Value;
+        if (req.Provider is not null) model.Provider = req.Provider.Trim();
+        if (req.Family is not null) model.Family = req.Family.Trim();
+        if (req.InputPricePerMillion >= 0) model.InputPricePerMillion = req.InputPricePerMillion.Value;
+        if (req.OutputPricePerMillion >= 0) model.OutputPricePerMillion = req.OutputPricePerMillion.Value;
+        if (req.CachedInputPricePerMillion >= 0) model.CachedInputPricePerMillion = req.CachedInputPricePerMillion.Value;
+        if (req.CacheWriteInputPricePerMillion >= 0) model.CacheWriteInputPricePerMillion = req.CacheWriteInputPricePerMillion.Value;
+
+        // 自动命名（Name 留空）的模型被按显示名寻址更新时，物化该名字到文件：
+        // UpsertModel 按非空 Name 匹配替换，留空会变成新增重复条目。
+        if (string.IsNullOrWhiteSpace(model.Name))
+            model.Name = names[idx];
+
+        try
+        {
+            cfg.UpsertModel(model);
+        }
+        catch (ArgumentException ex)
+        {
+            return Results.BadRequest(new { error = ex.Message });
+        }
+        return Results.Ok(new { message = $"Model '{name}' updated", model = new { model.Name, model.Id, model.BaseUrl, model.Tier, model.MaxContextTokens, model.TimeoutSeconds, model.MaxRetries, model.Enabled, model.InputPricePerMillion, model.OutputPricePerMillion, HasApiKey = !string.IsNullOrEmpty(model.ApiKey) } });
+    }
+
+    private static IResult DeleteModel(string name, ModelsConfigService cfg)
+    {
+        // 先按显示名解析出文件里的原始 Name（自动命名的模型文件内 Name 为空）。
+        var models = cfg.LoadModels();
+        var names = EffectiveNames(models);
+        int idx = names.FindIndex(n => string.Equals(n, name, StringComparison.Ordinal));
+        string rawName = idx >= 0 ? models[idx].Name : name;
+
+        bool deleted = cfg.DeleteModel(rawName);
+        if (!deleted)
+            return Results.NotFound(new { error = $"Model '{name}' not found" });
+        return Results.Ok(new { message = $"Model '{name}' deleted" });
+    }
+
+    private static async Task<IResult> TestEndpointConnectivity(
+        string name, ModelsConfigService cfg, IModelClientProvider clientProvider)
+    {
+        var models = cfg.LoadModels();
+        var names = EffectiveNames(models);
+        var model = names
+            .Select((n, i) => (n, i))
+            .Where(t => string.Equals(t.n, name, StringComparison.Ordinal))
+            .Select(t => models[t.i])
+            .FirstOrDefault();
+        if (model is null)
+            return Results.NotFound(new { success = false, error = $"Model '{name}' not found" });
+
+        var client = clientProvider.GetClient(model);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Min(10, model.TimeoutSeconds)));
+        var result = await client.ProbeAsync(cts.Token).ConfigureAwait(false);
+        return Results.Ok(new
+        {
+            success = result.Healthy,
+            latencyMs = (long)result.LatencyMs,
+            message = result.Healthy ? "连接正常 (OK)" : "连接异常",
+            error = result.Error
         });
+    }
+
+    /// <summary>
+    /// 计算模型列表的有效名称（与 /v1/models 及路由一致）：Name 非空用 Name；
+    /// 留空（Id-only 配置，文件内不落名）时用归一化生成的 "{供应商}/{Id}"（重复追加 #N）。
+    /// 供 GET 展示与 {name} 寻址复用；不改动文件内容。
+    /// </summary>
+    private static List<string> EffectiveNames(IList<ModelEndpointOptions> models)
+    {
+        // 复制后归一化，避免就地改写 LoadModels 返回的对象。
+        var copies = models.Select(m => new ModelEndpointOptions
+        {
+            Name = m.Name,
+            Id = m.Id,
+            BaseUrl = m.BaseUrl,
+            Provider = m.Provider,
+            Family = m.Family,
+            Tier = m.Tier
+        }).ToList();
+        ModelNameNormalizer.Normalize(copies);
+        return copies.Select(m => m.Name).ToList();
     }
 
     private record UpdateModelRequest(
