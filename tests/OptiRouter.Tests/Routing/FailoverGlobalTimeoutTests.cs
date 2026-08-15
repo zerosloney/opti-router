@@ -251,7 +251,7 @@ public class FailoverGlobalTimeoutTests
 
         var json = JsonSerializer.Serialize(new ChatRequest
         {
-            Model = "any",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") },
             Stream = true
         });

@@ -475,8 +475,9 @@
                             @foreach (var b in EvalBatches)
                             {
                                 <tr>
-                                    <td><input type="radio" name="eval-baseline" value="@b.BatchId" @bind="CompareBaselineId" /></td>
-                                    <td><input type="radio" name="eval-candidate" value="@b.BatchId" @bind="CompareCandidateId" /></td>
+                                    @* @bind 与显式 value 在同一元素上触发 RZ10008；单选组用 checked+onchange 手工绑定。 *@
+                                    <td><input type="radio" name="eval-baseline" value="@b.BatchId" checked="@(CompareBaselineId == b.BatchId)" @onchange="@(() => CompareBaselineId = b.BatchId)" /></td>
+                                    <td><input type="radio" name="eval-candidate" value="@b.BatchId" checked="@(CompareCandidateId == b.BatchId)" @onchange="@(() => CompareCandidateId = b.BatchId)" /></td>
                                     <td class="table-mono" style="color: var(--purple);">@b.BatchId</td>
                                     <td>@b.TotalCases</td>
                                     <td>@((b.AccuracyRate * 100).ToString("F1"))%</td>

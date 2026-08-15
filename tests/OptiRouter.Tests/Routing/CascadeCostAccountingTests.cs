@@ -310,7 +310,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         var req = new ChatRequest
         {
-            Model = "any",
+            Model = "auto",
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
             Stream = false
         };

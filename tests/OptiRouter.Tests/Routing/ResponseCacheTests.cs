@@ -86,7 +86,7 @@ public class ResponseCacheTests
 
     private static ChatRequest BuildRequest(string content) => new()
     {
-        Model = "any",
+        Model = "auto",
         Messages = new List<ChatMessage> { ChatMessage.FromText("user", content) },
         Stream = false
     };
@@ -202,7 +202,7 @@ public class ResponseCacheTests
         using var client = factory.CreateClient();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CacheFactory.Key);
 
-        var req = new ChatRequest { Model = "any", Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") }, Stream = true };
+        var req = new ChatRequest { Model = "auto", Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") }, Stream = true };
         var json = JsonSerializer.Serialize(req);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         using var c1 = new StringContent(json, Encoding.UTF8, "application/json");

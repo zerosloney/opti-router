@@ -177,7 +177,8 @@ public static class DashboardHandler
             var report = await OfflineEvalRunner.RunBatchEvalAsync(
                 $"eval-batch-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
                 dataset,
-                orchestrator.SendAsync);
+                // SendAsync 带可选 sessionId 参数，方法组无法直接转换为二元委托，显式适配。
+                (request, token) => orchestrator.SendAsync(request, token));
 
             RecordEvalBatch(cache, report);
             return Results.Ok(report);
