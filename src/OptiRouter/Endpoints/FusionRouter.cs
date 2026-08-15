@@ -742,7 +742,10 @@ public sealed class FusionRouter
 
             if (panelAnswers.Count >= 2)
             {
-                ModelEndpointOptions analystModel = options.Models.FirstOrDefault(m => m.Enabled && m.Name.Equals(routing.FusionRouterAnalystModel, StringComparison.OrdinalIgnoreCase))
+                // 分析模型寻址与其他入口一致：路由名 / "{供应商}/{Id}" 显示名 / 裸上游 Id 均可。
+                ModelEndpointOptions analystModel = ModelDisplayIds.Resolve(
+                        options.Models.Where(m => m.Enabled).ToList(),
+                        routing.FusionRouterAnalystModel ?? string.Empty).FirstOrDefault()
                     ?? PickUnfailedFallback(decision.Candidates, failedInThisRequest);
 
                 string analystPrompt = string.IsNullOrWhiteSpace(routing.FusionRouterAnalystPrompt)

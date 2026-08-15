@@ -24,8 +24,9 @@ public sealed class ModelEndpointOptions
 
     /// <summary>
     /// 发往上游的真实模型 id：<see cref="Id"/> 留空时回退 <see cref="Name"/>。
+    /// 与 ModelDisplayIds 的解析一致做 trim，避免配置值带首尾空格时显示/寻址与实际发送不一致。
     /// </summary>
-    public string UpstreamModelId => string.IsNullOrWhiteSpace(Id) ? Name : Id;
+    public string UpstreamModelId => string.IsNullOrWhiteSpace(Id) ? Name.Trim() : Id.Trim();
 
     /// <summary>
     /// OpenAI 兼容 API base url，如 "https://api.openai.com/v1"。

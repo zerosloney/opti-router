@@ -31,21 +31,21 @@ public static class DashboardHandler
             IRequestAuditStore auditStore,
             AlertEngine alertEngine,
             ILatencyStatsProvider latencyStats,
-            IOptions<RouterOptions> options,
+            IOptionsMonitor<RouterOptions> options,
             IMemoryCache cache) =>
         {
             return cache.GetOrCreate("dashboard:metrics", entry =>
             {
                 entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(1);
                 entry.Size = 1;
-                return ComputeMetrics(ledger, tracker, auditStore, alertEngine, latencyStats, options.Value);
+                return ComputeMetrics(ledger, tracker, auditStore, alertEngine, latencyStats, options.CurrentValue);
             });
         });
 
         // 2b. Window Summary API (cached 1s) — 多窗口统计（输入/输出 token、缓存命中率、错误率等）
         endpoints.MapGet("/api/dashboard/metrics/summary", (
             IRequestAuditStore auditStore,
-            IOptions<RouterOptions> options,
+            IOptionsMonitor<RouterOptions> options,
             IMemoryCache cache,
             string? window) =>
         {
@@ -54,7 +54,7 @@ public static class DashboardHandler
             {
                 entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(1);
                 entry.Size = 1;
-                return ComputeWindowSummary(auditStore, options.Value, key);
+                return ComputeWindowSummary(auditStore, options.CurrentValue, key);
             });
         });
 
@@ -140,7 +140,7 @@ public static class DashboardHandler
         });
 
         // 5. Router Sandbox Playground Simulation API
-        endpoints.MapPost("/api/dashboard/sandbox/route", (RouterEngine engine, IOptions<RouterOptions> options, SandboxRouteRequest req) =>
+        endpoints.MapPost("/api/dashboard/sandbox/route", (RouterEngine engine, IOptionsMonitor<RouterOptions> options, SandboxRouteRequest req) =>
         {
             if (string.IsNullOrWhiteSpace(req.Prompt))
                 return Results.BadRequest(new { error = "Prompt cannot be empty." });
@@ -150,7 +150,7 @@ public static class DashboardHandler
                 Messages = new List<ChatMessage> { ChatMessage.FromText("user", req.Prompt) }
             };
 
-            var decision = engine.Decide(chatReq, options.Value);
+            var decision = engine.Decide(chatReq, options.CurrentValue);
             return Results.Ok(new
             {
                 TargetTier = decision.ClassificationTargetTier?.ToString() ?? decision.Primary.Tier.ToString(),
