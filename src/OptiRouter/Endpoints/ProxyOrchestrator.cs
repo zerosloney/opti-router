@@ -310,7 +310,6 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     outcomeReported = true;
                     _recorder.RecordAffinity(sessionId, candidate.Name);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
-                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
 
                     // 级联自校验：Cheap 首选 + 启用 + 采样命中 → 自校验，低置信升级 Strong。
                     // 仅非流式（流式首 chunk 已透传无法切模型）。失败不影响主流程，返回原 Cheap 答案。
@@ -319,7 +318,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         var upgraded = await _cascadeHandler.TryUpgradeAsync(
                              request, response, decision, candidate, estimatedTokens, routedTier, sessionId, failedInThisRequest, effectiveCt).ConfigureAwait(false);
                         if (upgraded is not null)
-                            return ProcessResponse(upgraded, piiMap);
+                        {
+                            // 升级成功：regenerate 反馈与响应缓存都记用户实际看到的 Strong 答案，
+                            // 而非被判定低置信、未下发的 Cheap 答案（否则同键重发会惩罚错模型、且升级响应永远缓存 miss）。
+                            var upgradedFinal = ProcessResponse(upgraded.Response, piiMap);
+                            if (cacheKey is not null)
+                                _responseCache.Set(cacheKey, upgradedFinal, TimeSpan.FromSeconds(options.Routing.ResponseCacheTtlSeconds));
+                            _regenerateTracker.Record(feedbackKey, upgraded.UpgradedModelName, success: true);
+                            return upgradedFinal;
+                        }
                     }
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
@@ -330,6 +337,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     var finalResponse = ProcessResponse(response, piiMap);
                     if (cacheKey is not null)
                         _responseCache.Set(cacheKey, finalResponse, TimeSpan.FromSeconds(options.Routing.ResponseCacheTtlSeconds));
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
                     return finalResponse;
                 }
                 catch (ModelClientException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)

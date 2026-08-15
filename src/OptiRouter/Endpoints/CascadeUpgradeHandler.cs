@@ -35,11 +35,12 @@ public sealed class CascadeUpgradeHandler
     }
 
     /// <summary>
-    /// 尝试级联自校验与升级。返回 null 表示不升级（用原 Cheap 答案）；返回 <see cref="RawChatResponse"/> 表示升级到 Strong 的重答结果。
+    /// 尝试级联自校验与升级。返回 null 表示不升级（用原 Cheap 答案）；否则返回升级重答结果及产出模型名
+    /// （供调用方把 regenerate 反馈与响应缓存记到用户实际看到的模型上）。
     /// 触发条件：<see cref="RoutingOptions.EnableCascadeUpgrade"/> 且采样命中。自校验用同 Cheap 模型，低置信则升级候选链首个 Strong。
     /// 全程异常吞掉返回 null：质量兜底不应破坏已成功的请求。
     /// </summary>
-    public async Task<RawChatResponse?> TryUpgradeAsync(
+    public async Task<CascadeUpgradeResult?> TryUpgradeAsync(
         ChatRequest originalRequest,
         RawChatResponse cheapResponse,
         RouterDecision decision,
@@ -166,7 +167,7 @@ public sealed class CascadeUpgradeHandler
                 _logger.LogInformation("Cascade upgrade: {Cheap} -> {Strong} (self-verify uncertain)",
                     cheapModel.Name, upgradeTarget.Name);
 
-                return strongResponse;
+                return new CascadeUpgradeResult(strongResponse, upgradeTarget.Name);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested)
             {
@@ -213,3 +214,6 @@ public sealed class CascadeUpgradeHandler
         }
     }
 }
+
+/// <summary>级联升级结果：升级重答的响应 + 产出该答案的 Strong 模型名。</summary>
+public sealed record CascadeUpgradeResult(RawChatResponse Response, string UpgradedModelName);

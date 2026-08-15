@@ -26,6 +26,9 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
         public const string Key = "cascade-test-key";
         public Dictionary<string, IModelClient> MockClients { get; } = new();
 
+        /// <summary>额外启用响应缓存 + regenerate 负反馈（默认关，保持既有级联成本测试语义）。</summary>
+        public bool EnableCacheAndFeedback { get; init; }
+
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseSetting("OptiRouter:ProxyApiKey", Key);
@@ -69,6 +72,13 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
                     opt.Routing.EnableLoadBalance = false;
                     opt.Routing.EnableCascadeUpgrade = true;
                     opt.Routing.CascadeUpgradeSampleRate = 1.0;
+                    if (EnableCacheAndFeedback)
+                    {
+                        opt.Routing.EnableResponseCache = true;
+                        opt.Routing.ResponseCacheTtlSeconds = 60;
+                        opt.Routing.EnableRegenerateFeedback = true;
+                        opt.Routing.RegenerateFeedbackWindowSeconds = 60;
+                    }
                 });
                 services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
             });
@@ -272,6 +282,69 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
         Assert.True(daily > cheapCost + verifyCost,
             $"Daily spend {daily} must include strong upgrade cost. Expected {cheapCost + verifyCost + strongCost}.");
         Assert.Equal(cheapCost + verifyCost + strongCost, daily);
+    }
+
+    /// <summary>
+    /// 回归：级联升级成功的响应必须写入响应缓存，且 regenerate 负反馈记到用户实际看到的
+    /// Strong 模型（而非被判定低置信、未下发的 Cheap 答案）。
+    /// 修复前：升级分支提前 return 不写缓存（同键重发永远 miss），且 tracker 先记了 cheap 成功
+    /// （同键重发惩罚错模型）。
+    /// </summary>
+    [Fact]
+    public async Task Cascade_Upgrade_Response_IsCached_And_RegeneratePenalizesStrong()
+    {
+        using var factory = new CascadeFactory { EnableCacheAndFeedback = true };
+        var options = factory.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue;
+        var cheapEp = options.Models.First(m => m.Name == "cheap-model");
+        var strongEp = options.Models.First(m => m.Name == "strong-model");
+
+        int cheapCalls = 0, strongCalls = 0;
+        factory.MockClients["cheap-model"] = new MockClient(cheapEp,
+            raw: (r, c) => { cheapCalls++; return Task.FromResult(Raw("cheap answer", 10, 5)); },
+            complete: (r, c) => Task.FromResult(Parsed("UNCERTAIN", 20, 1)));
+        factory.MockClients["strong-model"] = new MockClient(strongEp,
+            raw: (r, c) => { strongCalls++; return Task.FromResult(Raw("strong corrected answer", 12, 8)); });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CascadeFactory.Key);
+
+        var req = new ChatRequest
+        {
+            Model = "any",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
+            Stream = false
+        };
+        var json = JsonSerializer.Serialize(req);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var c1 = new StringContent(json, Encoding.UTF8, "application/json");
+        using var c2 = new StringContent(json, Encoding.UTF8, "application/json");
+
+        var r1 = await client.PostAsync("/v1/chat/completions", c1, cts.Token);
+        Assert.Equal(HttpStatusCode.OK, r1.StatusCode);
+        Assert.Equal("strong corrected answer",
+            JsonDocument.Parse(await r1.Content.ReadAsStringAsync(cts.Token))
+                .RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
+
+        // 第二次同键请求前记录两个模型的 Thompson Beta。
+        var tsStore = factory.Services.GetRequiredService<ThompsonStateStore>();
+        double cheapBeta = tsStore.GetOrAdd("cheap-model").Beta;
+        double strongBeta = tsStore.GetOrAdd("strong-model").Beta;
+
+        var r2 = await client.PostAsync("/v1/chat/completions", c2, cts.Token);
+        Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
+        Assert.Equal("strong corrected answer",
+            JsonDocument.Parse(await r2.Content.ReadAsStringAsync(cts.Token))
+                .RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString());
+
+        // 升级响应必须已入缓存：同键重发命中缓存，不再调任何上游。
+        Assert.Equal(1, cheapCalls);
+        Assert.Equal(1, strongCalls);
+
+        // regenerate 惩罚（缓存命中路径消费信号）应记到 strong-model：Beta 增量 ≥0.8（reward=0.1，无折扣 0.9）。
+        // cheap-model 未被惩罚，Beta 不变。
+        Assert.True(tsStore.GetOrAdd("strong-model").Beta - strongBeta >= 0.8,
+            $"regenerate 惩罚应记到 strong-model（Beta 增量 {(tsStore.GetOrAdd("strong-model").Beta - strongBeta):F4} ≥ 0.8）");
+        Assert.Equal(cheapBeta, tsStore.GetOrAdd("cheap-model").Beta);
     }
 
     /// <summary>
