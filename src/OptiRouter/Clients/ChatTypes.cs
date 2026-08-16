@@ -69,6 +69,13 @@ public sealed record ChatMessage
     public JsonElement? Content { get; init; }
 
     /// <summary>
+    /// 未知字段原样透传（如 assistant 消息的 tool_calls、tool 消息的 tool_call_id）。
+    /// 键名为上游原始 property name，序列化时原样写回，保证工具调用重放不破坏上游契约。
+    /// </summary>
+    [JsonExtensionData]
+    public IDictionary<string, JsonElement>? ExtensionData { get; init; }
+
+    /// <summary>
     /// 从纯文本构造。覆盖最常见的字符串 content 场景，简化调用方。
     /// </summary>
     public static ChatMessage FromText(string role, string content)

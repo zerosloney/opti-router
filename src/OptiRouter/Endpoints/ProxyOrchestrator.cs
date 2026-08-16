@@ -34,6 +34,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly IStreamingComplianceFilter _complianceFilter;
     private readonly RegenerateFeedbackTracker _regenerateTracker;
     private readonly OptiRouter.Compression.IPromptPruner _promptPruner;
+    private readonly OptiRouter.Mcp.McpToolOrchestrator? _mcpToolOrchestrator;
     private bool _disposed;
 
     /// <summary>
@@ -54,7 +55,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ISemanticResponseCache? semanticCache = null,
         IAdaptiveConcurrencyLimiter? adaptiveLimiter = null,
         IStreamingComplianceFilter? complianceFilter = null,
-        OptiRouter.Compression.IPromptPruner? promptPruner = null)
+        OptiRouter.Compression.IPromptPruner? promptPruner = null,
+        OptiRouter.Mcp.McpToolOrchestrator? mcpToolOrchestrator = null)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
@@ -82,6 +84,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _complianceFilter = complianceFilter ?? new StreamingSlidingWindowFilter(_options.CurrentValue.Routing);
         _regenerateTracker = regenerateTracker;
         _promptPruner = promptPruner ?? new OptiRouter.Compression.AdaptivePromptPruner();
+        _mcpToolOrchestrator = mcpToolOrchestrator;
         _logger = logger;
     }
 
@@ -341,6 +344,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (options.Routing.EnableAdaptiveConcurrency)
                     {
                         _adaptiveLimiter.RecordRtt(candidate.Name, attemptSw.Elapsed.TotalMilliseconds);
+                    }
+
+                    // MCP 工具执行闭环（默认关闭）：模型请求工具时执行全部 tool_calls 并重放，
+                    // 直至无新工具调用或达轮次上限。在成本/延迟统计之前完成，使记账覆盖全部重放轮次。
+                    if (options.Routing.EnableMcpToolExecution && !request.Stream && _mcpToolOrchestrator is not null)
+                    {
+                        response = await _mcpToolOrchestrator.ExecuteToolCallsAndReplayAsync(
+                            request, response, candidate, options.Routing.MaxMcpToolRounds, effectiveCt).ConfigureAwait(false);
                     }
 
                     decimal cost = response.Usage is not null

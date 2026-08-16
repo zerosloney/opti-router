@@ -83,6 +83,15 @@ public sealed class McpToolRegistry
     }
 
     /// <summary>
+    /// 按名称查找 MCP 服务器配置。
+    /// </summary>
+    public McpServerRegistration? GetServer(string serverName)
+    {
+        if (string.IsNullOrWhiteSpace(serverName)) return null;
+        return _servers.TryGetValue(serverName, out var server) ? server : null;
+    }
+
+    /// <summary>
     /// 获取指定工具的健康与延迟统计。
     /// </summary>
     public McpToolHealthStats GetToolHealth(string toolName)
