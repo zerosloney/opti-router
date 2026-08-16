@@ -27,6 +27,7 @@ public sealed class OutcomeRecorder
     private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly KalmanLatencyTracker? _kalmanTracker;
     private readonly KvCachePrefixTrie? _kvCacheTrie;
+    private readonly PredictiveResilienceEngine? _resilienceEngine;
     private readonly ILogger<OutcomeRecorder> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly ClientKeyService? _clientKeyService;
@@ -47,7 +48,8 @@ public sealed class OutcomeRecorder
         ClientKeyService? clientKeyService = null,
         IHttpContextAccessor? httpContextAccessor = null,
         KalmanLatencyTracker? kalmanTracker = null,
-        KvCachePrefixTrie? kvCacheTrie = null)
+        KvCachePrefixTrie? kvCacheTrie = null,
+        PredictiveResilienceEngine? resilienceEngine = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -64,6 +66,7 @@ public sealed class OutcomeRecorder
         _httpContextAccessor = httpContextAccessor;
         _kalmanTracker = kalmanTracker;
         _kvCacheTrie = kvCacheTrie;
+        _resilienceEngine = resilienceEngine;
     }
 
     /// <summary>
@@ -163,22 +166,26 @@ public sealed class OutcomeRecorder
 
         try
         {
-            if (success && latencyMs > 0 && !string.IsNullOrWhiteSpace(model))
+            if (!string.IsNullOrWhiteSpace(model))
             {
-                _kalmanTracker?.RecordObservation(model, latencyMs);
-                if (!string.IsNullOrWhiteSpace(requestContent))
+                _resilienceEngine?.RecordObservation(model, success, latencyMs);
+                if (success && latencyMs > 0)
                 {
-                    var req = new OptiRouter.Clients.ChatRequest
+                    _kalmanTracker?.RecordObservation(model, latencyMs);
+                    if (!string.IsNullOrWhiteSpace(requestContent))
                     {
-                        Messages = new List<OptiRouter.Clients.ChatMessage> { OptiRouter.Clients.ChatMessage.FromText("user", requestContent) }
-                    };
-                    _kvCacheTrie?.RecordCachePrefix(req, model);
+                        var req = new OptiRouter.Clients.ChatRequest
+                        {
+                            Messages = new List<OptiRouter.Clients.ChatMessage> { OptiRouter.Clients.ChatMessage.FromText("user", requestContent) }
+                        };
+                        _kvCacheTrie?.RecordCachePrefix(req, model);
+                    }
                 }
             }
         }
         catch
         {
-            // 卡尔曼滤波与前缀记录失败不得影响请求路径。
+            // 卡尔曼滤波、前缀与时序弹性记录失败不得影响请求路径。
         }
     }
 

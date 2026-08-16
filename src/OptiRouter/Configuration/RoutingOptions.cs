@@ -716,6 +716,26 @@ public sealed class RoutingOptions
     /// 投机解码 Draft 最大草稿 Token 数。默认 256。
     /// </summary>
     public int SpeculativeDraftMaxTokens { get; set; } = 256;
+
+    /// <summary>
+    /// 是否启用拜占庭容错 (BFT) 与多模型多重共识一致性校验。
+    /// </summary>
+    public bool EnableByzantineConsensus { get; set; } = false;
+
+    /// <summary>
+    /// 拜占庭共识判定为异常幻觉/偏离的相似度门限。默认 0.65。
+    /// </summary>
+    public double ByzantineOutlierThreshold { get; set; } = 0.65;
+
+    /// <summary>
+    /// 是否启用时序预测主动弹性避浪路由。
+    /// </summary>
+    public bool EnablePredictiveResilience { get; set; } = false;
+
+    /// <summary>
+    /// 时序预测主动超前预测窗口（分钟）。默认 2 分钟。
+    /// </summary>
+    public int PredictiveLookaheadMinutes { get; set; } = 2;
 }
 
 /// <summary>

@@ -330,6 +330,8 @@ builder.Services.AddSingleton<KvCachePrefixTrie>(sp =>
 builder.Services.AddSingleton<ReasoningEffortController>();
 builder.Services.AddSingleton<MultiAgentDagRouter>();
 builder.Services.AddSingleton<CrossProviderSpeculativeEngine>();
+builder.Services.AddSingleton<ByzantineConsensusEngine>();
+builder.Services.AddSingleton<PredictiveResilienceEngine>();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
@@ -340,6 +342,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var tsStore = sp.GetRequiredService<ThompsonStateStore>();
     var kalmanTracker = sp.GetRequiredService<KalmanLatencyTracker>();
     var kvCacheTrie = sp.GetRequiredService<KvCachePrefixTrie>();
+    var resilienceEngine = sp.GetRequiredService<PredictiveResilienceEngine>();
     // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
     // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
@@ -358,6 +361,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
             sp.GetRequiredService<ContextualBanditState>()),
         new PromptCacheAffinityPolicy(sp.GetRequiredService<PromptCacheAffinityStore>()),
         new KvCacheLocalityPolicy(kvCacheTrie),
+        new PredictiveResiliencePolicy(resilienceEngine),
         new ParetoFrontierPolicy(),
         new BudgetGuardPolicy(ledger),
         new QuotaAwarePolicy(sp.GetRequiredService<UpstreamQuotaStateStore>()),
@@ -383,7 +387,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     clientKeyService: sp.GetRequiredService<ClientKeyService>(),
     httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>(),
     kalmanTracker: sp.GetRequiredService<KalmanLatencyTracker>(),
-    kvCacheTrie: sp.GetRequiredService<KvCachePrefixTrie>()));
+    kvCacheTrie: sp.GetRequiredService<KvCachePrefixTrie>(),
+    resilienceEngine: sp.GetRequiredService<PredictiveResilienceEngine>()));
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
