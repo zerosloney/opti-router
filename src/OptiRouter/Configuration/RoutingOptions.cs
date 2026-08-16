@@ -751,6 +751,36 @@ public sealed class RoutingOptions
     /// RAG 上下文低充分度阈值（&lt;= 此阈值时说明检索知识匮乏或冲突，强制提升调度至 Strong 深度推理模型）。默认 0.35。
     /// </summary>
     public double RagLowSufficiencyThreshold { get; set; } = 0.35;
+
+    /// <summary>
+    /// 是否启用分布式跨网关集群状态同步网格 (Distributed State Mesh)。
+    /// </summary>
+    public bool EnableDistributedStateMesh { get; set; } = false;
+
+    /// <summary>
+    /// 分布式网格节点唯一标识。留空则自动生成随机 Node ID。
+    /// </summary>
+    public string MeshNodeId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 是否向集群网格广播 KV Cache 前缀索引。默认 true。
+    /// </summary>
+    public bool MeshBroadcastKvCache { get; set; } = true;
+
+    /// <summary>
+    /// 是否向集群网格广播卡尔曼延迟观测数据。默认 true。
+    /// </summary>
+    public bool MeshBroadcastKalman { get; set; } = true;
+
+    /// <summary>
+    /// 是否向集群网格广播成本账本消耗。默认 true。
+    /// </summary>
+    public bool MeshBroadcastCostLedger { get; set; } = true;
+
+    /// <summary>
+    /// 是否向集群网格广播主动弹性故障时序事件。默认 true。
+    /// </summary>
+    public bool MeshBroadcastResilience { get; set; } = true;
 }
 
 /// <summary>

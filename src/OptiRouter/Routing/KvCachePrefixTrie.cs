@@ -70,13 +70,20 @@ public sealed class KvCachePrefixTrie
     /// </summary>
     public void RecordCachePrefix(ChatRequest request, string modelName)
     {
-        if (string.IsNullOrWhiteSpace(modelName)) return;
-
+        if (string.IsNullOrWhiteSpace(modelName) || request == null) return;
         var tokens = ExtractPrefixTokens(request);
-        if (tokens.Count < 3) return; // 过短的前缀无 KV-Cache 价值
+        RecordCachePrefix(tokens, modelName);
+    }
+
+    /// <summary>
+    /// 记录前缀 Token 序列与模型的 KV Cache 温暖状态（支持本地与分布式同步）。
+    /// </summary>
+    public void RecordCachePrefix(IReadOnlyList<string> tokens, string modelName, DateTimeOffset? accessTime = null)
+    {
+        if (string.IsNullOrWhiteSpace(modelName) || tokens == null || tokens.Count < 3) return;
 
         var current = _root;
-        var now = _timeProvider.GetUtcNow();
+        var now = accessTime ?? _timeProvider.GetUtcNow();
 
         foreach (var token in tokens)
         {

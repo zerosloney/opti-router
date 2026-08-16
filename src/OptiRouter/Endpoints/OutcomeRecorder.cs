@@ -28,6 +28,7 @@ public sealed class OutcomeRecorder
     private readonly KalmanLatencyTracker? _kalmanTracker;
     private readonly KvCachePrefixTrie? _kvCacheTrie;
     private readonly PredictiveResilienceEngine? _resilienceEngine;
+    private readonly Mesh.DistributedMeshSynchronizer? _meshSynchronizer;
     private readonly ILogger<OutcomeRecorder> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly ClientKeyService? _clientKeyService;
@@ -49,7 +50,8 @@ public sealed class OutcomeRecorder
         IHttpContextAccessor? httpContextAccessor = null,
         KalmanLatencyTracker? kalmanTracker = null,
         KvCachePrefixTrie? kvCacheTrie = null,
-        PredictiveResilienceEngine? resilienceEngine = null)
+        PredictiveResilienceEngine? resilienceEngine = null,
+        Mesh.DistributedMeshSynchronizer? meshSynchronizer = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -67,6 +69,7 @@ public sealed class OutcomeRecorder
         _kalmanTracker = kalmanTracker;
         _kvCacheTrie = kvCacheTrie;
         _resilienceEngine = resilienceEngine;
+        _meshSynchronizer = meshSynchronizer;
     }
 
     /// <summary>
@@ -169,9 +172,21 @@ public sealed class OutcomeRecorder
             if (!string.IsNullOrWhiteSpace(model))
             {
                 _resilienceEngine?.RecordObservation(model, success, latencyMs);
+                var routingOpt = _options.CurrentValue.Routing;
+
+                if (routingOpt.EnableDistributedStateMesh && routingOpt.MeshBroadcastResilience && _meshSynchronizer != null)
+                {
+                    _ = _meshSynchronizer.BroadcastResilienceOutcomeAsync(model, !success);
+                }
+
                 if (success && latencyMs > 0)
                 {
                     _kalmanTracker?.RecordObservation(model, latencyMs);
+                    if (routingOpt.EnableDistributedStateMesh && routingOpt.MeshBroadcastKalman && _meshSynchronizer != null)
+                    {
+                        _ = _meshSynchronizer.BroadcastKalmanLatencyAsync(model, latencyMs);
+                    }
+
                     if (!string.IsNullOrWhiteSpace(requestContent))
                     {
                         var req = new OptiRouter.Clients.ChatRequest
@@ -179,13 +194,22 @@ public sealed class OutcomeRecorder
                             Messages = new List<OptiRouter.Clients.ChatMessage> { OptiRouter.Clients.ChatMessage.FromText("user", requestContent) }
                         };
                         _kvCacheTrie?.RecordCachePrefix(req, model);
+
+                        if (routingOpt.EnableDistributedStateMesh && routingOpt.MeshBroadcastKvCache && _meshSynchronizer != null)
+                        {
+                            var tokens = KvCachePrefixTrie.ExtractPrefixTokens(req);
+                            if (tokens.Count >= 3)
+                            {
+                                _ = _meshSynchronizer.BroadcastKvCachePrefixAsync(tokens, model);
+                            }
+                        }
                     }
                 }
             }
         }
         catch
         {
-            // 卡尔曼滤波、前缀与时序弹性记录失败不得影响请求路径。
+            // 卡尔曼滤波、前缀、网格同步与时序弹性记录失败不得影响请求路径。
         }
     }
 
@@ -198,6 +222,12 @@ public sealed class OutcomeRecorder
         try
         {
             _ledger.Record(cost, sessionId);
+
+            var routingOpt = _options.CurrentValue.Routing;
+            if (routingOpt.EnableDistributedStateMesh && routingOpt.MeshBroadcastCostLedger && _meshSynchronizer != null)
+            {
+                _ = _meshSynchronizer.BroadcastCostAsync(cost, sessionId);
+            }
         }
         catch (Exception ex)
         {

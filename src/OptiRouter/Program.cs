@@ -301,6 +301,24 @@ builder.Services.AddSingleton<ISemanticResponseCache>(sp =>
     return new SemanticResponseCache(options.Routing.SemanticCacheMaxEntries, sp.GetService<ISemanticVectorEngine>());
 });
 
+// 分布式状态网格 (Distributed State Mesh)
+builder.Services.AddSingleton<OptiRouter.Mesh.IDistributedStateMesh>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new OptiRouter.Mesh.InMemoryDistributedStateMesh(options.Routing.MeshNodeId);
+});
+
+builder.Services.AddSingleton<OptiRouter.Mesh.DistributedMeshSynchronizer>(sp =>
+{
+    var mesh = sp.GetRequiredService<OptiRouter.Mesh.IDistributedStateMesh>();
+    var kvTrie = sp.GetService<KvCachePrefixTrie>();
+    var kalmanTracker = sp.GetService<KalmanLatencyTracker>();
+    var costLedger = sp.GetService<CostLedger>();
+    var resilienceEngine = sp.GetService<PredictiveResilienceEngine>();
+    var logger = sp.GetService<ILogger<OptiRouter.Mesh.DistributedMeshSynchronizer>>();
+    return new OptiRouter.Mesh.DistributedMeshSynchronizer(mesh, kvTrie, kalmanTracker, costLedger, resilienceEngine, logger);
+});
+
 builder.Services.AddSingleton<IAdaptiveConcurrencyLimiter>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
@@ -392,7 +410,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>(),
     kalmanTracker: sp.GetRequiredService<KalmanLatencyTracker>(),
     kvCacheTrie: sp.GetRequiredService<KvCachePrefixTrie>(),
-    resilienceEngine: sp.GetRequiredService<PredictiveResilienceEngine>()));
+    resilienceEngine: sp.GetRequiredService<PredictiveResilienceEngine>(),
+    meshSynchronizer: sp.GetService<OptiRouter.Mesh.DistributedMeshSynchronizer>()));
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
