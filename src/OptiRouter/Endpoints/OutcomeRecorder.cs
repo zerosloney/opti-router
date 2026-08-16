@@ -26,6 +26,7 @@ public sealed class OutcomeRecorder
     private readonly PromptCacheAffinityStore _promptAffinityStore;
     private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly KalmanLatencyTracker? _kalmanTracker;
+    private readonly KvCachePrefixTrie? _kvCacheTrie;
     private readonly ILogger<OutcomeRecorder> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly ClientKeyService? _clientKeyService;
@@ -45,7 +46,8 @@ public sealed class OutcomeRecorder
         ContextualBanditState? banditStore = null,
         ClientKeyService? clientKeyService = null,
         IHttpContextAccessor? httpContextAccessor = null,
-        KalmanLatencyTracker? kalmanTracker = null)
+        KalmanLatencyTracker? kalmanTracker = null,
+        KvCachePrefixTrie? kvCacheTrie = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -61,6 +63,7 @@ public sealed class OutcomeRecorder
         _clientKeyService = clientKeyService;
         _httpContextAccessor = httpContextAccessor;
         _kalmanTracker = kalmanTracker;
+        _kvCacheTrie = kvCacheTrie;
     }
 
     /// <summary>
@@ -163,11 +166,19 @@ public sealed class OutcomeRecorder
             if (success && latencyMs > 0 && !string.IsNullOrWhiteSpace(model))
             {
                 _kalmanTracker?.RecordObservation(model, latencyMs);
+                if (!string.IsNullOrWhiteSpace(requestContent))
+                {
+                    var req = new OptiRouter.Clients.ChatRequest
+                    {
+                        Messages = new List<OptiRouter.Clients.ChatMessage> { OptiRouter.Clients.ChatMessage.FromText("user", requestContent) }
+                    };
+                    _kvCacheTrie?.RecordCachePrefix(req, model);
+                }
             }
         }
         catch
         {
-            // 卡尔曼滤波记录失败不得影响请求路径。
+            // 卡尔曼滤波与前缀记录失败不得影响请求路径。
         }
     }
 

@@ -661,6 +661,36 @@ public sealed class RoutingOptions
     /// 是否启用严格帕累托前沿过滤（过滤掉被其他模型绝对支配的劣势模型）。
     /// </summary>
     public bool ParetoStrictFrontierFilter { get; set; } = false;
+
+    /// <summary>
+    /// 是否启用 KV-Cache 空间局部性与 Radix Trie 前缀亲和性路由。
+    /// </summary>
+    public bool EnableKvCacheLocality { get; set; } = false;
+
+    /// <summary>
+    /// KV-Cache 上游匹配有效生命周期（分钟）。默认 10 分钟。
+    /// </summary>
+    public int KvCacheTtlMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// 是否启用 Reasoning Token 动态计算预算调节器。
+    /// </summary>
+    public bool EnableReasoningBudgetController { get; set; } = false;
+
+    /// <summary>
+    /// 简单任务 Reasoning 计算预算最大 Token 数。默认 1024。
+    /// </summary>
+    public int ReasoningLowMaxTokens { get; set; } = 1024;
+
+    /// <summary>
+    /// 标准任务 Reasoning 计算预算最大 Token 数。默认 4096。
+    /// </summary>
+    public int ReasoningMediumMaxTokens { get; set; } = 4096;
+
+    /// <summary>
+    /// 高难度任务 Reasoning 计算预算最大 Token 数。默认 16384。
+    /// </summary>
+    public int ReasoningHighMaxTokens { get; set; } = 16384;
 }
 
 /// <summary>

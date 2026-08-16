@@ -321,6 +321,14 @@ builder.Services.AddSingleton<KalmanLatencyTracker>(sp =>
         penaltyGamma: options.Routing.KalmanPenaltyGamma);
 });
 
+builder.Services.AddSingleton<KvCachePrefixTrie>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new KvCachePrefixTrie(TimeSpan.FromMinutes(options.Routing.KvCacheTtlMinutes));
+});
+
+builder.Services.AddSingleton<ReasoningEffortController>();
+
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
@@ -329,6 +337,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var vectorEngine = sp.GetRequiredService<ISemanticVectorEngine>();
     var tsStore = sp.GetRequiredService<ThompsonStateStore>();
     var kalmanTracker = sp.GetRequiredService<KalmanLatencyTracker>();
+    var kvCacheTrie = sp.GetRequiredService<KvCachePrefixTrie>();
     // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
     // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
@@ -346,6 +355,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore, null,
             sp.GetRequiredService<ContextualBanditState>()),
         new PromptCacheAffinityPolicy(sp.GetRequiredService<PromptCacheAffinityStore>()),
+        new KvCacheLocalityPolicy(kvCacheTrie),
         new ParetoFrontierPolicy(),
         new BudgetGuardPolicy(ledger),
         new QuotaAwarePolicy(sp.GetRequiredService<UpstreamQuotaStateStore>()),
@@ -370,7 +380,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     banditStore: sp.GetRequiredService<ContextualBanditState>(),
     clientKeyService: sp.GetRequiredService<ClientKeyService>(),
     httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>(),
-    kalmanTracker: sp.GetRequiredService<KalmanLatencyTracker>()));
+    kalmanTracker: sp.GetRequiredService<KalmanLatencyTracker>(),
+    kvCacheTrie: sp.GetRequiredService<KvCachePrefixTrie>()));
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
