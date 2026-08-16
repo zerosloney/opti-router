@@ -146,4 +146,41 @@ public sealed class AdaptivePromptPrunerTests
         Assert.DoesNotContain("Sure, I can help with that!", prunedText);
         Assert.DoesNotContain("Hope this helps!", prunedText);
     }
+
+    [Fact]
+    public void Compress_PreservesMultimodalHistoricalMessages()
+    {
+        var options = new PromptCompressionOptions
+        {
+            Enabled = true,
+            MinTokensToTrigger = 10,
+            PreserveRecentTurns = 1, // 前 2 条进入历史剪枝分支
+            StripConversationalFillers = true
+        };
+
+        var multimodalContent = System.Text.Json.JsonSerializer.SerializeToElement(new object[]
+        {
+            new { type = "text", text = "Analyze this architecture diagram" },
+            new { type = "image_url", image_url = new { url = "https://example.com/diagram.png" } }
+        });
+        var multimodalMsg = new ChatMessage { Role = "user", Content = multimodalContent };
+
+        var request = new ChatRequest
+        {
+            Messages = new List<ChatMessage>
+            {
+                ChatMessage.FromText("user", "Sure, I would be happy to help with that! Recursion is a method where the solution depends on solutions to smaller instances. Hope this helps!"),
+                multimodalMsg, // 陈旧轮次的多模态消息：必须原样保留，不得重建为纯文本
+                ChatMessage.FromText("assistant", "Answer"),
+                ChatMessage.FromText("user", "Recent question")
+            }
+        };
+
+        var result = _pruner.Compress(request, options);
+
+        Assert.True(result.WasCompressed);
+        var preserved = result.CompressedRequest.Messages.Single(m => ReferenceEquals(m, multimodalMsg));
+        Assert.Equal(System.Text.Json.JsonValueKind.Array, preserved.Content!.Value.ValueKind);
+        Assert.Contains("image_url", preserved.Content!.Value.GetRawText());
+    }
 }

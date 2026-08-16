@@ -127,13 +127,24 @@ public sealed class AdaptivePromptPruner : IPromptPruner
                     continue;
                 }
 
+                // 仅对纯文本消息剪枝重建：多模态 content（如 vision 的 image_url 数组）经
+                // FromText 重建会丢失非文本部分，原样保留以不破坏消息结构。
+                if (msg.Content is not { ValueKind: System.Text.Json.JsonValueKind.String })
+                {
+                    newMessages.Add(msg);
+                    continue;
+                }
+
                 string prunedText = PruneMessageText(rawText, options);
                 if (prunedText.Length < rawText.Length)
                 {
                     strategiesApplied.Add("history_filler_prune");
                 }
 
-                newMessages.Add(ChatMessage.FromText(msg.Role, prunedText));
+                // 剪枝后文本未变化时保留原消息引用，避免无谓重建。
+                newMessages.Add(prunedText.Equals(rawText, StringComparison.Ordinal)
+                    ? msg
+                    : ChatMessage.FromText(msg.Role, prunedText));
             }
         }
 
