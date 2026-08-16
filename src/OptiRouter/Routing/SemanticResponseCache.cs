@@ -14,6 +14,7 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
     private readonly ConcurrentDictionary<string, CacheItem> _store = new(StringComparer.Ordinal);
     private readonly int _maxEntries;
     private readonly ISemanticVectorEngine? _vectorEngine;
+    private readonly CentroidIndex? _index;
 
     private sealed record CacheItem(
         string Prompt,
@@ -26,10 +27,12 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
     /// </summary>
     /// <param name="maxEntries">最大条目数。</param>
     /// <param name="vectorEngine">可选的向量匹配引擎（如 ONNX 或 DenseEmbeddingVectorEngine）。为空时使用内置快速 CJK 特征投影。</param>
-    public SemanticResponseCache(int maxEntries = 10000, ISemanticVectorEngine? vectorEngine = null)
+    /// <param name="enableAnnIndex">是否启用质心分桶索引加速查询（将 O(n) 扫描降为 O(候选集)）。默认开启。</param>
+    public SemanticResponseCache(int maxEntries = 10000, ISemanticVectorEngine? vectorEngine = null, bool enableAnnIndex = true)
     {
         _maxEntries = Math.Max(100, maxEntries);
         _vectorEngine = vectorEngine;
+        _index = enableAnnIndex ? new CentroidIndex() : null;
     }
 
     /// <inheritdoc />
@@ -49,20 +52,50 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         double maxSim = 0.0;
         CacheItem? bestMatch = null;
 
-        foreach (var kvp in _store)
+        if (_index is not null)
         {
-            var item = kvp.Value;
-            if (item.ExpiresAtUtc <= now)
+            // 质心分桶候选集精排：只对候选桶做精确余弦，淘汰条目惰性清理（桶内死 key 在
+            // TryGetValue 失败或过期时从索引移除，避免死 key 占满候选集）。
+            var candidates = _index.Search(queryVector);
+            foreach (var key in candidates)
             {
-                _store.TryRemove(kvp.Key, out _);
-                continue;
-            }
+                if (!_store.TryGetValue(key, out var item))
+                {
+                    _index.Remove(key, queryVector);
+                    continue;
+                }
+                if (item.ExpiresAtUtc <= now)
+                {
+                    _store.TryRemove(key, out _);
+                    _index.Remove(key, queryVector);
+                    continue;
+                }
 
-            double sim = ComputeCosineSimilarity(queryVector, item.NormalizedVector);
-            if (sim > maxSim)
+                double sim = ComputeCosineSimilarity(queryVector, item.NormalizedVector);
+                if (sim > maxSim)
+                {
+                    maxSim = sim;
+                    bestMatch = item;
+                }
+            }
+        }
+        else
+        {
+            foreach (var kvp in _store)
             {
-                maxSim = sim;
-                bestMatch = item;
+                var item = kvp.Value;
+                if (item.ExpiresAtUtc <= now)
+                {
+                    _store.TryRemove(kvp.Key, out _);
+                    continue;
+                }
+
+                double sim = ComputeCosineSimilarity(queryVector, item.NormalizedVector);
+                if (sim > maxSim)
+                {
+                    maxSim = sim;
+                    bestMatch = item;
+                }
             }
         }
 
@@ -98,6 +131,7 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         var item = new CacheItem(prompt, vector, response, now.Add(ttl));
 
         _store[prompt] = item;
+        _index?.Add(prompt, vector);
         return Task.CompletedTask;
     }
 
