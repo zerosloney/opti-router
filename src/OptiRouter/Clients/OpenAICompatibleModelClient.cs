@@ -123,46 +123,64 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 pendingLineBytes = 0;
                 if (lineBytes.IsEmpty) continue;
 
-                byte[] lineArr = lineBytes.ToArray();
-                var lineSpan = (ReadOnlySpan<byte>)lineArr;
-                if (!lineSpan.StartsWith("data: "u8))
-                    continue;
-
-                var dataSpan = lineSpan.Slice("data: ".Length);
-                if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
-                    dataSpan = dataSpan[..^1];
-
-                if (dataSpan.SequenceEqual("[DONE]"u8))
-                {
-                    await reader.CompleteAsync().ConfigureAwait(false);
-                    yield break;
-                }
-
-                var data = System.Text.Encoding.UTF8.GetString(dataSpan);
-
-                // 解析 JSON，失败则跳过该行并继续。
-                RawStreamChunk? raw = null;
+                byte[]? rented = null;
                 try
                 {
-                    raw = JsonSerializer.Deserialize<RawStreamChunk>(data, _deserializeOptions);
+                    ReadOnlySpan<byte> lineSpan = lineBytes.IsSingleSegment
+                        ? lineBytes.FirstSpan
+                        : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent((int)lineBytes.Length)).AsSpan(0, (int)lineBytes.Length);
+
+                    if (!lineBytes.IsSingleSegment && rented is not null)
+                    {
+                        lineBytes.CopyTo(rented);
+                    }
+
+                    if (!lineSpan.StartsWith("data: "u8))
+                        continue;
+
+                    var dataSpan = lineSpan.Slice("data: ".Length);
+                    if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
+                        dataSpan = dataSpan[..^1];
+
+                    if (dataSpan.SequenceEqual("[DONE]"u8))
+                    {
+                        await reader.CompleteAsync().ConfigureAwait(false);
+                        yield break;
+                    }
+
+                    var data = System.Text.Encoding.UTF8.GetString(dataSpan);
+
+                    // 解析 JSON，失败则跳过该行并继续。
+                    RawStreamChunk? raw = null;
+                    try
+                    {
+                        raw = JsonSerializer.Deserialize<RawStreamChunk>(data, _deserializeOptions);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (raw is null)
+                        continue;
+
+                    var chunk = new ChatStreamChunk
+                    {
+                        Id = raw.Id,
+                        DeltaContent = raw.Choices.Count > 0 ? raw.Choices[0].Delta.Content : null,
+                        FinishReason = raw.Choices.Count > 0 ? raw.Choices[0].FinishReason : null,
+                        Usage = raw.Usage
+                    };
+
+                    yield return chunk;
                 }
-                catch
+                finally
                 {
-                    continue;
+                    if (rented is not null)
+                    {
+                        System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+                    }
                 }
-
-                if (raw is null)
-                    continue;
-
-                var chunk = new ChatStreamChunk
-                {
-                    Id = raw.Id,
-                    DeltaContent = raw.Choices.Count > 0 ? raw.Choices[0].Delta.Content : null,
-                    FinishReason = raw.Choices.Count > 0 ? raw.Choices[0].FinishReason : null,
-                    Usage = raw.Usage
-                };
-
-                yield return chunk;
             }
 
             // 剩余未遇换行的字节：即当前 buffer 中的未消费字节长度，超限则中断。
@@ -353,46 +371,63 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     pendingLineBytes = 0;
                     if (lineBytes.IsEmpty) continue; // 空行跳过
 
-                    // 取行内容为字节数组（SSE 单行通常 <1KB，ToArray 开销可忽略）。
-                    byte[] lineArr = lineBytes.ToArray();
-                    var lineSpan = (ReadOnlySpan<byte>)lineArr;
-                    if (!lineSpan.StartsWith("data: "u8))
-                        continue;
-
-                    var dataSpan = lineSpan.Slice("data: ".Length);
-                    // 去尾随 \r（兼容 CRLF）。
-                    if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
-                        dataSpan = dataSpan[..^1];
-
-                    if (dataSpan.SequenceEqual("[DONE]"u8))
+                    byte[]? rented = null;
+                    try
                     {
-                        await reader.CompleteAsync().ConfigureAwait(false);
-                        UpstreamResponseMetadata? firstMetadata = null;
+                        ReadOnlySpan<byte> lineSpan = lineBytes.IsSingleSegment
+                            ? lineBytes.FirstSpan
+                            : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent((int)lineBytes.Length)).AsSpan(0, (int)lineBytes.Length);
+
+                        if (!lineBytes.IsSingleSegment && rented is not null)
+                        {
+                            lineBytes.CopyTo(rented);
+                        }
+
+                        if (!lineSpan.StartsWith("data: "u8))
+                            continue;
+
+                        var dataSpan = lineSpan.Slice("data: ".Length);
+                        // 去尾随 \r（兼容 CRLF）。
+                        if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
+                            dataSpan = dataSpan[..^1];
+
+                        if (dataSpan.SequenceEqual("[DONE]"u8))
+                        {
+                            await reader.CompleteAsync().ConfigureAwait(false);
+                            UpstreamResponseMetadata? firstMetadata = null;
+                            if (isFirstDataItem && responseMetadata is not null)
+                            {
+                                responseSw?.Stop();
+                                firstMetadata = responseMetadata with
+                                {
+                                    TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds
+                                };
+                                isFirstDataItem = false;
+                            }
+                            yield return new RawStreamLine("[DONE]", null, firstMetadata);
+                            yield break;
+                        }
+
+                        var data = System.Text.Encoding.UTF8.GetString(dataSpan);
+                        UpstreamResponseMetadata? lineMetadata = null;
                         if (isFirstDataItem && responseMetadata is not null)
                         {
                             responseSw?.Stop();
-                            firstMetadata = responseMetadata with
+                            lineMetadata = responseMetadata with
                             {
                                 TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds
                             };
                             isFirstDataItem = false;
                         }
-                        yield return new RawStreamLine("[DONE]", null, firstMetadata);
-                        yield break;
+                        yield return new RawStreamLine(data, TryExtractUsage(data), lineMetadata);
                     }
-
-                    var data = System.Text.Encoding.UTF8.GetString(dataSpan);
-                    UpstreamResponseMetadata? lineMetadata = null;
-                    if (isFirstDataItem && responseMetadata is not null)
+                    finally
                     {
-                        responseSw?.Stop();
-                        lineMetadata = responseMetadata with
+                        if (rented is not null)
                         {
-                            TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds
-                        };
-                        isFirstDataItem = false;
+                            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+                        }
                     }
-                    yield return new RawStreamLine(data, TryExtractUsage(data), lineMetadata);
                 }
 
                 // 剩余未遇换行的字节：即当前 buffer 中的未消费字节长度，超限则中断。
