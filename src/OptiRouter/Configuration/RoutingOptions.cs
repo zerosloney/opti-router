@@ -612,6 +612,18 @@ public sealed class RoutingOptions
     public string MetricsEndpointPath { get; set; } = "/metrics";
 
     /// <summary>
+    /// 告警 Webhook 推送 URL。留空时禁用告警推送（告警仅在 Dashboard 展示）。
+    /// 支持任意 HTTP 端点（Slack/钉钉/飞书/自建）。告警出现推送 <c>alert</c> 事件，
+    /// 恢复后推送 <c>resolved</c> 事件；推送失败自动重试。
+    /// </summary>
+    public string AlertWebhookUrl { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 告警检查与推送周期（秒）。默认 30。
+    /// </summary>
+    public int AlertWebhookIntervalSeconds { get; set; } = 30;
+
+    /// <summary>
     /// 是否启用零拷贝 SSE 流式滑动窗口敏感词与合规在线拦截。
     /// </summary>
     public bool EnableStreamingComplianceFilter { get; set; } = false;
