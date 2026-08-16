@@ -484,19 +484,51 @@ builder.Services.AddHostedService<AuditRetentionService>();
 // EnableMetrics=false 时不影响功能，但 gauge 保持零值。
 builder.Services.AddHostedService<MetricsGaugeUpdaterService>();
 
-// 告警 Webhook 推送：周期检查 AlertEngine 活跃告警，新增推送 alert、恢复推送 resolved。
-// 未配置 AlertWebhookUrl 时服务直接禁用（见 AlertWebhookNotifier）。
-builder.Services.AddHttpClient();
-builder.Services.AddHostedService<OptiRouter.Health.AlertWebhookNotifier>(sp =>
-    new OptiRouter.Health.AlertWebhookNotifier(
-        () => sp.GetRequiredService<AlertEngine>().Check(),
-        sp.GetRequiredService<IHttpClientFactory>().CreateClient("alert-webhook"),
-        sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
-        sp.GetService<ILogger<OptiRouter.Health.AlertWebhookNotifier>>()));
-
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
     .AddCheck<CostLedgerHealthCheck>("cost-ledger", failureStatus: HealthStatus.Unhealthy);
+
+// OpenAPI 契约文档（Swagger）：暴露于 /dashboard/swagger（管理鉴权保护），
+// openapi.json 位于 /dashboard/api-docs/v1/openapi.json。
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo
+    {
+        Title = "OptiRouter API",
+        Version = "v1",
+        Description = "多模型智能路由代理：OpenAI 兼容 Chat Completions、模型发现、管理与租户用量 API。" +
+                      "代理端点使用 Bearer 鉴权（ProxyApiKey 或租户密钥）；管理端点见 /dashboard。"
+    });
+    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        Type = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Name = "Authorization",
+        In = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Bearer <proxy-api-key> 或租户客户端密钥"
+    });
+    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+
+    string xmlFile = $"{System.Reflection.Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    string xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+    if (File.Exists(xmlPath))
+    {
+        c.IncludeXmlComments(xmlPath);
+    }
+});
 
 // Blazor Server：组件化 Dashboard + 模型配置 UI。
 // _Host.cshtml 是 Razor Page（用 <component render-mode="ServerPrerendered">），
@@ -699,7 +731,9 @@ app.Use(async (context, next) =>
         if (!sessionAuthenticated && !bearerAuthenticated)
         {
             // 页面（HTML）场景：浏览器重定向到登录页；API 场景：直接 401。
-            bool isPageRequest = !context.Request.Path.StartsWithSegments("/api");
+            // openapi.json（/dashboard/api-docs）按 API 处理返回 401，便于工具链识别。
+            bool isPageRequest = !context.Request.Path.StartsWithSegments("/api")
+                && !context.Request.Path.StartsWithSegments("/dashboard/api-docs");
             if (isPageRequest)
             {
                 context.Response.Redirect("/login");
@@ -787,6 +821,14 @@ app.Use(async (context, next) =>
 });
 
 app.UseRateLimiter();
+
+// OpenAPI 文档（位于 /dashboard/swagger，经上方鉴权中间件保护；openapi.json 随 UI 页同源提供）。
+app.UseSwagger(c => c.RouteTemplate = "dashboard/api-docs/{documentName}/openapi.json");
+app.UseSwaggerUI(c =>
+{
+    c.RoutePrefix = "dashboard/swagger";
+    c.SwaggerEndpoint("api-docs/v1/openapi.json", "OptiRouter v1");
+});
 
 // 健康检查端点，无需 API Key，不受限流影响（非 /v1/* 路径）。
 app.MapHealthChecks("/health");
