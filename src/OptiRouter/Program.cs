@@ -496,6 +496,22 @@ builder.Services.AddHostedService<OptiRouter.Health.AlertWebhookNotifier>(sp =>
 
 });
 
+// 内容审核（Moderation）：配置 ModerationEndpoint 时注册审核器；未配置时注册 null，
+// ProxyOrchestrator 的可选依赖为 null，功能整体禁用。审核服务不可用时 fail-open。
+builder.Services.AddSingleton<OptiRouter.Compliance.IContentModerator>(sp =>
+{
+    var routing = sp.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue.Routing;
+    if (string.IsNullOrWhiteSpace(routing.ModerationEndpoint))
+    {
+        return null!;
+    }
+    return new OptiRouter.Compliance.OpenAIModerationClient(
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("moderation"),
+        routing.ModerationEndpoint,
+        routing.ModerationApiKey,
+        routing.ModerationThreshold,
+        sp.GetService<ILogger<OptiRouter.Compliance.OpenAIModerationClient>>());
+
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
     .AddCheck<CostLedgerHealthCheck>("cost-ledger", failureStatus: HealthStatus.Unhealthy);

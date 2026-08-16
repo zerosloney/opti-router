@@ -135,6 +135,22 @@ public static class ChatCompletionsEndpoint
 
                 return Results.Json(problem, statusCode: StatusCodes.Status429TooManyRequests, contentType: "application/problem+json");
             }
+            catch (OptiRouter.Compliance.ComplianceViolationException ex)
+            {
+                // 内容审核拦截（输入违规拒绝 / 输出违规中断）：客户端可据此调整输入或终止重试。
+                string? requestId = httpContext.Items.TryGetValue("RequestId", out var rid) ? rid?.ToString() : null;
+                var problem = new Microsoft.AspNetCore.Mvc.ProblemDetails
+                {
+                    Title = "Content moderated",
+                    Detail = ex.Message,
+                    Status = StatusCodes.Status400BadRequest
+                };
+                problem.Extensions["code"] = "CONTENT_MODERATED";
+                if (ex.MatchedKeyword != null) problem.Extensions["category"] = ex.MatchedKeyword;
+                if (requestId != null) problem.Extensions["requestId"] = requestId;
+
+                return Results.Json(problem, statusCode: StatusCodes.Status400BadRequest, contentType: "application/problem+json");
+            }
             catch (AllCandidatesFailedException ex)
             {
                 string? requestId = httpContext.Items.TryGetValue("RequestId", out var rid) ? rid?.ToString() : null;

@@ -35,6 +35,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly RegenerateFeedbackTracker _regenerateTracker;
     private readonly OptiRouter.Compression.IPromptPruner _promptPruner;
     private readonly OptiRouter.Mcp.McpToolOrchestrator? _mcpToolOrchestrator;
+    private readonly OptiRouter.Compliance.IContentModerator? _contentModerator;
     private bool _disposed;
 
     /// <summary>
@@ -56,7 +57,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         IAdaptiveConcurrencyLimiter? adaptiveLimiter = null,
         IStreamingComplianceFilter? complianceFilter = null,
         OptiRouter.Compression.IPromptPruner? promptPruner = null,
-        OptiRouter.Mcp.McpToolOrchestrator? mcpToolOrchestrator = null)
+        OptiRouter.Mcp.McpToolOrchestrator? mcpToolOrchestrator = null,
+        OptiRouter.Compliance.IContentModerator? contentModerator = null)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
@@ -85,6 +87,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _regenerateTracker = regenerateTracker;
         _promptPruner = promptPruner ?? new OptiRouter.Compression.AdaptivePromptPruner();
         _mcpToolOrchestrator = mcpToolOrchestrator;
+        _contentModerator = contentModerator;
         _logger = logger;
     }
 
@@ -194,6 +197,27 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             if (compResult.WasCompressed)
             {
                 request = compResult.CompressedRequest;
+            }
+        }
+
+        // 内容审核（默认关闭）：对改写后的最终 user 文本做输入审核，违规按策略拒绝。
+        // 置于语义缓存查询之前，保证未审核输入不进入缓存。
+        if (options.Routing.EnableContentModeration && _contentModerator is not null && ShouldModerate(options.Routing))
+        {
+            string? userText = GetLastUserPrompt(request);
+            if (!string.IsNullOrWhiteSpace(userText))
+            {
+                var modResult = await _contentModerator.ModerateTextAsync(userText, OptiRouter.Compliance.ModerationDirection.Input, effectiveCt).ConfigureAwait(false);
+                if (modResult.IsViolation)
+                {
+                    _logger.LogWarning("Input blocked by content moderation: category={Category}, score={Score:F3}", modResult.Category, modResult.Score);
+                    _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-input-blocked:{modResult.Category}", false, modResult.Reason, false, ModelTier.Cheap, requestContent: requestContent);
+                    if (options.Routing.ModerationInputAction == OptiRouter.Compliance.ModerationAction.Block)
+                    {
+                        throw new OptiRouter.Compliance.ComplianceViolationException(
+                            $"Input blocked by content moderation (category: {modResult.Category}).", modResult.Category);
+                    }
+                }
             }
         }
 
@@ -352,6 +376,29 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         response = await _mcpToolOrchestrator.ExecuteToolCallsAndReplayAsync(
                             request, response, candidate, options.Routing.MaxMcpToolRounds, effectiveCt).ConfigureAwait(false);
+                    }
+
+                    // 内容审核（输出）：审核模型生成的最终响应文本，违规按策略中断。
+                    if (options.Routing.EnableContentModeration && _contentModerator is not null
+                        && options.Routing.ModerationOutputAction != OptiRouter.Compliance.ModerationAction.None
+                        && ShouldModerate(options.Routing))
+                    {
+                        string? outputText = ExtractContentText(response.Body);
+                        if (!string.IsNullOrWhiteSpace(outputText))
+                        {
+                            var modResult = await _contentModerator.ModerateTextAsync(
+                                outputText, OptiRouter.Compliance.ModerationDirection.Output, effectiveCt).ConfigureAwait(false);
+                            if (modResult.IsViolation)
+                            {
+                                _logger.LogWarning("Output blocked by content moderation: category={Category}, score={Score:F3}", modResult.Category, modResult.Score);
+                                _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-output-blocked:{modResult.Category}", false, modResult.Reason, false, routedTier, requestContent: requestContent);
+                                if (options.Routing.ModerationOutputAction == OptiRouter.Compliance.ModerationAction.Block)
+                                {
+                                    throw new OptiRouter.Compliance.ComplianceViolationException(
+                                        $"Output blocked by content moderation (category: {modResult.Category}).", modResult.Category);
+                                }
+                            }
+                        }
                     }
 
                     decimal cost = response.Usage is not null
@@ -589,6 +636,26 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             if (compResult.WasCompressed)
             {
                 request = compResult.CompressedRequest;
+            }
+        }
+
+        // 内容审核（输入）：流式路径仅审核用户输入（输出增量审核由流式敏感词过滤器承担）。
+        if (options.Routing.EnableContentModeration && _contentModerator is not null && ShouldModerate(options.Routing))
+        {
+            string? userText = GetLastUserPrompt(request);
+            if (!string.IsNullOrWhiteSpace(userText))
+            {
+                var modResult = await _contentModerator.ModerateTextAsync(userText, OptiRouter.Compliance.ModerationDirection.Input, effectiveCt).ConfigureAwait(false);
+                if (modResult.IsViolation)
+                {
+                    _logger.LogWarning("Streaming input blocked by content moderation: category={Category}, score={Score:F3}", modResult.Category, modResult.Score);
+                    _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-input-blocked:{modResult.Category}", false, modResult.Reason, false, ModelTier.Cheap, requestContent: requestContent);
+                    if (options.Routing.ModerationInputAction == OptiRouter.Compliance.ModerationAction.Block)
+                    {
+                        throw new OptiRouter.Compliance.ComplianceViolationException(
+                            $"Input blocked by content moderation (category: {modResult.Category}).", modResult.Category);
+                    }
+                }
             }
         }
 
@@ -972,6 +1039,44 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// 采样判定：采样率 >= 1.0 全量审核，否则按概率抽样（控制审核 API 成本）。
+    /// </summary>
+    private static bool ShouldModerate(Configuration.RoutingOptions routing) =>
+        routing.ModerationSampleRate >= 1.0
+        || Random.Shared.NextDouble() < Math.Clamp(routing.ModerationSampleRate, 0.0, 1.0);
+
+    /// <summary>
+    /// 从 OpenAI 兼容响应 JSON 提取 choices[0].message.content 文本（用于输出审核）。
+    /// </summary>
+    private static string? ExtractContentText(string responseBody)
+    {
+        if (string.IsNullOrWhiteSpace(responseBody)) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(responseBody);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("choices", out var choices)
+                || choices.ValueKind != System.Text.Json.JsonValueKind.Array
+                || choices.GetArrayLength() == 0)
+            {
+                return null;
+            }
+            var message = choices[0];
+            if (!message.TryGetProperty("message", out var msg)
+                || !msg.TryGetProperty("content", out var content)
+                || content.ValueKind != System.Text.Json.JsonValueKind.String)
+            {
+                return null;
+            }
+            return content.GetString();
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
     }
 
     private RawStreamLine ProcessCompliance(RawStreamLine line, StreamingSlidingWindowBuffer? buffer, RoutingOptions routingOpts)

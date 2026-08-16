@@ -644,6 +644,42 @@ public sealed class RoutingOptions
     public string StreamingComplianceReplacementMask { get; set; } = "***";
 
     /// <summary>
+    /// 是否启用内容审核（Moderation）。默认关闭。启用时需配置 <see cref="ModerationEndpoint"/>。
+    /// </summary>
+    public bool EnableContentModeration { get; set; } = false;
+
+    /// <summary>
+    /// 内容审核端点（OpenAI Moderation API 兼容，如 <c>https://api.openai.com/v1/moderations</c>）。
+    /// 留空时不注册审核器（功能禁用）。
+    /// </summary>
+    public string ModerationEndpoint { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 内容审核 API Key。留空则请求不带鉴权头。
+    /// </summary>
+    public string ModerationApiKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 违规判定阈值：category_scores 中最高分数达到该值即判违规。默认 0.8。
+    /// </summary>
+    public double ModerationThreshold { get; set; } = 0.8;
+
+    /// <summary>
+    /// 输入审核违规动作（用户消息）。默认 Block（拒绝请求）。
+    /// </summary>
+    public OptiRouter.Compliance.ModerationAction ModerationInputAction { get; set; } = OptiRouter.Compliance.ModerationAction.Block;
+
+    /// <summary>
+    /// 输出审核违规动作（模型响应）。默认 Block（中断响应）。Redact 为后续扩展。
+    /// </summary>
+    public OptiRouter.Compliance.ModerationAction ModerationOutputAction { get; set; } = OptiRouter.Compliance.ModerationAction.Block;
+
+    /// <summary>
+    /// 审核采样率（0~1），用于控制审核 API 成本。默认 1.0（全量审核）。
+    /// </summary>
+    public double ModerationSampleRate { get; set; } = 1.0;
+
+    /// <summary>
     /// 是否启用卡尔曼滤波与 P99 动态降权负载均衡。
     /// 开启后结合 1D 卡尔曼滤波平滑估计真实隐藏延迟，并对高尾延 P99 异常 Provider 进行指数级降权。
     /// </summary>
