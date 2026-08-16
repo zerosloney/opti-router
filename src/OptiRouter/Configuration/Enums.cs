@@ -53,3 +53,19 @@ public enum TokenEstimationMode
     /// </summary>
     Tiktoken = 1
 }
+
+/// <summary>
+/// 上游模型端点协议。默认 OpenAI 兼容；原生协议由对应客户端在内部完成
+/// 请求/响应双向翻译，对外（下游）始终保持 OpenAI 契约不变。
+/// </summary>
+public enum ProviderProtocol
+{
+    /// <summary>OpenAI 兼容接口（默认）。</summary>
+    OpenAI = 0,
+
+    /// <summary>Anthropic Messages API（/v1/messages）。</summary>
+    Anthropic = 1,
+
+    /// <summary>Google Gemini generateContent API。</summary>
+    Gemini = 2
+}

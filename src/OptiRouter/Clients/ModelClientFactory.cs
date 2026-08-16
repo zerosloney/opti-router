@@ -40,7 +40,14 @@ public sealed class ModelClientFactory
             httpClient.DefaultRequestHeaders.Authorization = null;
         }
 
-        return new OpenAICompatibleModelClient(endpoint, httpClient);
+        // 按端点协议选择客户端：原生协议（Anthropic/Gemini）在客户端内部完成双向翻译，
+        // 下游始终收到 OpenAI 契约响应。
+        return endpoint.Protocol switch
+        {
+            ProviderProtocol.Anthropic => new AnthropicModelClient(endpoint, httpClient),
+            ProviderProtocol.Gemini => new GeminiModelClient(endpoint, httpClient),
+            _ => new OpenAICompatibleModelClient(endpoint, httpClient)
+        };
     }
 
     /// <summary>

@@ -44,6 +44,12 @@ public sealed class ModelEndpointOptions
     public ModelTier Tier { get; set; } = ModelTier.Medium;
 
     /// <summary>
+    /// 上游端点协议（OpenAI 兼容 / Anthropic 原生 / Gemini 原生）。默认 OpenAI。
+    /// 原生协议由客户端内部完成翻译，下游始终收到 OpenAI 契约响应。
+    /// </summary>
+    public ProviderProtocol Protocol { get; set; } = ProviderProtocol.OpenAI;
+
+    /// <summary>
     /// 最大上下文窗口（token 数）。默认 200k 对齐当前主流模型；
     /// 小窗口模型（本地小模型等）务必显式配置，长输入过滤据此淘汰装不下的候选。
     /// </summary>
