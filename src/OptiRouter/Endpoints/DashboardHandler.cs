@@ -459,6 +459,83 @@ public static class DashboardHandler
             if (!ok) return Results.NotFound(new { error = $"Client key '{keyId}' not found." });
             return Results.Ok(new { message = $"Client key '{keyId}' deleted successfully." });
         });
+
+        // 11. Tenant usage & quota APIs（配额设置见上方 PUT /keys/{keyId}；此处提供用量查询与导出）
+        endpoints.MapGet("/api/dashboard/keys/usage", (ClientKeyService keySvc) =>
+        {
+            var usages = keySvc.GetAllKeys().Select(TenantUsageDto);
+            return Results.Ok(usages);
+        });
+
+        endpoints.MapGet("/api/dashboard/keys/{keyId}/usage", (string keyId, ClientKeyService keySvc) =>
+        {
+            var key = keySvc.GetAllKeys().FirstOrDefault(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
+            if (key is null) return Results.NotFound(new { error = $"Client key '{keyId}' not found." });
+            return Results.Ok(TenantUsageDto(key));
+        });
+
+        endpoints.MapGet("/api/dashboard/keys/usage/export", (ClientKeyService keySvc) =>
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("key_id,key_prefix,tenant_name,daily_budget_usd,daily_spend_usd,remaining_budget_usd,quota_utilization_pct,daily_request_count,max_qps,enabled,created_at_utc");
+            foreach (var key in keySvc.GetAllKeys())
+            {
+                var dto = TenantUsageDto(key);
+                sb.AppendLine(string.Join(',',
+                    CsvEscape(dto.KeyId),
+                    CsvEscape(dto.KeyPrefix),
+                    CsvEscape(dto.TenantName),
+                    dto.DailyBudgetUsd.ToString("F4"),
+                    dto.DailySpendUsd.ToString("F4"),
+                    dto.RemainingBudgetUsd.ToString("F4"),
+                    dto.QuotaUtilization.ToString("F2"),
+                    dto.DailyRequestCount,
+                    dto.MaxQps,
+                    dto.Enabled,
+                    dto.CreatedAt.ToString("yyyy-MM-ddTHH:mm:ssZ")));
+            }
+            // 带 BOM 便于 Excel 正确识别 UTF-8 中文。
+            return Results.Text("\uFEFF" + sb.ToString(), "text/csv", System.Text.Encoding.UTF8);
+        });
+    }
+
+    /// <summary>租户用量视图（不含 KeyHash）。</summary>
+    private sealed record TenantUsage(
+        string KeyId,
+        string KeyPrefix,
+        string TenantName,
+        decimal DailyBudgetUsd,
+        decimal DailySpendUsd,
+        decimal RemainingBudgetUsd,
+        double QuotaUtilization,
+        int DailyRequestCount,
+        int MaxQps,
+        bool Enabled,
+        DateTime CreatedAt);
+
+    private static TenantUsage TenantUsageDto(ClientKeyInfo key) => new(
+        key.KeyId,
+        key.KeyPrefix,
+        key.TenantName,
+        key.DailyBudgetUsd,
+        key.DailySpendUsd,
+        key.DailyBudgetUsd > 0m ? Math.Max(0m, key.DailyBudgetUsd - key.DailySpendUsd) : 0m,
+        key.DailyBudgetUsd > 0m
+            ? Math.Round(Math.Min(100.0, (double)(key.DailySpendUsd / key.DailyBudgetUsd) * 100.0), 2)
+            : 0.0,
+        key.DailyRequestCount,
+        key.MaxQps,
+        key.Enabled,
+        key.CreatedAt);
+
+    private static string CsvEscape(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+        if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
+        {
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
+        }
+        return value;
     }
 
     public record SandboxRouteRequest(string Prompt);

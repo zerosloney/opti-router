@@ -215,8 +215,11 @@ public sealed class ClientKeyService : IDisposable
             }
 
             _qpsWindows[matched.KeyId] = window with { Count = window.Count + 1 };
+            matched.DailyRequestCount++;
             if (changed)
                 SaveKeysToFile(keys);
+            else
+                _spendDirty = true; // 请求计数变化由去抖定时器合并落盘
 
             return identity(ClientKeyAuthorizationStatus.Authorized);
         }
@@ -520,6 +523,9 @@ public sealed class ClientKeyInfo
     public required string TenantName { get; set; }
     public decimal DailyBudgetUsd { get; set; } = 100.0m;
     public decimal DailySpendUsd { get; set; } = 0.0m;
+
+    /// <summary>当日成功授权的请求数（UTC 日滚动，与 DailySpendUsd 同窗口）。</summary>
+    public int DailyRequestCount { get; set; }
     public int MaxQps { get; set; } = 50;
     public bool Enabled { get; set; } = true;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
