@@ -794,6 +794,17 @@ public sealed class RoutingOptions
     public bool EnableMcpIntegration { get; set; } = true;
 
     /// <summary>
+    /// 是否启用 MCP 工具调用执行闭环（模型请求工具时执行并重放，直至无 tool_calls 或达轮次上限）。
+    /// 默认关闭；仅非流式请求生效。
+    /// </summary>
+    public bool EnableMcpToolExecution { get; set; } = false;
+
+    /// <summary>
+    /// MCP 工具执行的最大重放轮数（每轮执行全部 tool_calls 后向模型重放一次）。默认 4。
+    /// </summary>
+    public int MaxMcpToolRounds { get; set; } = 4;
+
+    /// <summary>
     /// 是否启用 MCP / Tool Schema 复杂度感知动态分级路由。
     /// </summary>
     public bool EnableMcpComplexityRouting { get; set; } = true;
