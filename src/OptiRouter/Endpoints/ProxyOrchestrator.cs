@@ -33,6 +33,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly IAdaptiveConcurrencyLimiter _adaptiveLimiter;
     private readonly IStreamingComplianceFilter _complianceFilter;
     private readonly RegenerateFeedbackTracker _regenerateTracker;
+    private readonly OptiRouter.Compression.IPromptPruner _promptPruner;
     private bool _disposed;
 
     /// <summary>
@@ -52,7 +53,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         ILogger<ProxyOrchestrator> logger,
         ISemanticResponseCache? semanticCache = null,
         IAdaptiveConcurrencyLimiter? adaptiveLimiter = null,
-        IStreamingComplianceFilter? complianceFilter = null)
+        IStreamingComplianceFilter? complianceFilter = null,
+        OptiRouter.Compression.IPromptPruner? promptPruner = null)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
@@ -79,6 +81,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _adaptiveLimiter = adaptiveLimiter ?? new AdaptiveConcurrencyLimiter();
         _complianceFilter = complianceFilter ?? new StreamingSlidingWindowFilter(_options.CurrentValue.Routing);
         _regenerateTracker = regenerateTracker;
+        _promptPruner = promptPruner ?? new OptiRouter.Compression.AdaptivePromptPruner();
         _logger = logger;
     }
 
@@ -200,6 +203,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         if (options.Routing.EnablePersonaDriftProtection && !string.IsNullOrEmpty(sessionId))
         {
             request = PersonaDriftGuard.ApplyPersonaAnchor(request);
+        }
+
+        if (options.Routing.EnablePromptCompression)
+        {
+            var compResult = _promptPruner.Compress(request, options.Routing.PromptCompression);
+            if (compResult.WasCompressed)
+            {
+                request = compResult.CompressedRequest;
+            }
         }
 
         while (true)
@@ -547,6 +559,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
                     break;
                 }
+            }
+        }
+
+        if (options.Routing.EnablePromptCompression)
+        {
+            var compResult = _promptPruner.Compress(request, options.Routing.PromptCompression);
+            if (compResult.WasCompressed)
+            {
+                request = compResult.CompressedRequest;
             }
         }
 

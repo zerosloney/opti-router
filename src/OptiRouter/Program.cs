@@ -355,6 +355,9 @@ builder.Services.AddSingleton<RagContextDensityAnalyzer>();
 builder.Services.AddSingleton<OptiRouter.Mcp.McpToolComplexityAnalyzer>();
 builder.Services.AddSingleton<OptiRouter.Mcp.McpToolCallSanitizer>();
 builder.Services.AddSingleton<OptiRouter.Mcp.McpToolRegistry>();
+builder.Services.AddSingleton<OptiRouter.Compression.IPromptPruner, OptiRouter.Compression.AdaptivePromptPruner>();
+builder.Services.AddSingleton<OptiRouter.Clients.IProviderAdapterSandbox, OptiRouter.Clients.ProviderAdapterSandbox>();
+builder.Services.AddSingleton<OptiRouter.Benchmarks.StressBenchmarkEngine>();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {

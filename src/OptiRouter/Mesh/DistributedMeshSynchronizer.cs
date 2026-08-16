@@ -26,6 +26,11 @@ public sealed class DistributedMeshSynchronizer : IDisposable
     public const string ChannelCost = "optirouter:mesh:cost";
     public const string ChannelResilience = "optirouter:mesh:resilience";
 
+    /// <summary>
+    /// 获取当前节点的本地网格节点 ID。
+    /// </summary>
+    public string LocalNodeId => _mesh.NodeId;
+
     public DistributedMeshSynchronizer(
         IDistributedStateMesh mesh,
         KvCachePrefixTrie? kvTrie = null,

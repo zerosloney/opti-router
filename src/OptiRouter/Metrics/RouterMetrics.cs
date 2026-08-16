@@ -86,6 +86,41 @@ public sealed class RouterMetrics
         "optirouter_total_spend_usd",
         "Total USD spend since process start.");
 
+    private readonly Counter _promptCompressionSavedTokens = Prometheus.Metrics.CreateCounter(
+        "optirouter_prompt_compression_saved_tokens_total",
+        "Total tokens saved by adaptive prompt compression.");
+
+    private readonly Counter _mcpSanitizationsTotal = Prometheus.Metrics.CreateCounter(
+        "optirouter_mcp_tool_sanitizations_total",
+        "Total MCP tool arguments repaired and sanitized.",
+        new CounterConfiguration { LabelNames = new[] { "tool", "issue" } });
+
+    private readonly Counter _meshSyncEventsTotal = Prometheus.Metrics.CreateCounter(
+        "optirouter_mesh_sync_events_total",
+        "Total Distributed State Mesh synchronization events.",
+        new CounterConfiguration { LabelNames = new[] { "event_type" } });
+
+    /// <summary>记录提示词压缩节省的 Token 数量。</summary>
+    public void RecordPromptCompression(int savedTokens)
+    {
+        if (savedTokens > 0)
+        {
+            _promptCompressionSavedTokens.Inc(savedTokens);
+        }
+    }
+
+    /// <summary>记录 MCP 工具参数修复事件。</summary>
+    public void RecordMcpSanitization(string toolName, string issueType)
+    {
+        _mcpSanitizationsTotal.WithLabels(toolName ?? "unknown", issueType ?? "syntax_repair").Inc();
+    }
+
+    /// <summary>记录 Mesh 集群状态同步事件。</summary>
+    public void RecordMeshSync(string eventType)
+    {
+        _meshSyncEventsTotal.WithLabels(eventType ?? "state_update").Inc();
+    }
+
     /// <summary>
     /// 记录一次模型尝试结果。由 ProxyOrchestrator.RecordAudit 在所有成功/失败路径统一调用。
     /// </summary>

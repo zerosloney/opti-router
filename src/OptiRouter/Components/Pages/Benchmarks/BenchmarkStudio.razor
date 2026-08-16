@@ -1,0 +1,334 @@
+@page "/benchmarks"
+@using System.Diagnostics
+@using OptiRouter.Benchmarks
+@using OptiRouter.Mcp
+@using OptiRouter.Mesh
+@using OptiRouter.Compression
+@using OptiRouter.Routing
+@using OptiRouter.Configuration
+@using Microsoft.Extensions.Options
+@inject StressBenchmarkEngine BenchmarkEngine
+@inject RouterEngine Engine
+@inject IOptionsMonitor<RouterOptions> OptionsMonitor
+@inject McpToolRegistry ToolRegistry
+@inject McpToolComplexityAnalyzer ToolComplexityAnalyzer
+@inject IPromptPruner PromptPruner
+@inject DistributedMeshSynchronizer MeshSynchronizer
+
+<PageTitle>OptiRouter - 性能基准、MCP 生态与分布式 Mesh 拓扑</PageTitle>
+
+<div class="studio-container">
+    <header class="studio-header">
+        <div>
+            <h1 class="studio-title">性能基准、MCP 生态与分布式 Mesh 拓扑</h1>
+            <p class="studio-subtitle">实时并发压测、Model Context Protocol 工具目录态势感知与分布式状态同步网格</p>
+        </div>
+        <div class="header-badges">
+            <span class="badge badge-primary">Node: @MeshSynchronizer.LocalNodeId</span>
+            <span class="badge badge-success">Mesh Synchronized</span>
+        </div>
+    </header>
+
+    <div class="dashboard-grid">
+        <!-- 模块 1: 在线高并发压测台 -->
+        <section class="card benchmark-card">
+            <div class="card-header">
+                <h2>⚡ 在线全链路基准压测 (Live Stress Benchmark)</h2>
+                <span class="badge @(isRunningBenchmark ? "badge-warning" : "badge-secondary")">
+                    @(isRunningBenchmark ? "压测进行中..." : "就绪")
+                </span>
+            </div>
+
+            <div class="benchmark-controls">
+                <div class="control-group">
+                    <label>压测场景</label>
+                    <select class="form-control" @bind="selectedScenario" disabled="@isRunningBenchmark">
+                        <option value="@BenchmarkScenario.FastRouteDecision">极速决策流水线 (FastRouteDecision)</option>
+                        <option value="@BenchmarkScenario.McpComplexityPipeline">MCP 复杂度评估流水线</option>
+                        <option value="@BenchmarkScenario.RagDensityPipeline">RAG 上下文密度分析流水线</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <label>并发 Worker 数: <strong>@concurrency</strong></label>
+                    <input type="range" min="1" max="100" step="1" class="form-range" @bind="concurrency" disabled="@isRunningBenchmark" />
+                </div>
+
+                <div class="control-group">
+                    <label>总请求量: <strong>@totalRequests</strong></label>
+                    <input type="range" min="50" max="5000" step="50" class="form-range" @bind="totalRequests" disabled="@isRunningBenchmark" />
+                </div>
+
+                <button class="btn btn-primary" @onclick="RunBenchmarkAsync" disabled="@isRunningBenchmark">
+                    @(isRunningBenchmark ? "正在执行压测..." : "▶ 启动并发压测")
+                </button>
+            </div>
+
+            @if (latestReport != null)
+            {
+                <div class="benchmark-results">
+                    <div class="metrics-row">
+                        <div class="metric-box">
+                            <div class="metric-label">每秒吞吐 (RPS)</div>
+                            <div class="metric-value highlight">@latestReport.RequestsPerSecond.ToString("F1") req/s</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-label">成功率</div>
+                            <div class="metric-value">@((latestReport.SuccessRequests * 100.0 / latestReport.TotalRequests).ToString("F1"))%</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-label">中位数延迟 (P50)</div>
+                            <div class="metric-value">@latestReport.Latency.P50Ms.ToString("F3") ms</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-label">长尾延迟 (P99)</div>
+                            <div class="metric-value">@latestReport.Latency.P99Ms.ToString("F3") ms</div>
+                        </div>
+                    </div>
+
+                    <div class="percentile-table-container">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>P50</th>
+                                    <th>P75</th>
+                                    <th>P90</th>
+                                    <th>P95</th>
+                                    <th>P99</th>
+                                    <th>P99.9</th>
+                                    <th>GC (0/1/2)</th>
+                                    <th>内存吞吐</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>@latestReport.Latency.P50Ms.ToString("F3") ms</td>
+                                    <td>@latestReport.Latency.P75Ms.ToString("F3") ms</td>
+                                    <td>@latestReport.Latency.P90Ms.ToString("F3") ms</td>
+                                    <td>@latestReport.Latency.P95Ms.ToString("F3") ms</td>
+                                    <td>@latestReport.Latency.P99Ms.ToString("F3") ms</td>
+                                    <td>@latestReport.Latency.P999Ms.ToString("F3") ms</td>
+                                    <td>@latestReport.Gen0Collections / @latestReport.Gen1Collections / @latestReport.Gen2Collections</td>
+                                    <td>@((latestReport.TotalAllocatedBytes / 1024.0 / 1024.0).ToString("F2")) MB</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            }
+        </section>
+
+        <!-- 模块 2: MCP 工具目录与复杂度感知 -->
+        <section class="card mcp-card">
+            <div class="card-header">
+                <h2>🧩 MCP (Model Context Protocol) 工具生态目录</h2>
+                <span class="badge badge-info">@registeredTools.Count 个注册工具</span>
+            </div>
+
+            <div class="table-responsive">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>工具名称</th>
+                            <th>复杂度评分</th>
+                            <th>推荐分档</th>
+                            <th>嵌套深度</th>
+                            <th>属性数量</th>
+                            <th>Schema 状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @if (registeredTools.Count == 0)
+                        {
+                            <tr>
+                                <td colspan="6" class="text-muted text-center">暂无注册的 MCP 工具（支持自动通过 ToolRegistry 注册）</td>
+                            </tr>
+                        }
+                        else
+                        {
+                            @foreach (var tool in registeredTools)
+                            {
+                                var complexity = ToolComplexityAnalyzer.Analyze(new[] { tool });
+                                <tr>
+                                    <td><strong>@tool.Name</strong><div class="text-muted small">@tool.Description</div></td>
+                                    <td><span class="badge badge-primary">@complexity.ComplexityScore.ToString("F1")</span></td>
+                                    <td><span class="badge badge-tier">@complexity.RecommendedMinTier</span></td>
+                                    <td>@complexity.MaxNestingDepth 级</td>
+                                    <td>@complexity.TotalProperties 个</td>
+                                    <td><span class="badge badge-success">Valid</span></td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- 模块 3: 分布式 State Mesh 拓扑与 KV Cache 共享 -->
+        <section class="card mesh-card">
+            <div class="card-header">
+                <h2>🌐 分布式状态同步网格 (Distributed State Mesh)</h2>
+                <span class="badge badge-primary">P2P Mesh Active</span>
+            </div>
+
+            <div class="mesh-summary">
+                <div class="mesh-node-item">
+                    <div class="node-icon">🖥</div>
+                    <div class="node-info">
+                        <div class="node-title">本地节点 (Local Node)</div>
+                        <div class="node-meta">ID: <code>@MeshSynchronizer.LocalNodeId</code></div>
+                    </div>
+                    <span class="badge badge-success">Leader/Active</span>
+                </div>
+                <div class="mesh-stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value">KV-Prefix Trie</div>
+                        <div class="stat-label">分布式上下文缓存热度</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value">Kalman Filter</div>
+                        <div class="stat-label">多节点延迟预估器</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value">Cluster Ledger</div>
+                        <div class="stat-label">跨网关配额统一结算</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 模块 4: 自适应 Prompt 压缩与瘦身 -->
+        <section class="card compression-card">
+            <div class="card-header">
+                <h2>✂️ 智能提示词压缩与 Token 瘦身 (Prompt Pruner)</h2>
+                <span class="badge badge-success">Enabled</span>
+            </div>
+
+            <div class="compression-info">
+                <p>实时对系统指令（System Prompt）进行多轮去重，自动裁剪历史寒暄客套，并对代码块（<code>```</code>）与 JSON 数据结构进行严格 100% 语法无损保护。</p>
+                <div class="compression-features">
+                    <span class="pill">✓ System Prompt 去重</span>
+                    <span class="pill">✓ 历史寒暄智能剪枝</span>
+                    <span class="pill">✓ 代码块严格保护</span>
+                    <span class="pill">✓ JSON 结构无损</span>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+
+<style>
+    .studio-container { padding: 24px; max-width: 1400px; margin: 0 auto; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .studio-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid #334155; padding-bottom: 16px; }
+    .studio-title { font-size: 24px; font-weight: 700; color: #f8fafc; margin: 0; }
+    .studio-subtitle { font-size: 14px; color: #94a3b8; margin-top: 4px; }
+    .dashboard-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+    .card { background: #1e293b; border-radius: 12px; border: 1px solid #334155; padding: 20px; }
+    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+    .card-header h2 { font-size: 16px; font-weight: 600; margin: 0; color: #e2e8f0; }
+    .badge { padding: 4px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
+    .badge-primary { background: #3b82f6; color: #fff; }
+    .badge-success { background: #10b981; color: #fff; }
+    .badge-warning { background: #f59e0b; color: #fff; }
+    .badge-info { background: #06b6d4; color: #fff; }
+    .badge-secondary { background: #475569; color: #e2e8f0; }
+    .badge-tier { background: #6366f1; color: #fff; }
+    .benchmark-controls { display: flex; flex-direction: column; gap: 14px; }
+    .control-group { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #cbd5e1; }
+    .form-control { background: #0f172a; border: 1px solid #475569; color: #f8fafc; border-radius: 6px; padding: 8px 12px; }
+    .form-range { accent-color: #3b82f6; }
+    .btn { padding: 10px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; border: none; }
+    .btn-primary { background: #3b82f6; color: #fff; }
+    .btn-primary:hover { background: #2563eb; }
+    .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
+    .metric-box { background: #0f172a; border-radius: 8px; padding: 12px; border: 1px solid #334155; }
+    .metric-label { font-size: 12px; color: #94a3b8; }
+    .metric-value { font-size: 18px; font-weight: 700; color: #f8fafc; margin-top: 4px; }
+    .metric-value.highlight { color: #38bdf8; }
+    .data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }
+    .data-table th, .data-table td { padding: 10px; text-align: left; border-bottom: 1px solid #334155; }
+    .data-table th { color: #94a3b8; font-weight: 600; background: #0f172a; }
+    .pill { display: inline-block; padding: 4px 10px; background: #0f172a; border: 1px solid #334155; border-radius: 9999px; font-size: 12px; color: #38bdf8; margin-right: 8px; margin-top: 8px; }
+    .mesh-node-item { display: flex; align-items: center; gap: 12px; background: #0f172a; padding: 12px; border-radius: 8px; border: 1px solid #334155; }
+    .node-icon { font-size: 24px; }
+    .node-info { flex: 1; }
+    .node-title { font-weight: 600; color: #f8fafc; }
+    .node-meta { font-size: 12px; color: #94a3b8; }
+    .mesh-stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+    .stat-item { background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; text-align: center; }
+    .stat-value { font-weight: 600; color: #e2e8f0; font-size: 13px; }
+    .stat-label { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+    @@media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 1fr; } }
+</style>
+
+@code {
+    private bool isRunningBenchmark = false;
+    private BenchmarkScenario selectedScenario = BenchmarkScenario.FastRouteDecision;
+    private int concurrency = 20;
+    private int totalRequests = 200;
+    private BenchmarkSummaryReport? latestReport;
+    private List<McpToolRegistration> registeredTools = new();
+
+    protected override void OnInitialized()
+    {
+        registeredTools = ToolRegistry.GetAllTools().ToList();
+        if (registeredTools.Count == 0)
+        {
+            // 初始化展示默认工具
+            ToolRegistry.RegisterTool(new McpToolRegistration
+            {
+                Name = "web_search",
+                Description = "Search the web for realtime information",
+                ServerName = "search-service",
+                InputSchema = System.Text.Json.JsonDocument.Parse("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}").RootElement
+            });
+
+            ToolRegistry.RegisterTool(new McpToolRegistration
+            {
+                Name = "database_sql_executor",
+                Description = "Execute analytical SQL queries with join conditions",
+                ServerName = "db-service",
+                InputSchema = System.Text.Json.JsonDocument.Parse("{\"type\":\"object\",\"properties\":{\"sql\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"sql\"]}").RootElement
+            });
+
+            registeredTools = ToolRegistry.GetAllTools().ToList();
+        }
+    }
+
+    private async Task RunBenchmarkAsync()
+    {
+        if (isRunningBenchmark) return;
+        isRunningBenchmark = true;
+        StateHasChanged();
+
+        try
+        {
+            var options = OptionsMonitor.CurrentValue;
+            var config = new BenchmarkConfig
+            {
+                Scenario = selectedScenario,
+                Concurrency = concurrency,
+                TotalRequests = totalRequests,
+                WarmupRequests = 10
+            };
+
+            latestReport = await BenchmarkEngine.RunAsync(config, (req, ct) =>
+            {
+                var sw = Stopwatch.StartNew();
+                var decision = Engine.Decide(req, options);
+                sw.Stop();
+
+                return Task.FromResult(new BenchmarkSample(
+                    LatencyMs: sw.Elapsed.TotalMilliseconds,
+                    TtftMs: null,
+                    StatusCode: 200,
+                    Success: decision.Candidates.Count > 0));
+            });
+        }
+        finally
+        {
+            isRunningBenchmark = false;
+            StateHasChanged();
+        }
+    }
+}

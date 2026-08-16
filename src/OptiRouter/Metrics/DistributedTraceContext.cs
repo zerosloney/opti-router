@@ -56,6 +56,27 @@ public static class DistributedTraceContext
         string flags = sampled ? "01" : "00";
         return $"00-{validTraceId}-{validSpanId}-{flags}";
     }
+
+    /// <summary>
+    /// 开启一个新的 OpenTelemetry Activity Span。
+    /// </summary>
+    public static Activity? StartActivity(string name, string? traceParent = null, ActivityKind kind = ActivityKind.Internal)
+    {
+        if (string.IsNullOrWhiteSpace(traceParent))
+        {
+            return ActivitySource.StartActivity(name, kind);
+        }
+
+        var (traceId, parentSpanId) = ParseTraceParent(traceParent);
+        if (ActivityTraceId.CreateFromString(traceId.AsSpan()) is var tid &&
+            ActivitySpanId.CreateFromString(parentSpanId.PadLeft(16, '0').AsSpan()) is var sid)
+        {
+            var parentContext = new ActivityContext(tid, sid, ActivityTraceFlags.Recorded);
+            return ActivitySource.StartActivity(name, kind, parentContext);
+        }
+
+        return ActivitySource.StartActivity(name, kind);
+    }
 }
 
 /// <summary>

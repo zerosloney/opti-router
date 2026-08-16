@@ -796,6 +796,16 @@ public sealed class RoutingOptions
     /// 是否启用 Tool Call JSON 参数自愈与清洗器（自动修复尾随逗号、单引号、Markdown 包裹与括号截断）。
     /// </summary>
     public bool EnableMcpToolCallSanitizer { get; set; } = true;
+
+    /// <summary>
+    /// 是否启用自适应提示词压缩与 Token 动态瘦身引擎。默认 true。
+    /// </summary>
+    public bool EnablePromptCompression { get; set; } = true;
+
+    /// <summary>
+    /// 提示词压缩与 Token 动态瘦身配置。
+    /// </summary>
+    public OptiRouter.Compression.PromptCompressionOptions PromptCompression { get; set; } = new();
 }
 
 /// <summary>
