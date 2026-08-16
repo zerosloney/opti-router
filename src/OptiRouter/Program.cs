@@ -333,6 +333,7 @@ builder.Services.AddSingleton<CrossProviderSpeculativeEngine>();
 builder.Services.AddSingleton<ByzantineConsensusEngine>(sp =>
     new ByzantineConsensusEngine(sp.GetService<ISemanticVectorEngine>()));
 builder.Services.AddSingleton<PredictiveResilienceEngine>();
+builder.Services.AddSingleton<RagContextDensityAnalyzer>();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
@@ -344,6 +345,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var kalmanTracker = sp.GetRequiredService<KalmanLatencyTracker>();
     var kvCacheTrie = sp.GetRequiredService<KvCachePrefixTrie>();
     var resilienceEngine = sp.GetRequiredService<PredictiveResilienceEngine>();
+    var ragAnalyzer = sp.GetRequiredService<RagContextDensityAnalyzer>();
     // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
     // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
@@ -357,6 +359,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new RuleClassifierPolicy(),
         new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),
         new SemanticRouterPolicy(vectorEngine),
+        new RagAwareRoutingPolicy(ragAnalyzer),
         new LongInputPolicy(),
         new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore, null,
             sp.GetRequiredService<ContextualBanditState>()),

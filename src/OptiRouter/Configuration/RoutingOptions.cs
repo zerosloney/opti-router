@@ -736,6 +736,21 @@ public sealed class RoutingOptions
     /// 时序预测主动超前预测窗口（分钟）。默认 2 分钟。
     /// </summary>
     public int PredictiveLookaheadMinutes { get; set; } = 2;
+
+    /// <summary>
+    /// 是否启用知识库与动态 RAG 检索感知路由。
+    /// </summary>
+    public bool EnableRagAwareRouting { get; set; } = false;
+
+    /// <summary>
+    /// RAG 上下文高充分度阈值（&gt;= 此阈值时说明检索知识极为充分，优先调度 Cheap/Medium 经济模型）。默认 0.70。
+    /// </summary>
+    public double RagHighSufficiencyThreshold { get; set; } = 0.70;
+
+    /// <summary>
+    /// RAG 上下文低充分度阈值（&lt;= 此阈值时说明检索知识匮乏或冲突，强制提升调度至 Strong 深度推理模型）。默认 0.35。
+    /// </summary>
+    public double RagLowSufficiencyThreshold { get; set; } = 0.35;
 }
 
 /// <summary>
