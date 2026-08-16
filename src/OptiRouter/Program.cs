@@ -484,6 +484,18 @@ builder.Services.AddHostedService<AuditRetentionService>();
 // EnableMetrics=false 时不影响功能，但 gauge 保持零值。
 builder.Services.AddHostedService<MetricsGaugeUpdaterService>();
 
+// 告警 Webhook 推送：周期检查 AlertEngine 活跃告警，新增推送 alert、恢复推送 resolved。
+// 未配置 AlertWebhookUrl 时服务直接禁用（见 AlertWebhookNotifier）。
+builder.Services.AddHttpClient();
+builder.Services.AddHostedService<OptiRouter.Health.AlertWebhookNotifier>(sp =>
+    new OptiRouter.Health.AlertWebhookNotifier(
+        () => sp.GetRequiredService<AlertEngine>().Check(),
+        sp.GetRequiredService<IHttpClientFactory>().CreateClient("alert-webhook"),
+        sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
+        sp.GetService<ILogger<OptiRouter.Health.AlertWebhookNotifier>>()));
+
+});
+
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
     .AddCheck<CostLedgerHealthCheck>("cost-ledger", failureStatus: HealthStatus.Unhealthy);
