@@ -17,7 +17,12 @@ using OptiRouter.Endpoints;
 using OptiRouter.Health;
 using OptiRouter.Metrics;
 using OptiRouter.Routing;
+using OptiRouter.Concurrency;
+using OptiRouter.Compliance;
 using Prometheus;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
+using OpenTelemetry.Exporter;
 
 // 初始化 SQLitePCLRaw 原生库（使用 bundle_e_sqlite3）。必须在使用 Microsoft.Data.Sqlite 前调用一次。
 SQLitePCL.Batteries_V2.Init();
@@ -86,12 +91,22 @@ builder.Services.AddSingleton<IModelClientProvider>(sp => new ModelClientProvide
     sp.GetRequiredService<ModelClientFactory>(),
     sp.GetRequiredService<IOptionsMonitor<RouterOptions>>()));
 
-// 成本账本存储：UsePersistentStore=true 用 SQLite（跨重启保留），否则用内存（重启归零）。
-// SQLite 文件目录在构建时创建，确保单例构造时路径可写。
+// 成本账本存储：支持 "Postgres" | "Redis" | "Sqlite" | "InMemory"。
+// 对于 K8s 多节点部署架构，配置 "Postgres" 或 "Redis" 即可实现跨节点全局成本计费与断路器共享。
 builder.Services.AddSingleton<ICostLedgerStore>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    if (!options.Budget.UsePersistentStore)
+    string provider = options.Budget.StoreProvider ?? "Sqlite";
+
+    if (string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase))
+    {
+        return new PostgresCostLedgerStore(options.Budget.PostgresConnectionString);
+    }
+    if (string.Equals(provider, "Redis", StringComparison.OrdinalIgnoreCase))
+    {
+        return new RedisCostLedgerStore(options.Budget.RedisConnectionString, options.Budget.RedisKeyPrefix);
+    }
+    if (!options.Budget.UsePersistentStore || string.Equals(provider, "InMemory", StringComparison.OrdinalIgnoreCase))
     {
         return new InMemoryCostLedgerStore();
     }
@@ -105,11 +120,17 @@ builder.Services.AddSingleton<ICostLedgerStore>(sp =>
     return new SqliteCostLedgerStore(storePath);
 });
 
-// 请求审计存储：与成本账本共享同一持久化策略（SQLite 或内存）。
+// 请求审计存储：支持 "Postgres" | "Sqlite" | "InMemory"。
 builder.Services.AddSingleton<IRequestAuditStore>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    if (!options.Budget.UsePersistentStore)
+    string provider = options.Budget.StoreProvider ?? "Sqlite";
+
+    if (string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase))
+    {
+        return new PostgresRequestAuditStore(options.Budget.PostgresConnectionString);
+    }
+    if (!options.Budget.UsePersistentStore || string.Equals(provider, "InMemory", StringComparison.OrdinalIgnoreCase))
     {
         return new InMemoryRequestAuditStore();
     }
@@ -122,6 +143,28 @@ builder.Services.AddSingleton<IRequestAuditStore>(sp =>
     }
     return new SqliteRequestAuditStore(storePath, sp.GetRequiredService<ILogger<SqliteRequestAuditStore>>());
 });
+
+// 配置 OpenTelemetry OTLP Exporter 链路追踪导出（无缝对接 Jaeger, Tempo 或 Datadog）
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracerProviderBuilder =>
+    {
+        var routingOptions = builder.Configuration.GetSection("OptiRouter:Routing").Get<RoutingOptions>() ?? new RoutingOptions();
+
+        tracerProviderBuilder
+            .SetResourceBuilder(OpenTelemetry.Resources.ResourceBuilder.CreateDefault().AddService(routingOptions.OtlpServiceName ?? "OptiRouter"))
+            .AddSource("OptiRouter.Tracing");
+
+        if (routingOptions.EnableOtlpTracing && !string.IsNullOrWhiteSpace(routingOptions.OtlpEndpoint))
+        {
+            tracerProviderBuilder.AddOtlpExporter(otlpOptions =>
+            {
+                otlpOptions.Endpoint = new Uri(routingOptions.OtlpEndpoint);
+                otlpOptions.Protocol = string.Equals(routingOptions.OtlpProtocol, "http/protobuf", StringComparison.OrdinalIgnoreCase)
+                    ? OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf
+                    : OpenTelemetry.Exporter.OtlpExportProtocol.Grpc;
+            });
+        }
+    });
 
 // t3: 注册成本账本、跨请求模型健康跟踪器（三态断路器）和路由引擎。
 // 注册 ClientKeyService
@@ -163,7 +206,30 @@ builder.Services.AddSingleton<ITokenEstimator>(sp =>
     return new TiktokenTokenEstimator(options.Routing.TiktokenEncoding);
 });
 
-builder.Services.AddSingleton<ISemanticVectorEngine>(sp => new HybridSemanticVectorEngine());
+builder.Services.AddSingleton<ISemanticVectorEngine>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    var logger = sp.GetRequiredService<ILogger<OnnxEmbeddingVectorEngine>>();
+
+    if (options.Routing.EnableOnnxEmbedding && !string.IsNullOrWhiteSpace(options.Routing.OnnxModelPath))
+    {
+        var onnxEngine = new OnnxEmbeddingVectorEngine(
+            options.Routing.OnnxModelPath,
+            options.Routing.OnnxExecutionProvider,
+            fallbackEngine: new DenseEmbeddingVectorEngine(),
+            logger: logger);
+
+        return new HybridSemanticVectorEngine(
+            sparseEngine: new TfIdfSemanticVectorEngine(),
+            denseEngine: onnxEngine,
+            highConfidenceThreshold: options.Routing.HybridHighConfidenceThreshold);
+    }
+
+    return new HybridSemanticVectorEngine(
+        sparseEngine: new TfIdfSemanticVectorEngine(),
+        denseEngine: new DenseEmbeddingVectorEngine(),
+        highConfidenceThreshold: options.Routing.HybridHighConfidenceThreshold);
+});
 
 // Thompson 采样 + Contextual Bandit 状态持久化（共享同一 SQLite 文件）。
 builder.Services.AddSingleton<IThompsonStateStore>(sp =>
@@ -229,6 +295,32 @@ builder.Services.AddSingleton<IResponseCache>(sp => new MemoryResponseCache(
 // 同一实例的具体类型注册：MaxEntries 在构造时绑定（重启生效），dashboard 状态端点借它读命中/写入统计。
 builder.Services.AddSingleton(sp => (MemoryResponseCache)sp.GetRequiredService<IResponseCache>());
 
+builder.Services.AddSingleton<ISemanticResponseCache>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new SemanticResponseCache(options.Routing.SemanticCacheMaxEntries);
+});
+
+builder.Services.AddSingleton<IAdaptiveConcurrencyLimiter>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new AdaptiveConcurrencyLimiter(options.Routing.AdaptiveMinLimit, options.Routing.AdaptiveMaxLimit);
+});
+
+builder.Services.AddSingleton<IStreamingComplianceFilter>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new StreamingSlidingWindowFilter(options.Routing);
+});
+
+builder.Services.AddSingleton<KalmanLatencyTracker>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new KalmanLatencyTracker(
+        targetLatencyMs: options.Routing.KalmanTargetLatencyMs,
+        penaltyGamma: options.Routing.KalmanPenaltyGamma);
+});
+
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
     var ledger = sp.GetRequiredService<CostLedger>();
@@ -236,6 +328,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var tokenEstimator = sp.GetRequiredService<ITokenEstimator>();
     var vectorEngine = sp.GetRequiredService<ISemanticVectorEngine>();
     var tsStore = sp.GetRequiredService<ThompsonStateStore>();
+    var kalmanTracker = sp.GetRequiredService<KalmanLatencyTracker>();
     // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
     // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
@@ -253,10 +346,11 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore, null,
             sp.GetRequiredService<ContextualBanditState>()),
         new PromptCacheAffinityPolicy(sp.GetRequiredService<PromptCacheAffinityStore>()),
+        new ParetoFrontierPolicy(),
         new BudgetGuardPolicy(ledger),
         new QuotaAwarePolicy(sp.GetRequiredService<UpstreamQuotaStateStore>()),
         new FailoverPolicy(healthTracker),
-        new LoadBalancePolicy()
+        new LoadBalancePolicy(kalmanTracker)
     };
     return new RouterEngine(ledger, policies, tokenEstimator);
 });
@@ -275,7 +369,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     sp.GetRequiredService<ILogger<OutcomeRecorder>>(),
     banditStore: sp.GetRequiredService<ContextualBanditState>(),
     clientKeyService: sp.GetRequiredService<ClientKeyService>(),
-    httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>()));
+    httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>(),
+    kalmanTracker: sp.GetRequiredService<KalmanLatencyTracker>()));
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();

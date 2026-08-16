@@ -1,0 +1,201 @@
+using System.Collections.Concurrent;
+using System.Numerics;
+using System.Runtime.Intrinsics;
+using OptiRouter.Clients;
+
+namespace OptiRouter.Routing;
+
+/// <summary>
+/// 深度语义响应缓存实现。
+/// 支持基于 CJK 字符 n-gram TF-IDF 与 SIMD 加速的余弦相似度极速检索。
+/// </summary>
+public sealed class SemanticResponseCache : ISemanticResponseCache
+{
+    private readonly ConcurrentDictionary<string, CacheItem> _store = new(StringComparer.Ordinal);
+    private readonly int _maxEntries;
+
+    private sealed record CacheItem(
+        string Prompt,
+        float[] NormalizedVector,
+        RawChatResponse Response,
+        DateTime ExpiresAtUtc);
+
+    /// <summary>
+    /// 初始化语义响应缓存。
+    /// </summary>
+    /// <param name="maxEntries">最大条目数。</param>
+    public SemanticResponseCache(int maxEntries = 10000)
+    {
+        _maxEntries = Math.Max(100, maxEntries);
+    }
+
+    /// <inheritdoc />
+    public Task<(bool Hit, RawChatResponse? Response, double Similarity, string? MatchedPrompt)> TryGetAsync(
+        string prompt,
+        float similarityThreshold = 0.95f,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(prompt) || _store.IsEmpty)
+        {
+            return Task.FromResult<(bool, RawChatResponse?, double, string?)>((false, null, 0.0, null));
+        }
+
+        DateTime now = DateTime.UtcNow;
+        var queryVector = BuildNormalizedVector(prompt);
+
+        double maxSim = 0.0;
+        CacheItem? bestMatch = null;
+
+        foreach (var kvp in _store)
+        {
+            var item = kvp.Value;
+            if (item.ExpiresAtUtc <= now)
+            {
+                _store.TryRemove(kvp.Key, out _);
+                continue;
+            }
+
+            double sim = ComputeCosineSimilarity(queryVector, item.NormalizedVector);
+            if (sim > maxSim)
+            {
+                maxSim = sim;
+                bestMatch = item;
+            }
+        }
+
+        if (bestMatch != null && maxSim >= similarityThreshold)
+        {
+            return Task.FromResult<(bool, RawChatResponse?, double, string?)>((true, bestMatch.Response, maxSim, bestMatch.Prompt));
+        }
+
+        return Task.FromResult<(bool, RawChatResponse?, double, string?)>((false, null, maxSim, null));
+    }
+
+    /// <inheritdoc />
+    public Task StoreAsync(
+        string prompt,
+        RawChatResponse response,
+        TimeSpan ttl,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(prompt) || response == null)
+        {
+            return Task.CompletedTask;
+        }
+
+        DateTime now = DateTime.UtcNow;
+
+        // 容量控制：如达到上限则清理过期项及早期的 20% 条目
+        if (_store.Count >= _maxEntries)
+        {
+            EvictExpiredOrOldest(now);
+        }
+
+        var vector = BuildNormalizedVector(prompt);
+        var item = new CacheItem(prompt, vector, response, now.Add(ttl));
+
+        _store[prompt] = item;
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public void Clear()
+    {
+        _store.Clear();
+    }
+
+    private void EvictExpiredOrOldest(DateTime now)
+    {
+        foreach (var kvp in _store)
+        {
+            if (kvp.Value.ExpiresAtUtc <= now)
+            {
+                _store.TryRemove(kvp.Key, out _);
+            }
+        }
+
+        if (_store.Count >= _maxEntries)
+        {
+            int toRemove = _store.Count / 5;
+            foreach (var key in _store.Keys.Take(toRemove))
+            {
+                _store.TryRemove(key, out _);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 将文本转化为归一化特征向量（结合 CJK 单字与 2-gram 散列映射至定长向量）。
+    /// </summary>
+    private static float[] BuildNormalizedVector(string text, int vectorSize = 1024)
+    {
+        float[] vector = new float[vectorSize];
+        string cleaned = text.Trim().ToLowerInvariant();
+        if (cleaned.Length == 0) return vector;
+
+        // 1. CJK 单字频率统计（权重 1.0）
+        for (int i = 0; i < cleaned.Length; i++)
+        {
+            int index = Math.Abs((cleaned[i] * 31) ^ 0x55555555) % vectorSize;
+            vector[index] += 1.0f;
+        }
+
+        // 2. 2-gram 散列补充（权重 1.5）
+        for (int i = 0; i < cleaned.Length - 1; i++)
+        {
+            int hash = HashTwoChars(cleaned[i], cleaned[i + 1]);
+            int index = Math.Abs(hash) % vectorSize;
+            vector[index] += 1.5f;
+        }
+
+        // 3. L2 SIMD 归一化 (使向量模长为 1，此时点积等价于余弦相似度)
+        float sumSq = 0.0f;
+        for (int i = 0; i < vectorSize; i++)
+        {
+            sumSq += vector[i] * vector[i];
+        }
+
+        if (sumSq > 1e-6f)
+        {
+            float norm = MathF.Sqrt(sumSq);
+            for (int i = 0; i < vectorSize; i++)
+            {
+                vector[i] /= norm;
+            }
+        }
+
+        return vector;
+    }
+
+    private static int HashTwoChars(char c1, char c2)
+    {
+        return (c1 << 16) | c2;
+    }
+
+    /// <summary>
+    /// 使用 SIMD 极速计算两个归一化向量的点积（即余弦相似度）。
+    /// </summary>
+    private static double ComputeCosineSimilarity(float[] v1, float[] v2)
+    {
+        if (v1.Length != v2.Length) return 0.0;
+
+        float dot = 0.0f;
+        int size = v1.Length;
+        int simdLength = Vector<float>.Count;
+        int i = 0;
+
+        for (; i <= size - simdLength; i += simdLength)
+        {
+            var va = new Vector<float>(v1, i);
+            var vb = new Vector<float>(v2, i);
+            dot += Vector.Dot(va, vb);
+        }
+
+        for (; i < size; i++)
+        {
+            dot += v1[i] * v2[i];
+        }
+
+        return Math.Clamp(dot, 0.0f, 1.0f);
+    }
+}

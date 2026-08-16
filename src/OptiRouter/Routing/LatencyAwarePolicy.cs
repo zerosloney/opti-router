@@ -218,7 +218,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
         return (result, promoted.Name);
     }
 
-    /// <summary>同 tier 段内：根据配置选择上下文 bandit / Thompson / 延迟感知重排。</summary>
+    /// <summary>同 tier 段内：根据配置选择上下文 bandit / Thompson / 延迟感知 (SLA) 重排。</summary>
     private List<ModelEndpointOptions> ReorderSegment(
         List<ModelEndpointOptions> segment,
         int minSamples,
@@ -235,11 +235,45 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             return ReorderByThompsonSampling(segment);
         }
 
-        return ReorderByLatencyScore(segment, minSamples);
+        return ReorderByLatencyScore(segment, minSamples, context.Options.Routing.DefaultSlaMode);
     }
 
-    /// <summary>
-    /// 上下文老虎机（LinUCB）重排：用分类信号 + tier 构造上下文特征，每模型 LinUCB 打分降序。
+    /// <summary>同 tier 段内：按 SLA 维度（Balanced / TTFT / TPS）计算得分降序排列。</summary>
+    private List<ModelEndpointOptions> ReorderByLatencyScore(List<ModelEndpointOptions> segment, int minSamples, SlaMode slaMode)
+    {
+        var ordered = new List<(ModelEndpointOptions Model, double Score)>();
+        var tail = new List<ModelEndpointOptions>();
+
+        foreach (var m in segment)
+        {
+            var stats = _statsProvider.GetStats(m.Name);
+            if (stats is not null && stats.SampleCount >= minSamples)
+            {
+                double score = slaMode switch
+                {
+                    SlaMode.Ttft => 1.0 / ((stats.AverageTtftMs > 0 ? stats.AverageTtftMs : stats.AverageLatencyMs) + LatencyFloorMs),
+                    SlaMode.Tps => stats.AverageTps > 0 ? stats.AverageTps : (1000.0 / Math.Max(1.0, stats.AverageLatencyMs)),
+                    _ => 1.0 / (stats.AverageLatencyMs + 0.5 * stats.P95LatencyMs + LatencyFloorMs)
+                };
+                ordered.Add((m, score));
+            }
+            else
+            {
+                tail.Add(m);
+            }
+        }
+
+        if (ordered.Count == 0) return segment;
+
+        var result = new List<ModelEndpointOptions>(segment.Count);
+        ordered.Sort((a, b) => b.Score.CompareTo(a.Score));
+        foreach (var (model, _) in ordered)
+            result.Add(model);
+        result.AddRange(tail);
+        return result;
+    }
+
+    /// <summary>上下文老虎机（LinUCB）重排：用分类信号 + tier 构造上下文特征，每模型 LinUCB 打分降序。
     /// 修非上下文 Thompson 「只优化延迟、系统性低估 Strong」的缺陷——LinUCB 用请求特征学习「模型↔任务」匹配。
     /// </summary>
     private List<ModelEndpointOptions> ReorderByContextualBandit(

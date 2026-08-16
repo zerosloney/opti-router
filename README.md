@@ -174,7 +174,10 @@ curl http://localhost:5000/health
 | `EnableHealthProbe` | 是否启用后台主动健康探活（定时对所有启用模型探测，结果上报断路器） | `true` |
 | `HealthProbeIntervalSeconds` | 后台探活间隔秒数 | `60` |
 | `EnableSemanticRouter` | 是否启用向量空间语义路由 | `true` |
-| `SemanticRouterMode` | `Hybrid`（TF-IDF 高置信短路 + 第二阶段）/ `TfIdf` / `Dense`；内置 Dense 是稳定词法特征哈希，不是训练 embedding | `Hybrid` |
+| `SemanticRouterMode` | `Hybrid`（TF-IDF 高置信短路 + 第二阶段）/ `TfIdf` / `Dense` | `Hybrid` |
+| `EnableOnnxEmbedding` | 是否启用本地 ONNX 轻量级向量模型（如 bge-small-zh / all-MiniLM-L6-v2）进行深层隐式语义路由 | `false` |
+| `OnnxModelPath` | 本地 ONNX 模型文件路径（如 `models/bge-small-zh.onnx`） | `null` |
+| `OnnxExecutionProvider` | ONNX 执行提供者：`CPU` 或 `CUDA` | `CPU` |
 | `HybridHighConfidenceThreshold` | Hybrid 模式下 TF-IDF 高置信短路阈值；低于阈值交给第二阶段判定 | `0.45` |
 | `SemanticSimilarityThreshold` | 语义匹配余弦相似度阈值 `[0.0, 1.0]`，低于此值不命中 | `0.25` |
 | `SemanticRoutes` | 语义路由规则列表，每条含 `Name`/`TargetTier`/`Phrases` | `[]` |
@@ -209,8 +212,32 @@ curl http://localhost:5000/health
 | `FusionRouterTemperature` | 融合路由 panel/analyst 采样温度，范围 `[0, 2]` | `0.0` |
 | `FusionRouterPanelTemperature` | panel 专用采样温度；`null`=沿用 `FusionRouterTemperature` | `null` |
 | `FusionRouterMinComplexity` | 融合路由最低复杂度门控（`Unknown`/`Simple`/`Standard`/`Complex`） | `Unknown` |
+| `EnableOnnxEmbedding` | 启用本地 ONNX Transformer 轻量级 Embedding 深度语义向量路由引擎 | `false` |
+| `OnnxModelPath` | ONNX 模型文件绝对路径或相对路径（如 `"data/all-MiniLM-L6-v2.onnx"`） | `"data/all-MiniLM-L6-v2.onnx"` |
+| `OnnxExecutionProvider` | ONNX 执行提供者，可选 `"CPU"` 或 `"CUDA"` | `"CPU"` |
+| `EnableOtlpTracing` | 启用原生 OpenTelemetry OTLP Exporter 导出 ActivitySource DAG 链路追踪 | `false` |
+| `OtlpEndpoint` | OTLP Exporter 接收端点（如 `"http://localhost:4317"`） | `"http://localhost:4317"` |
+| `OtlpProtocol` | OTLP 传输协议：可选 `"grpc"` 或 `"http/protobuf"` | `"grpc"` |
+| `OtlpServiceName` | OpenTelemetry 导出的服务名称 | `"OptiRouter"` |
 | `EnableMetrics` | 启用 Prometheus `/metrics` 端点（无鉴权，仅聚合数+模型名） | `true` |
 | `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
+
+### 分布式存储与多节点 K8s 部署 (Kubernetes Multi-Node Deployment)
+
+对于无状态多节点 Kubernetes 部署，OptiRouter 提炼了抽象存储接口 `ICostLedgerStore` 与 `IRequestAuditStore`，支持通过 PostgreSQL 或 Redis 实现跨节点共享分布式账本与审计汇总：
+
+```json
+{
+  "OptiRouter": {
+    "Budget": {
+      "StoreProvider": "Redis", // 可选 "Sqlite" | "Postgres" | "Redis" | "InMemory"
+      "RedisConnectionString": "localhost:6379,abortConnect=false",
+      "RedisKeyPrefix": "optirouter:",
+      "PostgresConnectionString": "Host=localhost;Database=optirouter;Username=postgres;Password=secret"
+    }
+  }
+}
+```
 
 ## curl 示例
 

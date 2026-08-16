@@ -1,3 +1,5 @@
+using OptiRouter.Routing;
+
 namespace OptiRouter.Configuration;
 
 /// <summary>
@@ -187,6 +189,86 @@ public sealed class RoutingOptions
     /// 语义路由规则列表。
     /// </summary>
     public System.Collections.Generic.List<SemanticRouteOptions> SemanticRoutes { get; set; } = new();
+
+    /// <summary>
+    /// 是否启用 ONNX 本地轻量级向量模型进行深层隐式语义路由。
+    /// 开启后自动加载本地 ONNX 模型 (如 bge-small-zh / all-MiniLM-L6-v2) 替换默认词法特征哈希。
+    /// </summary>
+    public bool EnableOnnxEmbedding { get; set; } = false;
+
+    /// <summary>
+    /// 本地 ONNX Embedding 模型文件路径。
+    /// </summary>
+    public string? OnnxModelPath { get; set; } = null;
+
+    /// <summary>
+    /// ONNX 执行提供者，可选 "CPU" 或 "CUDA"。默认 "CPU"。
+    /// </summary>
+    public string OnnxExecutionProvider { get; set; } = "CPU";
+
+    /// <summary>
+    /// 是否启用原生 OpenTelemetry OTLP Exporter 链路追踪导出。
+    /// 开启后可将 OptiRouter 的 ActivitySource DAG 分布式追踪直接导出至 Jaeger, Tempo 或 Datadog。
+    /// </summary>
+    public bool EnableOtlpTracing { get; set; } = false;
+
+    /// <summary>
+    /// OTLP 接收端点 URL（如 "http://localhost:4317" 或 "http://jaeger:4318/v1/traces"）。
+    /// </summary>
+    public string OtlpEndpoint { get; set; } = "http://localhost:4317";
+
+    /// <summary>
+    /// OTLP 传输协议：可选 "grpc" 或 "http/protobuf"。默认 "grpc"。
+    /// </summary>
+    public string OtlpProtocol { get; set; } = "grpc";
+
+    /// <summary>
+    /// OpenTelemetry 导出的服务名称。默认 "OptiRouter"。
+    /// </summary>
+    public string OtlpServiceName { get; set; } = "OptiRouter";
+
+    /// <summary>
+    /// 是否启用深度语义向量响应缓存 (Semantic Response Cache)。
+    /// 开启后将基于语义相似度算法匹配历史高相似度 Prompt 缓存，实现 0 上游成本与亚毫秒极速响应。
+    /// </summary>
+    public bool EnableSemanticCache { get; set; } = false;
+
+    /// <summary>
+    /// 语义响应缓存命中的最低 Cosine 余弦相似度阈值。范围 [0.80, 0.99]，默认 0.95。
+    /// </summary>
+    public float SemanticCacheSimilarityThreshold { get; set; } = 0.95f;
+
+    /// <summary>
+    /// 语义响应缓存项生存时间（分钟）。默认 60 分钟。
+    /// </summary>
+    public int SemanticCacheTtlMinutes { get; set; } = 60;
+
+    /// <summary>
+    /// 语义响应缓存最大条目数。超出时触发 LRU/过期清理。默认 10000。
+    /// </summary>
+    public int SemanticCacheMaxEntries { get; set; } = 10000;
+
+    /// <summary>
+    /// 是否启用基于 TCP Vegas / AIMD 算法的上游自适应并发拥塞控制。
+    /// 开启后可针对上游 API 延迟飙升（拥塞）动态收缩并发许可，防爆线程池与内存。
+    /// </summary>
+    public bool EnableAdaptiveConcurrency { get; set; } = false;
+
+    /// <summary>
+    /// 自适应并发限制单模型最小允许并发许可数。默认 2。
+    /// </summary>
+    public int AdaptiveMinLimit { get; set; } = 2;
+
+    /// <summary>
+    /// 自适应并发限制单模型最大允许并发许可数。默认 50。
+    /// </summary>
+    public int AdaptiveMaxLimit { get; set; } = 50;
+
+    /// <summary>
+    /// 默认 SLA 路由模式（Balanced 综合延迟 / Ttft 首 Token 敏捷度 / Tps 生成吞吐率）。
+    /// 可通过 HTTP Header 'X-OptiRouter-SLA'（ttft / tps / balanced）覆盖单请求级别。
+    /// </summary>
+    public SlaMode DefaultSlaMode { get; set; } = SlaMode.Balanced;
 
     /// <summary>
     /// 是否启用会话粘性路由。开启后，同 X-Session-Id 的多轮对话尽量命中上次成功使用的模型，
@@ -528,6 +610,57 @@ public sealed class RoutingOptions
     /// 修改后需同步更新反代/Prometheus scrape 配置。
     /// </summary>
     public string MetricsEndpointPath { get; set; } = "/metrics";
+
+    /// <summary>
+    /// 是否启用零拷贝 SSE 流式滑动窗口敏感词与合规在线拦截。
+    /// </summary>
+    public bool EnableStreamingComplianceFilter { get; set; } = false;
+
+    /// <summary>
+    /// 流式在线检测敏感词列表。
+    /// </summary>
+    public System.Collections.Generic.List<string> StreamingSensitiveKeywords { get; set; } = new();
+
+    /// <summary>
+    /// 流式合规违规动作（Block 立即中断流 / Redact 掩码替代）。默认 Block。
+    /// </summary>
+    public OptiRouter.Compliance.ComplianceAction StreamingComplianceAction { get; set; } = OptiRouter.Compliance.ComplianceAction.Block;
+
+    /// <summary>
+    /// 流式敏感词掩码替换文本。仅当 StreamingComplianceAction 为 Redact 时生效。默认 "***"。
+    /// </summary>
+    public string StreamingComplianceReplacementMask { get; set; } = "***";
+
+    /// <summary>
+    /// 是否启用卡尔曼滤波与 P99 动态降权负载均衡。
+    /// 开启后结合 1D 卡尔曼滤波平滑估计真实隐藏延迟，并对高尾延 P99 异常 Provider 进行指数级降权。
+    /// </summary>
+    public bool EnableKalmanLoadBalance { get; set; } = false;
+
+    /// <summary>
+    /// 卡尔曼滤波 P99 降权的目标 SLA 延迟（毫秒）。默认 1000ms。
+    /// </summary>
+    public double KalmanTargetLatencyMs { get; set; } = 1000.0;
+
+    /// <summary>
+    /// 卡尔曼滤波 P99 超限降权的惩罚指数因子 γ。默认 1.5。
+    /// </summary>
+    public double KalmanPenaltyGamma { get; set; } = 1.5;
+
+    /// <summary>
+    /// 是否启用 Cost-Quality 帕累托前沿动态调节器。
+    /// </summary>
+    public bool EnableParetoFrontierRegulator { get; set; } = false;
+
+    /// <summary>
+    /// 帕累托前沿 Utility 质量权重因子 λ \in [0, 1]。默认 0.7 (70% 质量, 30% 成本)。
+    /// </summary>
+    public double ParetoQualityWeight { get; set; } = 0.7;
+
+    /// <summary>
+    /// 是否启用严格帕累托前沿过滤（过滤掉被其他模型绝对支配的劣势模型）。
+    /// </summary>
+    public bool ParetoStrictFrontierFilter { get; set; } = false;
 }
 
 /// <summary>

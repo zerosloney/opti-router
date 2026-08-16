@@ -25,6 +25,7 @@ public sealed class OutcomeRecorder
     private readonly ContextualBanditState? _banditStore;
     private readonly PromptCacheAffinityStore _promptAffinityStore;
     private readonly UpstreamQuotaStateStore _quotaStore;
+    private readonly KalmanLatencyTracker? _kalmanTracker;
     private readonly ILogger<OutcomeRecorder> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly ClientKeyService? _clientKeyService;
@@ -43,7 +44,8 @@ public sealed class OutcomeRecorder
         TimeProvider? timeProvider = null,
         ContextualBanditState? banditStore = null,
         ClientKeyService? clientKeyService = null,
-        IHttpContextAccessor? httpContextAccessor = null)
+        IHttpContextAccessor? httpContextAccessor = null,
+        KalmanLatencyTracker? kalmanTracker = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -58,6 +60,7 @@ public sealed class OutcomeRecorder
         _banditStore = banditStore;
         _clientKeyService = clientKeyService;
         _httpContextAccessor = httpContextAccessor;
+        _kalmanTracker = kalmanTracker;
     }
 
     /// <summary>
@@ -153,6 +156,18 @@ public sealed class OutcomeRecorder
         catch
         {
             // 指标记录失败不得影响请求路径。
+        }
+
+        try
+        {
+            if (success && latencyMs > 0 && !string.IsNullOrWhiteSpace(model))
+            {
+                _kalmanTracker?.RecordObservation(model, latencyMs);
+            }
+        }
+        catch
+        {
+            // 卡尔曼滤波记录失败不得影响请求路径。
         }
     }
 

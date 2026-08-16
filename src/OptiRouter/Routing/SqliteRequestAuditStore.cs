@@ -113,7 +113,14 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
 
             if (!existing.Contains(columnName))
             {
-                Execute($"ALTER TABLE request_audit ADD COLUMN {columnName} {definition};");
+                try
+                {
+                    Execute($"ALTER TABLE request_audit ADD COLUMN {columnName} {definition};");
+                }
+                catch (SqliteException ex) when (ex.Message.Contains("duplicate column name", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Ignore duplicate column error if another connection added the column in parallel
+                }
             }
         }
     }

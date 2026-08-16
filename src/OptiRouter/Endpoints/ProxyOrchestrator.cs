@@ -7,6 +7,8 @@ using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Metrics;
 using OptiRouter.Routing;
+using OptiRouter.Concurrency;
+using OptiRouter.Compliance;
 
 namespace OptiRouter.Endpoints;
 
@@ -27,24 +29,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly FusionRouter _fusionRouter;
     private readonly RaceOrchestrator _raceOrchestrator;
     private readonly IResponseCache _responseCache;
+    private readonly ISemanticResponseCache _semanticCache;
+    private readonly IAdaptiveConcurrencyLimiter _adaptiveLimiter;
+    private readonly IStreamingComplianceFilter _complianceFilter;
     private readonly RegenerateFeedbackTracker _regenerateTracker;
     private bool _disposed;
 
     /// <summary>
     /// 初始化编排器。
     /// </summary>
-    /// <param name="clientProvider">模型客户端提供者。</param>
-    /// <param name="engine">路由引擎。</param>
-    /// <param name="options">路由配置监视器。Routing 开关经 reload 可生效；
-    /// 但 Models 端点（BaseUrl/ApiKey/Timeout）按模型名缓存在 ModelClientProvider，变更需重启进程。</param>
-    /// <param name="healthTracker">跨请求模型健康跟踪器。</param>
-    /// <param name="recorder">统一的审计/成本/指标/粘性/Thompson 记录器。</param>
-    /// <param name="cascadeHandler">Cheap→Strong 级联自校验处理器。</param>
-    /// <param name="fusionRouter">panel→analyst→outer 融合路由器。</param>
-    /// <param name="raceOrchestrator">并行首试（Fusion-lite）编排器。</param>
-    /// <param name="responseCache">响应缓存（仅非流式幂等请求命中即短路返回，不经路由/上游）。</param>
-    /// <param name="regenerateTracker">regenerate 负反馈跟踪器（同键请求重发时惩罚上次成功模型）。</param>
-    /// <param name="logger">日志记录器。</param>
     public ProxyOrchestrator(
         IModelClientProvider clientProvider,
         RouterEngine engine,
@@ -56,7 +49,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         RaceOrchestrator raceOrchestrator,
         IResponseCache responseCache,
         RegenerateFeedbackTracker regenerateTracker,
-        ILogger<ProxyOrchestrator> logger)
+        ILogger<ProxyOrchestrator> logger,
+        ISemanticResponseCache? semanticCache = null,
+        IAdaptiveConcurrencyLimiter? adaptiveLimiter = null,
+        IStreamingComplianceFilter? complianceFilter = null)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
@@ -79,6 +75,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _fusionRouter = fusionRouter;
         _raceOrchestrator = raceOrchestrator;
         _responseCache = responseCache;
+        _semanticCache = semanticCache ?? new SemanticResponseCache();
+        _adaptiveLimiter = adaptiveLimiter ?? new AdaptiveConcurrencyLimiter();
+        _complianceFilter = complianceFilter ?? new StreamingSlidingWindowFilter(_options.CurrentValue.Routing);
         _regenerateTracker = regenerateTracker;
         _logger = logger;
     }
@@ -150,6 +149,26 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
             _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap);
             return cached;
+        }
+
+        // 深度语义向量响应缓存 (Semantic Cache) 尝试相似度匹配
+        if (options.Routing.EnableSemanticCache && !request.Stream)
+        {
+            string? promptText = GetLastUserPrompt(request);
+            if (!string.IsNullOrWhiteSpace(promptText))
+            {
+                var (semHit, semCached, semSim, matchedPrompt) = await _semanticCache.TryGetAsync(
+                    promptText,
+                    options.Routing.SemanticCacheSimilarityThreshold,
+                    ct).ConfigureAwait(false);
+
+                if (semHit && semCached is not null)
+                {
+                    _recorder.RecordAudit(null, "semantic-cache", 0, null, 0m, 0, sessionId, $"semantic-cache-hit (sim={semSim:F3})", true, null, false, ModelTier.Cheap);
+                    _logger.LogInformation("Semantic Response Cache HIT! Similarity: {Sim:F3}, Matched Prompt: {Prompt}", semSim, matchedPrompt);
+                    return semCached;
+                }
+            }
         }
 
         bool regeneratePenaltyApplied = false;
@@ -289,11 +308,20 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 // 未上报就离开本候选（不可重试异常、外部取消等）时，finally 释放探测槽位，避免泄漏。
                 bool outcomeReported = false;
                 var attemptSw = System.Diagnostics.Stopwatch.StartNew();
+                IDisposable? adaptiveLease = null;
+                if (options.Routing.EnableAdaptiveConcurrency)
+                {
+                    adaptiveLease = await _adaptiveLimiter.AcquireAsync(candidate.Name, effectiveCt).ConfigureAwait(false);
+                }
                 try
                 {
                     var client = _clientProvider.GetClient(candidate);
                     var response = await client.CompleteRawAsync(request, effectiveCt).ConfigureAwait(false);
                     attemptSw.Stop();
+                    if (options.Routing.EnableAdaptiveConcurrency)
+                    {
+                        _adaptiveLimiter.RecordRtt(candidate.Name, attemptSw.Elapsed.TotalMilliseconds);
+                    }
 
                     decimal cost = response.Usage is not null
                         ? CostCalculator.Compute(response.Usage, candidate)
@@ -354,6 +382,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     var finalResponse = ProcessResponse(response, piiMap);
                     if (cacheKey is not null)
                         _responseCache.Set(cacheKey, finalResponse, TimeSpan.FromSeconds(options.Routing.ResponseCacheTtlSeconds));
+                    if (options.Routing.EnableSemanticCache && !request.Stream)
+                    {
+                        string? promptText = GetLastUserPrompt(request);
+                        if (!string.IsNullOrWhiteSpace(promptText))
+                        {
+                            await _semanticCache.StoreAsync(
+                                promptText, finalResponse, TimeSpan.FromMinutes(options.Routing.SemanticCacheTtlMinutes), ct).ConfigureAwait(false);
+                        }
+                    }
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
                     return finalResponse;
                 }
@@ -427,6 +464,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 finally
                 {
+                    adaptiveLease?.Dispose();
                     if (!outcomeReported)
                         _healthTracker.ReleaseProbe(candidate.Name);
                 }
@@ -476,6 +514,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         long totalBytesTransferred = 0;
         long maxResponseBytes = options.Routing.MaxResponseStreamBytes;
         bool fusionRouterAttempted = false;
+        StreamingSlidingWindowBuffer? complianceBuffer = options.Routing.EnableStreamingComplianceFilter
+            ? new StreamingSlidingWindowBuffer()
+            : null;
 
         // PII 脱敏（与非流式 SendAsync 对称）：流式路径同样必须在上游发送前替换敏感数据，
         // 并在每个 yield 行上反向还原，否则原始 PII 直达上游、占位符泄露给客户端。
@@ -721,7 +762,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         // 先还原 PII 再统计字节：限流须约束实际下发客户端的字节数，
                         // 否则占位符还原为（更长的）原文后实际体量可超过 MaxResponseStreamBytes。
-                        var restoredFirst = RestorePii(firstLine, piiMap);
+                        var restoredFirst = ProcessCompliance(RestorePii(firstLine, piiMap), complianceBuffer, options.Routing);
                         totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(restoredFirst.Data ?? "");
                         if (totalBytesTransferred > maxResponseBytes)
                         {
@@ -752,7 +793,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             if (line.Usage is not null)
                                 finalUsage = line.Usage;
 
-                            var restored = RestorePii(line, piiMap);
+                            var restored = ProcessCompliance(RestorePii(line, piiMap), complianceBuffer, options.Routing);
                             totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(restored.Data ?? "");
                             if (totalBytesTransferred > maxResponseBytes)
                             {
@@ -874,5 +915,93 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             return line;
 
         return line with { Data = piiMap.Restore(line.Data) };
+    }
+
+    private static string? GetLastUserPrompt(ChatRequest request)
+    {
+        if (request?.Messages is null) return null;
+        for (int i = request.Messages.Count - 1; i >= 0; i--)
+        {
+            var msg = request.Messages[i];
+            if (string.Equals(msg.Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                var text = msg.GetText();
+                if (!string.IsNullOrWhiteSpace(text)) return text;
+            }
+        }
+        return null;
+    }
+
+    private RawStreamLine ProcessCompliance(RawStreamLine line, StreamingSlidingWindowBuffer? buffer, RoutingOptions routingOpts)
+    {
+        if (buffer == null || !routingOpts.EnableStreamingComplianceFilter || string.IsNullOrEmpty(line.Data))
+            return line;
+
+        string? delta = ExtractDeltaText(line.Data);
+        if (string.IsNullOrEmpty(delta))
+            return line;
+
+        var result = _complianceFilter.ProcessChunk(delta, buffer);
+        if (result.IsViolation)
+        {
+            if (routingOpts.StreamingComplianceAction == ComplianceAction.Block)
+            {
+                _logger.LogWarning("Streaming compliance violation intercepted: keyword={Keyword}", result.MatchedKeyword);
+                throw new ComplianceViolationException($"Streaming content blocked due to sensitive keyword match ({result.MatchedKeyword}).", result.MatchedKeyword);
+            }
+            else if (routingOpts.StreamingComplianceAction == ComplianceAction.Redact)
+            {
+                string redactedData = ReplaceDeltaContent(line.Data, result.ProcessedText);
+                return new RawStreamLine(redactedData, line.Usage, line.Metadata);
+            }
+        }
+
+        return line;
+    }
+
+    private static string? ExtractDeltaText(string data)
+    {
+        if (string.IsNullOrWhiteSpace(data) || data.Trim() == "[DONE]")
+            return null;
+
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(data);
+            if (doc.RootElement.TryGetProperty("choices", out var choices) &&
+                choices.ValueKind == System.Text.Json.JsonValueKind.Array &&
+                choices.GetArrayLength() > 0)
+            {
+                var choice = choices[0];
+                if (choice.TryGetProperty("delta", out var delta) &&
+                    delta.TryGetProperty("content", out var content) &&
+                    content.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    return content.GetString();
+                }
+            }
+        }
+        catch
+        {
+        }
+        return null;
+    }
+
+    private static string ReplaceDeltaContent(string data, string newDelta)
+    {
+        try
+        {
+            if (System.Text.Json.Nodes.JsonNode.Parse(data) is System.Text.Json.Nodes.JsonObject node)
+            {
+                if (node["choices"]?[0]?["delta"] is System.Text.Json.Nodes.JsonObject deltaObj)
+                {
+                    deltaObj["content"] = newDelta;
+                    return node.ToJsonString();
+                }
+            }
+        }
+        catch
+        {
+        }
+        return data;
     }
 }
