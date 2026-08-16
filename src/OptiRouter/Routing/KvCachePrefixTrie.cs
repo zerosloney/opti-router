@@ -18,23 +18,46 @@ public sealed record KvCacheHitResult(
 /// 维护全局系统提示词 (System Prompt) 及 RAG 长上下文前缀索引，计算输入 Prompt 与各上游模型历史 KV Cache 的重合前缀长度。
 /// 优先将具备热 KV Cache 前缀的请求“钉选”至对应 Provider，以最大化利用 OpenAI / Claude / DeepSeek 上游的 Prompt Caching 优惠（降低 80% 延迟与 50%~90% 成本）。
 /// </summary>
+/// <remarks>
+/// 内存有界：节点总数受硬上限（默认 100k）约束，超限或过期子树由
+/// <see cref="PruneExpired"/> 周期性回收（复用缓存 TTL 作为子树活跃判定），
+/// 防止长期运行下唯一前缀路径无限增长耗尽内存。
+/// </remarks>
 public sealed class KvCachePrefixTrie
 {
     private sealed class TrieNode
     {
         public ConcurrentDictionary<string, TrieNode> Children { get; } = new(StringComparer.Ordinal);
         public ConcurrentDictionary<string, DateTimeOffset> ModelAccessTimes { get; } = new(StringComparer.OrdinalIgnoreCase);
-        public ConcurrentDictionary<string, int> ModelHitCounts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public DateTimeOffset LastAccessUtc = DateTimeOffset.MinValue;
     }
 
     private readonly TrieNode _root = new();
     private readonly TimeSpan _cacheTtl;
+    private readonly TimeSpan _pruneMinInterval;
     private readonly TimeProvider _timeProvider;
+    private readonly int _maxNodes;
 
-    public KvCachePrefixTrie(TimeSpan? cacheTtl = null, TimeProvider? timeProvider = null)
+    private int _nodeCount;
+    private int _pruneInProgress;
+    private long _lastPruneUtcTicks;
+
+    /// <summary>
+    /// 当前 Trie 节点总数（含根节点），用于测试与诊断。
+    /// </summary>
+    public int NodeCount => Volatile.Read(ref _nodeCount);
+
+    public KvCachePrefixTrie(
+        TimeSpan? cacheTtl = null,
+        TimeProvider? timeProvider = null,
+        int maxNodes = 100_000,
+        TimeSpan? pruneMinInterval = null)
     {
         _cacheTtl = cacheTtl ?? TimeSpan.FromMinutes(10);
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _maxNodes = Math.Max(1, maxNodes);
+        _pruneMinInterval = pruneMinInterval ?? TimeSpan.FromSeconds(30);
+        Interlocked.Increment(ref _nodeCount); // 根节点
     }
 
     /// <summary>
@@ -87,9 +110,38 @@ public sealed class KvCachePrefixTrie
 
         foreach (var token in tokens)
         {
-            current = current.Children.GetOrAdd(token, _ => new TrieNode());
+            bool isNew = false;
+            current = current.Children.GetOrAdd(token, _ =>
+            {
+                isNew = true;
+                return new TrieNode();
+            });
+            if (isNew)
+            {
+                Interlocked.Increment(ref _nodeCount);
+            }
+            current.LastAccessUtc = now;
             current.ModelAccessTimes[modelName] = now;
-            current.ModelHitCounts.AddOrUpdate(modelName, 1, (_, count) => count + 1);
+
+            // 节点数超上限时尝试回收过期子树（带节流，避免每次插入全树扫描）。
+            if (_nodeCount > _maxNodes
+                && now.UtcTicks - Interlocked.Read(ref _lastPruneUtcTicks) >= _pruneMinInterval.Ticks
+                && Interlocked.Exchange(ref _pruneInProgress, 1) == 0)
+            {
+                try
+                {
+                    int removed = PruneExpired(now);
+                    if (removed > 0)
+                    {
+                        Interlocked.Add(ref _nodeCount, -removed);
+                    }
+                    Interlocked.Exchange(ref _lastPruneUtcTicks, _timeProvider.GetUtcNow().UtcTicks);
+                }
+                finally
+                {
+                    Volatile.Write(ref _pruneInProgress, 0);
+                }
+            }
         }
     }
 
@@ -142,5 +194,36 @@ public sealed class KvCachePrefixTrie
 
         double savingsRatio = Math.Min(0.9, 0.3 + 0.05 * bestMatchedLength);
         return new KvCacheHitResult(bestModel, bestMatchedLength, savingsRatio, bestHitTime);
+    }
+
+    /// <summary>
+    /// 递归回收超过 <paramref name="cutoff"/> 未活跃的子树，返回删除的节点数。
+    /// 子树删除判定：该节点自身及其所有后代在 TTL 窗口内均无任何模型访问。
+    /// </summary>
+    private int PruneExpired(DateTimeOffset cutoff)
+    {
+        DateTimeOffset expiredBefore = cutoff - _cacheTtl;
+        int removed = 0;
+        PruneSubtree(_root, expiredBefore, ref removed);
+        return removed;
+    }
+
+    /// <summary>
+    /// 剪除本节点下所有过期子树；返回 true 表示本节点自身也可从父节点移除。
+    /// 判定只依据节点自身活跃性（LastAccessUtc），而非整个子树过期——被多条路径共享的
+    /// 子节点（如公共后缀）由其它活跃路径保活，删除过期父节点不影响其可达性。
+    /// </summary>
+    private static bool PruneSubtree(TrieNode node, DateTimeOffset cutoff, ref int removed)
+    {
+        foreach (var child in node.Children.ToList())
+        {
+            if (PruneSubtree(child.Value, cutoff, ref removed))
+            {
+                node.Children.TryRemove(child.Key, out _);
+                removed++;
+            }
+        }
+
+        return node.LastAccessUtc < cutoff;
     }
 }
