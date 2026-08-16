@@ -298,7 +298,7 @@ builder.Services.AddSingleton(sp => (MemoryResponseCache)sp.GetRequiredService<I
 builder.Services.AddSingleton<ISemanticResponseCache>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    return new SemanticResponseCache(options.Routing.SemanticCacheMaxEntries);
+    return new SemanticResponseCache(options.Routing.SemanticCacheMaxEntries, sp.GetService<ISemanticVectorEngine>());
 });
 
 builder.Services.AddSingleton<IAdaptiveConcurrencyLimiter>(sp =>
@@ -330,7 +330,8 @@ builder.Services.AddSingleton<KvCachePrefixTrie>(sp =>
 builder.Services.AddSingleton<ReasoningEffortController>();
 builder.Services.AddSingleton<MultiAgentDagRouter>();
 builder.Services.AddSingleton<CrossProviderSpeculativeEngine>();
-builder.Services.AddSingleton<ByzantineConsensusEngine>();
+builder.Services.AddSingleton<ByzantineConsensusEngine>(sp =>
+    new ByzantineConsensusEngine(sp.GetService<ISemanticVectorEngine>()));
 builder.Services.AddSingleton<PredictiveResilienceEngine>();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>

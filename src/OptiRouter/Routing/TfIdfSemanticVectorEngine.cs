@@ -67,6 +67,9 @@ public sealed class TfIdfSemanticVectorEngine : ISemanticVectorEngine
         return (matchedRoute, maxSimilarity);
     }
 
+    /// <inheritdoc />
+    public float[] Embed(string text) => new DenseEmbeddingVectorEngine().GetEmbedding(text);
+
     private CompiledRoutes GetOrCreateCache(List<SemanticRouteOptions> routes)
     {
         lock (_compileLock)

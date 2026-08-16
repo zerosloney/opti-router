@@ -42,4 +42,24 @@ public class ByzantineConsensusEngineTests
         Assert.Equal("deepseek-v3", result.WinningModelName);
         Assert.Empty(result.OutlierModels);
     }
+
+    [Fact]
+    public void EvaluateConsensus_WithDenseVectorEngine_CorrectlyIdentifiesOutlier()
+    {
+        var vectorEngine = new DenseEmbeddingVectorEngine();
+        var engine = new ByzantineConsensusEngine(vectorEngine);
+
+        var candidates = new List<ModelResponseCandidate>
+        {
+            new("modelA", "Deep learning transformer models require self-attention mechanism and multi-head projection."),
+            new("modelB", "Deep learning transformer architecture utilizes self-attention and multi-head feedforward projection."),
+            new("modelC", "Cooking pasta with tomato sauce and fresh basil on low temperature.")
+        };
+
+        var result = engine.EvaluateConsensus(candidates, outlierThreshold: 0.40);
+
+        Assert.True(result.ConsensusAchieved);
+        Assert.Contains("modelC", result.OutlierModels);
+        Assert.True(result.WinningModelName is "modelA" or "modelB");
+    }
 }

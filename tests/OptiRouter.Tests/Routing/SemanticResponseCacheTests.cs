@@ -69,4 +69,29 @@ public class SemanticResponseCacheTests
         Assert.False(hit);
         Assert.Null(response);
     }
+
+    [Fact]
+    public async Task SemanticResponseCache_WithVectorEngine_HitsSimilarPrompt()
+    {
+        var vectorEngine = new DenseEmbeddingVectorEngine();
+        var cache = new SemanticResponseCache(maxEntries: 100, vectorEngine: vectorEngine);
+
+        string prompt1 = "How to sort an array in C#?";
+        string prompt2 = "How to sort an array in C# efficiently?";
+
+        var dummyResponse = new RawChatResponse(
+            Body: "{\"choices\":[{\"message\":{\"content\":\"Use Array.Sort or LINQ OrderBy\"}}]}",
+            Usage: null,
+            Metadata: null);
+
+        await cache.StoreAsync(prompt1, dummyResponse, TimeSpan.FromMinutes(10));
+
+        var (hit, response, similarity, matchedPrompt) = await cache.TryGetAsync(prompt2, similarityThreshold: 0.60f);
+
+        Assert.True(hit);
+        Assert.NotNull(response);
+        Assert.Equal(dummyResponse.Body, response.Body);
+        Assert.True(similarity >= 0.60);
+        Assert.Equal(prompt1, matchedPrompt);
+    }
 }

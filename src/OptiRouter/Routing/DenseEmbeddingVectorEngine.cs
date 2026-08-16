@@ -66,6 +66,9 @@ public sealed class DenseEmbeddingVectorEngine : ISemanticVectorEngine
         return (bestRoute, maxSimilarity);
     }
 
+    /// <inheritdoc />
+    public float[] Embed(string text) => GetEmbedding(text);
+
     /// <summary>
     /// 对输入文本计算 L2 归一化向量。默认是词法特征哈希；注入函数时由调用方决定语义。
     /// </summary>

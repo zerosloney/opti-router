@@ -134,6 +134,9 @@ public sealed class OnnxEmbeddingVectorEngine : ISemanticVectorEngine, IDisposab
         }
     }
 
+    /// <inheritdoc />
+    public float[] Embed(string text) => GetEmbedding(text);
+
     /// <summary>
     /// 对给定文本计算 ONNX 密向量表示。
     /// </summary>

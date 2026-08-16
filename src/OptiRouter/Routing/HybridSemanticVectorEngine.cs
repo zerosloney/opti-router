@@ -79,4 +79,7 @@ public sealed class HybridSemanticVectorEngine : ISemanticVectorEngine
 
         return sparseResult;
     }
+
+    /// <inheritdoc />
+    public float[] Embed(string text) => _denseEngine.Embed(text);
 }

@@ -29,6 +29,13 @@ public sealed record ByzantineConsensusResult(
 /// </summary>
 public sealed class ByzantineConsensusEngine
 {
+    private readonly ISemanticVectorEngine? _vectorEngine;
+
+    public ByzantineConsensusEngine(ISemanticVectorEngine? vectorEngine = null)
+    {
+        _vectorEngine = vectorEngine;
+    }
+
     /// <summary>
     /// 对多个候选模型的响应进行拜占庭共识评定与异常剔除。
     /// </summary>
@@ -64,57 +71,79 @@ public sealed class ByzantineConsensusEngine
         }
 
         int n = candidates.Count;
-        var vocab = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        var tokenized = new List<string[]>(n);
-
-        foreach (var cand in candidates)
-        {
-            var tokens = (cand.OutputText ?? string.Empty)
-                .Split(new[] { ' ', '\n', '\r', '\t', ',', '.', ';', ':', '!', '?' }, StringSplitOptions.RemoveEmptyEntries);
-            tokenized.Add(tokens);
-            foreach (var t in tokens)
-            {
-                if (!vocab.ContainsKey(t))
-                {
-                    vocab[t] = vocab.Count;
-                }
-            }
-        }
-
-        int dim = vocab.Count;
-        var vectors = new float[n][];
-        for (int i = 0; i < n; i++)
-        {
-            vectors[i] = new float[dim];
-            foreach (var t in tokenized[i])
-            {
-                if (vocab.TryGetValue(t, out int idx))
-                {
-                    vectors[i][idx] += 1.0f;
-                }
-            }
-            // L2 归一化
-            double normSq = 0.0;
-            for (int d = 0; d < dim; d++) normSq += vectors[i][d] * vectors[i][d];
-            if (normSq > 0.0)
-            {
-                float inv = (float)(1.0 / Math.Sqrt(normSq));
-                for (int d = 0; d < dim; d++) vectors[i][d] *= inv;
-            }
-        }
-
-        // 计算全两两余弦相似度矩阵
         var simMatrix = new double[n, n];
-        for (int i = 0; i < n; i++)
+
+        if (_vectorEngine != null)
         {
-            simMatrix[i, i] = 1.0;
-            for (int j = i + 1; j < n; j++)
+            var vectors = new float[n][];
+            for (int i = 0; i < n; i++)
             {
-                double dot = 0.0;
-                for (int d = 0; d < dim; d++) dot += vectors[i][d] * vectors[j][d];
-                double sim = Math.Clamp(dot, 0.0, 1.0);
-                simMatrix[i, j] = sim;
-                simMatrix[j, i] = sim;
+                vectors[i] = _vectorEngine.Embed(candidates[i].OutputText ?? string.Empty);
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                simMatrix[i, i] = 1.0;
+                for (int j = i + 1; j < n; j++)
+                {
+                    double sim = DenseEmbeddingVectorEngine.CosineSimilarity(vectors[i], vectors[j]);
+                    simMatrix[i, j] = sim;
+                    simMatrix[j, i] = sim;
+                }
+            }
+        }
+        else
+        {
+            var vocab = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var tokenized = new List<string[]>(n);
+
+            foreach (var cand in candidates)
+            {
+                var tokens = (cand.OutputText ?? string.Empty)
+                    .Split(new[] { ' ', '\n', '\r', '\t', ',', '.', ';', ':', '!', '?' }, StringSplitOptions.RemoveEmptyEntries);
+                tokenized.Add(tokens);
+                foreach (var t in tokens)
+                {
+                    if (!vocab.ContainsKey(t))
+                    {
+                        vocab[t] = vocab.Count;
+                    }
+                }
+            }
+
+            int dim = vocab.Count;
+            var vectors = new float[n][];
+            for (int i = 0; i < n; i++)
+            {
+                vectors[i] = new float[dim];
+                foreach (var t in tokenized[i])
+                {
+                    if (vocab.TryGetValue(t, out int idx))
+                    {
+                        vectors[i][idx] += 1.0f;
+                    }
+                }
+                // L2 归一化
+                double normSq = 0.0;
+                for (int d = 0; d < dim; d++) normSq += vectors[i][d] * vectors[i][d];
+                if (normSq > 0.0)
+                {
+                    float inv = (float)(1.0 / Math.Sqrt(normSq));
+                    for (int d = 0; d < dim; d++) vectors[i][d] *= inv;
+                }
+            }
+
+            for (int i = 0; i < n; i++)
+            {
+                simMatrix[i, i] = 1.0;
+                for (int j = i + 1; j < n; j++)
+                {
+                    double dot = 0.0;
+                    for (int d = 0; d < dim; d++) dot += vectors[i][d] * vectors[j][d];
+                    double sim = Math.Clamp(dot, 0.0, 1.0);
+                    simMatrix[i, j] = sim;
+                    simMatrix[j, i] = sim;
+                }
             }
         }
 

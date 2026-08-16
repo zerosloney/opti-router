@@ -13,6 +13,7 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
 {
     private readonly ConcurrentDictionary<string, CacheItem> _store = new(StringComparer.Ordinal);
     private readonly int _maxEntries;
+    private readonly ISemanticVectorEngine? _vectorEngine;
 
     private sealed record CacheItem(
         string Prompt,
@@ -24,9 +25,11 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
     /// 初始化语义响应缓存。
     /// </summary>
     /// <param name="maxEntries">最大条目数。</param>
-    public SemanticResponseCache(int maxEntries = 10000)
+    /// <param name="vectorEngine">可选的向量匹配引擎（如 ONNX 或 DenseEmbeddingVectorEngine）。为空时使用内置快速 CJK 特征投影。</param>
+    public SemanticResponseCache(int maxEntries = 10000, ISemanticVectorEngine? vectorEngine = null)
     {
         _maxEntries = Math.Max(100, maxEntries);
+        _vectorEngine = vectorEngine;
     }
 
     /// <inheritdoc />
@@ -41,7 +44,7 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         }
 
         DateTime now = DateTime.UtcNow;
-        var queryVector = BuildNormalizedVector(prompt);
+        var queryVector = GetVector(prompt);
 
         double maxSim = 0.0;
         CacheItem? bestMatch = null;
@@ -91,11 +94,28 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
             EvictExpiredOrOldest(now);
         }
 
-        var vector = BuildNormalizedVector(prompt);
+        var vector = GetVector(prompt);
         var item = new CacheItem(prompt, vector, response, now.Add(ttl));
 
         _store[prompt] = item;
         return Task.CompletedTask;
+    }
+
+    private float[] GetVector(string prompt)
+    {
+        if (_vectorEngine != null)
+        {
+            try
+            {
+                var vec = _vectorEngine.Embed(prompt);
+                if (vec != null && vec.Length > 0) return vec;
+            }
+            catch
+            {
+                // 降级使用内置向量投影
+            }
+        }
+        return BuildNormalizedVector(prompt);
     }
 
     /// <inheritdoc />

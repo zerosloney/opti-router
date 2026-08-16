@@ -136,6 +136,8 @@ public class HybridSemanticVectorEngineTests
         public (SemanticRouteOptions? MatchedRoute, double MaxSimilarity) Match(
             string queryText,
             List<SemanticRouteOptions> routes) => (_route, _score);
+
+        public float[] Embed(string text) => Array.Empty<float>();
     }
 
     [Fact]

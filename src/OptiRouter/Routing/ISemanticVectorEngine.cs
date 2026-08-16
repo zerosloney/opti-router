@@ -17,4 +17,11 @@ public interface ISemanticVectorEngine
     (SemanticRouteOptions? MatchedRoute, double MaxSimilarity) Match(
         string queryText,
         List<SemanticRouteOptions> routes);
+
+    /// <summary>
+    /// 对输入文本计算并生成 L2 归一化的 Dense / 特征向量表示。
+    /// </summary>
+    /// <param name="text">待向量化的输入文本。</param>
+    /// <returns>L2 归一化的单精度浮点特征向量。</returns>
+    float[] Embed(string text);
 }
