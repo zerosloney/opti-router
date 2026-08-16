@@ -763,6 +763,12 @@ public sealed class RoutingOptions
     public string MeshNodeId { get; set; } = string.Empty;
 
     /// <summary>
+    /// 分布式状态网格的 Redis 连接串。留空时使用进程内 InMemory 网格（单实例部署）；
+    /// 多网关实例共享同一 Redis 时启用集群级状态同步。连接失败自动降级 InMemory。
+    /// </summary>
+    public string MeshRedisConnectionString { get; set; } = string.Empty;
+
+    /// <summary>
     /// 是否向集群网格广播 KV Cache 前缀索引。默认 true。
     /// </summary>
     public bool MeshBroadcastKvCache { get; set; } = true;

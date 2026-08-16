@@ -305,7 +305,25 @@ builder.Services.AddSingleton<ISemanticResponseCache>(sp =>
 builder.Services.AddSingleton<OptiRouter.Mesh.IDistributedStateMesh>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    return new OptiRouter.Mesh.InMemoryDistributedStateMesh(options.Routing.MeshNodeId);
+    string nodeId = options.Routing.MeshNodeId;
+
+    // 配置了 Redis 连接串时使用集群级网格；连接失败降级 InMemory（单机模式），不阻断启动。
+    if (!string.IsNullOrWhiteSpace(options.Routing.MeshRedisConnectionString))
+    {
+        try
+        {
+            return new OptiRouter.Mesh.RedisDistributedStateMesh(
+                new OptiRouter.Mesh.RedisChannelBus(options.Routing.MeshRedisConnectionString),
+                nodeId);
+        }
+        catch (Exception ex)
+        {
+            var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("OptiRouter.Mesh");
+            logger?.LogWarning(ex, "Redis mesh unavailable, falling back to in-memory mesh");
+        }
+    }
+
+    return new OptiRouter.Mesh.InMemoryDistributedStateMesh(nodeId);
 });
 
 builder.Services.AddSingleton<OptiRouter.Mesh.DistributedMeshSynchronizer>(sp =>
