@@ -1742,4 +1742,83 @@ public class ChatCompletionsEndpointTests
     }
 
     #endregion
+
+    #region Semantic cache + PII anonymization combination
+
+    /// <summary>
+    /// 语义缓存与 PII 脱敏组合开关的键一致性：
+    /// 启用 EnableSemanticCache + EnablePiiAnonymization 时，同一请求第二次必须命中语义缓存
+    /// （上游仅调用一次）；且缓存命中返回的响应须用当前请求 piiMap 还原 PII 占位符，
+    /// 不得直接透出占位符或上一请求的明文数据。
+    /// </summary>
+    [Fact]
+    public async Task Post_SemanticCacheWithPiiAnonymization_KeysConsistentAndPiiRestored()
+    {
+        // Arrange
+        int attempts = 0;
+        using var factory = CreateSemanticCachePiiFactory(() => attempts++);
+        using var client = factory.CreateClient();
+
+        var request = new ChatRequest
+        {
+            Model = "auto",
+            Messages = new List<ChatMessage>
+            {
+                ChatMessage.FromText("user", "What is the balance of account 13800138000?")
+            }
+        };
+        using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+
+        // Act: 同一请求发送两次
+        var first = await client.PostAsync("/v1/chat/completions", content);
+        var second = await client.PostAsync("/v1/chat/completions", content);
+
+        // Assert
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+
+        // 语义缓存 TryGet/Store 使用同一（脱敏后）prompt 键 → 第二次命中 → 上游仅调用一次
+        Assert.Equal(1, attempts);
+
+        var firstBody = await first.Content.ReadAsStringAsync();
+        var secondBody = await second.Content.ReadAsStringAsync();
+        // 首次请求：上游占位符响应被还原为真实 PII
+        Assert.Contains("13800138000", firstBody);
+        // 第二次（缓存命中）：同样还原为当前请求的 PII，而非泄漏占位符
+        Assert.Contains("13800138000", secondBody);
+        Assert.DoesNotContain("PII_PHONE", secondBody);
+    }
+
+    private static TestWebApplicationFactory CreateSemanticCachePiiFactory(Action? onUpstream = null)
+    {
+        var factory = new TestWebApplicationFactory();
+        var endpoint = CreateEndpoint("model-a");
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(endpoint);
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+                // 关闭精确响应缓存，隔离出语义缓存路径（否则精确缓存先命中，测试失去区分度）
+                opt.Routing.EnableResponseCache = false;
+                opt.Routing.EnableSemanticCache = true;
+                opt.Routing.EnablePiiAnonymization = true;
+            });
+        };
+        factory.MockClients["model-a"] = new MockModelClient(endpoint, (req, ct) =>
+        {
+            onUpstream?.Invoke();
+            // 上游响应引用脱敏占位符（模拟模型回显占位符的场景）
+            return Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-sem\",\"model\":\"model-a\",\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"Balance for [PII_PHONE_1] is $42.00\"}}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}",
+                new ChatUsage { PromptTokens = 3, CompletionTokens = 2, TotalTokens = 5 }));
+        });
+        return factory;
+    }
+
+    #endregion
 }

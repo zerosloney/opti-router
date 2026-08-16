@@ -154,26 +154,6 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             return cached;
         }
 
-        // 深度语义向量响应缓存 (Semantic Cache) 尝试相似度匹配
-        if (options.Routing.EnableSemanticCache && !request.Stream)
-        {
-            string? promptText = GetLastUserPrompt(request);
-            if (!string.IsNullOrWhiteSpace(promptText))
-            {
-                var (semHit, semCached, semSim, matchedPrompt) = await _semanticCache.TryGetAsync(
-                    promptText,
-                    options.Routing.SemanticCacheSimilarityThreshold,
-                    ct).ConfigureAwait(false);
-
-                if (semHit && semCached is not null)
-                {
-                    _recorder.RecordAudit(null, "semantic-cache", 0, null, 0m, 0, sessionId, $"semantic-cache-hit (sim={semSim:F3})", true, null, false, ModelTier.Cheap);
-                    _logger.LogInformation("Semantic Response Cache HIT! Similarity: {Sim:F3}, Matched Prompt: {Prompt}", semSim, matchedPrompt);
-                    return semCached;
-                }
-            }
-        }
-
         bool regeneratePenaltyApplied = false;
 
         PiiMap? piiMap = null;
@@ -211,6 +191,34 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             if (compResult.WasCompressed)
             {
                 request = compResult.CompressedRequest;
+            }
+        }
+
+        // 深度语义向量响应缓存 (Semantic Cache) 尝试相似度匹配。
+        // 必须在 PII 脱敏 / Persona 锚定 / 提示词压缩等所有请求改写**之后**执行：
+        // TryGet 与成功路径的 Store 使用同一改写后的 prompt 作键，否则脱敏占位符/压缩文本
+        // 与原文不同键必然 miss（启用 PII 脱敏时语义缓存整体失效）。
+        // 命中返回的缓存响应是上游基于占位符生成的原始文本（未还原），须用当前请求 piiMap
+        // 还原——不同用户相同结构请求命中同一缓存项时，各自还原出自己的 PII，不泄漏明文。
+        if (options.Routing.EnableSemanticCache && !request.Stream)
+        {
+            string? promptText = GetLastUserPrompt(request);
+            if (!string.IsNullOrWhiteSpace(promptText))
+            {
+                var (semHit, semCached, semSim, matchedPrompt) = await _semanticCache.TryGetAsync(
+                    promptText,
+                    options.Routing.SemanticCacheSimilarityThreshold,
+                    ct).ConfigureAwait(false);
+
+                if (semHit && semCached is not null)
+                {
+                    RawChatResponse semResponse = piiMap is { HasSensitiveData: true }
+                        ? new RawChatResponse(piiMap.Restore(semCached.Body), semCached.Usage, semCached.Metadata)
+                        : semCached;
+                    _recorder.RecordAudit(null, "semantic-cache", 0, null, 0m, 0, sessionId, $"semantic-cache-hit (sim={semSim:F3})", true, null, false, ModelTier.Cheap);
+                    _logger.LogInformation("Semantic Response Cache HIT! Similarity: {Sim:F3}, Matched Prompt: {Prompt}", semSim, matchedPrompt);
+                    return semResponse;
+                }
             }
         }
 
@@ -399,8 +407,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         string? promptText = GetLastUserPrompt(request);
                         if (!string.IsNullOrWhiteSpace(promptText))
                         {
+                            // 存储未还原的原始响应（含 PII 占位符）：命中时由当前请求 piiMap 还原，
+                            // 保证不同用户相同结构请求共享缓存项时各自得到自己的 PII 值。
                             await _semanticCache.StoreAsync(
-                                promptText, finalResponse, TimeSpan.FromMinutes(options.Routing.SemanticCacheTtlMinutes), ct).ConfigureAwait(false);
+                                promptText, response, TimeSpan.FromMinutes(options.Routing.SemanticCacheTtlMinutes), ct).ConfigureAwait(false);
                         }
                     }
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
