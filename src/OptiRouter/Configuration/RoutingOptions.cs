@@ -691,6 +691,31 @@ public sealed class RoutingOptions
     /// 高难度任务 Reasoning 计算预算最大 Token 数。默认 16384。
     /// </summary>
     public int ReasoningHighMaxTokens { get; set; } = 16384;
+
+    /// <summary>
+    /// 是否启用拓扑感知的 Multi-Agent DAG 协作路由。
+    /// </summary>
+    public bool EnableMultiAgentDagRouting { get; set; } = false;
+
+    /// <summary>
+    /// 是否启用跨 Provider 代理投机解码与草稿加速。
+    /// </summary>
+    public bool EnableCrossProviderSpeculation { get; set; } = false;
+
+    /// <summary>
+    /// 投机解码 Draft Model 偏好 Tier。默认 Cheap。
+    /// </summary>
+    public ModelTier SpeculativeDraftTier { get; set; } = ModelTier.Cheap;
+
+    /// <summary>
+    /// 投机解码 Target Model 偏好 Tier。默认 Strong。
+    /// </summary>
+    public ModelTier SpeculativeTargetTier { get; set; } = ModelTier.Strong;
+
+    /// <summary>
+    /// 投机解码 Draft 最大草稿 Token 数。默认 256。
+    /// </summary>
+    public int SpeculativeDraftMaxTokens { get; set; } = 256;
 }
 
 /// <summary>
