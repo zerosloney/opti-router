@@ -781,6 +781,21 @@ public sealed class RoutingOptions
     /// 是否向集群网格广播主动弹性故障时序事件。默认 true。
     /// </summary>
     public bool MeshBroadcastResilience { get; set; } = true;
+
+    /// <summary>
+    /// 是否启用 MCP (Model Context Protocol) 统一生态集成。
+    /// </summary>
+    public bool EnableMcpIntegration { get; set; } = true;
+
+    /// <summary>
+    /// 是否启用 MCP / Tool Schema 复杂度感知动态分级路由。
+    /// </summary>
+    public bool EnableMcpComplexityRouting { get; set; } = true;
+
+    /// <summary>
+    /// 是否启用 Tool Call JSON 参数自愈与清洗器（自动修复尾随逗号、单引号、Markdown 包裹与括号截断）。
+    /// </summary>
+    public bool EnableMcpToolCallSanitizer { get; set; } = true;
 }
 
 /// <summary>

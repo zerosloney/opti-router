@@ -352,6 +352,9 @@ builder.Services.AddSingleton<ByzantineConsensusEngine>(sp =>
     new ByzantineConsensusEngine(sp.GetService<ISemanticVectorEngine>()));
 builder.Services.AddSingleton<PredictiveResilienceEngine>();
 builder.Services.AddSingleton<RagContextDensityAnalyzer>();
+builder.Services.AddSingleton<OptiRouter.Mcp.McpToolComplexityAnalyzer>();
+builder.Services.AddSingleton<OptiRouter.Mcp.McpToolCallSanitizer>();
+builder.Services.AddSingleton<OptiRouter.Mcp.McpToolRegistry>();
 
 builder.Services.AddSingleton<RouterEngine>(sp =>
 {
@@ -364,6 +367,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     var kvCacheTrie = sp.GetRequiredService<KvCachePrefixTrie>();
     var resilienceEngine = sp.GetRequiredService<PredictiveResilienceEngine>();
     var ragAnalyzer = sp.GetRequiredService<RagContextDensityAnalyzer>();
+    var mcpAnalyzer = sp.GetRequiredService<OptiRouter.Mcp.McpToolComplexityAnalyzer>();
     // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
     // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
@@ -378,6 +382,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),
         new SemanticRouterPolicy(vectorEngine),
         new RagAwareRoutingPolicy(ragAnalyzer),
+        new McpToolRoutingPolicy(mcpAnalyzer),
         new LongInputPolicy(),
         new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore, null,
             sp.GetRequiredService<ContextualBanditState>()),
