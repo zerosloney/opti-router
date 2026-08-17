@@ -133,6 +133,79 @@ Key fields under `OptiRouter` in `appsettings.json`:
 | `EnablePersonaDriftProtection` | Enable multi-turn persona drift protection | `true` |
 | `EnableFusionRouter` | Enable Mixture-of-Agents fusion routing | `false` |
 
+### Recommended Configuration Presets
+
+Presets are starting points, not final destinations. Paste these JSON snippets into the `"OptiRouter"` section of `appsettings.json`, then tune individual switches as needed. Explicitly configured keys override defaults.
+
+```json
+{
+  "OptiRouter": {
+    "Routing": { ... },
+    "Budget": { ... }
+  }
+}
+```
+
+#### 1. cost-first（Cost Priority – Batch/Offline/High-Traffic）
+
+```json
+{
+"Routing": {
+  "EnableThompsonSampling": true,
+  "EnableLatencyAware": true,
+  "ExplorationEpsilon": 0.05,
+  "EnableResponseCache": true,
+  "DefaultTier": "Cheap"
+},
+"Budget": {
+  "EnforceOnExhausted": "Degrade"
+}
+}
+```
+
+**Use Case**: Batch processing, offline tasks, high-volume simple queries.
+
+**Behavior**: Thompson sampling + latency-aware routing auto-converges to fast, cheap models for high-frequency requests. 5% ε-exploration ensures tail models get samples. Response cache deduplicates repeated queries (zero-cost for idempotent hits). Budget exhaustion degrades to cheaper models rather than rejecting.
+
+#### 2. balanced（Balanced – General Purpose/Agent Backend, Recommended Starting Point）
+
+```json
+{
+"Routing": {
+  "EnableThompsonSampling": true,
+  "EnableCascadeUpgrade": true,
+  "CascadeUpgradeSampleRate": 0.1,
+  "EnableResponseCache": true,
+  "DefaultTier": "Medium"
+}
+}
+```
+
+**Use Case**: General chatbots, agent backends, multi-turn conversations (production-recommended baseline).
+
+**Behavior**: Thompson sampling adapts model selection based on historical latency and success rates. 10% sampled Cheap→Strong cascade self-verification catches low-confidence cheap answers and upgrades to strong models. Configure `"CascadeUpgradeVerifierModel"` to a strong model name for third-party verification (eliminates self-rating bias). Response cache reduces redundant calls.
+
+#### 3. quality-first（Quality Priority – High-Risk Low-Traffic）
+
+```json
+{
+"Routing": {
+  "DefaultTier": "Strong",
+  "EnableFusionRouter": true,
+  "EnableByzantineConsensus": true,
+  "EnableCascadeUpgrade": true,
+  "CascadeUpgradeSampleRate": 0.3
+},
+"Budget": {
+  "EnforceOnExhausted": "Reject"
+}
+}
+```
+
+**Use Case**: High-risk decisions, financial/medical diagnosis, complex reasoning (low traffic tolerates high cost).
+
+**Behavior**: Defaults to Strong tier. Fusion routing runs parallel panel models → Analyst structured consensus/conflict analysis → Outer final answer (~N+2 calls, N=panel size). Byzantine consensus shortcuts to majority when panels agree, Analyst arbitrates disagreements. **Note**: `EnableByzantineConsensus` only works in non-streaming fusion paths when `EnableFusionRouter` is enabled. 30% cascade sampling strengthens quality guard. Budget exhaustion rejects rather than degrades (quality is non-negotiable).
+
 ## curl Examples
 
 Non-streaming:

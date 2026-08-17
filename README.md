@@ -226,6 +226,95 @@ curl http://localhost:5000/health
 | `MetricsApiKey` | `/metrics` 端点鉴权密钥（Bearer Token）。非空时要求 `Authorization: Bearer <key>`；null 保持无鉴权 | `null` |
 | `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（隐私敏感部署建议设为 `false`） | `true` |
 
+### 推荐配置预设 (Presets)
+
+预设是起点不是终点。粘贴以下 JSON 片段到 `appsettings.json` 的 `"OptiRouter"` 节点后，可根据实际需求微调单个开关。显式配置的 key 会覆盖默认值。
+
+```json
+{
+  "OptiRouter": {
+    "Routing": { ... },
+    "Budget": { ... }
+  }
+}
+```
+
+#### 1. cost-first（成本优先——批量/离线/高流量）
+
+```json
+{
+"Routing": {
+  "EnableThompsonSampling": true,
+  "EnableLatencyAware": true,
+  "ExplorationEpsilon": 0.05,
+  "EnableResponseCache": true,
+  "DefaultTier": "Cheap"
+},
+"Budget": {
+  "EnforceOnExhausted": "Degrade"
+}
+}
+```
+
+**适用场景**：批量数据处理、离线任务、高流量简单查询场景。
+
+**行为说明**：
+- 启用 Thompson 采样与延迟感知路由，系统自动学习并收敛到延迟低且成本低的模型（高频请求路径优化明显）
+- 5% ε 探索保底确保尾部模型仍有流量样本，低流量实例收益有限
+- 响应缓存对重复问题精确去重（幂等请求零成本，命中即短路返回）
+- 预算耗尽时自动降档到更便宜的模型继续服务（拒绝成本高于降级风险）
+- 对单次回答质量不敏感，追求总体吞吐与成本最优
+
+#### 2. balanced（均衡——通用对话/Agent 后端，推荐起点）
+
+```json
+{
+"Routing": {
+  "EnableThompsonSampling": true,
+  "EnableCascadeUpgrade": true,
+  "CascadeUpgradeSampleRate": 0.1,
+  "EnableResponseCache": true,
+  "DefaultTier": "Medium"
+}
+}
+```
+
+**适用场景**：通用 Chatbot、Agent 后端、多轮对话场景（生产环境推荐起点）。
+
+**行为说明**：
+- Thompson 采样让系统根据历史延迟与成功率自适应调整模型选择
+- 开启 10% 采样的 Cheap→Strong 级联自校验：简单问题由 Cheap 模型直接回答并自评置信度，低置信时升级 Strong 模型重答（质量漏洞兜底）
+- 建议配置 `"CascadeUpgradeVerifierModel": "某个Strong模型名"` 消除"模型自评"的自利偏差，他评可信度更高
+- 响应缓存去重重复提问，减少不必要的模型调用
+- 中档模型作为默认起点，平衡成本与质量
+
+#### 3. quality-first（质量优先——高风险低流量）
+
+```json
+{
+"Routing": {
+  "DefaultTier": "Strong",
+  "EnableFusionRouter": true,
+  "EnableByzantineConsensus": true,
+  "EnableCascadeUpgrade": true,
+  "CascadeUpgradeSampleRate": 0.3
+},
+"Budget": {
+  "EnforceOnExhausted": "Reject"
+}
+}
+```
+
+**适用场景**：高风险决策、金融/医疗诊断、复杂推理任务（低流量可容忍高成本）。
+
+**行为说明**：
+- 默认直接路由到 Strong 档模型（最强能力档）
+- 融合路由并行调用多个 Panel 模型作答 → Analyst 结构化分析共识/矛盾/缺口 → Outer 写最终答案（成本约 N+2 次调用，N=Panel 数）
+- 拜占庭共识在 Panel 输出高度一致时直接采纳多数派（捷径命中时降为 N 次调用），分歧时交给 Analyst 深度仲裁
+- **注意**：`EnableByzantineConsensus` 仅在 `EnableFusionRouter` 开启的非流式融合路径生效
+- 30% 级联采样率（高于 balanced 的 10%）加强质量兜底
+- 预算耗尽时宁可拒绝请求也不降档（质量不可妥协）
+
 ### 分布式存储与多节点 K8s 部署 (Kubernetes Multi-Node Deployment)
 
 对于无状态多节点 Kubernetes 部署，OptiRouter 提炼了抽象存储接口 `ICostLedgerStore` 与 `IRequestAuditStore`，支持通过 PostgreSQL 或 Redis 实现跨节点共享分布式账本与审计汇总：
