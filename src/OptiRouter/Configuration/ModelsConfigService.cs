@@ -241,7 +241,31 @@ public sealed class ModelsConfigService : IDisposable
         {
             string json = File.ReadAllText(_filePath);
             var models = JsonSerializer.Deserialize<List<ModelEndpointOptions>>(json, JsonOptions);
-            return models ?? new List<ModelEndpointOptions>();
+            var result = models ?? new List<ModelEndpointOptions>();
+
+            // 处理 env:VAR 环境变量引用语法
+            foreach (var model in result)
+            {
+                if (!string.IsNullOrWhiteSpace(model.ApiKey) && model.ApiKey.StartsWith("env:", StringComparison.Ordinal))
+                {
+                    string envVarName = model.ApiKey.Substring(4);
+                    string envValue = Environment.GetEnvironmentVariable(envVarName) ?? "";
+
+                    if (string.IsNullOrEmpty(envValue))
+                    {
+                        _logger.LogWarning(
+                            "模型 {ModelName} 的 ApiKey 引用环境变量 {EnvVarName} 不存在或为空，该模型 ApiKey 视为空",
+                            model.Name, envVarName);
+                        model.ApiKey = "";
+                    }
+                    else
+                    {
+                        model.ApiKey = envValue;
+                    }
+                }
+            }
+
+            return result;
         }
         catch (Exception ex)
         {

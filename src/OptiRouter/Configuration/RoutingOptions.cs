@@ -598,6 +598,13 @@ public sealed class RoutingOptions
     public int AuditRetentionHours { get; set; } = 168;
 
     /// <summary>
+    /// 是否在审计记录中存储请求内容明文（<c>request_content</c> 字段，用于 Dashboard 展示）。
+    /// 默认 true（保持现状，保留 168 小时）。关闭后审计与 Dashboard 不再留存请求内容明文，
+    /// 隐私敏感部署建议关闭以降低数据泄露风险。
+    /// </summary>
+    public bool AuditStoreRequestContent { get; set; } = true;
+
+    /// <summary>
     /// 是否启用 Prometheus 指标导出（<c>/metrics</c> 端点）。默认 true。
     /// 关闭时不注册指标中间件与 gauge 刷新服务，但 <see cref="OptiRouter.Metrics.RouterMetrics"/> 单例仍存在
     /// （ProxyOrchestrator 仍可无副作用调用 RecordAttempt，prometheus-net 的仪表为空集）。
@@ -610,6 +617,12 @@ public sealed class RoutingOptions
     /// 修改后需同步更新反代/Prometheus scrape 配置。
     /// </summary>
     public string MetricsEndpointPath { get; set; } = "/metrics";
+
+    /// <summary>
+    /// Prometheus 指标端点访问密钥（可选）。配置后，访问 <c>/metrics</c> 需提供 Bearer token；
+    /// 未配置或为 null 时端点无鉴权（默认，向后兼容）。格式：请求头 <c>Authorization: Bearer &lt;MetricsApiKey&gt;</c>。
+    /// </summary>
+    public string? MetricsApiKey { get; set; } = null;
 
     /// <summary>
     /// 告警 Webhook 推送 URL。留空时禁用告警推送（告警仅在 Dashboard 展示）。

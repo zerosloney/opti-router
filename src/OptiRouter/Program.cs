@@ -867,12 +867,29 @@ bool enableMetrics = app.Configuration.GetValue<bool?>("OptiRouter:Routing:Enabl
 if (enableMetrics)
 {
     string metricsPath = app.Configuration.GetValue<string?>("OptiRouter:Routing:MetricsEndpointPath") ?? "/metrics";
+    string? metricsApiKey = app.Configuration.GetValue<string?>("OptiRouter:Routing:MetricsApiKey");
+
     app.UseHttpMetrics(options =>
     {
         // 用自定义 optirouter_request_duration_ms（按模型标签）替代默认 ASP.NET http_request_duration_seconds。
         options.RequestDuration.Enabled = false;
     });
-    app.MapMetrics(metricsPath);
+
+    // 配置了 MetricsApiKey 时，要求 Bearer token 鉴权
+    var metricsEndpoint = app.MapMetrics(metricsPath);
+    if (!string.IsNullOrWhiteSpace(metricsApiKey))
+    {
+        metricsEndpoint.AddEndpointFilter(async (context, next) =>
+        {
+            string? providedKey = ExtractBearerToken(context.HttpContext);
+            if (!AdminKeyVerifier.IsValid(metricsApiKey, providedKey))
+            {
+                context.HttpContext.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return Results.Unauthorized();
+            }
+            return await next(context);
+        });
+    }
 }
 
 // 生产环境 HTTPS 检查。

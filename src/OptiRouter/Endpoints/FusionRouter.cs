@@ -57,21 +57,10 @@ public sealed class FusionRouter
         var panelSelection = _panelSelector.Select(decision, routing, _quotaStore);
         int panelSize = panelSelection.RequestedSize;
 
-        // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
-        string? requestContent = null;
-        for (int i = request.Messages.Count - 1; i >= 0; i--)
-        {
-            var msg = request.Messages[i];
-            if (msg.Role == "user")
-            {
-                var text = msg.GetText();
-                if (!string.IsNullOrEmpty(text))
-                {
-                    requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
-                    break;
-                }
-            }
-        }
+        // 构造请求内容摘要（用于 dashboard 展示），根据开关决定是否提取
+        string? requestContent = routing.AuditStoreRequestContent
+            ? OptiRouter.Endpoints.ProxyOrchestrator.ExtractRequestContentSummary(request)
+            : null;
 
         int halfOpenMaxProbes = routing.FailoverHalfOpenMaxProbes;
         int requiredSuccesses = routing.FailoverHalfOpenRequiredSuccesses;
@@ -522,21 +511,10 @@ public sealed class FusionRouter
         if (panelSelection.RankedCandidates.Count < 2)
             yield break;
 
-        // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
-        string? requestContent = null;
-        for (int i = request.Messages.Count - 1; i >= 0; i--)
-        {
-            var msg = request.Messages[i];
-            if (msg.Role == "user")
-            {
-                var text = msg.GetText();
-                if (!string.IsNullOrEmpty(text))
-                {
-                    requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
-                    break;
-                }
-            }
-        }
+        // 构造请求内容摘要（用于 dashboard 展示），根据开关决定是否提取
+        string? requestContent = routing.AuditStoreRequestContent
+            ? OptiRouter.Endpoints.ProxyOrchestrator.ExtractRequestContentSummary(request)
+            : null;
 
         // 准入：逐候选占用半开探测槽位（与非流式 ExecuteAsync 一致），防止半开态模型被并发融合流过量打入。
         var admitted = new List<ModelEndpointOptions>();

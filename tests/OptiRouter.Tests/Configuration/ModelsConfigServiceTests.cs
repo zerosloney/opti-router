@@ -92,6 +92,125 @@ public sealed class ModelsConfigServiceTests
     public void Delete_InvalidJsonDoesNotOverwriteOriginalFile()
         => AssertInvalidJsonMutationPreservesFile(service => service.DeleteModel("existing"));
 
+    [Fact]
+    public void LoadModels_WithEnvPrefix_ResolvesEnvironmentVariable()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+        Environment.SetEnvironmentVariable("TEST_API_KEY_1", "resolved-key-from-env");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "env:TEST_API_KEY_1";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+
+            // Act
+            var loaded = service.LoadModels();
+
+            // Assert
+            Assert.Single(loaded);
+            Assert.Equal("resolved-key-from-env", loaded[0].ApiKey);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEST_API_KEY_1", null);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadModels_WithEnvPrefix_VariableNotSet_ReturnsEmpty()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+
+        // Ensure environment variable is not set
+        Environment.SetEnvironmentVariable("TEST_NONEXISTENT_VAR", null);
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "env:TEST_NONEXISTENT_VAR";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+
+            // Act
+            var loaded = service.LoadModels();
+
+            // Assert
+            Assert.Single(loaded);
+            Assert.Equal("", loaded[0].ApiKey); // Should be empty string when env var is missing
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadModels_WithEnvPrefix_VariableSetToEmpty_ReturnsEmpty()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+        Environment.SetEnvironmentVariable("TEST_EMPTY_VAR", "");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "env:TEST_EMPTY_VAR";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+
+            // Act
+            var loaded = service.LoadModels();
+
+            // Assert
+            Assert.Single(loaded);
+            Assert.Equal("", loaded[0].ApiKey); // Should be empty string when env var is empty
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEST_EMPTY_VAR", null);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadModels_WithoutEnvPrefix_PreservesOriginalValue()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "sk-plain-api-key";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+
+            // Act
+            var loaded = service.LoadModels();
+
+            // Assert
+            Assert.Single(loaded);
+            Assert.Equal("sk-plain-api-key", loaded[0].ApiKey);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static ModelsConfigService CreateService(string path)
     {
         var configuration = new ConfigurationBuilder()

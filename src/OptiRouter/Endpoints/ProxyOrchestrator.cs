@@ -170,21 +170,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             piiMap = anonymized.PiiMap;
         }
 
-        // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
-        string? requestContent = null;
-        for (int i = request.Messages.Count - 1; i >= 0; i--)
-        {
-            var msg = request.Messages[i];
-            if (msg.Role == "user")
-            {
-                var text = msg.GetText();
-                if (!string.IsNullOrEmpty(text))
-                {
-                    requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
-                    break;
-                }
-            }
-        }
+        // 构造请求内容摘要（用于 dashboard 展示），根据开关决定是否提取
+        string? requestContent = options.Routing.AuditStoreRequestContent
+            ? ExtractRequestContentSummary(request)
+            : null;
 
         if (options.Routing.EnablePersonaDriftProtection && !string.IsNullOrEmpty(sessionId))
         {
@@ -614,21 +603,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             piiMap = anonymized.PiiMap;
         }
 
-        // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
-        string? requestContent = null;
-        for (int i = request.Messages.Count - 1; i >= 0; i--)
-        {
-            var msg = request.Messages[i];
-            if (msg.Role == "user")
-            {
-                var text = msg.GetText();
-                if (!string.IsNullOrEmpty(text))
-                {
-                    requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
-                    break;
-                }
-            }
-        }
+        // 构造请求内容摘要（用于 dashboard 展示），根据开关决定是否提取
+        string? requestContent = options.Routing.AuditStoreRequestContent
+            ? ExtractRequestContentSummary(request)
+            : null;
 
         if (options.Routing.EnablePromptCompression)
         {
@@ -1150,5 +1128,31 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         {
         }
         return data;
+    }
+
+    /// <summary>
+    /// 提取请求内容摘要（用于 Dashboard 展示）。
+    /// 取最后一条非空 user 消息文本，截断到 500 字符。
+    /// </summary>
+    /// <param name="request">聊天请求。</param>
+    /// <returns>请求内容摘要，无 user 消息时返回 null。</returns>
+    internal static string? ExtractRequestContentSummary(ChatRequest request)
+    {
+        if (request is null || request.Messages is null)
+            return null;
+
+        for (int i = request.Messages.Count - 1; i >= 0; i--)
+        {
+            var msg = request.Messages[i];
+            if (msg.Role == "user")
+            {
+                var text = msg.GetText();
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    return text.Length > 500 ? text.Substring(0, 500) + "..." : text;
+                }
+            }
+        }
+        return null;
     }
 }
