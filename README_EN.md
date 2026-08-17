@@ -39,17 +39,17 @@ A multi-model intelligent routing HTTP proxy built with .NET 8. Features an Open
 
 ## Core Features
 
-- 🚀 **Progressive Speculative Streaming**: Enables streaming for Fusion Router with TTFT < 200ms. Anchor models stream immediately while background Panel models and Analyst compute incremental patch chunks.
-- ⚡ **Prompt Cache Distillation & APC Alignment**: Panel text distillation strips boilerplate and greetings (saving 50%~70% tokens). Static top-loaded prefixes (`[SYSTEM_PREFIX_INSTRUCTION]`) maximize Automatic Prefix Caching (APC) hit rates across providers.
+- 🚀 **Progressive Speculative Streaming**: Enables streaming for Fusion Router with design goal of significantly lower TTFT than full fusion. Anchor models stream immediately while background Panel models and Analyst compute incremental patch chunks.
+- ⚡ **Prompt Cache Distillation & APC Alignment**: Panel text distillation strips boilerplate and greetings (actual savings depend on conversation structure via history folding, deduplication, and filler removal). Static top-loaded prefixes (`[SYSTEM_PREFIX_INSTRUCTION]`) maximize Automatic Prefix Caching (APC) hit rates across providers.
 - 🛡️ **P1 Data Compliance & JSON AST Auto-Repair**:
-  - **PII Anonymization & Deanonymization**: Automatically detects and replaces Phone numbers, Email addresses, ID cards, Credit cards, and IP addresses with named placeholders and restores them on response.
-  - **Data Sovereignty Barrier**: Enforces routing strictly to local or on-premise endpoints (`IsLocalOrPrivate`) when `EnableDataSovereignty` is enabled.
+  - **PII Anonymization & Deanonymization**: Automatically detects and replaces Phone numbers, Email addresses, ID cards, Credit cards, and IP addresses with named placeholders and restores them on response. (Disabled by default, requires explicit `EnablePiiAnonymization=true`)
+  - **Data Sovereignty Barrier**: Enforces routing strictly to local or on-premise endpoints (`IsLocalOrPrivate`) when `EnableDataSovereignty` is enabled. (Disabled by default, requires explicit `EnableDataSovereignty=true`)
   - **JSON AST Repairer**: Strips Markdown code fences, cleans control characters, fixes trailing commas, and auto-closes missing brackets from truncated responses.
 - 🔍 **P2 Observability & Multi-Turn Persona Defense**:
   - **W3C Distributed Tracing**: Full `traceparent` parsing and ActivitySource mapping with DAG cost attribution trees across Panel, Analyst, and Outer models.
   - **Persona Alignment (`PersonaDriftGuard`)**: Injects static persona anchor instructions combined with Session Affinity locking to prevent persona drift across multi-turn agent conversations.
 - 🧪 **P3 Prompt Versioning & Speculative Decoding**:
-  - **Prompt Template Manager (`PromptTemplateManager`)**: Version control and variable rendering for Analyst/Outer prompts.
+  - **Prompt Template Manager (`PromptTemplateManager`)**: Version control and variable rendering for Analyst/Outer prompts. (Planned, not yet implemented)
   - **Golden Dataset Regression Suite (`OfflineEvalRunner`)**: Automated evaluation suite computing Jaccard token similarity, accuracy rates, latency, and token consumption reports.
   - **Hybrid Speculative Orchestration (`HybridSpeculativeOrchestrator`)**: Local 1B/3B draft models generate preliminary outlines rapidly before passing context to cloud verifier models.
 - 🏎️ **Zero-Blocking High Performance Architecture**:
@@ -125,8 +125,9 @@ Key fields under `OptiRouter` in `appsettings.json`:
 | Field | Description | Default |
 |------|------|------|
 | `EnableRuleClassifier` | Infer tier based on request characteristics | `true` |
-| `EnablePiiAnonymization` | Enable PII anonymization and restoration | `false` |
-| `EnableDataSovereignty` | Restrict routing to local/private endpoints | `false` |
+| `EnablePiiAnonymization` | Enable PII anonymization and restoration. **Disabled by default, recommended for privacy-sensitive deployments** | `false` |
+| `EnableDataSovereignty` | Restrict routing to local/private endpoints. **Disabled by default, recommended for compliance deployments** | `false` |
+| `EnableFusionRouter` | Enable Mixture-of-Agents fusion routing (panel → analyst → outer). Cost: N+2 model calls (N=panel size). **Disabled by default, requires explicit enable and cost consideration** | `false` |
 | `EnableJsonAstAutoRepair` | Automatically repair broken JSON responses | `true` |
 | `EnableDistributedTracing` | Enable W3C distributed tracing (`traceparent`) | `true` |
 | `EnablePersonaDriftProtection` | Enable multi-turn persona drift protection | `true` |
@@ -162,7 +163,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 ## Testing
 
-Run the full suite of 503 unit and integration tests:
+Run the full suite of 979+ unit and integration tests (grows with iterations):
 
 ```bash
 dotnet test OptiRouter.sln -c Release

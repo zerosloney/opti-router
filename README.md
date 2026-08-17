@@ -40,17 +40,17 @@
 ## 核心特性
 
 - 🤖 **auto 虚拟模型与显式固定路由**：`GET /v1/models` 首位暴露虚拟模型 `auto`——请求 `model="auto"` 或缺省时走全链路智能路由；真实模型以 `{供应商}/{真实模型Id}` 格式展示（如 `deepseek/deepseek-chat`，同供应商同模型多 Key 追加 ` #2`），请求该格式 id 时自动解析并转换为上游内部模型 ID 发送，也接受路由名或裸模型 Id（多端点提供同一模型时固定为提供方集合，路由器在其中择优/降级）；仅数据合规/预算/熔断等硬约束可否决，不静默换模型，未知模型名按 OpenAI 兼容语义返回 404 `model_not_found`。模型配置的 `Id` 对应上游真实请求模型（如 `deepseek-chat`），`Name` 留空时自动生成为「供应商/模型」。
-- 🚀 **渐进式投机流 (Progressive Speculative Streaming)**：融合路由流式输出首字延迟 TTFT < 200ms，Anchor 节点即时推流，背景 Panel 模型与 Analyst 异步分析增量 Patch 补丁。
-- ⚡ **Prompt Cache 蒸馏 & APC 自动对齐**：Panel 文本蒸馏过滤无用废话（节省 50%~70% Token），Top-loaded 静态前缀（`[SYSTEM_PREFIX_INSTRUCTION]`）实现 Automatic Prefix Caching 高高效对齐。
+- 🚀 **渐进式投机流 (Progressive Speculative Streaming)**：融合路由流式输出首字延迟设计目标显著低于全流程融合，Anchor 节点即时推流，背景 Panel 模型与 Analyst 异步分析增量 Patch 补丁。
+- ⚡ **Prompt Cache 蒸馏 & APC 自动对齐**：Panel 文本蒸馏过滤无用废话（历史轮次折叠、去重、填充语剔除，实际节省取决于对话结构），Top-loaded 静态前缀（`[SYSTEM_PREFIX_INSTRUCTION]`）实现 Automatic Prefix Caching 高高效对齐。
 - 🛡️ **P1 合规防护与 JSON AST 自动修复**：
-  - **PII 脱敏与还原**：自动识别手机、邮箱、身份证号、银行卡号与 IP 地址，双向占位符还原。
-  - **数据不出域屏障**：开启 `EnableDataSovereignty` 强制过滤外部云端节点，仅路由至私有/本地端点 (`IsLocalOrPrivate`)。
+  - **PII 脱敏与还原**：自动识别手机、邮箱、身份证号、银行卡号与 IP 地址，双向占位符还原。（默认关闭，需显式启用 `EnablePiiAnonymization=true`）
+  - **数据不出域屏障**：开启 `EnableDataSovereignty` 强制过滤外部云端节点，仅路由至私有/本地端点 (`IsLocalOrPrivate`)。（默认关闭，需显式启用 `EnableDataSovereignty=true`）
   - **JSON AST 容错修复**：自动剥离 Markdown 代码围栏、清除控制字符、修补尾部非法逗号，并自动补全因 `MaxTokens` 截断导致的缺失括号。
 - 🔍 **P2 分布式 DAG 链路追踪与 Persona 锁**：
   - **W3C 规范链路追踪**：支持 `traceparent` 解析与 ActivitySource 映射，多模型 Panel/Analyst/Outer 结构化 DAG 树成本分拆归因。
   - **人设一致性防护 (`PersonaDriftGuard`)**：自动植入静态人设锚点提示词，配合 Session 粘性锁防止多轮 Agent 对话 Persona 漂移。
 - 🧪 **P3 提示词版本化与端云投机解码**：
-  - **提示词版本管理 (`PromptTemplateManager`)**：Analyst / Outer 系统提示词模版版本控制与变量动态插值。
+  - **提示词版本管理 (`PromptTemplateManager`)**：Analyst / Outer 系统提示词模版版本控制与变量动态插值。（规划中，尚未实现）
   - **Golden Dataset 离线回归评测 (`OfflineEvalRunner`)**：自动化 Golden Question 题库 Jaccard 词重叠相似度、准确率、延迟与 Token 消耗回归报告。
   - **端云混合投机解码 (`HybridSpeculativeOrchestrator`)**：本地 1B/3B 端侧模型极速生成 Draft 草稿，云端强模型（Verifier）二次校验修补，兼顾高智力与低开支。
 - 🏎️ **0-阻塞高性能架构**：
@@ -65,6 +65,8 @@
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
 
 ### 构建
+
+SDK 版本由根目录 `global.json` 固定（当前 8.0.303 + rollForward）。
 
 ```bash
 dotnet build OptiRouter.sln -c Release
@@ -123,7 +125,7 @@ curl http://localhost:5000/health
 |------|------|------|
 | `Name` | 模型标识 | `gpt-4o` |
 | `BaseUrl` | 上游 API 基地址 | `https://api.openai.com/v1` |
-| `ApiKey` | 鉴权密钥 | `sk-...` |
+| `ApiKey` | 鉴权密钥。支持 `env:VAR_NAME` 语法从环境变量加载（变量缺失时该模型 key 为空并告警）。**边界说明：仅 models-config.json 加载路径生效；appsettings.json 的 Models[] 不支持；通过 Dashboard 保存模型配置会把当前生效密钥明文写回 models-config.json** | `sk-...` |
 | `Tier` | 能力分档：`Strong` / `Medium` / `Cheap` | `Strong` |
 | `MaxContextTokens` | 最大上下文长度 | `128000` |
 | `InputPricePerMillion` | 输入价格（美元/百万 token） | `2.5` |
@@ -157,8 +159,8 @@ curl http://localhost:5000/health
 | `EnableTokenEstimator` | 估算 token 并过滤上下文不足的模型 | `true` |
 | `EnableBudgetGuard` | 预算耗尽时执行降级/拒绝 | `true` |
 | `EnableFailover` | 候选链顺序尝试，主模型失败自动切下一个 | `true` |
-| `EnablePiiAnonymization` | 是否启用 PII 敏感数据脱敏与反向还原（手机/邮箱/身份证/卡号/IP） | `false` |
-| `EnableDataSovereignty` | 是否启用数据不出域隔离屏障（强制仅路由至本地/私有节点） | `false` |
+| `EnablePiiAnonymization` | 是否启用 PII 敏感数据脱敏与反向还原（手机/邮箱/身份证/卡号/IP）。**默认关闭，隐私敏感部署建议启用** | `false` |
+| `EnableDataSovereignty` | 是否启用数据不出域隔离屏障（强制仅路由至本地/私有节点）。**默认关闭，合规部署建议启用** | `false` |
 | `EnableJsonAstAutoRepair` | 是否启用 JSON AST 自动化修补服务（剥离代码围栏、修复逗号、截断补全） | `true` |
 | `EnableDistributedTracing` | 是否启用 W3C 分布式链路追踪（生成 TraceId/SpanId，映射 ActivitySource） | `true` |
 | `EnablePersonaDriftProtection` | 是否启用多轮对话人设一致性防护（静态人设锚点提示词） | `true` |
@@ -200,7 +202,7 @@ curl http://localhost:5000/health
 | `EnableCapabilityFilter` | 按请求能力需求（vision/tool-use/json-mode）排除 Tags 不含的模型 | `false` |
 | `EnableFusionMode` | 并行首试：非流式首轮并行前 N 候选取最快成功，取消其余 | `false` |
 | `FusionMaxParallel` | 并行首试首轮并发数，范围 `[2, 5]` | `2` |
-| `EnableFusionRouter` | **融合路由**（OpenRouter Fusion 式）：非流式/流式首轮并行 panel → analyst 结构化分析 → outer 写最终答案。质量技术，成本 N+2 调用，生产默认关 | `false` |
+| `EnableFusionRouter` | **融合路由**（OpenRouter Fusion 式）：非流式/流式首轮并行 panel → analyst 结构化分析 → outer 写最终答案。质量技术，成本 N+2 调用（N=panel 数）。**默认关闭，需显式启用并承担成本** | `false` |
 | `FusionRouterPanelSize` | 融合路由 panel 并行模型数，范围 `[2, 5]` | `3` |
 | `EnableDynamicFusionPanelSize` | 按 typed request complexity 在最小/最大范围内动态选 panel 数；不解析 reason 文本 | `false` |
 | `FusionRouterMinPanelSize` | 动态 Fusion panel 最小数，范围 `[2, 5]` 且不得大于 `FusionRouterPanelSize` | `2` |
@@ -221,6 +223,8 @@ curl http://localhost:5000/health
 | `OtlpServiceName` | OpenTelemetry 导出的服务名称 | `"OptiRouter"` |
 | `EnableMetrics` | 启用 Prometheus `/metrics` 端点（无鉴权，仅聚合数+模型名） | `true` |
 | `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
+| `MetricsApiKey` | `/metrics` 端点鉴权密钥（Bearer Token）。非空时要求 `Authorization: Bearer <key>`；null 保持无鉴权 | `null` |
+| `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（隐私敏感部署建议设为 `false`） | `true` |
 
 ### 分布式存储与多节点 K8s 部署 (Kubernetes Multi-Node Deployment)
 
@@ -273,7 +277,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 ### 单元测试与集成测试
 
-运行全量 503 项单元与集成测试套件：
+运行全量 979+ 项单元与集成测试套件（随迭代增长）：
 
 ```bash
 dotnet test OptiRouter.sln -c Release
