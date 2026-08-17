@@ -364,8 +364,6 @@ builder.Services.AddSingleton<KvCachePrefixTrie>(sp =>
 });
 
 builder.Services.AddSingleton<ReasoningEffortController>();
-builder.Services.AddSingleton<MultiAgentDagRouter>();
-builder.Services.AddSingleton<CrossProviderSpeculativeEngine>();
 builder.Services.AddSingleton<ByzantineConsensusEngine>(sp =>
     new ByzantineConsensusEngine(sp.GetService<ISemanticVectorEngine>()));
 builder.Services.AddSingleton<PredictiveResilienceEngine>();
