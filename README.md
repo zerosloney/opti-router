@@ -367,11 +367,38 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 > 说明：`model` 字段会被路由器忽略——模型由路由策略决定；传任何值都行。
 
+### 多协议入口（协议对齐）
+
+除 OpenAI 格式外，也接受 Anthropic 与 Gemini 原生协议，三种入口共用同一套路由、预算、熔断与审计：
+
+```bash
+# Anthropic Messages API（鉴权：Authorization: Bearer 或 x-api-key）
+curl -X POST http://localhost:5000/v1/messages \
+  -H "x-api-key: your-proxy-api-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "解释什么是多态"}]
+  }'
+
+# Gemini generateContent（鉴权：Authorization: Bearer、x-goog-api-key 或 ?key=）
+curl -X POST "http://localhost:5000/v1beta/models/auto:generateContent" \
+  -H "x-goog-api-key: your-proxy-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role": "user", "parts": [{"text": "解释什么是多态"}]}]
+  }'
+```
+
+流式分别走 `"stream": true`（Anthropic 事件序列）与 `:streamGenerateContent?alt=sse`（Gemini SSE 块）。`auto` 语义与模型校验同 OpenAI 入口一致；文本、system、工具调用（tool_use/tool_result 与 functionCall/functionResponse）双向翻译。
+
 ## 测试
 
 ### 单元测试与集成测试
 
-运行全量 979+ 项单元与集成测试套件（随迭代增长）：
+运行全量 1000+ 项单元与集成测试套件（随迭代增长）：
 
 ```bash
 dotnet test OptiRouter.sln -c Release

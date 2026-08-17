@@ -200,28 +200,37 @@ public static class ChatCompletionsEndpoint
     /// </summary>
     private static IResult? ValidateRequestedModel(ChatRequest request, OptiRouter.Configuration.RouterOptions options)
     {
-        if (Routing.ExplicitModelPolicy.IsAutoRouting(request.Model))
+        if (!IsKnownModel(request.Model, options))
         {
-            return null;
+            return Results.Json(
+                new
+                {
+                    error = new
+                    {
+                        message = $"The model '{request.Model}' does not exist or is not enabled. Use 'auto' for smart routing, or GET /v1/models for available model ids.",
+                        type = "invalid_request_error",
+                        code = "model_not_found"
+                    }
+                },
+                statusCode: StatusCodes.Status404NotFound);
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 模型引用是否可解析：auto 语义（空/auto）、路由名、显示 ID 或裸上游 Id。
+    /// 各协议入口（OpenAI/Anthropic/Gemini）共享同一判定，仅错误信封不同。
+    /// </summary>
+    internal static bool IsKnownModel(string? model, OptiRouter.Configuration.RouterOptions options)
+    {
+        if (Routing.ExplicitModelPolicy.IsAutoRouting(model))
+        {
+            return true;
         }
 
         var enabled = options.Models.Where(m => m.Enabled).ToList();
-        if (ModelDisplayIds.Resolve(enabled, request.Model).Count > 0)
-        {
-            return null;
-        }
-
-        return Results.Json(
-            new
-            {
-                error = new
-                {
-                    message = $"The model '{request.Model}' does not exist or is not enabled. Use 'auto' for smart routing, or GET /v1/models for available model ids.",
-                    type = "invalid_request_error",
-                    code = "model_not_found"
-                }
-            },
-            statusCode: StatusCodes.Status404NotFound);
+        return ModelDisplayIds.Resolve(enabled, model ?? string.Empty).Count > 0;
     }
 
     private static bool TryGetValidationError(ChatRequest request, out string error)

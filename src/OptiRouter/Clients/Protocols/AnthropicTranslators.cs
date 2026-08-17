@@ -262,6 +262,473 @@ public static class AnthropicTranslators
         }
     }
 
+    /// <summary>
+    /// 把 Anthropic Messages API 请求体 JSON 翻译为 OpenAI 兼容 ChatRequest（下游入口方向）。
+    /// system 拆分、tool_use/tool_result 块、image source（base64/url）与 tools/tool_choice/stop_sequences 均映射。
+    /// </summary>
+    public static ChatRequest FromAnthropicJson(string anthropicBody)
+    {
+        using var doc = JsonDocument.Parse(anthropicBody);
+        var root = doc.RootElement;
+
+        string model = root.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String
+            ? modelEl.GetString() ?? string.Empty
+            : string.Empty;
+        var messages = new List<ChatMessage>();
+
+        // system：string 或 text blocks 数组
+        if (root.TryGetProperty("system", out var systemEl))
+        {
+            string? systemText = ExtractTextLike(systemEl);
+            if (!string.IsNullOrWhiteSpace(systemText))
+            {
+                messages.Add(ChatMessage.FromText("system", systemText));
+            }
+        }
+
+        if (root.TryGetProperty("messages", out var msgsEl) && msgsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var msg in msgsEl.EnumerateArray())
+            {
+                string role = msg.TryGetProperty("role", out var roleEl) ? roleEl.GetString() ?? "user" : "user";
+                bool isAssistant = role.Equals("assistant", StringComparison.OrdinalIgnoreCase);
+
+                if (!msg.TryGetProperty("content", out var content) || content.ValueKind == JsonValueKind.String)
+                {
+                    string text = content.ValueKind == JsonValueKind.String ? content.GetString() ?? string.Empty : string.Empty;
+                    messages.Add(new ChatMessage
+                    {
+                        Role = isAssistant ? "assistant" : "user",
+                        Content = JsonSerializer.SerializeToElement(text)
+                    });
+                    continue;
+                }
+
+                if (content.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                // 块数组：text/image 归入正文；tool_use → assistant tool_calls；tool_result → tool 消息
+                var contentBlocks = new List<object>();
+                var toolCalls = new List<object>();
+                foreach (var block in content.EnumerateArray())
+                {
+                    if (block.ValueKind != JsonValueKind.Object) continue;
+                    string type = block.TryGetProperty("type", out var typeEl) ? typeEl.GetString() ?? string.Empty : string.Empty;
+
+                    if (type == "text" && block.TryGetProperty("text", out var textEl))
+                    {
+                        contentBlocks.Add(new { type = "text", text = textEl.GetString() });
+                    }
+                    else if (type == "image" && block.TryGetProperty("source", out var srcEl) && srcEl.ValueKind == JsonValueKind.Object)
+                    {
+                        // Anthropic image source → OpenAI image_url（base64 → data URL，url 直传）
+                        string srcType = srcEl.TryGetProperty("type", out var stEl) ? stEl.GetString() ?? string.Empty : string.Empty;
+                        string url = srcType == "base64"
+                            && srcEl.TryGetProperty("media_type", out var mtEl)
+                            && srcEl.TryGetProperty("data", out var dataEl)
+                            ? $"data:{mtEl.GetString()};base64,{dataEl.GetString()}"
+                            : srcEl.TryGetProperty("url", out var urlEl) ? urlEl.GetString() ?? string.Empty : string.Empty;
+                        if (url.Length > 0)
+                        {
+                            contentBlocks.Add(new { type = "image_url", image_url = new { url } });
+                        }
+                    }
+                    else if (type == "tool_use" && isAssistant)
+                    {
+                        toolCalls.Add(new
+                        {
+                            id = block.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? string.Empty : string.Empty,
+                            type = "function",
+                            function = new
+                            {
+                                name = block.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty,
+                                arguments = block.TryGetProperty("input", out var inputEl)
+                                    && (inputEl.ValueKind == JsonValueKind.Object || inputEl.ValueKind == JsonValueKind.Array)
+                                    ? inputEl.GetRawText()
+                                    : "{}"
+                            }
+                        });
+                    }
+                    else if (type == "tool_result")
+                    {
+                        // Anthropic 规范：tool_result 只出现在 user 消息中 → OpenAI tool 消息
+                        string toolUseId = block.TryGetProperty("tool_use_id", out var tuidEl) ? tuidEl.GetString() ?? string.Empty : string.Empty;
+                        string resultText = block.TryGetProperty("content", out var rcEl) ? ExtractTextLike(rcEl) ?? string.Empty : string.Empty;
+                        messages.Add(new ChatMessage
+                        {
+                            Role = "tool",
+                            Content = JsonSerializer.SerializeToElement(resultText),
+                            ExtensionData = new Dictionary<string, JsonElement>
+                            {
+                                ["tool_call_id"] = JsonSerializer.SerializeToElement(toolUseId)
+                            }
+                        });
+                    }
+                }
+
+                if (contentBlocks.Count > 0 || toolCalls.Count == 0)
+                {
+                    messages.Add(new ChatMessage
+                    {
+                        Role = isAssistant ? "assistant" : "user",
+                        Content = contentBlocks.Count == 0
+                            ? JsonSerializer.SerializeToElement(string.Empty)
+                            : JsonSerializer.SerializeToElement(contentBlocks)
+                    });
+                }
+
+                if (toolCalls.Count > 0)
+                {
+                    messages.Add(new ChatMessage
+                    {
+                        Role = "assistant",
+                        Content = JsonSerializer.SerializeToElement(string.Empty),
+                        ExtensionData = new Dictionary<string, JsonElement>
+                        {
+                            ["tool_calls"] = JsonSerializer.SerializeToElement(toolCalls)
+                        }
+                    });
+                }
+            }
+        }
+
+        var extension = new Dictionary<string, JsonElement>();
+        if (root.TryGetProperty("tools", out var toolsEl) && toolsEl.ValueKind == JsonValueKind.Array && toolsEl.GetArrayLength() > 0)
+        {
+            // Anthropic {name, description, input_schema} → OpenAI {type:"function", function:{...}}
+            var tools = new List<object>();
+            foreach (var tool in toolsEl.EnumerateArray())
+            {
+                if (tool.ValueKind != JsonValueKind.Object) continue;
+                string name = tool.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty;
+                if (name.Length == 0) continue;
+                tools.Add(new
+                {
+                    type = "function",
+                    function = new
+                    {
+                        name,
+                        description = tool.TryGetProperty("description", out var descEl) ? descEl.GetString() : null,
+                        parameters = tool.TryGetProperty("input_schema", out var schemaEl)
+                            ? schemaEl
+                            : JsonSerializer.SerializeToElement(new { type = "object", properties = new { } })
+                    }
+                });
+            }
+            if (tools.Count > 0)
+            {
+                extension["tools"] = JsonSerializer.SerializeToElement(tools);
+            }
+        }
+
+        // tool_choice：auto→auto，any→required，tool→具名 function
+        if (root.TryGetProperty("tool_choice", out var tcEl) && tcEl.ValueKind == JsonValueKind.Object
+            && tcEl.TryGetProperty("type", out var tcTypeEl))
+        {
+            string tcType = tcTypeEl.GetString() ?? "auto";
+            object? choice = tcType switch
+            {
+                "auto" => "auto",
+                "any" => "required",
+                "tool" => tcEl.TryGetProperty("name", out var tcNameEl)
+                    ? new { type = "function", function = new { name = tcNameEl.GetString() } }
+                    : null,
+                _ => null
+            };
+            if (choice is not null)
+            {
+                extension["tool_choice"] = JsonSerializer.SerializeToElement(choice);
+            }
+        }
+
+        if (root.TryGetProperty("stop_sequences", out var stopEl) && stopEl.ValueKind == JsonValueKind.Array)
+        {
+            extension["stop"] = stopEl.Clone();
+        }
+        if (root.TryGetProperty("top_p", out var topPEl) && topPEl.ValueKind == JsonValueKind.Number)
+        {
+            extension["top_p"] = topPEl.Clone();
+        }
+
+        return new ChatRequest
+        {
+            Model = model,
+            Messages = messages,
+            Stream = root.TryGetProperty("stream", out var streamEl) && streamEl.ValueKind == JsonValueKind.True,
+            Temperature = root.TryGetProperty("temperature", out var tempEl) && tempEl.ValueKind == JsonValueKind.Number
+                ? tempEl.GetDouble()
+                : null,
+            MaxTokens = root.TryGetProperty("max_tokens", out var maxEl) && maxEl.ValueKind == JsonValueKind.Number
+                ? maxEl.GetInt32()
+                : null,
+            ExtensionData = extension.Count > 0 ? extension : null
+        };
+    }
+
+    /// <summary>
+    /// 把 OpenAI 兼容非流式响应 JSON 翻译为 Anthropic Messages 响应 JSON（下游出口方向）。
+    /// </summary>
+    public static string ToAnthropicJson(string openAiBody)
+    {
+        using var doc = JsonDocument.Parse(openAiBody);
+        var root = doc.RootElement;
+
+        string id = root.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? string.Empty : string.Empty;
+        string model = root.TryGetProperty("model", out var modelEl) ? modelEl.GetString() ?? string.Empty : string.Empty;
+
+        var contentBlocks = new List<object>();
+        string stopReason = "end_turn";
+
+        if (root.TryGetProperty("choices", out var choices) && choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0)
+        {
+            var choice = choices[0];
+            if (choice.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object)
+            {
+                if (message.TryGetProperty("content", out var contentEl)
+                    && contentEl.ValueKind == JsonValueKind.String
+                    && (contentEl.GetString() ?? string.Empty).Length > 0)
+                {
+                    contentBlocks.Add(new { type = "text", text = contentEl.GetString() });
+                }
+
+                if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var call in toolCalls.EnumerateArray())
+                    {
+                        if (!call.TryGetProperty("function", out var fn) || fn.ValueKind != JsonValueKind.Object) continue;
+                        string name = fn.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty;
+                        if (name.Length == 0) continue;
+                        JsonElement input = default;
+                        if (fn.TryGetProperty("arguments", out var argsEl) && argsEl.ValueKind == JsonValueKind.String)
+                        {
+                            try
+                            {
+                                input = JsonDocument.Parse(argsEl.GetString() ?? "{}").RootElement.Clone();
+                            }
+                            catch (JsonException)
+                            {
+                                input = default;
+                            }
+                        }
+                        contentBlocks.Add(new
+                        {
+                            type = "tool_use",
+                            id = call.TryGetProperty("id", out var callIdEl) ? callIdEl.GetString() ?? string.Empty : string.Empty,
+                            name,
+                            input = input.ValueKind == JsonValueKind.Object ? input : JsonSerializer.SerializeToElement(new { })
+                        });
+                    }
+                }
+            }
+
+            if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
+            {
+                stopReason = frEl.GetString() switch
+                {
+                    "tool_calls" => "tool_use",
+                    "length" => "max_tokens",
+                    _ => "end_turn"
+                };
+            }
+        }
+
+        int inputTokens = 0;
+        int outputTokens = 0;
+        if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
+        {
+            inputTokens = usage.TryGetProperty("prompt_tokens", out var pt) && pt.ValueKind == JsonValueKind.Number ? pt.GetInt32() : 0;
+            outputTokens = usage.TryGetProperty("completion_tokens", out var ct) && ct.ValueKind == JsonValueKind.Number ? ct.GetInt32() : 0;
+        }
+
+        return JsonSerializer.Serialize(new
+        {
+            id = id.Length > 0 ? id : $"msg_{Guid.NewGuid():N}",
+            type = "message",
+            role = "assistant",
+            model,
+            content = contentBlocks,
+            stop_reason = stopReason,
+            stop_sequence = (string?)null,
+            usage = new { input_tokens = inputTokens, output_tokens = outputTokens }
+        });
+    }
+
+    /// <summary>
+    /// 有状态流式翻译器：把 OpenAI 兼容 SSE data 行翻译为 Anthropic 事件序列
+    /// （message_start → content_block_start/delta/stop → message_delta → message_stop）。
+    /// 每个 OnData 返回 0..n 个完整 SSE 块（含 event: 行与空行分隔）。
+    /// </summary>
+    public sealed class AnthropicStreamTranslator
+    {
+        private readonly string _fallbackModel;
+        private string _model;
+        private bool _started;
+        private bool _blockClosed;
+        private string _stopReason = "end_turn";
+        private ChatUsage? _usage;
+
+        /// <param name="requestedModel">请求的模型名（chunk 未携带 model 时的回退值）。</param>
+        public AnthropicStreamTranslator(string requestedModel)
+        {
+            _fallbackModel = requestedModel;
+            _model = requestedModel;
+        }
+
+        /// <summary>翻译一条 OpenAI data 行（JSON 或 [DONE]）。</summary>
+        public IReadOnlyList<string> OnData(string data)
+        {
+            var blocks = new List<string>();
+            if (data == "[DONE]")
+            {
+                EnsureStarted(blocks);
+                CloseBlock(blocks);
+                blocks.Add(Event("message_delta", JsonSerializer.Serialize(new
+                {
+                    type = "message_delta",
+                    delta = new { stop_reason = _stopReason, stop_sequence = (string?)null },
+                    usage = new { output_tokens = _usage?.CompletionTokens ?? 0 }
+                })));
+                blocks.Add(Event("message_stop", "{\"type\":\"message_stop\"}"));
+                return blocks;
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(data);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String)
+                {
+                    _model = modelEl.GetString() ?? _model;
+                }
+                if (root.TryGetProperty("usage", out var usageEl) && usageEl.ValueKind == JsonValueKind.Object)
+                {
+                    _usage = new ChatUsage
+                    {
+                        PromptTokens = usageEl.TryGetProperty("prompt_tokens", out var pt) && pt.ValueKind == JsonValueKind.Number ? pt.GetInt32() : 0,
+                        CompletionTokens = usageEl.TryGetProperty("completion_tokens", out var ct) && ct.ValueKind == JsonValueKind.Number ? ct.GetInt32() : 0
+                    };
+                }
+
+                if (!root.TryGetProperty("choices", out var choices)
+                    || choices.ValueKind != JsonValueKind.Array
+                    || choices.GetArrayLength() == 0)
+                {
+                    return blocks;
+                }
+
+                var choice = choices[0];
+                if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object)
+                {
+                    bool hasContent = delta.TryGetProperty("content", out var contentEl)
+                        && contentEl.ValueKind == JsonValueKind.String
+                        && (contentEl.GetString() ?? string.Empty).Length > 0;
+
+                    if (hasContent || delta.TryGetProperty("role", out _))
+                    {
+                        EnsureStarted(blocks);
+                    }
+                    if (hasContent)
+                    {
+                        blocks.Add(Event("content_block_delta", JsonSerializer.Serialize(new
+                        {
+                            type = "content_block_delta",
+                            index = 0,
+                            delta = new { type = "text_delta", text = contentEl.GetString() }
+                        })));
+                    }
+                }
+
+                if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
+                {
+                    _stopReason = frEl.GetString() switch
+                    {
+                        "tool_calls" => "tool_use",
+                        "length" => "max_tokens",
+                        _ => "end_turn"
+                    };
+                }
+            }
+            catch (JsonException)
+            {
+                // 非 JSON data 行跳过（与上游方向 TranslateStreamEvent 行为一致）
+            }
+
+            return blocks;
+        }
+
+        /// <summary>流中途失败：输出 Anthropic error 事件。</summary>
+        public static string OnError(string type, string message)
+            => Event("error", JsonSerializer.Serialize(new { type = "error", error = new { type, message } }));
+
+        private void EnsureStarted(List<string> blocks)
+        {
+            if (_started) return;
+            _started = true;
+            blocks.Add(Event("message_start", JsonSerializer.Serialize(new
+            {
+                type = "message_start",
+                message = new
+                {
+                    id = $"msg_{Guid.NewGuid():N}",
+                    type = "message",
+                    role = "assistant",
+                    model = _model.Length > 0 ? _model : _fallbackModel,
+                    content = Array.Empty<object>(),
+                    stop_reason = (string?)null,
+                    stop_sequence = (string?)null,
+                    usage = new { input_tokens = _usage?.PromptTokens ?? 0, output_tokens = 0 }
+                }
+            })));
+            blocks.Add(Event("content_block_start", JsonSerializer.Serialize(new
+            {
+                type = "content_block_start",
+                index = 0,
+                content_block = new { type = "text", text = string.Empty }
+            })));
+        }
+
+        private void CloseBlock(List<string> blocks)
+        {
+            if (!_started || _blockClosed) return;
+            _blockClosed = true;
+            blocks.Add(Event("content_block_stop", "{\"type\":\"content_block_stop\",\"index\":0}"));
+        }
+
+        private static string Event(string eventType, string dataJson)
+            => $"event: {eventType}\ndata: {dataJson}\n\n";
+    }
+
+    /// <summary>
+    /// 抽取 string 或 text blocks 数组的合并文本；其他形态返回 null。
+    /// </summary>
+    private static string? ExtractTextLike(JsonElement el)
+    {
+        if (el.ValueKind == JsonValueKind.String)
+        {
+            return el.GetString();
+        }
+        if (el.ValueKind == JsonValueKind.Array)
+        {
+            var parts = new List<string>();
+            foreach (var block in el.EnumerateArray())
+            {
+                if (block.ValueKind == JsonValueKind.Object
+                    && block.TryGetProperty("type", out var typeEl)
+                    && typeEl.GetString() == "text"
+                    && block.TryGetProperty("text", out var textEl)
+                    && textEl.ValueKind == JsonValueKind.String)
+                {
+                    parts.Add(textEl.GetString() ?? string.Empty);
+                }
+            }
+            return parts.Count > 0 ? string.Join(string.Empty, parts) : null;
+        }
+        return null;
+    }
+
     private static object BuildUserContent(ChatMessage msg)
     {
         if (msg.Content is not { } content)

@@ -234,9 +234,38 @@ curl -X POST http://localhost:5000/v1/chat/completions \
   }'
 ```
 
+> Note: the `model` field is ignored by the router — model selection is decided by routing strategies; any value works.
+
+### Multi-protocol entry points (protocol alignment)
+
+Besides the OpenAI format, Anthropic and Gemini native protocols are also accepted. All three entry points share the same routing, budget, circuit-breaking and audit pipeline:
+
+```bash
+# Anthropic Messages API (auth: Authorization: Bearer or x-api-key)
+curl -X POST http://localhost:5000/v1/messages \
+  -H "x-api-key: your-proxy-api-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Explain polymorphism"}]
+  }'
+
+# Gemini generateContent (auth: Authorization: Bearer, x-goog-api-key, or ?key=)
+curl -X POST "http://localhost:5000/v1beta/models/auto:generateContent" \
+  -H "x-goog-api-key: your-proxy-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "contents": [{"role": "user", "parts": [{"text": "Explain polymorphism"}]}]
+  }'
+```
+
+Streaming uses `"stream": true` (Anthropic event sequence) or `:streamGenerateContent?alt=sse` (Gemini SSE chunks). `auto` semantics and model validation match the OpenAI entry; text, system prompts and tool calls (tool_use/tool_result and functionCall/functionResponse) are translated in both directions.
+
 ## Testing
 
-Run the full suite of 979+ unit and integration tests (grows with iterations):
+Run the full suite of 1000+ unit and integration tests (grows with iterations):
 
 ```bash
 dotnet test OptiRouter.sln -c Release

@@ -663,6 +663,7 @@ app.Use(async (context, next) =>
 
 static bool IsProtectedPath(PathString path) =>
     path.StartsWithSegments("/v1")
+    || path.StartsWithSegments("/v1beta")
     || path.StartsWithSegments("/dashboard")
     || path.StartsWithSegments("/overview")
     || path.StartsWithSegments("/requests")
@@ -705,7 +706,8 @@ app.Use(async (context, next) =>
         || context.Request.Path.StartsWithSegments("/keys")
         || context.Request.Path.StartsWithSegments("/api/dashboard")
         || context.Request.Path.StartsWithSegments("/api/models");
-    bool isV1Path = context.Request.Path.StartsWithSegments("/v1");
+    bool isV1Path = context.Request.Path.StartsWithSegments("/v1")
+        || context.Request.Path.StartsWithSegments("/v1beta");
     string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
     // 管理端密钥仅 AdminApiKey（不再回退 ProxyApiKey）：ProxyApiKey 发给 API 客户端，
     // 允许它登录管理台构成权限越界。未配 AdminApiKey 时管理台鉴权总失败（仅剩已登录会话，会话过期即不可用）。
@@ -794,6 +796,23 @@ static string? ExtractBearerToken(HttpContext context)
         && authorization.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase))
     {
         return authorization.Parameter;
+    }
+    return ExtractProtocolNativeKey(context);
+}
+
+// 协议对齐：原生协议入口使用各自的 key 传递习惯，与 Bearer 等价参与同一套校验
+// （ProxyApiKey / ClientKeyService），不新增密钥体系。
+static string? ExtractProtocolNativeKey(HttpContext context)
+{
+    var path = context.Request.Path;
+    if (path.StartsWithSegments("/v1/messages"))
+    {
+        return context.Request.Headers["x-api-key"].FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+    }
+    if (path.StartsWithSegments("/v1beta"))
+    {
+        return context.Request.Headers["x-goog-api-key"].FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))
+            ?? context.Request.Query["key"].FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
     }
     return null;
 }
@@ -913,6 +932,10 @@ if (builder.Environment.IsProduction())
 
 // t4: 暴露 OpenAI 兼容 Chat Completions 端点。
 app.MapChatCompletions();
+// 下游协议对齐：Anthropic Messages 与 Gemini generateContent 原生入口，
+// 内部统一翻译为 OpenAI 契约进路由管线（鉴权兼容 x-api-key / x-goog-api-key / ?key=）。
+app.MapAnthropicMessages();
+app.MapGeminiGenerateContent();
 
 // OpenAI 兼容模型发现端点（GET /v1/models），受 /v1/* 鉴权与限流保护。
 app.MapModelsEndpoint();

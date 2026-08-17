@@ -265,6 +265,407 @@ public static class GeminiTranslators
         }
     }
 
+    /// <summary>
+    /// 把 Gemini generateContent 请求体 JSON 翻译为 OpenAI 兼容 ChatRequest（下游入口方向）。
+    /// contents/parts、systemInstruction、functionCall/functionResponse 与 generationConfig 均映射。
+    /// </summary>
+    /// <param name="geminiBody">Gemini 请求体 JSON（不含 stream 字段，流式由端点路由决定）。</param>
+    /// <param name="modelFromPath">URL 路径中的模型名（Gemini 的 model 在路径而非 body）。</param>
+    public static ChatRequest FromGeminiJson(string geminiBody, string modelFromPath)
+    {
+        using var doc = JsonDocument.Parse(geminiBody);
+        var root = doc.RootElement;
+
+        var messages = new List<ChatMessage>();
+
+        // systemInstruction → system 消息
+        if (root.TryGetProperty("systemInstruction", out var sysEl)
+            && sysEl.ValueKind == JsonValueKind.Object
+            && sysEl.TryGetProperty("parts", out var sysParts)
+            && sysParts.ValueKind == JsonValueKind.Array)
+        {
+            var texts = new List<string>();
+            foreach (var part in sysParts.EnumerateArray())
+            {
+                if (part.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String)
+                {
+                    texts.Add(textEl.GetString() ?? string.Empty);
+                }
+            }
+            string systemText = string.Join(string.Empty, texts);
+            if (systemText.Length > 0)
+            {
+                messages.Add(ChatMessage.FromText("system", systemText));
+            }
+        }
+
+        if (root.TryGetProperty("contents", out var contentsEl) && contentsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var content in contentsEl.EnumerateArray())
+            {
+                if (content.ValueKind != JsonValueKind.Object) continue;
+                bool isModel = content.TryGetProperty("role", out var roleEl)
+                    && string.Equals(roleEl.GetString(), "model", StringComparison.OrdinalIgnoreCase);
+
+                if (!content.TryGetProperty("parts", out var parts) || parts.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                var textParts = new List<object>();
+                var toolCalls = new List<object>();
+                foreach (var part in parts.EnumerateArray())
+                {
+                    if (part.ValueKind != JsonValueKind.Object) continue;
+
+                    if (part.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String)
+                    {
+                        textParts.Add(new { type = "text", text = textEl.GetString() });
+                    }
+                    else if (part.TryGetProperty("inlineData", out var inlineEl) && inlineEl.ValueKind == JsonValueKind.Object
+                        && inlineEl.TryGetProperty("mimeType", out var mimeEl)
+                        && inlineEl.TryGetProperty("data", out var dataEl))
+                    {
+                        // Gemini inlineData → OpenAI image_url data URL
+                        textParts.Add(new
+                        {
+                            type = "image_url",
+                            image_url = new { url = $"data:{mimeEl.GetString()};base64,{dataEl.GetString()}" }
+                        });
+                    }
+                    else if (isModel && part.TryGetProperty("functionCall", out var fnCall) && fnCall.ValueKind == JsonValueKind.Object)
+                    {
+                        // model 的 functionCall → assistant tool_calls
+                        toolCalls.Add(new
+                        {
+                            id = $"call-{Guid.NewGuid():N}"[..12],
+                            type = "function",
+                            function = new
+                            {
+                                name = fnCall.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty,
+                                arguments = fnCall.TryGetProperty("args", out var argsEl)
+                                    && (argsEl.ValueKind == JsonValueKind.Object || argsEl.ValueKind == JsonValueKind.Array)
+                                    ? argsEl.GetRawText()
+                                    : "{}"
+                            }
+                        });
+                    }
+                    else if (!isModel && part.TryGetProperty("functionResponse", out var fnResp) && fnResp.ValueKind == JsonValueKind.Object)
+                    {
+                        // user 的 functionResponse → tool 消息（Gemini 用 name 匹配，OpenAI 用 id——以 name 充当 tool_call_id）
+                        string fnName = fnResp.TryGetProperty("name", out var fnNameEl) ? fnNameEl.GetString() ?? string.Empty : string.Empty;
+                        string resultJson = fnResp.TryGetProperty("response", out var respEl) ? respEl.GetRawText() : "{}";
+                        messages.Add(new ChatMessage
+                        {
+                            Role = "tool",
+                            Content = JsonSerializer.SerializeToElement(resultJson),
+                            ExtensionData = new Dictionary<string, JsonElement>
+                            {
+                                ["tool_call_id"] = JsonSerializer.SerializeToElement(fnName)
+                            }
+                        });
+                    }
+                }
+
+                if (textParts.Count > 0 || toolCalls.Count == 0)
+                {
+                    messages.Add(new ChatMessage
+                    {
+                        Role = isModel ? "assistant" : "user",
+                        Content = textParts.Count == 0
+                            ? JsonSerializer.SerializeToElement(string.Empty)
+                            : JsonSerializer.SerializeToElement(textParts)
+                    });
+                }
+
+                if (toolCalls.Count > 0)
+                {
+                    messages.Add(new ChatMessage
+                    {
+                        Role = "assistant",
+                        Content = JsonSerializer.SerializeToElement(string.Empty),
+                        ExtensionData = new Dictionary<string, JsonElement>
+                        {
+                            ["tool_calls"] = JsonSerializer.SerializeToElement(toolCalls)
+                        }
+                    });
+                }
+            }
+        }
+
+        var extension = new Dictionary<string, JsonElement>();
+
+        // tools[{functionDeclarations}] → OpenAI tools
+        if (root.TryGetProperty("tools", out var toolsEl) && toolsEl.ValueKind == JsonValueKind.Array)
+        {
+            var tools = new List<object>();
+            foreach (var toolSet in toolsEl.EnumerateArray())
+            {
+                if (!toolSet.TryGetProperty("functionDeclarations", out var decls) || decls.ValueKind != JsonValueKind.Array) continue;
+                foreach (var decl in decls.EnumerateArray())
+                {
+                    if (decl.ValueKind != JsonValueKind.Object) continue;
+                    string name = decl.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty;
+                    if (name.Length == 0) continue;
+                    tools.Add(new
+                    {
+                        type = "function",
+                        function = new
+                        {
+                            name,
+                            description = decl.TryGetProperty("description", out var descEl) ? descEl.GetString() : null,
+                            parameters = decl.TryGetProperty("parameters", out var paramsEl)
+                                ? paramsEl
+                                : JsonSerializer.SerializeToElement(new { type = "object", properties = new { } })
+                        }
+                    });
+                }
+            }
+            if (tools.Count > 0)
+            {
+                extension["tools"] = JsonSerializer.SerializeToElement(tools);
+            }
+        }
+
+        double? temperature = null;
+        int? maxTokens = null;
+        if (root.TryGetProperty("generationConfig", out var genConfig) && genConfig.ValueKind == JsonValueKind.Object)
+        {
+            if (genConfig.TryGetProperty("temperature", out var tempEl) && tempEl.ValueKind == JsonValueKind.Number)
+            {
+                temperature = tempEl.GetDouble();
+            }
+            if (genConfig.TryGetProperty("maxOutputTokens", out var maxEl) && maxEl.ValueKind == JsonValueKind.Number)
+            {
+                maxTokens = maxEl.GetInt32();
+            }
+            if (genConfig.TryGetProperty("topP", out var topPEl) && topPEl.ValueKind == JsonValueKind.Number)
+            {
+                extension["top_p"] = topPEl.Clone();
+            }
+        }
+        if (root.TryGetProperty("stopSequences", out var stopEl) && stopEl.ValueKind == JsonValueKind.Array)
+        {
+            extension["stop"] = stopEl.Clone();
+        }
+
+        return new ChatRequest
+        {
+            Model = modelFromPath,
+            Messages = messages,
+            Stream = false,
+            Temperature = temperature,
+            MaxTokens = maxTokens,
+            ExtensionData = extension.Count > 0 ? extension : null
+        };
+    }
+
+    /// <summary>
+    /// 把 OpenAI 兼容非流式响应 JSON 翻译为 Gemini generateContent 响应 JSON（下游出口方向）。
+    /// </summary>
+    public static string ToGeminiJson(string openAiBody)
+    {
+        using var doc = JsonDocument.Parse(openAiBody);
+        var root = doc.RootElement;
+
+        string model = root.TryGetProperty("model", out var modelEl) ? modelEl.GetString() ?? string.Empty : string.Empty;
+
+        var parts = new List<object>();
+        string finishReason = "STOP";
+
+        if (root.TryGetProperty("choices", out var choices) && choices.ValueKind == JsonValueKind.Array && choices.GetArrayLength() > 0)
+        {
+            var choice = choices[0];
+            if (choice.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object)
+            {
+                if (message.TryGetProperty("content", out var contentEl)
+                    && contentEl.ValueKind == JsonValueKind.String
+                    && (contentEl.GetString() ?? string.Empty).Length > 0)
+                {
+                    parts.Add(new { text = contentEl.GetString() });
+                }
+
+                if (message.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var call in toolCalls.EnumerateArray())
+                    {
+                        if (!call.TryGetProperty("function", out var fn) || fn.ValueKind != JsonValueKind.Object) continue;
+                        string name = fn.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? string.Empty : string.Empty;
+                        if (name.Length == 0) continue;
+                        JsonElement args = default;
+                        if (fn.TryGetProperty("arguments", out var argsEl) && argsEl.ValueKind == JsonValueKind.String)
+                        {
+                            try
+                            {
+                                args = JsonDocument.Parse(argsEl.GetString() ?? "{}").RootElement.Clone();
+                            }
+                            catch (JsonException)
+                            {
+                                args = default;
+                            }
+                        }
+                        parts.Add(new
+                        {
+                            functionCall = new
+                            {
+                                name,
+                                args = args.ValueKind == JsonValueKind.Object ? args : JsonSerializer.SerializeToElement(new { })
+                            }
+                        });
+                    }
+                }
+            }
+
+            if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
+            {
+                finishReason = frEl.GetString() switch
+                {
+                    "length" => "MAX_TOKENS",
+                    "content_filter" => "SAFETY",
+                    _ => "STOP"
+                };
+            }
+        }
+
+        int promptTokens = 0;
+        int completionTokens = 0;
+        if (root.TryGetProperty("usage", out var usage) && usage.ValueKind == JsonValueKind.Object)
+        {
+            promptTokens = usage.TryGetProperty("prompt_tokens", out var pt) && pt.ValueKind == JsonValueKind.Number ? pt.GetInt32() : 0;
+            completionTokens = usage.TryGetProperty("completion_tokens", out var ct) && ct.ValueKind == JsonValueKind.Number ? ct.GetInt32() : 0;
+        }
+
+        return JsonSerializer.Serialize(new
+        {
+            candidates = new object[]
+            {
+                new
+                {
+                    content = new { parts, role = "model" },
+                    finishReason,
+                    index = 0
+                }
+            },
+            usageMetadata = new
+            {
+                promptTokenCount = promptTokens,
+                candidatesTokenCount = completionTokens,
+                totalTokenCount = promptTokens + completionTokens
+            },
+            modelVersion = model
+        });
+    }
+
+    /// <summary>
+    /// 有状态流式翻译器：把 OpenAI 兼容 SSE data 行翻译为 Gemini GenerateContentResponse 流块。
+    /// content delta → 文本块；[DONE] → 带 finishReason + usageMetadata 的终结块（Gemini 流以连接结束为界，无 [DONE] 标记）。
+    /// </summary>
+    public sealed class GeminiStreamTranslator
+    {
+        private readonly string _fallbackModel;
+        private string _model;
+        private string _finishReason = "STOP";
+        private ChatUsage? _usage;
+
+        /// <param name="requestedModel">路径中的模型名（chunk 未携带 model 时的回退值）。</param>
+        public GeminiStreamTranslator(string requestedModel)
+        {
+            _fallbackModel = requestedModel;
+            _model = requestedModel;
+        }
+
+        /// <summary>翻译一条 OpenAI data 行（JSON 或 [DONE]），返回 0..n 个 data 块（含空行分隔）。</summary>
+        public IReadOnlyList<string> OnData(string data)
+        {
+            if (data == "[DONE]")
+            {
+                var finalChunk = new
+                {
+                    candidates = new object[]
+                    {
+                        new { content = new { parts = Array.Empty<object>(), role = "model" }, finishReason = _finishReason, index = 0 }
+                    },
+                    usageMetadata = new
+                    {
+                        promptTokenCount = _usage?.PromptTokens ?? 0,
+                        candidatesTokenCount = _usage?.CompletionTokens ?? 0,
+                        totalTokenCount = (_usage?.PromptTokens ?? 0) + (_usage?.CompletionTokens ?? 0)
+                    },
+                    modelVersion = _model.Length > 0 ? _model : _fallbackModel
+                };
+                return new[] { $"data: {JsonSerializer.Serialize(finalChunk)}\n\n" };
+            }
+
+            var blocks = new List<string>();
+            try
+            {
+                using var doc = JsonDocument.Parse(data);
+                var root = doc.RootElement;
+
+                if (root.TryGetProperty("model", out var modelEl) && modelEl.ValueKind == JsonValueKind.String)
+                {
+                    _model = modelEl.GetString() ?? _model;
+                }
+                if (root.TryGetProperty("usage", out var usageEl) && usageEl.ValueKind == JsonValueKind.Object)
+                {
+                    _usage = new ChatUsage
+                    {
+                        PromptTokens = usageEl.TryGetProperty("prompt_tokens", out var pt) && pt.ValueKind == JsonValueKind.Number ? pt.GetInt32() : 0,
+                        CompletionTokens = usageEl.TryGetProperty("completion_tokens", out var ct) && ct.ValueKind == JsonValueKind.Number ? ct.GetInt32() : 0
+                    };
+                }
+
+                if (!root.TryGetProperty("choices", out var choices)
+                    || choices.ValueKind != JsonValueKind.Array
+                    || choices.GetArrayLength() == 0)
+                {
+                    return blocks;
+                }
+
+                var choice = choices[0];
+                if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object
+                    && delta.TryGetProperty("content", out var contentEl)
+                    && contentEl.ValueKind == JsonValueKind.String
+                    && (contentEl.GetString() ?? string.Empty).Length > 0)
+                {
+                    var chunk = new
+                    {
+                        candidates = new object[]
+                        {
+                            new
+                            {
+                                content = new { parts = new object[] { new { text = contentEl.GetString() } }, role = "model" },
+                                index = 0
+                            }
+                        },
+                        modelVersion = _model.Length > 0 ? _model : _fallbackModel
+                    };
+                    blocks.Add($"data: {JsonSerializer.Serialize(chunk)}\n\n");
+                }
+
+                if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
+                {
+                    _finishReason = frEl.GetString() switch
+                    {
+                        "length" => "MAX_TOKENS",
+                        "content_filter" => "SAFETY",
+                        _ => "STOP"
+                    };
+                }
+            }
+            catch (JsonException)
+            {
+                // 非 JSON data 行跳过
+            }
+
+            return blocks;
+        }
+
+        /// <summary>流中途失败：输出 Gemini 错误块。</summary>
+        public static string OnError(int code, string status, string message)
+            => $"data: {JsonSerializer.Serialize(new { error = new { code, message, status } })}\n\n";
+    }
+
     private static List<object> BuildParts(ChatMessage msg, bool isToolResult)
     {
         var parts = new List<object>();
