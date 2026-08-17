@@ -80,7 +80,7 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
 
         string key = $"{_prefix}total";
         var val = _db.StringGet(key);
-        return val.HasValue && double.TryParse(val, out double d) ? (decimal)d : 0m;
+        return val.HasValue && double.TryParse(val.ToString(), out double d) ? (decimal)d : 0m;
     }
 
     /// <inheritdoc />
@@ -108,7 +108,7 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
 
         string key = $"{_prefix}daily:{utcDate:yyyy-MM-dd}";
         var val = _db.StringGet(key);
-        return val.HasValue && double.TryParse(val, out double d) ? (decimal)d : 0m;
+        return val.HasValue && double.TryParse(val.ToString(), out double d) ? (decimal)d : 0m;
     }
 
     /// <inheritdoc />
@@ -140,7 +140,7 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
 
         string key = $"{_prefix}session:{sessionId}";
         var val = _db.StringGet(key);
-        return val.HasValue && double.TryParse(val, out double d) ? (decimal)d : 0m;
+        return val.HasValue && double.TryParse(val.ToString(), out double d) ? (decimal)d : 0m;
     }
 
     /// <inheritdoc />

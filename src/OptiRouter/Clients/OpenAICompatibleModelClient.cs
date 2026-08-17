@@ -111,6 +111,34 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var reader = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8 * 1024));
         int pendingLineBytes = 0;
 
+        // 同步局部函数：解析 SSE 行数据，避免在 async 方法中使用 ReadOnlySpan<byte>
+        string? ProcessLineData(in ReadOnlySequence<byte> lineBytes, ref byte[]? rented)
+        {
+            rented = null;
+            if (lineBytes.IsEmpty) return null;
+
+            var lineSpan = lineBytes.IsSingleSegment
+                ? lineBytes.FirstSpan
+                : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent((int)lineBytes.Length)).AsSpan(0, (int)lineBytes.Length);
+
+            if (!lineBytes.IsSingleSegment && rented is not null)
+            {
+                lineBytes.CopyTo(rented);
+            }
+
+            if (!lineSpan.StartsWith("data: "u8))
+                return null;
+
+            var dataSpan = lineSpan.Slice("data: ".Length);
+            if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
+                dataSpan = dataSpan[..^1];
+
+            if (dataSpan.SequenceEqual("[DONE]"u8))
+                return "[DONE]";
+
+            return System.Text.Encoding.UTF8.GetString(dataSpan);
+        }
+
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -121,34 +149,18 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             while (TryReadLine(ref buffer, out var lineBytes))
             {
                 pendingLineBytes = 0;
-                if (lineBytes.IsEmpty) continue;
 
                 byte[]? rented = null;
                 try
                 {
-                    ReadOnlySpan<byte> lineSpan = lineBytes.IsSingleSegment
-                        ? lineBytes.FirstSpan
-                        : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent((int)lineBytes.Length)).AsSpan(0, (int)lineBytes.Length);
+                    var data = ProcessLineData(lineBytes, ref rented);
+                    if (data is null) continue;
 
-                    if (!lineBytes.IsSingleSegment && rented is not null)
-                    {
-                        lineBytes.CopyTo(rented);
-                    }
-
-                    if (!lineSpan.StartsWith("data: "u8))
-                        continue;
-
-                    var dataSpan = lineSpan.Slice("data: ".Length);
-                    if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
-                        dataSpan = dataSpan[..^1];
-
-                    if (dataSpan.SequenceEqual("[DONE]"u8))
+                    if (data == "[DONE]")
                     {
                         await reader.CompleteAsync().ConfigureAwait(false);
                         yield break;
                     }
-
-                    var data = System.Text.Encoding.UTF8.GetString(dataSpan);
 
                     // 解析 JSON，失败则跳过该行并继续。
                     RawStreamChunk? raw = null;
@@ -358,6 +370,35 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             var reader = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8 * 1024));
             int pendingLineBytes = 0;
 
+            // 同步局部函数：解析 SSE 行数据，避免在 async 方法中使用 ReadOnlySpan<byte>
+            string? ProcessLineData(in ReadOnlySequence<byte> lineBytes, ref byte[]? rented)
+            {
+                rented = null;
+                if (lineBytes.IsEmpty) return null;
+
+                var lineSpan = lineBytes.IsSingleSegment
+                    ? lineBytes.FirstSpan
+                    : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent((int)lineBytes.Length)).AsSpan(0, (int)lineBytes.Length);
+
+                if (!lineBytes.IsSingleSegment && rented is not null)
+                {
+                    lineBytes.CopyTo(rented);
+                }
+
+                if (!lineSpan.StartsWith("data: "u8))
+                    return null;
+
+                var dataSpan = lineSpan.Slice("data: ".Length);
+                // 去尾随 \r（兼容 CRLF）。
+                if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
+                    dataSpan = dataSpan[..^1];
+
+                if (dataSpan.SequenceEqual("[DONE]"u8))
+                    return "[DONE]";
+
+                return System.Text.Encoding.UTF8.GetString(dataSpan);
+            }
+
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -369,29 +410,14 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 while (TryReadLine(ref buffer, out var lineBytes))
                 {
                     pendingLineBytes = 0;
-                    if (lineBytes.IsEmpty) continue; // 空行跳过
 
                     byte[]? rented = null;
                     try
                     {
-                        ReadOnlySpan<byte> lineSpan = lineBytes.IsSingleSegment
-                            ? lineBytes.FirstSpan
-                            : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent((int)lineBytes.Length)).AsSpan(0, (int)lineBytes.Length);
+                        var data = ProcessLineData(lineBytes, ref rented);
+                        if (data is null) continue;
 
-                        if (!lineBytes.IsSingleSegment && rented is not null)
-                        {
-                            lineBytes.CopyTo(rented);
-                        }
-
-                        if (!lineSpan.StartsWith("data: "u8))
-                            continue;
-
-                        var dataSpan = lineSpan.Slice("data: ".Length);
-                        // 去尾随 \r（兼容 CRLF）。
-                        if (dataSpan.Length > 0 && dataSpan[^1] == (byte)'\r')
-                            dataSpan = dataSpan[..^1];
-
-                        if (dataSpan.SequenceEqual("[DONE]"u8))
+                        if (data == "[DONE]")
                         {
                             await reader.CompleteAsync().ConfigureAwait(false);
                             UpstreamResponseMetadata? firstMetadata = null;
@@ -407,8 +433,6 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                             yield return new RawStreamLine("[DONE]", null, firstMetadata);
                             yield break;
                         }
-
-                        var data = System.Text.Encoding.UTF8.GetString(dataSpan);
                         UpstreamResponseMetadata? lineMetadata = null;
                         if (isFirstDataItem && responseMetadata is not null)
                         {
