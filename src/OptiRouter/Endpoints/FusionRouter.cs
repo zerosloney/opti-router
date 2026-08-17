@@ -25,6 +25,7 @@ public sealed class FusionRouter
     private readonly FusionPanelSelector _panelSelector;
     private readonly UpstreamQuotaStateStore? _quotaStore;
     private readonly ILogger<FusionRouter> _logger;
+    private readonly ByzantineConsensusEngine? _byzantineEngine;
 
     public FusionRouter(
         IModelClientProvider clientProvider,
@@ -32,7 +33,8 @@ public sealed class FusionRouter
         OutcomeRecorder recorder,
         FusionPanelSelector panelSelector,
         ILogger<FusionRouter> logger,
-        UpstreamQuotaStateStore? quotaStore = null)
+        UpstreamQuotaStateStore? quotaStore = null,
+        ByzantineConsensusEngine? byzantineEngine = null)
     {
         _clientProvider = clientProvider;
         _healthTracker = healthTracker;
@@ -40,6 +42,7 @@ public sealed class FusionRouter
         _panelSelector = panelSelector;
         _logger = logger;
         _quotaStore = quotaStore;
+        _byzantineEngine = byzantineEngine;
     }
 
     public async Task<FusionAttemptResult> ExecuteAsync(
@@ -241,6 +244,64 @@ public sealed class FusionRouter
             // 注意：已记入 failedInThisRequest 的 panel 失败模型会在串行降级中被排除。
             // 被跳过的候选（未 admission）仍在候选链中，串行会尝试它们。
             return new FusionAttemptResult(null, lastModelName, lastStatusCode, lastErrorMessage);
+        }
+
+        // 5.5. 拜占庭共识捷径：若启用且有 >=2 个成功 panel，尝试共识判定
+        if (routing.EnableByzantineConsensus && _byzantineEngine != null && panelAnswers.Count >= 2)
+        {
+            var candidates = new List<ModelResponseCandidate>();
+            var panelSuccessResults = new Dictionary<string, (RawChatResponse Response, long ElapsedMs, decimal Cost)>();
+
+            // 从 panelResults 中提取成功项构造候选列表
+            foreach (var (model, response, error, elapsedMs) in panelResults)
+            {
+                if (response is not null && error is null)
+                {
+                    string text = ResponseConfidenceChecker.ExtractAssistantText(response);
+                    ChatUsage? usage = response.Usage;
+                    decimal cost = usage is not null ? CostCalculator.Compute(usage, model) : 0m;
+                    candidates.Add(new ModelResponseCandidate(model.Name, text, elapsedMs, cost));
+                    panelSuccessResults[model.Name] = (response, elapsedMs, cost);
+                }
+            }
+
+            if (candidates.Count >= 2)
+            {
+                var consensus = _byzantineEngine.EvaluateConsensus(candidates, routing.ByzantineOutlierThreshold);
+
+                if (consensus.ConsensusAchieved)
+                {
+                    // 共识达成：跳过 analyst 与 outer，直接返回 winner
+                    var (winnerResponse, winnerElapsedMs, winnerCost) = panelSuccessResults[consensus.WinningModelName];
+                    var winnerModel = panelResults.First(p => p.Model.Name == consensus.WinningModelName).Model;
+
+                    // 审计共识采纳记录（复用 panel 已入账的成本，不调用 RecordCost；
+                    // 学习信号已在 panel 阶段记录，此处不重复 RecordThompsonOutcome，避免双重计数）
+                    ChatUsage? winnerUsage = winnerResponse.Usage;
+                    string consensusReason = decision.Reason + "; fusion-router: byzantine-consensus adopted (score=" + consensus.ConsensusScore.ToString("F3") + ", outliers=[" + string.Join(",", consensus.OutlierModels) + "])";
+                    _recorder.RecordAudit(null, winnerModel.Name, estimatedTokens, winnerUsage, winnerCost, winnerElapsedMs, sessionId,
+                        consensusReason,
+                        true, null, false, routedTier,
+                        isAdopted: true, parallelGroupId: groupId, isEstimated: false, fusionRole: "consensus",
+                        timeToFirstTokenMs: winnerResponse.Metadata?.ResponseHeaderLatencyMs,
+                        reward: null, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+
+                    // 记录亲和性信号（与 outer 成功路径对齐——用户实际看到的答案）
+                    _recorder.RecordAffinity(sessionId, winnerModel.Name, AffinitySignal.Weak);
+                    _recorder.RecordPromptCacheAffinity(request, winnerModel.Name);
+
+                    _logger.LogInformation("Fusion router: Byzantine consensus achieved (group {GroupId}), winner={Winner}, score={Score:F3}, outliers={Outliers}",
+                        groupId, consensus.WinningModelName, consensus.ConsensusScore, string.Join(",", consensus.OutlierModels));
+
+                    return new FusionAttemptResult(winnerResponse, winnerModel.Name, null, null);
+                }
+                else
+                {
+                    // 共识分歧：记录 warning，落入下方 analyst 路径（分歧正是需要 LLM 仲裁的信号）
+                    _logger.LogWarning("Fusion router: Byzantine consensus divergence (group {GroupId}), reason: {Reason}. Falling back to analyst arbitration.",
+                        groupId, consensus.Reason);
+                }
+            }
         }
 
         // 6. 解析 analyst 模型。

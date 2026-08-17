@@ -35,6 +35,8 @@ public class FusionRouterTests
         public int FusionRouterPanelTimeoutSeconds { get; set; } = 0;
         public string? FusionRouterAnalystPrompt { get; set; }
         public string? CascadeUpgradeSelfVerifyPrompt { get; set; }
+        public bool EnableByzantineConsensus { get; set; }
+        public double ByzantineOutlierThreshold { get; set; } = 0.65;
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -99,6 +101,8 @@ public class FusionRouterTests
                     opt.Routing.FusionRouterAnalystPrompt = FusionRouterAnalystPrompt;
                     if (CascadeUpgradeSelfVerifyPrompt is not null)
                         opt.Routing.CascadeUpgradeSelfVerifyPrompt = CascadeUpgradeSelfVerifyPrompt;
+                    opt.Routing.EnableByzantineConsensus = EnableByzantineConsensus;
+                    opt.Routing.ByzantineOutlierThreshold = ByzantineOutlierThreshold;
                     opt.Routing.EnableHealthProbe = false;
                 });
                 services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
@@ -1186,4 +1190,205 @@ public class FusionRouterTests
             Assert.Contains(selection.RankedCandidates, m => m.Name == "model-a");
             Assert.Contains(selection.RankedCandidates, m => m.Name == "model-c");
         }
-}
+
+        [Fact]
+        public async Task Consensus_Disabled_AnalystOuterStillCalled()
+        {
+            // EnableByzantineConsensus=false → 走原有 analyst+outer 路径
+            using var factory = new FusionRouterFactory { EnableFusionMode = true, EnableByzantineConsensus = false };
+
+            int analystCallCount = 0;
+            int outerCallCount = 0;
+            int modelACalls = 0;
+
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) =>
+                {
+                    modelACalls++;
+                    if (modelACalls == 1) return Task.FromResult(MakeResponse("model-a", 10, 5, "panel-a"));
+                    if (modelACalls == 2)
+                    {
+                        analystCallCount++;
+                        return Task.FromResult(MakeAnalystResponse("model-a", 10, 5, AnalystJson));
+                    }
+                    outerCallCount++;
+                    return Task.FromResult(MakeResponse("model-a", 10, 5, "final"));
+                });
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "panel-b")));
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "panel-c")));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(1, analystCallCount);
+            Assert.Equal(1, outerCallCount);
+            Assert.Contains("final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task Consensus_AgreedPanels_ReturnsWinnerDirectly()
+        {
+            // 开关开 + 3 个 panel 返回高度一致的文本 → 返回 winner，analyst/outer 未被调用
+            using var factory = new FusionRouterFactory { EnableFusionMode = true, EnableByzantineConsensus = true, ByzantineOutlierThreshold = 0.65 };
+
+            int analystCallCount = 0;
+            int outerCallCount = 0;
+            int modelACalls = 0;
+            int modelBCalls = 0;
+            int modelCCalls = 0;
+
+            // 三个 panel 返回几乎相同的文本（词袋相似度高）
+            string agreedText = "The capital of France is Paris, located in the north-central part of the country.";
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) =>
+                {
+                    modelACalls++;
+                    return Task.FromResult(MakeResponse("model-a", 10, 5, agreedText));
+                });
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) =>
+                {
+                    modelBCalls++;
+                    return Task.FromResult(MakeResponse("model-b", 10, 5, agreedText));
+                });
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) =>
+                {
+                    modelCCalls++;
+                    // model-c 可能会被选作 analyst/outer（如它是最小 MaxContextTokens 会被选为 outer）
+                    // 但共识捷径应该跳过 analyst/outer，所以不应该被调用
+                    if (modelCCalls == 1) return Task.FromResult(MakeResponse("model-c", 10, 5, agreedText));
+                    analystCallCount++;
+                    return Task.FromResult(MakeAnalystResponse("model-c", 10, 5, AnalystJson));
+                });
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+            // 验证只调用了一次 panel（没有 analyst/outer 调用）
+            Assert.Equal(1, modelACalls);
+            Assert.Equal(1, modelBCalls);
+            Assert.Equal(1, modelCCalls);
+            Assert.Equal(0, analystCallCount);
+            Assert.Equal(0, outerCallCount);
+
+            // 验证返回的是某个 panel 的答案
+            var body = await response.Content.ReadAsStringAsync();
+            Assert.Contains("Paris", body, StringComparison.Ordinal);
+
+            // 验证审计记录中出现 "consensus" 角色
+            await Task.Delay(300); // 等审计落库
+            var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+            var recent = auditStore.GetRecent(10);
+            var consensusRecords = recent.Where(r => r.FusionRole == "consensus").ToList();
+            Assert.NotEmpty(consensusRecords);
+            Assert.True(consensusRecords[0].IsAdopted, "consensus result should be marked as adopted");
+        }
+
+        [Fact]
+        public async Task Consensus_DivergentPanels_FallsBackToAnalyst()
+        {
+            // 开关开 + 3 个互不相似的 panel 文本（低于 0.65 阈值相似度）→ 走 analyst+outer
+            using var factory = new FusionRouterFactory { EnableFusionMode = true, EnableByzantineConsensus = true, ByzantineOutlierThreshold = 0.65 };
+
+            int analystCallCount = 0;
+            int outerCallCount = 0;
+            int modelACalls = 0;
+
+            // 三个 panel 返回完全不同话题的答案（词袋相似度低）
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) =>
+                {
+                    modelACalls++;
+                    if (modelACalls == 1) return Task.FromResult(MakeResponse("model-a", 10, 5, "The answer is about mathematics and calculus."));
+                    if (modelACalls == 2)
+                    {
+                        analystCallCount++;
+                        return Task.FromResult(MakeAnalystResponse("model-a", 10, 5, AnalystJson));
+                    }
+                    outerCallCount++;
+                    return Task.FromResult(MakeResponse("model-a", 10, 5, "final"));
+                });
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "The answer discusses history and ancient civilizations.")));
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "The answer covers cooking recipes and ingredients.")));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(1, analystCallCount);
+            Assert.Equal(1, outerCallCount);
+            Assert.Contains("final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
+
+        [Fact]
+        public async Task Consensus_HighThreshold_FailsAndFallsBack()
+        {
+            // 把 ByzantineOutlierThreshold 配成 0.99 → 相似但不完全相同的文本回退 analyst
+            // 使用基本相同但略有差异的文本（相似度在 0.65-0.99 之间）
+            using var factory = new FusionRouterFactory { EnableFusionMode = true, EnableByzantineConsensus = true, ByzantineOutlierThreshold = 0.99 };
+
+            int analystCallCount = 0;
+            int outerCallCount = 0;
+            int modelACalls = 0;
+
+            // 三个 panel 返回高度相似但略有差异的文本（词袋相似度约 0.7-0.8，但达不到 0.99）
+            factory.MockClients["model-a"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-a" },
+                (req, ct) =>
+                {
+                    modelACalls++;
+                    if (modelACalls == 1) return Task.FromResult(MakeResponse("model-a", 10, 5, "The weather today is sunny and pleasant with clear blue skies."));
+                    if (modelACalls == 2)
+                    {
+                        analystCallCount++;
+                        return Task.FromResult(MakeAnalystResponse("model-a", 10, 5, AnalystJson));
+                    }
+                    outerCallCount++;
+                    return Task.FromResult(MakeResponse("model-a", 10, 5, "final"));
+                });
+            factory.MockClients["model-b"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-b" },
+                (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "Today the weather is sunny with clear blue skies and pleasant conditions.")));
+            factory.MockClients["model-c"] = new TestModelClient(
+                new ModelEndpointOptions { Name = "model-c" },
+                (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "Sunny weather today with pleasant conditions and clear blue skies.")));
+
+            using var client = factory.CreateClient();
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+            using var response = await client.PostAsync(
+                "/v1/chat/completions",
+                new StringContent(JsonSerializer.Serialize(BuildRequest()), System.Text.Encoding.UTF8, "application/json"));
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            Assert.Equal(1, analystCallCount);
+            Assert.Equal(1, outerCallCount);
+            Assert.Contains("final", await response.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+        }
+    }
+
