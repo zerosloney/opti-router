@@ -22,6 +22,12 @@ public sealed class ModelsConfigService : IDisposable
     private readonly object _gate = new();
     private bool _disposed;
 
+    /// <summary>
+    /// 记录原始 env: 字面量（模型名 → ApiKey 字面量），用于序列化时恢复环境变量引用。
+    /// 仅记录以 "env:" 开头的 ApiKey，每次加载时重建。
+    /// </summary>
+    private readonly Dictionary<string, string> _rawApiKeys = new(StringComparer.Ordinal);
+
     // Test-only seam: lets the atomic replacement failure path be exercised
     // without relying on platform-specific file permission behavior.
     internal Action<string, string>? AtomicReplaceHook { get; set; }
@@ -166,6 +172,9 @@ public sealed class ModelsConfigService : IDisposable
                 return false;
             }
 
+            // 清理 _rawApiKeys 中已删模型的条目（防字典随时间膨胀）
+            _rawApiKeys.Remove(name);
+
             WriteModelsToFile(models);
             _logger.LogInformation("Saved {Count} models to models-config.json", models.Count);
             deleted = true;
@@ -183,7 +192,32 @@ public sealed class ModelsConfigService : IDisposable
 
     private void WriteModelsToFile(IEnumerable<ModelEndpointOptions> models)
     {
-        string json = JsonSerializer.Serialize(models.ToList(), JsonOptions);
+        // 恢复 env: 引用：对每个模型，若原始是 env:X 且当前值等于环境变量值，恢复为 env:X
+        var modelsList = models.ToList();
+        var originalApiKeys = new Dictionary<string, string?>(modelsList.Count);
+
+        for (int i = 0; i < modelsList.Count; i++)
+        {
+            var model = modelsList[i];
+            originalApiKeys[model.Name] = model.ApiKey;
+
+            // 若原始是 env: 引用
+            if (_rawApiKeys.TryGetValue(model.Name, out string? rawLiteral) &&
+                rawLiteral.StartsWith("env:", StringComparison.Ordinal))
+            {
+                string envVarName = rawLiteral.Substring(4);
+                string currentEnvValue = Environment.GetEnvironmentVariable(envVarName) ?? "";
+
+                // 若当前 ApiKey 恰好等于环境变量值（说明用户没改 key），恢复为 env: 字面量
+                if (model.ApiKey == currentEnvValue)
+                {
+                    model.ApiKey = rawLiteral;
+                }
+                // 否则：用户传入了新明文 key（≠ 环境变量当前值）或传入值本身就是 env: 开头，照写
+            }
+        }
+
+        string json = JsonSerializer.Serialize(modelsList, JsonOptions);
         string targetPath = Path.GetFullPath(_filePath);
         string directory = Path.GetDirectoryName(targetPath)
             ?? throw new InvalidOperationException("models-config.json path has no parent directory");
@@ -233,6 +267,16 @@ public sealed class ModelsConfigService : IDisposable
             if (File.Exists(tempPath))
                 File.Delete(tempPath);
         }
+
+        // 序列化完成后恢复原始 ApiKey 值（不永久修改调用方对象）
+        for (int i = 0; i < modelsList.Count; i++)
+        {
+            var model = modelsList[i];
+            if (originalApiKeys.TryGetValue(model.Name, out string? originalKey))
+            {
+                model.ApiKey = originalKey;
+            }
+        }
     }
 
     private List<ModelEndpointOptions> LoadModelsNoLock(bool tolerateErrors)
@@ -243,6 +287,9 @@ public sealed class ModelsConfigService : IDisposable
             var models = JsonSerializer.Deserialize<List<ModelEndpointOptions>>(json, JsonOptions);
             var result = models ?? new List<ModelEndpointOptions>();
 
+            // 重建原始 env: 字面量字典（每次加载时清空重建）
+            _rawApiKeys.Clear();
+
             // 处理 env:VAR 环境变量引用语法
             foreach (var model in result)
             {
@@ -250,6 +297,9 @@ public sealed class ModelsConfigService : IDisposable
                 {
                     string envVarName = model.ApiKey.Substring(4);
                     string envValue = Environment.GetEnvironmentVariable(envVarName) ?? "";
+
+                    // 记录原始字面量，供序列化时恢复
+                    _rawApiKeys[model.Name] = model.ApiKey;
 
                     if (string.IsNullOrEmpty(envValue))
                     {

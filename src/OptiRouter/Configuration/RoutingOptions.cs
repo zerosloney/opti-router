@@ -8,6 +8,13 @@ namespace OptiRouter.Configuration;
 public sealed class RoutingOptions
 {
     /// <summary>
+    /// 路由预设名称。可选值：<c>cost-first</c>（成本优先）、<c>balanced</c>（均衡）、<c>quality-first</c>（质量优先）。
+    /// preset 只为「用户未显式配置」的项赋值，显式配置永远赢。仅作用于 Routing 节，不含 Budget。
+    /// 配置文件（appsettings.json/环境变量/models-config.json）中写过的 key 视为显式配置。
+    /// </summary>
+    public string? Preset { get; set; } = null;
+
+    /// <summary>
     /// 是否启用规则分类器。
     /// </summary>
     public bool EnableRuleClassifier { get; set; } = true;

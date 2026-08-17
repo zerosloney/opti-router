@@ -228,7 +228,12 @@ curl http://localhost:5000/health
 
 ### 推荐配置预设 (Presets)
 
-预设是起点不是终点。粘贴以下 JSON 片段到 `appsettings.json` 的 `"OptiRouter"` 节点后，可根据实际需求微调单个开关。显式配置的 key 会覆盖默认值。
+预设是起点不是终点。你可以：
+
+1. **粘贴完整 JSON 片段**到 `appsettings.json` 的 `"OptiRouter"` 节点后，根据实际需求微调单个开关。显式配置的 key 会覆盖默认值。
+2. **仅使用预设名称**：在 `"OptiRouter"` 节点设置 `"Routing": { "Preset": "balanced" }`，preset 仅填充未显式配置的项、显式配置优先、仅覆盖 Routing 节（Budget 需单独设）。
+
+**两种方式等价，后者更简洁。**
 
 ```json
 {

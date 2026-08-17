@@ -76,6 +76,14 @@ builder.Services.AddOptions<RouterOptions>()
     // Name 留空且配置了 Id 的模型在此归一化为 "{供应商}/{Id}"（冲突时追加序号），
     // 后续 Validate 与所有消费方（路由/客户端/显示）看到的都是最终路由名。
     .PostConfigure(options => ModelNameNormalizer.Normalize(options.Models))
+    // 应用路由预设（Preset）填充未显式配置的 Routing 项。
+    // IServiceProvider 作为 TDep 解析到根容器，再取 IConfiguration 与 ILogger。
+    .PostConfigure<IServiceProvider>((options, sp) =>
+    {
+        var config = sp.GetRequiredService<IConfiguration>();
+        var logger = sp.GetRequiredService<ILogger<Program>>();
+        RoutingPreset.Apply(options.Routing, config, logger);
+    })
     .ValidateOnStart();
 
 builder.Services.AddSingleton<IValidateOptions<RouterOptions>>(sp =>

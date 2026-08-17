@@ -211,6 +211,192 @@ public sealed class ModelsConfigServiceTests
         }
     }
 
+    [Fact]
+    public void SaveModels_PreservesEnvLiteral_WhenKeyUnchanged()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+        Environment.SetEnvironmentVariable("TEST_SAVE_ENV_KEY", "resolved-value");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "env:TEST_SAVE_ENV_KEY";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+            var loaded = service.LoadModels();
+
+            // Act: SaveModels 传入解析后的对象（ApiKey 已是 resolved 值）
+            service.SaveModels(loaded);
+
+            // Assert: 文件应仍是 env: 字面量
+            var fileContent = File.ReadAllText(path);
+            Assert.Contains("env:TEST_SAVE_ENV_KEY", fileContent);
+            Assert.DoesNotContain("resolved-value", fileContent);
+
+            // 验证重新加载仍然正确解析
+            var reloaded = service.LoadModels();
+            Assert.Single(reloaded);
+            Assert.Equal("resolved-value", reloaded[0].ApiKey);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEST_SAVE_ENV_KEY", null);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void UpsertModel_EmptyApiKey_KeepsEnvLiteral()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+        Environment.SetEnvironmentVariable("TEST_UPSERT_ENV_KEY", "original-env-value");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "env:TEST_UPSERT_ENV_KEY";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+
+            // Act: UpsertModel 传入空 ApiKey（保留现有）+ 改 BaseUrl
+            var updateModel = CreateModel("test-model");
+            updateModel.ApiKey = ""; // 空 ApiKey 应保留现有 env: 引用
+            updateModel.BaseUrl = "https://updated.example.com/v1";
+            service.UpsertModel(updateModel);
+
+            // Assert: 文件应保留 env: 字面量
+            var fileContent = File.ReadAllText(path);
+            Assert.Contains("env:TEST_UPSERT_ENV_KEY", fileContent);
+            Assert.Contains("https://updated.example.com", fileContent);
+
+            // 验证重新加载仍然正确解析
+            var reloaded = service.LoadModels();
+            Assert.Single(reloaded);
+            Assert.Equal("original-env-value", reloaded[0].ApiKey);
+            Assert.Equal("https://updated.example.com/v1", reloaded[0].BaseUrl);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEST_UPSERT_ENV_KEY", null);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void UpsertModel_NewPlaintextKey_WritesPlaintext()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+        Environment.SetEnvironmentVariable("TEST_PLAINTEXT_ENV_KEY", "env-value");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "env:TEST_PLAINTEXT_ENV_KEY";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+
+            // Act: UpsertModel 传入新明文 key（不同于环境变量值）
+            var updateModel = CreateModel("test-model");
+            updateModel.ApiKey = "sk-new-plaintext-key";
+            service.UpsertModel(updateModel);
+
+            // Assert: 文件应是明文，不是 env: 引用
+            var fileContent = File.ReadAllText(path);
+            Assert.Contains("sk-new-plaintext-key", fileContent);
+            Assert.DoesNotContain("env:TEST_PLAINTEXT_ENV_KEY", fileContent);
+
+            // 验证重新加载
+            var reloaded = service.LoadModels();
+            Assert.Single(reloaded);
+            Assert.Equal("sk-new-plaintext-key", reloaded[0].ApiKey);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEST_PLAINTEXT_ENV_KEY", null);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void UpsertModel_NewEnvReference_PassesThrough()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+        Environment.SetEnvironmentVariable("TEST_NEW_ENV_VAR", "new-env-value");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "old-plaintext-key";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+
+            // Act: UpsertModel 传新的 env: 引用
+            var updateModel = CreateModel("test-model");
+            updateModel.ApiKey = "env:TEST_NEW_ENV_VAR";
+            service.UpsertModel(updateModel);
+
+            // Assert: 文件应是新的 env: 引用
+            var fileContent = File.ReadAllText(path);
+            Assert.Contains("env:TEST_NEW_ENV_VAR", fileContent);
+
+            // 验证重新加载正确解析
+            var reloaded = service.LoadModels();
+            Assert.Single(reloaded);
+            Assert.Equal("new-env-value", reloaded[0].ApiKey);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("TEST_NEW_ENV_VAR", null);
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SaveModels_PlaintextModel_BehaviorUnchanged()
+    {
+        // Arrange
+        string directory = CreateDirectory();
+        string path = Path.Combine(directory, "models-config.json");
+
+        try
+        {
+            var model = CreateModel("test-model");
+            model.ApiKey = "sk-always-plaintext";
+            File.WriteAllText(path, SerializeModels(model));
+
+            using var service = CreateService(path);
+            var loaded = service.LoadModels();
+
+            // Act: SaveModels 传入明文模型
+            service.SaveModels(loaded);
+
+            // Assert: 文件应仍是明文（回归测试）
+            var fileContent = File.ReadAllText(path);
+            Assert.Contains("sk-always-plaintext", fileContent);
+            Assert.DoesNotContain("env:", fileContent);
+
+            var reloaded = service.LoadModels();
+            Assert.Single(reloaded);
+            Assert.Equal("sk-always-plaintext", reloaded[0].ApiKey);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static ModelsConfigService CreateService(string path)
     {
         var configuration = new ConfigurationBuilder()
