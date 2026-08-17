@@ -19,19 +19,28 @@ public static class GeminiGenerateContentEndpoint
 {
     /// <summary>
     /// 将 Gemini generateContent 端点映射到路由图。
+    /// 用 catch-all 参数承接模型名：显示 id 形如 "{供应商}/{Id}" 含斜杠，
+    /// 常规路由参数不匹配路径分隔符；动作后缀（:generateContent / :streamGenerateContent）在此解析。
     /// </summary>
     /// <param name="app">端点路由构建器。</param>
     /// <returns>同一个 <paramref name="app"/>，便于链式调用。</returns>
     public static IEndpointRouteBuilder MapGeminiGenerateContent(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/v1beta/models/{model}:generateContent",
-            (string model, HttpContext httpContext, IOptionsMonitor<OptiRouter.Configuration.RouterOptions> optionsMonitor, ProxyOrchestrator orchestrator, CancellationToken ct)
-                => HandleAsync(model, stream: false, httpContext, optionsMonitor, orchestrator, ct));
-
         // Gemini 流式要求 alt=sse（SDK 默认携带）；无 alt 时也按 SSE 输出，行为一致
-        app.MapPost("/v1beta/models/{model}:streamGenerateContent",
-            (string model, HttpContext httpContext, IOptionsMonitor<OptiRouter.Configuration.RouterOptions> optionsMonitor, ProxyOrchestrator orchestrator, CancellationToken ct)
-                => HandleAsync(model, stream: true, httpContext, optionsMonitor, orchestrator, ct));
+        app.MapPost("/v1beta/models/{**modelAction}",
+            async (string modelAction, HttpContext httpContext, IOptionsMonitor<OptiRouter.Configuration.RouterOptions> optionsMonitor, ProxyOrchestrator orchestrator, CancellationToken ct) =>
+        {
+            if (modelAction.EndsWith(":generateContent", StringComparison.Ordinal))
+            {
+                return await HandleAsync(modelAction[..^":generateContent".Length], stream: false, httpContext, optionsMonitor, orchestrator, ct);
+            }
+            if (modelAction.EndsWith(":streamGenerateContent", StringComparison.Ordinal))
+            {
+                return await HandleAsync(modelAction[..^":streamGenerateContent".Length], stream: true, httpContext, optionsMonitor, orchestrator, ct);
+            }
+            return GeminiError(StatusCodes.Status404NotFound, "NOT_FOUND",
+                $"Unknown Gemini action for model path '{modelAction}'. Expected :generateContent or :streamGenerateContent.");
+        });
 
         return app;
     }

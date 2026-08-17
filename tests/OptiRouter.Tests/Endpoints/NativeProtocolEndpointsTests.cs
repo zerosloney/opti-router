@@ -40,10 +40,11 @@ public class NativeProtocolEndpointsTests
 
     /// <summary>创建注入 mock 模型客户端的工厂：非流式返回固定 OpenAI JSON，流式返回固定增量序列。</summary>
     private static (TestWebApplicationFactory Factory, CapturedRequestContext Captured) CreateFactory(
-        string responseBody = OpenAiResponseBody)
+        string responseBody = OpenAiResponseBody,
+        string modelName = "model-a")
     {
         var factory = new TestWebApplicationFactory();
-        var endpoint = CreateEndpoint("model-a");
+        var endpoint = CreateEndpoint(modelName);
         var captured = new CapturedRequestContext();
         factory.ConfigureTestServicesAction = services =>
         {
@@ -57,7 +58,7 @@ public class NativeProtocolEndpointsTests
                 opt.Routing.EnableFailover = false;
             });
         };
-        factory.MockClients["model-a"] = new MockModelClient(
+        factory.MockClients[modelName] = new MockModelClient(
             endpoint,
             (req, ct) =>
             {
@@ -359,6 +360,39 @@ public class NativeProtocolEndpointsTests
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.Equal("NOT_FOUND", doc.RootElement.GetProperty("error").GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Gemini_ModelIdWithSlash_RoutesCorrectly()
+    {
+        // 显示 id 形如 "{供应商}/{Id}" 含斜杠：catch-all 路由必须匹配完整 id
+        var (factory, captured) = CreateFactory(modelName: "provider/model-a");
+        using var client = factory.CreateClient();
+
+        var response = await PostAsync(client, "/v1beta/models/provider/model-a:generateContent", JsonSerializer.Serialize(new
+        {
+            contents = new object[] { new { role = "user", parts = new object[] { new { text = "Hi" } } } }
+        }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("Hi there", doc.RootElement.GetProperty("candidates")[0]
+            .GetProperty("content").GetProperty("parts")[0].GetProperty("text").GetString());
+        Assert.Equal("provider/model-a", captured.LastRequest?.Model);
+    }
+
+    [Fact]
+    public async Task Gemini_UnknownAction_Returns404()
+    {
+        var (factory, _) = CreateFactory();
+        using var client = factory.CreateClient();
+
+        var response = await PostAsync(client, "/v1beta/models/model-a:someUnknownAction", JsonSerializer.Serialize(new
+        {
+            contents = new object[] { new { role = "user", parts = new object[] { new { text = "Hi" } } } }
+        }));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     [Fact]
