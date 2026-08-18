@@ -228,6 +228,18 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                 if (semHit && semCached is not null)
                 {
+                    // 缓存命中也要消费 regenerate 信号（与响应缓存命中路径同构）：
+                    // 命中即短路返回，若不消费，重发请求拿到相似缓存答案且上次模型不受惩罚，
+                    // 信号被语义缓存完全屏蔽。命中路径无 RouterDecision，只更新 Thompson 状态。
+                    if (feedbackKey is not null
+                        && _regenerateTracker.TryConsumeRegenerate(
+                            feedbackKey, TimeSpan.FromSeconds(options.Routing.RegenerateFeedbackWindowSeconds), out string previousModel))
+                    {
+                        _recorder.RecordQualityOutcome(previousModel, options.Routing.RegeneratePenaltyReward);
+                        _logger.LogInformation(
+                            "Regenerate feedback (semantic cache hit): penalizing previous model {Model} with reward {Reward:0.00}",
+                            previousModel, options.Routing.RegeneratePenaltyReward);
+                    }
                     RawChatResponse semResponse = piiMap is { HasSensitiveData: true }
                         ? new RawChatResponse(piiMap.Restore(semCached.Body), semCached.Usage, semCached.Metadata)
                         : semCached;
@@ -479,7 +491,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _logger.LogWarning("Model {Name} quota exhausted (status {Status}), trying next candidate",
                         candidate.Name, 429);
                 }
-                catch (ModelClientException ex) when (IsRetryable(ex))
+                catch (ModelClientException ex) when (IsRetryable(ex) || (IsCredentialError(ex) && HasOtherCandidate(decision, candidate.Name, failedInThisRequest)))
                 {
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
@@ -607,6 +619,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         string? requestContent = options.Routing.AuditStoreRequestContent
             ? ExtractRequestContentSummary(request)
             : null;
+
+        // Persona 锚定（与非流式 SendAsync 对称）：流式路径同样在上游发送前注入锚定，
+        // 否则同一开关在流式请求上静默失效。
+        if (options.Routing.EnablePersonaDriftProtection && !string.IsNullOrEmpty(sessionId))
+        {
+            request = PersonaDriftGuard.ApplyPersonaAnchor(request);
+        }
 
         if (options.Routing.EnablePromptCompression)
         {
@@ -767,7 +786,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         lastStatusCode = 429;
                         lastErrorMessage = "quota-exhausted";
                     }
-                    catch (ModelClientException ex) when (IsRetryable(ex))
+                    catch (ModelClientException ex) when (IsRetryable(ex) || (IsCredentialError(ex) && HasOtherCandidate(decision, candidate.Name, failedInThisRequest)))
                     {
                         preStreamFailure = ex;
                         lastModelName = candidate.Name;
@@ -986,6 +1005,26 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         int statusCode = (int)exception.StatusCode;
         return statusCode is 408 or >= 500 and <= 599;
     }
+
+    /// <summary>
+    /// 凭证/权限类上游错误（401/403）：该模型连接配置的问题，与请求内容无关——
+    /// 换一候选可能成功（如某 key 失效而其余模型健康）。其余不可重试 4xx（422/400 等
+    /// 请求语义错误）换模型大概率同样失败，保持透传语义让原始状态码到达客户端。
+    /// </summary>
+    private static bool IsCredentialError(ModelClientException exception)
+    {
+        int statusCode = (int)exception.StatusCode;
+        return statusCode is 401 or 403;
+    }
+
+    /// <summary>
+    /// 是否还有未失败的其他候选。凭证错误在 auto 路由下应降级到下一候选而非放弃整个请求；
+    /// 无其他候选（显式单模型或最后一个候选）时保持透传，原始状态码到达客户端。
+    /// </summary>
+    private static bool HasOtherCandidate(RouterDecision decision, string currentModel, HashSet<string> failed) =>
+        decision.Candidates.Any(c =>
+            !string.Equals(c.Name, currentModel, StringComparison.Ordinal)
+            && !failed.Contains(c.Name));
 
     private static RawChatResponse ProcessResponse(RawChatResponse response, PiiMap? piiMap)
     {

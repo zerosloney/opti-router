@@ -63,8 +63,9 @@ public sealed class AnthropicModelClient : IModelClient
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, MessagesPath) { Content = content };
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
-        string body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        // 有界读取：响应体超过上限立即中断，防异常/恶意上游超大响应撑爆内存（与 OpenAI 客户端一致）
+        string body = await BoundedResponseReader.ReadBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new ModelClientException(response.StatusCode, body);
@@ -111,14 +112,12 @@ public sealed class AnthropicModelClient : IModelClient
         using var response = await SendStreamRequestAsync(request, cancellationToken).ConfigureAwait(false);
 
         // Anthropic SSE：event: <type> 与 data: <json> 交替出现，逐行翻译为 OpenAI data 行。
-        using var reader = new StreamReader(response.Content.ReadAsStream(cancellationToken), Encoding.UTF8);
+        // 限长行读取：单行超上限立即中断，替代无行长限制的 StreamReader.ReadLineAsync。
         string? pendingEvent = null;
         bool doneSent = false;
-        while (!doneSent)
+        await foreach (string line in BoundedResponseReader.ReadLinesAsync(
+            response.Content.ReadAsStream(cancellationToken), cancellationToken).ConfigureAwait(false))
         {
-            string? line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (line is null) break;
-
             if (line.StartsWith("event: ", StringComparison.Ordinal))
             {
                 pendingEvent = line["event: ".Length..].Trim();
@@ -133,6 +132,7 @@ public sealed class AnthropicModelClient : IModelClient
                 {
                     yield return new RawStreamLine("[DONE]", null, null);
                     doneSent = true;
+                    break;
                 }
                 else if (translated is not null)
                 {

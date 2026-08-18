@@ -588,7 +588,7 @@ builder.Services.AddRateLimiter(options =>
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
     {
-        if (!context.Request.Path.StartsWithSegments("/v1"))
+        if (!IsProxyPath(context.Request.Path))
             return RateLimitPartition.GetNoLimiter("public");
 
         // 每请求从已合并的 IConfiguration 读阈值（含 WebApplicationFactory 经 ConfigureAppConfiguration 注入的值）。
@@ -662,8 +662,7 @@ app.Use(async (context, next) =>
 });
 
 static bool IsProtectedPath(PathString path) =>
-    path.StartsWithSegments("/v1")
-    || path.StartsWithSegments("/v1beta")
+    IsProxyPath(path)
     || path.StartsWithSegments("/dashboard")
     || path.StartsWithSegments("/overview")
     || path.StartsWithSegments("/requests")
@@ -672,6 +671,13 @@ static bool IsProtectedPath(PathString path) =>
     || path.StartsWithSegments("/keys")
     || path.StartsWithSegments("/api/dashboard")
     || path.StartsWithSegments("/api/models");
+
+// 代理入口路径（限流 / 并发闸 / 代理鉴权三处共用）。
+// /v1beta 是独立段：StartsWithSegments("/v1") 不匹配 "/v1beta/..."，必须显式并列，
+// 否则 Gemini 入口绕过限流与并发控制。
+static bool IsProxyPath(PathString path) =>
+    path.StartsWithSegments("/v1")
+    || path.StartsWithSegments("/v1beta");
 
 static bool IsBlazorFrameworkPath(PathString path) =>
     path.StartsWithSegments("/_framework")
@@ -706,8 +712,7 @@ app.Use(async (context, next) =>
         || context.Request.Path.StartsWithSegments("/keys")
         || context.Request.Path.StartsWithSegments("/api/dashboard")
         || context.Request.Path.StartsWithSegments("/api/models");
-    bool isV1Path = context.Request.Path.StartsWithSegments("/v1")
-        || context.Request.Path.StartsWithSegments("/v1beta");
+    bool isV1Path = IsProxyPath(context.Request.Path);
     string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
     // 管理端密钥仅 AdminApiKey（不再回退 ProxyApiKey）：ProxyApiKey 发给 API 客户端，
     // 允许它登录管理台构成权限越界。未配 AdminApiKey 时管理台鉴权总失败（仅剩已登录会话，会话过期即不可用）。
@@ -837,7 +842,7 @@ static async Task WriteClientKeyProblemAsync(
 // M2 阶段：分区最大并发数控制，防止单用户请求洪水打满线程池
 app.Use(async (context, next) =>
 {
-    if (!context.Request.Path.StartsWithSegments("/v1"))
+    if (!IsProxyPath(context.Request.Path))
     {
         await next(context).ConfigureAwait(false);
         return;

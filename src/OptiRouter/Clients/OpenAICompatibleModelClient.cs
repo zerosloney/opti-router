@@ -15,14 +15,9 @@ public sealed class OpenAICompatibleModelClient : IModelClient
 {
     /// <summary>
     /// 流式响应单行最大字节数。防恶意上游发送超长单行撑爆内存。
-    /// 正常 OpenAI SSE chunk 远小于此（通常 &lt;1KB）。
+    /// 正常 OpenAI SSE chunk 远小于此（通常 &lt;1KB）。与 <see cref="BoundedResponseReader"/> 共用同值。
     /// </summary>
-    private const int MaxStreamLineBytes = 1024 * 1024; // 1 MB
-
-    /// <summary>
-    /// 非流式响应体最大字节数。完整物化前先通过 Content-Length 或流读取检查。
-    /// </summary>
-    private const int MaxNonStreamingResponseBytes = 1024 * 1024; // 1 MB
+    private const int MaxStreamLineBytes = BoundedResponseReader.MaxStreamLineBytes;
 
     private static readonly JsonSerializerOptions _serializeOptions = new()
     {
@@ -516,54 +511,10 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     }
 
     /// <summary>
-    /// 在完整物化前读取有限大小的 UTF-8 响应体。
+    /// 在完整物化前读取有限大小的 UTF-8 响应体（共享实现，见 <see cref="BoundedResponseReader"/>）。
     /// </summary>
-    private static async Task<string> ReadResponseBodyAsync(HttpContent content, CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(content);
-
-        if (content.Headers.ContentLength is > MaxNonStreamingResponseBytes)
-        {
-            throw new ResponseSizeLimitExceededException(MaxNonStreamingResponseBytes,
-                $"Upstream response body exceeded {MaxNonStreamingResponseBytes} bytes; aborting to prevent OOM.");
-        }
-
-        await using var stream = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        int initialCapacity = content.Headers.ContentLength is > 0
-            ? (int)content.Headers.ContentLength.Value
-            : 0;
-        using var body = new MemoryStream(initialCapacity);
-        byte[] buffer = ArrayPool<byte>.Shared.Rent(81920);
-
-        try
-        {
-            while (true)
-            {
-                long remaining = MaxNonStreamingResponseBytes - body.Length;
-                int readLength = (int)Math.Min(buffer.Length, remaining + 1);
-                int bytesRead = await stream.ReadAsync(buffer.AsMemory(0, readLength), cancellationToken)
-                    .ConfigureAwait(false);
-                if (bytesRead == 0)
-                {
-                    break;
-                }
-
-                if (body.Length + bytesRead > MaxNonStreamingResponseBytes)
-                {
-                    throw new ResponseSizeLimitExceededException(MaxNonStreamingResponseBytes,
-                        $"Upstream response body exceeded {MaxNonStreamingResponseBytes} bytes; aborting to prevent OOM.");
-                }
-
-                body.Write(buffer, 0, bytesRead);
-            }
-
-            return Encoding.UTF8.GetString(body.GetBuffer(), 0, checked((int)body.Length));
-        }
-        finally
-        {
-            ArrayPool<byte>.Shared.Return(buffer);
-        }
-    }
+    private static Task<string> ReadResponseBodyAsync(HttpContent content, CancellationToken cancellationToken)
+        => BoundedResponseReader.ReadBodyAsync(content, cancellationToken);
 
     private static async Task DelayWithJitterAsync(int attempt, CancellationToken cancellationToken)
     {

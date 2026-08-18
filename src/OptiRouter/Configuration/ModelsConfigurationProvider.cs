@@ -56,9 +56,14 @@ public sealed class ModelsJsonConfigurationProvider : ConfigurationProvider
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // 配置损坏时以空列表继续，不阻断启动
+            // 配置损坏时以空列表继续，不阻断启动；但必须留下原因——
+            // 否则模型静默消失，全部请求无候选且无任何诊断线索。
+            // 此处处于日志系统建立前的引导阶段，Console.Error 由宿主重定向到 stderr。
+            Console.Error.WriteLine(
+                $"[ModelsJsonConfigurationProvider] models-config.json ('{_filePath}') failed to load: {ex.Message}. " +
+                "Continuing with an EMPTY model list; all models are unavailable until the file is fixed.");
             Data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         }
     }
