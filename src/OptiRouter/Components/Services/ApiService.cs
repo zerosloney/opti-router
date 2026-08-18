@@ -11,10 +11,13 @@ namespace OptiRouter.Components.Services;
 public class ApiService
 {
     private readonly HttpClient _http;
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
 
-    public ApiService(HttpClient http, NavigationManager nav, IHttpContextAccessor? httpContextAccessor)
+    public ApiService(HttpClient http, NavigationManager nav, IHttpContextAccessor? httpContextAccessor,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _http = http;
+        _logger = logger;
         // Set base address so relative paths work inside the Blazor circuit.
         if (_http.BaseAddress == null)
             _http.BaseAddress = new Uri(nav.BaseUri);
@@ -72,8 +75,10 @@ public class ApiService
         {
             return await _http.GetFromJsonAsync<AuditItem>(Url($"/api/dashboard/requests/detail?id={Uri.EscapeDataString(id)}"));
         }
-        catch
+        catch (Exception ex)
         {
+            // 静默降级保留诊断线索：区分网络失败与反序列化失败
+            _logger?.LogDebug(ex, "GetAuditDetailAsync failed for {Id}", id);
             return null;
         }
     }

@@ -757,7 +757,31 @@ public static class AnthropicTranslators
                          && item.TryGetProperty("image_url", out var imageEl)
                          && imageEl.TryGetProperty("url", out var urlEl))
                 {
-                    blocks.Add(new { type = "image", source = new { type = "url", url = urlEl.GetString() } });
+                    string url = urlEl.GetString() ?? string.Empty;
+                    // data URL（下游入口的 base64 图像）→ Anthropic base64 source；
+                    // 直接以 url source 发 data URL 不被 Anthropic 接受（vision 断链）。
+                    if (url.StartsWith("data:", StringComparison.Ordinal))
+                    {
+                        int semi = url.IndexOf(';');
+                        int comma = url.IndexOf(',');
+                        if (semi > 5 && comma > semi)
+                        {
+                            blocks.Add(new
+                            {
+                                type = "image",
+                                source = new
+                                {
+                                    type = "base64",
+                                    media_type = url["data:".Length..semi],
+                                    data = url[(comma + 1)..]
+                                }
+                            });
+                        }
+                    }
+                    else if (url.Length > 0)
+                    {
+                        blocks.Add(new { type = "image", source = new { type = "url", url } });
+                    }
                 }
             }
             return blocks;

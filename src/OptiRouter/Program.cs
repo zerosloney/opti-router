@@ -89,8 +89,9 @@ builder.Services.AddOptions<RouterOptions>()
 builder.Services.AddSingleton<IValidateOptions<RouterOptions>>(sp =>
     new RouterOptionsValidator(sp.GetRequiredService<ILogger<RouterOptionsValidator>>()));
 
-// 注册模型客户端工厂。
-builder.Services.AddSingleton<ModelClientFactory>();
+// 注册模型客户端工厂（传日志，客户端流式解析降级时可诊断）。
+builder.Services.AddSingleton<ModelClientFactory>(sp =>
+    new ModelClientFactory(sp.GetService<ILogger<ModelClientFactory>>()));
 
 // 注册模型客户端提供者（生产实现，按模型名缓存 IModelClient）。
 // 热更新：内部订阅 IOptionsMonitor.OnChange，BaseUrl/ApiKey/TimeoutSeconds 变化时重建对应客户端，
@@ -500,22 +501,14 @@ builder.Services.AddHostedService<OptiRouter.Health.AlertWebhookNotifier>(sp =>
         sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
         sp.GetService<ILogger<OptiRouter.Health.AlertWebhookNotifier>>()));
 
-// 内容审核（Moderation）：配置 ModerationEndpoint 时注册审核器；未配置时注册 null，
-// ProxyOrchestrator 的可选依赖为 null，功能整体禁用。审核服务不可用时 fail-open。
+// 内容审核（Moderation）：ConfigurableModerator 每次审核读 IOptionsMonitor 当前值，
+// ModerationEndpoint/ApiKey/Threshold 热重载即时生效（与其余 Routing 项一致）。
+// 端点未配置时 fail-open（返回非违规）；ProxyOrchestrator 另有 EnableContentModeration 总开关。
 builder.Services.AddSingleton<OptiRouter.Compliance.IContentModerator>(sp =>
-{
-    var routing = sp.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue.Routing;
-    if (string.IsNullOrWhiteSpace(routing.ModerationEndpoint))
-    {
-        return null!;
-    }
-    return new OptiRouter.Compliance.OpenAIModerationClient(
-        sp.GetRequiredService<IHttpClientFactory>().CreateClient("moderation"),
-        routing.ModerationEndpoint,
-        routing.ModerationApiKey,
-        routing.ModerationThreshold,
-        sp.GetService<ILogger<OptiRouter.Compliance.OpenAIModerationClient>>());
-});
+    new OptiRouter.Compliance.ConfigurableModerator(
+        sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
+        sp.GetRequiredService<IHttpClientFactory>(),
+        sp.GetService<ILogger<OptiRouter.Compliance.OpenAIModerationClient>>()));
 
 // 健康检查：验证内部依赖（成本账本 store 连接正常）。
 builder.Services.AddHealthChecks()
@@ -576,7 +569,7 @@ builder.Services.AddScoped<ApiService>(sp =>
     var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(ApiService));
     var nav = sp.GetRequiredService<NavigationManager>();
     var httpContextAccessor = sp.GetRequiredService<IHttpContextAccessor>();
-    return new ApiService(client, nav, httpContextAccessor);
+    return new ApiService(client, nav, httpContextAccessor, sp.GetService<ILogger<ApiService>>());
 });
 
 int requestsPerMinute = builder.Configuration.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? 60;
@@ -663,14 +656,21 @@ app.Use(async (context, next) =>
 
 static bool IsProtectedPath(PathString path) =>
     IsProxyPath(path)
-    || path.StartsWithSegments("/dashboard")
-    || path.StartsWithSegments("/overview")
-    || path.StartsWithSegments("/requests")
-    || path.StartsWithSegments("/models")
-    || path.StartsWithSegments("/router")
-    || path.StartsWithSegments("/keys")
-    || path.StartsWithSegments("/api/dashboard")
-    || path.StartsWithSegments("/api/models");
+    || IsAdminPath(path);
+
+// 管理端路径前缀：受保护路径判定与鉴权中间件的管理分支共用一份定义，
+// 新增管理页面只改这里（漏改 = 漏保护）。
+static bool IsAdminPath(PathString path)
+{
+    foreach (var prefix in Program.AdminPathPrefixes)
+    {
+        if (path.StartsWithSegments(prefix))
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 // 代理入口路径（限流 / 并发闸 / 代理鉴权三处共用）。
 // /v1beta 是独立段：StartsWithSegments("/v1") 不匹配 "/v1beta/..."，必须显式并列，
@@ -704,14 +704,7 @@ app.Use(async (context, next) =>
     //   - 管理路径（dashboard/models 页面与 /api/dashboard、/api/models）：优先放行已登录会话（Cookie），
     //     兼容 Authorization: Bearer <AdminApiKey>（脚本/测试客户端）。未认证的页面请求 302 到 /login，API 请求 401。
     //   - /v1/* 代理路径：ProxyApiKey 或租户 ClientKeyService（保持不变）。
-    bool isAdminPath = context.Request.Path.StartsWithSegments("/dashboard")
-        || context.Request.Path.StartsWithSegments("/overview")
-        || context.Request.Path.StartsWithSegments("/requests")
-        || context.Request.Path.StartsWithSegments("/models")
-        || context.Request.Path.StartsWithSegments("/router")
-        || context.Request.Path.StartsWithSegments("/keys")
-        || context.Request.Path.StartsWithSegments("/api/dashboard")
-        || context.Request.Path.StartsWithSegments("/api/models");
+    bool isAdminPath = IsAdminPath(context.Request.Path);
     bool isV1Path = IsProxyPath(context.Request.Path);
     string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
     // 管理端密钥仅 AdminApiKey（不再回退 ProxyApiKey）：ProxyApiKey 发给 API 客户端，
@@ -964,18 +957,16 @@ app.MapModelsConfigEndpoints();
 app.Run();
 
 // 分区 Key 解析：限流与并发中间件共用。
-// 优先级 Session > IP > Auth：
-//   - Session：显式会话隔离（最强信号）
+// 优先级 IP > Auth：
 //   - IP：网络来源（CF-Connecting-IP > X-Forwarded-For 首段 > RemoteIpAddress），
 //         仅当 OptiRouter:TrustProxyHeaders=true 时信任代理头（必须位于可信反代/CF 之后）；
 //         否则回退 socket 级 RemoteIpAddress，防止客户端伪造代理头绕过限流/并发限制
-//   - Auth：退路（无 session 无 IP 才用），SHA256 前 16 hex 字符，避免明文 key 入分区诊断日志
+//   - Auth：退路（无 IP 才用），SHA256 前 16 hex 字符，避免明文 key 入分区诊断日志
+// 注意：X-Session-Id 是客户端可控头，不作为限流身份——每请求换随机值即可独享配额绕过限流；
+// 它仅用于会话亲和路由与记账。同 IP 多会话共享配额是限流的保守正确行为。
 static string ResolvePartitionKey(HttpContext context, bool trustProxyHeaders)
 {
     var headers = context.Request.Headers;
-
-    if (headers.TryGetValue("X-Session-Id", out var sessionIdHeader) && !string.IsNullOrWhiteSpace(sessionIdHeader))
-        return $"session:{sessionIdHeader}";
 
     string? ip = null;
     if (trustProxyHeaders && headers.TryGetValue("CF-Connecting-IP", out var cfIp) && !string.IsNullOrEmpty(cfIp))
@@ -1007,6 +998,19 @@ static string HashPartitionToken(string token)
 
 public partial class Program
 {
+    /// <summary>管理端路径前缀（页面与 API）。受保护路径判定与鉴权中间件共用。</summary>
+    internal static readonly string[] AdminPathPrefixes =
+    {
+        "/dashboard",
+        "/overview",
+        "/requests",
+        "/models",
+        "/router",
+        "/keys",
+        "/api/dashboard",
+        "/api/models"
+    };
+
     internal static void SeedModelsConfig(
         Microsoft.Extensions.Configuration.IConfiguration configuration,
         string filePath)

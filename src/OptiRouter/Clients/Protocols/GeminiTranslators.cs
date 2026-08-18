@@ -705,6 +705,34 @@ public static class GeminiTranslators
                     {
                         parts.Add(new { text = textEl.GetString() });
                     }
+                    else if (type == "image_url"
+                             && item.TryGetProperty("image_url", out var imageEl)
+                             && imageEl.TryGetProperty("url", out var urlEl))
+                    {
+                        // data URL（下游入口 base64 图像）→ Gemini inlineData；http(s) URL
+                        // Gemini 无原生 url source，仍以 fileData.uri 尽力透传。
+                        string url = urlEl.GetString() ?? string.Empty;
+                        if (url.StartsWith("data:", StringComparison.Ordinal))
+                        {
+                            int semi = url.IndexOf(';');
+                            int comma = url.IndexOf(',');
+                            if (semi > 5 && comma > semi)
+                            {
+                                parts.Add(new
+                                {
+                                    inlineData = new
+                                    {
+                                        mimeType = url["data:".Length..semi],
+                                        data = url[(comma + 1)..]
+                                    }
+                                });
+                            }
+                        }
+                        else if (url.Length > 0)
+                        {
+                            parts.Add(new { fileData = new { fileUri = url } });
+                        }
+                    }
                 }
             }
         }

@@ -33,6 +33,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
 
     private readonly HttpClient _httpClient;
     private readonly ModelEndpointOptions _endpoint;
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
 
     /// <inheritdoc />
     public ModelEndpointOptions Endpoint => _endpoint;
@@ -42,13 +43,15 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     /// </summary>
     /// <param name="endpoint">端点配置。</param>
     /// <param name="httpClient">已配置 BaseAddress、Timeout 与 Authorization 的 HttpClient。</param>
-    public OpenAICompatibleModelClient(ModelEndpointOptions endpoint, HttpClient httpClient)
+    /// <param name="logger">可选日志，用于流式解析降级的诊断记录。</param>
+    public OpenAICompatibleModelClient(ModelEndpointOptions endpoint, HttpClient httpClient, Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(httpClient);
 
         _endpoint = endpoint;
         _httpClient = httpClient;
+        _logger = logger;
     }
 
     /// <inheritdoc />
@@ -163,8 +166,11 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     {
                         raw = JsonSerializer.Deserialize<RawStreamChunk>(data, _deserializeOptions);
                     }
-                    catch
+                    catch (Exception ex)
                     {
+                        // 降级保留诊断线索：协议不兼容问题不再完全静默
+                        _logger?.LogDebug(ex, "OpenAI stream line failed to parse, skipping: {Fragment}",
+                            data.Length > 200 ? data[..200] : data);
                         continue;
                     }
 

@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using OptiRouter.Clients.Protocols;
 using OptiRouter.Configuration;
 
@@ -24,6 +25,7 @@ public sealed class AnthropicModelClient : IModelClient
 
     private readonly HttpClient _httpClient;
     private readonly ModelEndpointOptions _endpoint;
+    private readonly ILogger? _logger;
 
     /// <inheritdoc />
     public ModelEndpointOptions Endpoint => _endpoint;
@@ -33,12 +35,14 @@ public sealed class AnthropicModelClient : IModelClient
     /// </summary>
     /// <param name="endpoint">端点配置（BaseUrl 为 Anthropic API 根地址）。</param>
     /// <param name="httpClient">已配置 BaseAddress、Timeout 与 Authorization 的 HttpClient。</param>
-    public AnthropicModelClient(ModelEndpointOptions endpoint, HttpClient httpClient)
+    /// <param name="logger">可选日志，用于流式解析降级的诊断记录。</param>
+    public AnthropicModelClient(ModelEndpointOptions endpoint, HttpClient httpClient, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(httpClient);
         _endpoint = endpoint;
         _httpClient = httpClient;
+        _logger = logger;
     }
 
     /// <inheritdoc />
@@ -88,9 +92,12 @@ public sealed class AnthropicModelClient : IModelClient
             {
                 chunk = JsonSerializer.Deserialize<RawStreamChunk>(line.Data, _deserializeOptions);
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
-                continue; // 跳过无法解析的行
+                // 跳过无法解析的行（降级），但留下诊断线索——协议不兼容问题不再完全静默
+                _logger?.LogDebug(ex, "Anthropic stream line failed to parse, skipping: {Fragment}",
+                    line.Data.Length > 200 ? line.Data[..200] : line.Data);
+                continue;
             }
             if (chunk is null) continue;
 

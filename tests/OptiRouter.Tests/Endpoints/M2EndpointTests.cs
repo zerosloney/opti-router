@@ -199,13 +199,16 @@ public class M2EndpointTests
     }
 
     [Fact]
-    public async Task Post_WithSessionId_IsolatesRateLimitPartitions()
+    public async Task Post_WithSessionId_DoesNotBypassRateLimit()
     {
+        // X-Session-Id 是客户端可控头，不作为限流分区身份：共享 ProxyApiKey 的调用方
+        // 逐请求换随机 session 头不得放大配额。多终端用户的公平隔离请使用租户 ClientKey
+        // （每 key 独立 MaxQps 与日预算）。session 头仍用于会话亲和路由与记账。
         // Arrange
         using var factory = new M2WebApplicationFactory { RequestsPerMinute = 1 };
         using var client = factory.CreateClient();
 
-        // 1. Send request with Session A (Succeeds)
+        // 1. First request with Session A (Succeeds)
         var req1 = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
         {
             Content = new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}", Encoding.UTF8, "application/json")
@@ -215,7 +218,7 @@ public class M2EndpointTests
         var resp1 = await client.SendAsync(req1);
         Assert.Equal(HttpStatusCode.OK, resp1.StatusCode);
 
-        // 2. Send request with Session B (Succeeds)
+        // 2. Different session id shares the same partition (429, not a fresh quota)
         var req2 = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
         {
             Content = new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}", Encoding.UTF8, "application/json")
@@ -223,9 +226,9 @@ public class M2EndpointTests
         req2.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "m2-test-key");
         req2.Headers.Add("X-Session-Id", "session-b");
         var resp2 = await client.SendAsync(req2);
-        Assert.Equal(HttpStatusCode.OK, resp2.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, resp2.StatusCode);
 
-        // 3. Send second request with Session A (Fails with 429)
+        // 3. Repeat with Session A (still 429)
         var req3 = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
         {
             Content = new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}", Encoding.UTF8, "application/json")

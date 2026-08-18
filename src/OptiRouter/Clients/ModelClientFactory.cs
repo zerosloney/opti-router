@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using Microsoft.Extensions.Logging;
 using OptiRouter.Configuration;
 
 namespace OptiRouter.Clients;
@@ -9,6 +10,17 @@ namespace OptiRouter.Clients;
 /// </summary>
 public sealed class ModelClientFactory
 {
+    private readonly ILogger? _logger;
+
+    /// <summary>
+    /// 初始化工厂。
+    /// </summary>
+    /// <param name="logger">可选日志，透传给客户端用于流式解析降级的诊断记录。</param>
+    public ModelClientFactory(ILogger? logger = null)
+    {
+        _logger = logger;
+    }
+
     /// <summary>
     /// 按 endpoint 创建一个 IModelClient 实例。
     /// 注意：每个 endpoint 用独立 HttpClient 实例（不同 BaseAddress/ApiKey/Timeout）。
@@ -44,9 +56,9 @@ public sealed class ModelClientFactory
         // 下游始终收到 OpenAI 契约响应。
         return endpoint.Protocol switch
         {
-            ProviderProtocol.Anthropic => new AnthropicModelClient(endpoint, httpClient),
-            ProviderProtocol.Gemini => new GeminiModelClient(endpoint, httpClient),
-            _ => new OpenAICompatibleModelClient(endpoint, httpClient)
+            ProviderProtocol.Anthropic => new AnthropicModelClient(endpoint, httpClient, _logger),
+            ProviderProtocol.Gemini => new GeminiModelClient(endpoint, httpClient, _logger),
+            _ => new OpenAICompatibleModelClient(endpoint, httpClient, _logger)
         };
     }
 

@@ -279,4 +279,96 @@ public class ReviewFixTests
     }
 
     #endregion
+
+    #region M1 限流身份（X-Session-Id 不可绕过）
+
+    [Fact]
+    public async Task RateLimit_SessionHeaderCannotBypassLimit()
+    {
+        // 客户端可控的 X-Session-Id 不再作为限流分区键：每请求换随机 session 头
+        // 不得独享配额绕过限流（修复前 session 优先于 IP，可无限分区）。
+        var endpoint = CreateEndpoint("model-a");
+        var factory = CreateFactory(opt => opt.Models.Add(endpoint));
+        factory.RequestsPerMinute = 1;
+        factory.MockClients["model-a"] = new MockModelClient(endpoint, (req, ct) =>
+            Task.FromResult(new RawChatResponse(
+                "{\"id\":\"chatcmpl-s\",\"model\":\"model-a\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}",
+                new ChatUsage { PromptTokens = 1, CompletionTokens = 1, TotalTokens = 2 })));
+        using var client = factory.CreateClient();
+
+        string body = JsonSerializer.Serialize(new { model = "auto", messages = new object[] { new { role = "user", content = "Hi" } } });
+
+        var first = await PostJsonAsync(client, "/v1/chat/completions", body);
+        using var secondRequest = new StringContent(body, Encoding.UTF8, "application/json");
+        using var second = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = secondRequest };
+        second.Headers.Add("X-Session-Id", "random-session-" + Guid.NewGuid().ToString("N"));
+        var secondResponse = await client.SendAsync(second);
+
+        Assert.NotEqual(HttpStatusCode.TooManyRequests, first.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, secondResponse.StatusCode);
+    }
+
+    #endregion
+
+    #region M2 vision data URL 上游翻译
+
+    [Fact]
+    public void AnthropicUpstream_DataUrlImage_TranslatesToBase64Source()
+    {
+        // 下游入口产生的 data URL（base64 图像）必须翻译为 Anthropic base64 source，
+        // 而非不被接受的 url source（vision 断链）。
+        var request = new ChatRequest
+        {
+            Model = "m",
+            Messages = new List<ChatMessage>
+            {
+                new()
+                {
+                    Role = "user",
+                    Content = JsonSerializer.SerializeToElement(new object[]
+                    {
+                        new { type = "text", text = "What is this?" },
+                        new { type = "image_url", image_url = new { url = "data:image/png;base64,aGVsbG8=" } }
+                    })
+                }
+            }
+        };
+
+        string body = OptiRouter.Clients.Protocols.AnthropicTranslators.BuildRequestBody(
+            request, CreateEndpoint("claude"));
+
+        Assert.Contains("\"type\":\"base64\"", body);
+        Assert.Contains("\"media_type\":\"image/png\"", body);
+        Assert.DoesNotContain("\"type\":\"url\"", body);
+    }
+
+    [Fact]
+    public void GeminiUpstream_DataUrlImage_TranslatesToInlineData()
+    {
+        var request = new ChatRequest
+        {
+            Model = "m",
+            Messages = new List<ChatMessage>
+            {
+                new()
+                {
+                    Role = "user",
+                    Content = JsonSerializer.SerializeToElement(new object[]
+                    {
+                        new { type = "text", text = "What is this?" },
+                        new { type = "image_url", image_url = new { url = "data:image/jpeg;base64,aGVsbG8=" } }
+                    })
+                }
+            }
+        };
+
+        string body = OptiRouter.Clients.Protocols.GeminiTranslators.BuildRequestBody(
+            request, CreateEndpoint("gemini"));
+
+        Assert.Contains("\"inlineData\"", body);
+        Assert.Contains("\"mimeType\":\"image/jpeg\"", body);
+        Assert.Contains("\"data\":\"aGVsbG8=\"", body);
+    }
+
+    #endregion
 }

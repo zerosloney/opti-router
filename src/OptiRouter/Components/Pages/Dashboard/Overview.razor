@@ -2,6 +2,7 @@
 @page "/dashboard"
 @inject ApiService Api
 @inject IJSRuntime JS
+@inject Microsoft.Extensions.Logging.ILogger<Overview> Logger
 @implements IDisposable
 
 <PageTitle>OptiRouter - 总览</PageTitle>
@@ -380,7 +381,10 @@
             AffinityState = affinityTask.Result;
             ResponseCacheStats = cacheStatsTask.Result;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Overview LoadInternalState failed");
+        }
     }
 
     private async Task LoadMetrics()
@@ -389,7 +393,11 @@
         {
             Metrics = await Api.GetMetricsAsync();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 静默降级保留诊断线索：仪表盘数据停止更新时可定位原因
+            Logger.LogDebug(ex, "Overview LoadMetrics failed");
+        }
     }
 
     private async Task LoadTrends()
@@ -398,7 +406,10 @@
         {
             Trends = await Api.GetTrendsAsync(TrendDays);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Overview LoadTrends failed");
+        }
     }
 
     private async Task SetTrendDays(int days)
@@ -420,7 +431,10 @@
         {
             WindowData = await Api.GetWindowSummaryAsync(WindowKey);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Overview LoadWindowSummary failed");
+        }
     }
 
     private async Task RenderChart()
@@ -433,7 +447,11 @@
         {
             await JS.InvokeVoidAsync("drawTrendChart", ChartCanvas, payload);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // Canvas 未绑定/JS 未就绪是常见场景，降级为 Debug 便于排查图表不渲染
+            Logger.LogDebug(ex, "Overview RenderChart JS invoke failed");
+        }
     }
 
     private static string Truncate(string val, int maxLen)

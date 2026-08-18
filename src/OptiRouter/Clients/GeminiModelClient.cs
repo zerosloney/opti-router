@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using OptiRouter.Clients.Protocols;
 using OptiRouter.Configuration;
 
@@ -22,6 +23,7 @@ public sealed class GeminiModelClient : IModelClient
 
     private readonly HttpClient _httpClient;
     private readonly ModelEndpointOptions _endpoint;
+    private readonly ILogger? _logger;
 
     /// <inheritdoc />
     public ModelEndpointOptions Endpoint => _endpoint;
@@ -31,12 +33,14 @@ public sealed class GeminiModelClient : IModelClient
     /// </summary>
     /// <param name="endpoint">端点配置（BaseUrl 为 Gemini API 根地址，如 <c>https://generativelanguage.googleapis.com</c>）。</param>
     /// <param name="httpClient">已配置 BaseAddress、Timeout 与 Authorization 的 HttpClient。</param>
-    public GeminiModelClient(ModelEndpointOptions endpoint, HttpClient httpClient)
+    /// <param name="logger">可选日志，用于流式解析降级的诊断记录。</param>
+    public GeminiModelClient(ModelEndpointOptions endpoint, HttpClient httpClient, ILogger? logger = null)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(httpClient);
         _endpoint = endpoint;
         _httpClient = httpClient;
+        _logger = logger;
     }
 
     private string GenerateContentPath => $"/v1beta/models/{_endpoint.Id}:generateContent";
@@ -87,9 +91,12 @@ public sealed class GeminiModelClient : IModelClient
             {
                 chunk = JsonSerializer.Deserialize<RawStreamChunk>(line.Data, _deserializeOptions);
             }
-            catch (JsonException)
+            catch (JsonException ex)
             {
-                continue; // 跳过无法解析的行
+                // 跳过无法解析的行（降级），但留下诊断线索——协议不兼容问题不再完全静默
+                _logger?.LogDebug(ex, "Gemini stream line failed to parse, skipping: {Fragment}",
+                    line.Data.Length > 200 ? line.Data[..200] : line.Data);
+                continue;
             }
             if (chunk is null) continue;
 

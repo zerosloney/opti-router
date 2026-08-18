@@ -153,7 +153,8 @@ public static class DashboardHandler
             var decision = engine.Decide(chatReq, options.CurrentValue);
             return Results.Ok(new
             {
-                TargetTier = decision.ClassificationTargetTier?.ToString() ?? decision.Primary.Tier.ToString(),
+                TargetTier = decision.ClassificationTargetTier?.ToString()
+                    ?? (decision.Candidates.Count > 0 ? decision.Candidates[0].Tier.ToString() : ModelTier.Medium.ToString()),
                 Reasons = decision.ReasonEvents.Select(r => new { PolicyName = r.Policy, Message = r.Detail }),
                 EstimatedTokens = decision.EstimatedInputTokens,
                 CandidateModels = decision.Candidates.Select(m => m.Name).ToList()

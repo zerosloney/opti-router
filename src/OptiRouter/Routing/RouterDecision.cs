@@ -18,7 +18,7 @@ public sealed record RouterDecision
     public required IReadOnlyList<ModelEndpointOptions> Candidates { get; init; }
 
     /// <summary>
-    /// 首选模型（Candidates[0]）。
+    /// 首选模型（Candidates[0]）。调用方须确保候选非空（决策链保证有候选，空候选即失败态）。
     /// </summary>
     public ModelEndpointOptions Primary => Candidates[0];
 
