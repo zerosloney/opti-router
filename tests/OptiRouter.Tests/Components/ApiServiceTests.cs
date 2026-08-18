@@ -53,6 +53,58 @@ public class ApiServiceTests
             uri => Assert.Equal("/api/dashboard/requests?limit=25&offset=50&model=model%2Fa", uri.PathAndQuery));
     }
 
+    [Fact]
+    public async Task Mutation_NonSuccess_ReturnsErrorFromBody()
+    {
+        // M9 回归：变更类方法的失败必须带回后端 {"error":"..."} 校验消息供 UI 展示。
+        using var http = new HttpClient(new ErrorJsonHandler(
+            HttpStatusCode.NotFound, "{\"error\":\"Client key 'k1' not found.\"}"));
+        var service = new ApiService(http, new TestNavigationManager("http://localhost/keys"), httpContextAccessor: null);
+
+        var (ok, error) = await service.UpdateClientKeyAsync("k1", enabled: false, dailyBudgetUsd: 10m, maxQps: 5);
+
+        Assert.False(ok);
+        Assert.NotNull(error);
+        Assert.Contains("not found", error);
+    }
+
+    [Fact]
+    public async Task Mutation_NonJsonError_FallsBackToStatusCode()
+    {
+        // 非 JSON 错误体（如网关 502 HTML）：回退为 HTTP 状态码文本，不抛异常。
+        using var http = new HttpClient(new ErrorJsonHandler(
+            HttpStatusCode.BadGateway, "<html>Bad Gateway</html>"));
+        var service = new ApiService(http, new TestNavigationManager("http://localhost/keys"), httpContextAccessor: null);
+
+        var (ok, error) = await service.DeleteClientKeyAsync("k1");
+
+        Assert.False(ok);
+        Assert.Equal("HTTP 502", error);
+    }
+
+    [Fact]
+    public async Task RunSandbox_NonSuccess_ReturnsErrorFromBody()
+    {
+        using var http = new HttpClient(new ErrorJsonHandler(
+            HttpStatusCode.BadRequest, "{\"error\":\"Prompt cannot be empty.\"}"));
+        var service = new ApiService(http, new TestNavigationManager("http://localhost/router"), httpContextAccessor: null);
+
+        var (result, error) = await service.RunSandboxRouteAsync("");
+
+        Assert.Null(result);
+        Assert.NotNull(error);
+        Assert.Contains("Prompt cannot be empty", error);
+    }
+
+    private sealed class ErrorJsonHandler(HttpStatusCode statusCode, string body) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(new HttpResponseMessage(statusCode)
+            {
+                Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json")
+            });
+    }
+
     private sealed class RecordingHandler : HttpMessageHandler
     {
         public List<Uri> RequestUris { get; } = new();

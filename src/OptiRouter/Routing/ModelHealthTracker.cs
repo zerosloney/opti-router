@@ -178,8 +178,14 @@ public sealed class ModelHealthTracker
     /// <param name="modelName">模型名。</param>
     /// <param name="threshold">连续失败阈值。</param>
     /// <param name="cooldownSeconds">冷却秒数。</param>
+    /// <param name="releaseProbe">
+    /// 是否顺带释放一个半开探测槽位。默认 true：调用方经 <see cref="TryBeginProbe"/> 放行、
+    /// 持有槽位（主链候选 / Fusion panel / Race）。未经放行的旁路健康信号
+    /// （Fusion analyst/outer、Cascade verifier/strong、后台探活服务）必须传 false——
+    /// 否则会偷走在途真实探测的槽位递减，使 halfOpenMaxProbes 并发上限失效。
+    /// </param>
     /// <returns>true 表示本次上报后熔断处于打开状态（触发、重开或刷新）。</returns>
-    public bool RecordFailure(string modelName, int threshold, int cooldownSeconds)
+    public bool RecordFailure(string modelName, int threshold, int cooldownSeconds, bool releaseProbe = true)
     {
         if (string.IsNullOrEmpty(modelName)) return false;
 
@@ -194,7 +200,7 @@ public sealed class ModelHealthTracker
             TransitionIfExpired(modelName, info);
 
             // 该失败来自一次已放行的请求（可能是半开探测），先释放占位。
-            if (info.ActiveProbes > 0)
+            if (releaseProbe && info.ActiveProbes > 0)
                 info.ActiveProbes--;
 
             bool result = false;
@@ -238,7 +244,8 @@ public sealed class ModelHealthTracker
     /// </summary>
     /// <param name="modelName">模型名。</param>
     /// <param name="requiredSuccesses">半开态连续成功闭合阈值；默认 1（单次成功即恢复，保持旧行为）。</param>
-    public void RecordSuccess(string modelName, int requiredSuccesses = 1)
+    /// <param name="releaseProbe">是否顺带释放一个半开探测槽位；语义同 <see cref="RecordFailure"/> 的同名参数。</param>
+    public void RecordSuccess(string modelName, int requiredSuccesses = 1, bool releaseProbe = true)
     {
         if (string.IsNullOrEmpty(modelName)) return;
         int threshold = Math.Max(1, requiredSuccesses);
@@ -250,7 +257,7 @@ public sealed class ModelHealthTracker
 
             TransitionIfExpired(modelName, info);
 
-            if (info.ActiveProbes > 0)
+            if (releaseProbe && info.ActiveProbes > 0)
                 info.ActiveProbes--;
 
             if (info.State == CircuitState.HalfOpen)

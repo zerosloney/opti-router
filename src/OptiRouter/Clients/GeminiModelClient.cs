@@ -43,7 +43,11 @@ public sealed class GeminiModelClient : IModelClient
         _logger = logger;
     }
 
-    private string GenerateContentPath => $"/v1beta/models/{_endpoint.Id}:generateContent";
+    // UpstreamModelId：Id 留空（仅配置 Name）时回退 Name，与 OpenAI 客户端语义一致
+    private string GenerateContentPath => $"/v1beta/models/{_endpoint.UpstreamModelId}:generateContent";
+
+    // 流式端点是独立的 :streamGenerateContent 且必须带 ?alt=sse 才返回 SSE（仅 Accept 头不够）
+    private string StreamGenerateContentPath => $"/v1beta/models/{_endpoint.UpstreamModelId}:streamGenerateContent?alt=sse";
 
     /// <inheritdoc />
     public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken = default)
@@ -184,7 +188,7 @@ public sealed class GeminiModelClient : IModelClient
             "application/json");
         content.Headers.ContentType!.CharSet = "utf-8";
 
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, GenerateContentPath) { Content = content };
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, StreamGenerateContentPath) { Content = content };
         httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
         var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);

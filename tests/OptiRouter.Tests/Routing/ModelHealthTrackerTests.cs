@@ -150,6 +150,55 @@ public class ModelHealthTrackerTests
     }
 
     [Fact]
+    public void RecordSuccess_BypassSignal_DoesNotConsumeHalfOpenProbeSlot()
+    {
+        // M8 回归：未经 TryBeginProbe 放行的旁路健康信号（Fusion analyst/outer、
+        // Cascade verifier/strong、后台探活）不得偷走在途真实探测的槽位递减。
+        var now = DateTime.UtcNow;
+        var tracker = new ModelHealthTracker(() => now);
+
+        for (int i = 0; i < 3; i++)
+            tracker.RecordFailure("m1", threshold: 3, cooldownSeconds: 60);
+        now = now.AddSeconds(61);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+
+        // maxProbes=1：唯一槽位被一次真实探测占用
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 1));
+        Assert.False(tracker.TryBeginProbe("m1", maxProbes: 1));
+
+        // 旁路成功上报（requiredSuccesses=3 保证不闭合，便于继续观察槽位）：
+        // 参与半开成功计数，但槽位仍被真实探测持有
+        tracker.RecordSuccess("m1", requiredSuccesses: 3, releaseProbe: false);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+        Assert.False(tracker.TryBeginProbe("m1", maxProbes: 1)); // 修复前这里会 true（槽位被偷）
+
+        // 默认参数（占位调用方，主链/panel）仍释放槽位
+        tracker.RecordSuccess("m1", requiredSuccesses: 3);
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 1));
+    }
+
+    [Fact]
+    public void RecordFailure_BypassSignal_DoesNotConsumeHalfOpenProbeSlot()
+    {
+        var now = DateTime.UtcNow;
+        var tracker = new ModelHealthTracker(() => now);
+
+        for (int i = 0; i < 3; i++)
+            tracker.RecordFailure("m1", threshold: 3, cooldownSeconds: 60);
+        now = now.AddSeconds(61);
+        Assert.True(tracker.TryBeginProbe("m1", maxProbes: 1)); // 真实探测占位
+
+        // 旁路失败上报：半开失败仍应重开熔断（状态转换不受影响），但不得释放槽位
+        Assert.True(tracker.RecordFailure("m1", threshold: 3, cooldownSeconds: 60, releaseProbe: false));
+        Assert.Equal(CircuitState.Open, tracker.GetState("m1"));
+
+        // 冷却到期再入半开：槽位计数应保持 1（未被旁路失败偷走）
+        now = now.AddSeconds(61);
+        Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
+        Assert.False(tracker.TryBeginProbe("m1", maxProbes: 1)); // 修复前这里会 true
+    }
+
+    [Fact]
     public void GetState_UnknownModel_ReturnsClosed()
     {
         var tracker = new ModelHealthTracker();

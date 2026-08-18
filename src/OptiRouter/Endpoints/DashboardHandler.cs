@@ -274,7 +274,7 @@ public static class DashboardHandler
 
         endpoints.MapPut("/api/dashboard/semantic-routes", (
             IConfiguration config,
-            IWebHostEnvironment env,
+            AppConfigDbStore store,
             UpdateSemanticRoutesRequest req) =>
         {
             var (routes, error) = BuildSemanticRoutes(req.Routes);
@@ -283,7 +283,7 @@ public static class DashboardHandler
                 return Results.BadRequest(new { error });
             }
 
-            PersistAppsettings(config, env, root =>
+            PersistRoutingDocuments((IConfigurationRoot)config, store, root =>
             {
                 var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
                 var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
@@ -316,15 +316,23 @@ public static class DashboardHandler
             {
                 Routing = new
                 {
-                    opt.Routing.EnableFailover,
-                    opt.Routing.EnableBudgetGuard,
+                    Preset = opt.Routing.Preset,
+                    // ① 基础路由
+                    DefaultTier = opt.Routing.DefaultTier.ToString(),
                     opt.Routing.EnableRuleClassifier,
-                    opt.Routing.EnableLatencyAware,
                     opt.Routing.EnableSemanticRouter,
-                    opt.Routing.EnablePiiAnonymization,
-                    opt.Routing.EnableDataSovereignty,
-                    opt.Routing.EnableJsonAstAutoRepair,
-                    opt.Routing.EnableFusionRouter,
+                    opt.Routing.EnableSessionAffinity,
+                    opt.Routing.EnableLatencyAware,
+                    opt.Routing.EnableLoadBalance,
+                    opt.Routing.EnableKalmanLoadBalance,
+                    // ② 可靠性与预算
+                    opt.Routing.EnableFailover,
+                    opt.Routing.FailoverFailureThreshold,
+                    opt.Routing.FailoverCooldownSeconds,
+                    opt.Routing.FailoverGlobalTimeoutSeconds,
+                    opt.Routing.EnableBudgetGuard,
+                    opt.Routing.EnableHealthProbe,
+                    // ③ 学习与优化
                     opt.Routing.EnableThompsonSampling,
                     opt.Routing.EnableContextualBandit,
                     opt.Routing.ExplorationEpsilon,
@@ -332,8 +340,30 @@ public static class DashboardHandler
                     opt.Routing.EnableResponseCache,
                     opt.Routing.ResponseCacheTtlSeconds,
                     opt.Routing.ResponseCacheMaxEntries,
-                    opt.Routing.FailoverFailureThreshold,
-                    opt.Routing.FailoverCooldownSeconds
+                    opt.Routing.EnableSemanticCache,
+                    opt.Routing.SemanticCacheSimilarityThreshold,
+                    opt.Routing.SemanticCacheTtlMinutes,
+                    opt.Routing.EnableCascadeUpgrade,
+                    opt.Routing.CascadeUpgradeSampleRate,
+                    opt.Routing.EnableRegenerateFeedback,
+                    // ④ 合规与安全
+                    opt.Routing.EnablePiiAnonymization,
+                    opt.Routing.EnableDataSovereignty,
+                    opt.Routing.EnableContentModeration,
+                    opt.Routing.ModerationSampleRate,
+                    opt.Routing.ModerationThreshold,
+                    opt.Routing.EnableStreamingComplianceFilter,
+                    opt.Routing.EnablePersonaDriftProtection,
+                    opt.Routing.EnablePromptCompression,
+                    // ⑤ 高级编排
+                    opt.Routing.EnableFusionRouter,
+                    FusionRouterMinComplexity = opt.Routing.FusionRouterMinComplexity.ToString(),
+                    opt.Routing.EnableFusionMode,
+                    opt.Routing.EnableByzantineConsensus,
+                    opt.Routing.EnableJsonAstAutoRepair,
+                    // ⑥ 观测
+                    opt.Routing.EnableDistributedTracing,
+                    opt.Routing.AuditStoreRequestContent
                 },
                 Budget = new
                 {
@@ -343,19 +373,23 @@ public static class DashboardHandler
             });
         });
 
+        // 7b. GET Presets API：三档路由预设（供配置页一键填充表单；应用预设 = 显式 PUT 全部预设字段）。
+        endpoints.MapGet("/api/dashboard/config/presets",
+            () => Results.Ok(RoutingPreset.GetPresets()));
+
         // 8. PUT Update System Config API（持久化到 appsettings.json + 触发 IConfigurationRoot.Reload，
         //    IOptionsMonitor 自然派发到所有消费方；取代旧版 mutate IOptions.Value 的非持久写法，
         //    后者被 models-config.json 写入触发的整体 reload 覆盖、且重启丢失）。
         endpoints.MapPut("/api/dashboard/config", (
             IConfiguration config,
-            IWebHostEnvironment env,
+            AppConfigDbStore store,
             IOptionsMonitor<RouterOptions> optionsMonitor,
             UpdateSystemConfigRequest req) =>
         {
-            // 落盘前把变更应用到"当前配置的克隆"并复用启动校验器（RouterOptionsValidator）：
-            // 坏配置一旦落盘，reload 会被 IOptionsMonitor 静默拒绝（表面保存成功、实际未生效），
+            // 落库前把变更应用到"当前配置的克隆"并复用启动校验器（RouterOptionsValidator）：
+            // 坏配置一旦落库，reload 会被 IOptionsMonitor 静默拒绝（表面保存成功、实际未生效），
             // 更糟的是重启时 ValidateOnStart 直接失败导致进程起不来。
-            // 克隆 = 从组合配置重新绑定（与启动同源）+ 用权威 models-config.json 的模型列表校正
+            // 克隆 = 从组合配置重新绑定（与启动同源）+ 用权威模型列表校正
             // （启动绑定时 Models 由 Configure<ModelsConfigService> 覆盖，纯 config 绑定拿不到）。
             var candidate = new RouterOptions();
             config.GetSection("OptiRouter").Bind(candidate);
@@ -371,21 +405,31 @@ public static class DashboardHandler
                 return Results.BadRequest(new { error = string.Join("; ", validation.Failures) });
             }
 
-            PersistAppsettings(config, env, root =>
+            PersistRoutingDocuments((IConfigurationRoot)config, store, root =>
             {
                 var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
                 var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
                 var budget = (optiRouter["Budget"] as JsonObject) ?? (JsonObject)(optiRouter["Budget"] = new JsonObject());
 
-                if (req.EnableFailover is not null) routing["EnableFailover"] = req.EnableFailover.Value;
-                if (req.EnableBudgetGuard is not null) routing["EnableBudgetGuard"] = req.EnableBudgetGuard.Value;
+                // 写入条件与 ApplyRequestToOptions 一一对应（null = 不改）
+                // ① 基础路由
                 if (req.EnableRuleClassifier is not null) routing["EnableRuleClassifier"] = req.EnableRuleClassifier.Value;
-                if (req.EnableLatencyAware is not null) routing["EnableLatencyAware"] = req.EnableLatencyAware.Value;
                 if (req.EnableSemanticRouter is not null) routing["EnableSemanticRouter"] = req.EnableSemanticRouter.Value;
-                if (req.EnablePiiAnonymization is not null) routing["EnablePiiAnonymization"] = req.EnablePiiAnonymization.Value;
-                if (req.EnableDataSovereignty is not null) routing["EnableDataSovereignty"] = req.EnableDataSovereignty.Value;
-                if (req.EnableJsonAstAutoRepair is not null) routing["EnableJsonAstAutoRepair"] = req.EnableJsonAstAutoRepair.Value;
-                if (req.EnableFusionRouter is not null) routing["EnableFusionRouter"] = req.EnableFusionRouter.Value;
+                if (req.EnableSessionAffinity is not null) routing["EnableSessionAffinity"] = req.EnableSessionAffinity.Value;
+                if (req.EnableLatencyAware is not null) routing["EnableLatencyAware"] = req.EnableLatencyAware.Value;
+                if (req.EnableLoadBalance is not null) routing["EnableLoadBalance"] = req.EnableLoadBalance.Value;
+                if (req.EnableKalmanLoadBalance is not null) routing["EnableKalmanLoadBalance"] = req.EnableKalmanLoadBalance.Value;
+                if (!string.IsNullOrEmpty(req.DefaultTier) && Enum.TryParse<ModelTier>(req.DefaultTier, ignoreCase: true, out var tier)) routing["DefaultTier"] = tier.ToString();
+
+                // ② 可靠性与预算
+                if (req.EnableFailover is not null) routing["EnableFailover"] = req.EnableFailover.Value;
+                if (req.FailoverFailureThreshold is > 0) routing["FailoverFailureThreshold"] = req.FailoverFailureThreshold.Value;
+                if (req.FailoverCooldownSeconds is > 0) routing["FailoverCooldownSeconds"] = req.FailoverCooldownSeconds.Value;
+                if (req.FailoverGlobalTimeoutSeconds is >= 0) routing["FailoverGlobalTimeoutSeconds"] = req.FailoverGlobalTimeoutSeconds.Value;
+                if (req.EnableBudgetGuard is not null) routing["EnableBudgetGuard"] = req.EnableBudgetGuard.Value;
+                if (req.EnableHealthProbe is not null) routing["EnableHealthProbe"] = req.EnableHealthProbe.Value;
+
+                // ③ 学习与优化
                 if (req.EnableThompsonSampling is not null) routing["EnableThompsonSampling"] = req.EnableThompsonSampling.Value;
                 if (req.EnableContextualBandit is not null) routing["EnableContextualBandit"] = req.EnableContextualBandit.Value;
                 if (req.ExplorationEpsilon is not null) routing["ExplorationEpsilon"] = req.ExplorationEpsilon.Value;
@@ -393,8 +437,33 @@ public static class DashboardHandler
                 if (req.EnableResponseCache is not null) routing["EnableResponseCache"] = req.EnableResponseCache.Value;
                 if (req.ResponseCacheTtlSeconds is > 0) routing["ResponseCacheTtlSeconds"] = req.ResponseCacheTtlSeconds.Value;
                 if (req.ResponseCacheMaxEntries is > 0) routing["ResponseCacheMaxEntries"] = req.ResponseCacheMaxEntries.Value;
-                if (req.FailoverFailureThreshold is > 0) routing["FailoverFailureThreshold"] = req.FailoverFailureThreshold.Value;
-                if (req.FailoverCooldownSeconds is > 0) routing["FailoverCooldownSeconds"] = req.FailoverCooldownSeconds.Value;
+                if (req.EnableSemanticCache is not null) routing["EnableSemanticCache"] = req.EnableSemanticCache.Value;
+                if (req.SemanticCacheSimilarityThreshold is > 0 and <= 1) routing["SemanticCacheSimilarityThreshold"] = req.SemanticCacheSimilarityThreshold.Value;
+                if (req.SemanticCacheTtlMinutes is > 0) routing["SemanticCacheTtlMinutes"] = req.SemanticCacheTtlMinutes.Value;
+                if (req.EnableCascadeUpgrade is not null) routing["EnableCascadeUpgrade"] = req.EnableCascadeUpgrade.Value;
+                if (req.CascadeUpgradeSampleRate is > 0 and <= 1) routing["CascadeUpgradeSampleRate"] = req.CascadeUpgradeSampleRate.Value;
+                if (req.EnableRegenerateFeedback is not null) routing["EnableRegenerateFeedback"] = req.EnableRegenerateFeedback.Value;
+
+                // ④ 合规与安全
+                if (req.EnablePiiAnonymization is not null) routing["EnablePiiAnonymization"] = req.EnablePiiAnonymization.Value;
+                if (req.EnableDataSovereignty is not null) routing["EnableDataSovereignty"] = req.EnableDataSovereignty.Value;
+                if (req.EnableContentModeration is not null) routing["EnableContentModeration"] = req.EnableContentModeration.Value;
+                if (req.ModerationSampleRate is > 0 and <= 1) routing["ModerationSampleRate"] = req.ModerationSampleRate.Value;
+                if (req.ModerationThreshold is > 0 and <= 1) routing["ModerationThreshold"] = req.ModerationThreshold.Value;
+                if (req.EnableStreamingComplianceFilter is not null) routing["EnableStreamingComplianceFilter"] = req.EnableStreamingComplianceFilter.Value;
+                if (req.EnablePersonaDriftProtection is not null) routing["EnablePersonaDriftProtection"] = req.EnablePersonaDriftProtection.Value;
+                if (req.EnablePromptCompression is not null) routing["EnablePromptCompression"] = req.EnablePromptCompression.Value;
+
+                // ⑤ 高级编排
+                if (req.EnableFusionRouter is not null) routing["EnableFusionRouter"] = req.EnableFusionRouter.Value;
+                if (!string.IsNullOrEmpty(req.FusionRouterMinComplexity) && Enum.TryParse<OptiRouter.Routing.RequestComplexity>(req.FusionRouterMinComplexity, ignoreCase: true, out var complexity)) routing["FusionRouterMinComplexity"] = complexity.ToString();
+                if (req.EnableFusionMode is not null) routing["EnableFusionMode"] = req.EnableFusionMode.Value;
+                if (req.EnableByzantineConsensus is not null) routing["EnableByzantineConsensus"] = req.EnableByzantineConsensus.Value;
+                if (req.EnableJsonAstAutoRepair is not null) routing["EnableJsonAstAutoRepair"] = req.EnableJsonAstAutoRepair.Value;
+
+                // ⑥ 观测
+                if (req.EnableDistributedTracing is not null) routing["EnableDistributedTracing"] = req.EnableDistributedTracing.Value;
+                if (req.AuditStoreRequestContent is not null) routing["AuditStoreRequestContent"] = req.AuditStoreRequestContent.Value;
 
                 if (req.DailyBudgetUsd is >= 0) budget["DailyBudgetUsd"] = req.DailyBudgetUsd.Value;
                 if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
@@ -545,27 +614,67 @@ public static class DashboardHandler
     public record CreateClientKeyRequest(string TenantName, decimal? DailyBudgetUsd, int? MaxQps);
     public record UpdateClientKeyRequest(bool? Enabled, decimal? DailyBudgetUsd, int? MaxQps);
 
-    public record UpdateSystemConfigRequest(
-        bool? EnableFailover,
-        bool? EnableBudgetGuard,
-        bool? EnableRuleClassifier,
-        bool? EnableLatencyAware,
-        bool? EnableSemanticRouter,
-        bool? EnablePiiAnonymization,
-        bool? EnableDataSovereignty,
-        bool? EnableJsonAstAutoRepair,
-        bool? EnableFusionRouter,
-        bool? EnableThompsonSampling,
-        bool? EnableContextualBandit,
-        double? ExplorationEpsilon,
-        long? ExplorationStarvedN,
-        bool? EnableResponseCache,
-        int? ResponseCacheTtlSeconds,
-        int? ResponseCacheMaxEntries,
-        int? FailoverFailureThreshold,
-        int? FailoverCooldownSeconds,
-        decimal? DailyBudgetUsd,
-        string? EnforceOnExhausted);
+    /// <summary>
+    /// 系统配置更新请求。全部字段可空：null = 不修改。属性式（非位置 record）以便 40+ 字段可维护。
+    /// 仅暴露热生效项；启动快照类配置（TokenEstimator 模式、OTLP 端点、Metrics 端点等）不进 UI。
+    /// </summary>
+    public sealed record UpdateSystemConfigRequest
+    {
+        // ① 基础路由
+        public bool? EnableRuleClassifier { get; init; }
+        public bool? EnableSemanticRouter { get; init; }
+        public bool? EnableSessionAffinity { get; init; }
+        public bool? EnableLatencyAware { get; init; }
+        public bool? EnableLoadBalance { get; init; }
+        public bool? EnableKalmanLoadBalance { get; init; }
+        public string? DefaultTier { get; init; }
+
+        // ② 可靠性与预算
+        public bool? EnableFailover { get; init; }
+        public int? FailoverFailureThreshold { get; init; }
+        public int? FailoverCooldownSeconds { get; init; }
+        public int? FailoverGlobalTimeoutSeconds { get; init; }
+        public bool? EnableBudgetGuard { get; init; }
+        public bool? EnableHealthProbe { get; init; }
+        public decimal? DailyBudgetUsd { get; init; }
+        public string? EnforceOnExhausted { get; init; }
+
+        // ③ 学习与优化
+        public bool? EnableThompsonSampling { get; init; }
+        public bool? EnableContextualBandit { get; init; }
+        public double? ExplorationEpsilon { get; init; }
+        public long? ExplorationStarvedN { get; init; }
+        public bool? EnableResponseCache { get; init; }
+        public int? ResponseCacheTtlSeconds { get; init; }
+        public int? ResponseCacheMaxEntries { get; init; }
+        public bool? EnableSemanticCache { get; init; }
+        public double? SemanticCacheSimilarityThreshold { get; init; }
+        public int? SemanticCacheTtlMinutes { get; init; }
+        public bool? EnableCascadeUpgrade { get; init; }
+        public double? CascadeUpgradeSampleRate { get; init; }
+        public bool? EnableRegenerateFeedback { get; init; }
+
+        // ④ 合规与安全
+        public bool? EnablePiiAnonymization { get; init; }
+        public bool? EnableDataSovereignty { get; init; }
+        public bool? EnableContentModeration { get; init; }
+        public double? ModerationSampleRate { get; init; }
+        public double? ModerationThreshold { get; init; }
+        public bool? EnableStreamingComplianceFilter { get; init; }
+        public bool? EnablePersonaDriftProtection { get; init; }
+        public bool? EnablePromptCompression { get; init; }
+
+        // ⑤ 高级编排
+        public bool? EnableFusionRouter { get; init; }
+        public string? FusionRouterMinComplexity { get; init; }
+        public bool? EnableFusionMode { get; init; }
+        public bool? EnableByzantineConsensus { get; init; }
+        public bool? EnableJsonAstAutoRepair { get; init; }
+
+        // ⑥ 观测
+        public bool? EnableDistributedTracing { get; init; }
+        public bool? AuditStoreRequestContent { get; init; }
+    }
 
     /// <summary>
     /// 把 PUT 请求的字段应用到配置克隆上，写入条件与落盘 JsonObject 的分支一一对应，
@@ -574,15 +683,33 @@ public static class DashboardHandler
     private static void ApplyRequestToOptions(RouterOptions candidate, UpdateSystemConfigRequest req)
     {
         var routing = candidate.Routing;
-        if (req.EnableFailover is not null) routing.EnableFailover = req.EnableFailover.Value;
-        if (req.EnableBudgetGuard is not null) routing.EnableBudgetGuard = req.EnableBudgetGuard.Value;
+
+        // ① 基础路由
         if (req.EnableRuleClassifier is not null) routing.EnableRuleClassifier = req.EnableRuleClassifier.Value;
-        if (req.EnableLatencyAware is not null) routing.EnableLatencyAware = req.EnableLatencyAware.Value;
         if (req.EnableSemanticRouter is not null) routing.EnableSemanticRouter = req.EnableSemanticRouter.Value;
-        if (req.EnablePiiAnonymization is not null) routing.EnablePiiAnonymization = req.EnablePiiAnonymization.Value;
-        if (req.EnableDataSovereignty is not null) routing.EnableDataSovereignty = req.EnableDataSovereignty.Value;
-        if (req.EnableJsonAstAutoRepair is not null) routing.EnableJsonAstAutoRepair = req.EnableJsonAstAutoRepair.Value;
-        if (req.EnableFusionRouter is not null) routing.EnableFusionRouter = req.EnableFusionRouter.Value;
+        if (req.EnableSessionAffinity is not null) routing.EnableSessionAffinity = req.EnableSessionAffinity.Value;
+        if (req.EnableLatencyAware is not null) routing.EnableLatencyAware = req.EnableLatencyAware.Value;
+        if (req.EnableLoadBalance is not null) routing.EnableLoadBalance = req.EnableLoadBalance.Value;
+        if (req.EnableKalmanLoadBalance is not null) routing.EnableKalmanLoadBalance = req.EnableKalmanLoadBalance.Value;
+        if (!string.IsNullOrEmpty(req.DefaultTier) && Enum.TryParse<ModelTier>(req.DefaultTier, ignoreCase: true, out var tier))
+        {
+            routing.DefaultTier = tier;
+        }
+
+        // ② 可靠性与预算
+        if (req.EnableFailover is not null) routing.EnableFailover = req.EnableFailover.Value;
+        if (req.FailoverFailureThreshold is > 0) routing.FailoverFailureThreshold = req.FailoverFailureThreshold.Value;
+        if (req.FailoverCooldownSeconds is > 0) routing.FailoverCooldownSeconds = req.FailoverCooldownSeconds.Value;
+        if (req.FailoverGlobalTimeoutSeconds is >= 0) routing.FailoverGlobalTimeoutSeconds = req.FailoverGlobalTimeoutSeconds.Value;
+        if (req.EnableBudgetGuard is not null) routing.EnableBudgetGuard = req.EnableBudgetGuard.Value;
+        if (req.EnableHealthProbe is not null) routing.EnableHealthProbe = req.EnableHealthProbe.Value;
+        if (req.DailyBudgetUsd is >= 0) candidate.Budget.DailyBudgetUsd = req.DailyBudgetUsd.Value;
+        if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
+        {
+            candidate.Budget.EnforceOnExhausted = behavior;
+        }
+
+        // ③ 学习与优化
         if (req.EnableThompsonSampling is not null) routing.EnableThompsonSampling = req.EnableThompsonSampling.Value;
         if (req.EnableContextualBandit is not null) routing.EnableContextualBandit = req.EnableContextualBandit.Value;
         if (req.ExplorationEpsilon is not null) routing.ExplorationEpsilon = req.ExplorationEpsilon.Value;
@@ -590,13 +717,36 @@ public static class DashboardHandler
         if (req.EnableResponseCache is not null) routing.EnableResponseCache = req.EnableResponseCache.Value;
         if (req.ResponseCacheTtlSeconds is > 0) routing.ResponseCacheTtlSeconds = req.ResponseCacheTtlSeconds.Value;
         if (req.ResponseCacheMaxEntries is > 0) routing.ResponseCacheMaxEntries = req.ResponseCacheMaxEntries.Value;
-        if (req.FailoverFailureThreshold is > 0) routing.FailoverFailureThreshold = req.FailoverFailureThreshold.Value;
-        if (req.FailoverCooldownSeconds is > 0) routing.FailoverCooldownSeconds = req.FailoverCooldownSeconds.Value;
-        if (req.DailyBudgetUsd is >= 0) candidate.Budget.DailyBudgetUsd = req.DailyBudgetUsd.Value;
-        if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
+        if (req.EnableSemanticCache is not null) routing.EnableSemanticCache = req.EnableSemanticCache.Value;
+        if (req.SemanticCacheSimilarityThreshold is > 0 and <= 1) routing.SemanticCacheSimilarityThreshold = (float)req.SemanticCacheSimilarityThreshold.Value;
+        if (req.SemanticCacheTtlMinutes is > 0) routing.SemanticCacheTtlMinutes = req.SemanticCacheTtlMinutes.Value;
+        if (req.EnableCascadeUpgrade is not null) routing.EnableCascadeUpgrade = req.EnableCascadeUpgrade.Value;
+        if (req.CascadeUpgradeSampleRate is > 0 and <= 1) routing.CascadeUpgradeSampleRate = req.CascadeUpgradeSampleRate.Value;
+        if (req.EnableRegenerateFeedback is not null) routing.EnableRegenerateFeedback = req.EnableRegenerateFeedback.Value;
+
+        // ④ 合规与安全
+        if (req.EnablePiiAnonymization is not null) routing.EnablePiiAnonymization = req.EnablePiiAnonymization.Value;
+        if (req.EnableDataSovereignty is not null) routing.EnableDataSovereignty = req.EnableDataSovereignty.Value;
+        if (req.EnableContentModeration is not null) routing.EnableContentModeration = req.EnableContentModeration.Value;
+        if (req.ModerationSampleRate is > 0 and <= 1) routing.ModerationSampleRate = req.ModerationSampleRate.Value;
+        if (req.ModerationThreshold is > 0 and <= 1) routing.ModerationThreshold = req.ModerationThreshold.Value;
+        if (req.EnableStreamingComplianceFilter is not null) routing.EnableStreamingComplianceFilter = req.EnableStreamingComplianceFilter.Value;
+        if (req.EnablePersonaDriftProtection is not null) routing.EnablePersonaDriftProtection = req.EnablePersonaDriftProtection.Value;
+        if (req.EnablePromptCompression is not null) routing.EnablePromptCompression = req.EnablePromptCompression.Value;
+
+        // ⑤ 高级编排
+        if (req.EnableFusionRouter is not null) routing.EnableFusionRouter = req.EnableFusionRouter.Value;
+        if (!string.IsNullOrEmpty(req.FusionRouterMinComplexity) && Enum.TryParse<OptiRouter.Routing.RequestComplexity>(req.FusionRouterMinComplexity, ignoreCase: true, out var complexity))
         {
-            candidate.Budget.EnforceOnExhausted = behavior;
+            routing.FusionRouterMinComplexity = complexity;
         }
+        if (req.EnableFusionMode is not null) routing.EnableFusionMode = req.EnableFusionMode.Value;
+        if (req.EnableByzantineConsensus is not null) routing.EnableByzantineConsensus = req.EnableByzantineConsensus.Value;
+        if (req.EnableJsonAstAutoRepair is not null) routing.EnableJsonAstAutoRepair = req.EnableJsonAstAutoRepair.Value;
+
+        // ⑥ 观测
+        if (req.EnableDistributedTracing is not null) routing.EnableDistributedTracing = req.EnableDistributedTracing.Value;
+        if (req.AuditStoreRequestContent is not null) routing.AuditStoreRequestContent = req.AuditStoreRequestContent.Value;
     }
 
     public record EvalRunRequest(List<EvalCaseRequest>? Cases);
@@ -721,50 +871,43 @@ public static class DashboardHandler
     }
 
     /// <summary>
-    /// 把对 appsettings.json 的修改原子落盘并触发 IConfigurationRoot.Reload，
-    /// IOptionsMonitor 随即把新值派发到所有消费方（配置 PUT 与语义路由 PUT 共用）。
-    /// 临时文件 + File.Replace 保证读端（reload / 其他进程）不会读到半截 JSON。
+    /// 把路由/预算配置变更持久化到 SQLite 配置库并触发热重载。
+    /// 变更以"当前 DB 文档 + 请求字段"合并后整体写回（与旧 appsettings.json 落盘语义一致）。
     /// </summary>
-    private static void PersistAppsettings(IConfiguration config, IWebHostEnvironment env, Action<JsonObject> mutate)
+    private static void PersistRoutingDocuments(
+        IConfigurationRoot configRoot,
+        AppConfigDbStore store,
+        Action<JsonObject> mutate)
     {
-        string appsettingsPath = Path.Combine(env.ContentRootPath, "appsettings.json");
-        var root = JsonNode.Parse(File.ReadAllText(appsettingsPath))?.AsObject()
-            ?? throw new InvalidOperationException("appsettings.json is unreadable; cannot persist config.");
+        static JsonObject LoadDoc(AppConfigDbStore store, string scope)
+        {
+            string? json = store.LoadDocument(scope);
+            return string.IsNullOrWhiteSpace(json)
+                ? new JsonObject()
+                : (JsonNode.Parse(json) as JsonObject ?? new JsonObject());
+        }
+
+        var root = new JsonObject
+        {
+            ["OptiRouter"] = new JsonObject
+            {
+                ["Routing"] = LoadDoc(store, AppConfigDbStore.RoutingScope),
+                ["Budget"] = LoadDoc(store, AppConfigDbStore.BudgetScope)
+            }
+        };
+
         mutate(root);
 
-        string directory = Path.GetDirectoryName(appsettingsPath) ?? env.ContentRootPath;
-        string tempPath = Path.Combine(directory, $".appsettings.{Guid.NewGuid():N}.tmp");
-        try
-        {
-            File.WriteAllText(tempPath, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-            int attempts = 0;
-            while (true)
-            {
-                try
-                {
-                    if (File.Exists(appsettingsPath))
-                        File.Replace(tempPath, appsettingsPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
-                    else
-                        File.Move(tempPath, appsettingsPath);
-                    break;
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                    attempts++;
-                    if (attempts >= 10) throw;
-                    Thread.Sleep(10 * attempts);
-                }
-            }
-        }
-        finally
-        {
-            if (File.Exists(tempPath))
-            {
-                try { File.Delete(tempPath); } catch { }
-            }
-        }
+        var optiRouter = root["OptiRouter"] as JsonObject;
+        if (optiRouter is null)
+            return;
+        if (optiRouter["Routing"] is JsonObject routing)
+            store.SaveDocument(AppConfigDbStore.RoutingScope, routing.ToJsonString());
+        if (optiRouter["Budget"] is JsonObject budget)
+            store.SaveDocument(AppConfigDbStore.BudgetScope, budget.ToJsonString());
 
-        ((IConfigurationRoot)config).Reload();
+        // Reload 同步扇出 IOptionsMonitor 回调（RouterEngine/ModelClientProvider 等热生效）。
+        configRoot.Reload();
     }
 
     private static readonly string[] ValidWindows = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };
@@ -935,7 +1078,19 @@ public static class DashboardHandler
             System = new
             {
                 Time = DateTime.UtcNow,
-                RoutingPolicy = options.Routing,
+                // 白名单投影：RoutingOptions 含 ModerationApiKey / MetricsApiKey / MeshRedisConnectionString
+                // 等密钥类字段，不得整包下发浏览器（与 GET /api/dashboard/config 的字段白名单策略一致）。
+                // 字段集与前端 ApiService.RoutingPolicyInfo 保持一一对应。
+                RoutingPolicy = new
+                {
+                    options.Routing.EnableFailover,
+                    options.Routing.EnableBudgetGuard,
+                    options.Routing.EnableRuleClassifier,
+                    options.Routing.EnableLatencyAware,
+                    options.Routing.EnableSemanticRouter,
+                    options.Routing.EnableMultiDimensionalRouting,
+                    options.Routing.EnableThompsonSampling
+                },
                 Budget = new
                 {
                     DailyBudgetUsd = options.Budget.DailyBudgetUsd,

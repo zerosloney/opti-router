@@ -120,7 +120,8 @@ public sealed class CascadeUpgradeHandler
                 _recorder.RecordCost(verifyCost, sessionId);
 
             // 校验调用的健康/延迟 reward 记到实际校验模型（verifier）；质量信号（confident/uncertain）记到 Cheap 模型。
-            _healthTracker.RecordSuccess(verifierModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
+            // verifier 未经 TryBeginProbe 放行：releaseProbe:false，只参与状态转换、不消耗半开探测槽位。
+            _healthTracker.RecordSuccess(verifierModel.Name, routing.FailoverHalfOpenRequiredSuccesses, releaseProbe: false);
             double verifierReward = _recorder.RecordThompsonOutcome(
                 verifierModel.Name,
                 verifySw.ElapsedMilliseconds,
@@ -168,7 +169,7 @@ public sealed class CascadeUpgradeHandler
                 }
                 _recorder.RecordQuota(upgradeTarget.Name, strongResponse.Metadata);
                 _healthTracker.RecordSuccess(upgradeTarget.Name,
-                    routing.FailoverHalfOpenRequiredSuccesses);
+                    routing.FailoverHalfOpenRequiredSuccesses, releaseProbe: false);
                 double upgradeReward = _recorder.RecordThompsonOutcome(
                     upgradeTarget.Name,
                     strongSw.ElapsedMilliseconds,
@@ -200,7 +201,7 @@ public sealed class CascadeUpgradeHandler
                     _healthTracker.RecordFailure(
                         upgradeTarget.Name,
                         routing.FailoverFailureThreshold,
-                        routing.FailoverCooldownSeconds);
+                        routing.FailoverCooldownSeconds, releaseProbe: false);
                     _recorder.RecordThompsonOutcome(upgradeTarget.Name, null, decision);
                 }
                 // 升级调用失败（含客户端内部超时）：记录但不抛，返回 null 让调用方用原 Cheap 答案（已有，质量兜底不优于崩溃）。
@@ -224,7 +225,7 @@ public sealed class CascadeUpgradeHandler
                 _healthTracker.RecordFailure(
                     verifierModel.Name,
                     routing.FailoverFailureThreshold,
-                    routing.FailoverCooldownSeconds);
+                    routing.FailoverCooldownSeconds, releaseProbe: false);
                 _recorder.RecordThompsonOutcome(verifierModel.Name, null, decision);
             }
             // 自校验本身失败（含客户端内部超时）：吞掉，用原 Cheap 答案。级联是优化路径，非主流程。

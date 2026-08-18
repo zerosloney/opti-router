@@ -138,37 +138,49 @@ public class RouterOptionsBindingTests
     }
 
     [Fact]
-    public void ModelsJsonProvider_PreservesRoutingMetadataPricesAndTags()
+    public void DbConfigProvider_PreservesRoutingMetadataPricesAndTags()
     {
         string directory = Path.Combine(Path.GetTempPath(), "optirouter-model-provider-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
-        string path = Path.Combine(directory, "models-config.json");
+        string dbPath = Path.Combine(directory, "config.db");
         try
         {
-            File.WriteAllText(path, """
-                [{
-                  "name":"model-a","baseUrl":"https://example.test/v1","tier":"medium",
-                  "provider":"custom-provider","family":"custom-family",
-                  "maxContextTokens":8192,"inputPricePerMillion":2.5,
-                  "cachedInputPricePerMillion":1.25,"cacheWriteInputPricePerMillion":3.0,
-                  "outputPricePerMillion":10,"timeoutSeconds":120,"maxRetries":0,
-                  "enabled":true,"isLocalOrPrivate":true,"tags":["vision","custom-tag"]
-                }]
-                """);
+            using var store = new AppConfigDbStore(dbPath);
+            store.UpsertModel(new ModelEndpointOptions
+            {
+                Name = "model-a",
+                BaseUrl = "https://example.test/v1",
+                Tier = ModelTier.Medium,
+                Provider = "custom-provider",
+                Family = "custom-family",
+                MaxContextTokens = 8192,
+                InputPricePerMillion = 2.5m,
+                CachedInputPricePerMillion = 1.25m,
+                CacheWriteInputPricePerMillion = 3.0m,
+                OutputPricePerMillion = 10m,
+                TimeoutSeconds = 120,
+                MaxRetries = 0,
+                Enabled = true,
+                IsLocalOrPrivate = true
+            });
+            var model = Assert.Single(store.LoadModelsRaw());
+            model.Tags.Add("vision");
+            model.Tags.Add("custom-tag");
+            store.UpsertModel(model);
 
             var configuration = new ConfigurationBuilder()
-                .Add(new ModelsJsonConfigurationSource { FilePath = path })
+                .Add(new DbAppConfigSource { DbPath = dbPath })
                 .Build();
             var options = new RouterOptions();
             configuration.GetSection("OptiRouter").Bind(options);
 
-            var model = Assert.Single(options.Models);
-            Assert.Equal("custom-provider", model.Provider);
-            Assert.Equal("custom-family", model.Family);
-            Assert.Equal(1.25m, model.CachedInputPricePerMillion);
-            Assert.Equal(3.0m, model.CacheWriteInputPricePerMillion);
-            Assert.Equal(["vision", "custom-tag"], model.Tags);
-            Assert.True(model.IsLocalOrPrivate);
+            var bound = Assert.Single(options.Models);
+            Assert.Equal("custom-provider", bound.Provider);
+            Assert.Equal("custom-family", bound.Family);
+            Assert.Equal(1.25m, bound.CachedInputPricePerMillion);
+            Assert.Equal(3.0m, bound.CacheWriteInputPricePerMillion);
+            Assert.Equal(["vision", "custom-tag"], bound.Tags);
+            Assert.True(bound.IsLocalOrPrivate);
         }
         finally
         {
@@ -177,44 +189,31 @@ public class RouterOptionsBindingTests
     }
 
     [Fact]
-    public void OptionsMonitor_UsesAuthoritativeModelsForEmptyShortenedAndChangedFiles()
+    public void OptionsMonitor_UsesAuthoritativeModelsFromConfigDb()
     {
         string directory = Path.Combine(Path.GetTempPath(), "optirouter-model-options-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
-        string path = Path.Combine(directory, "models-config.json");
+        string dbPath = Path.Combine(directory, "config.db");
         try
         {
-            var appsettings = new Dictionary<string, string?>
+            using var store = new AppConfigDbStore(dbPath);
+            // 权威模型初始为 appsettings 模拟种子；之后 DB 内列表始终为唯一权威，
+            // 清空/缩短不会让任何低优先级来源复活旧模型。
+            store.SaveModels(new[]
             {
-                ["OptiRouter:Models:0:Name"] = "appsettings-a",
-                ["OptiRouter:Models:0:BaseUrl"] = "https://appsettings.test/v1",
-                ["OptiRouter:Models:0:MaxContextTokens"] = "8192",
-                ["OptiRouter:Models:0:InputPricePerMillion"] = "1",
-                ["OptiRouter:Models:1:Name"] = "appsettings-b",
-                ["OptiRouter:Models:1:BaseUrl"] = "https://appsettings.test/v1",
-                ["OptiRouter:Models:1:MaxContextTokens"] = "8192",
-                ["OptiRouter:Models:2:Name"] = "appsettings-c",
-                ["OptiRouter:Models:2:BaseUrl"] = "https://appsettings.test/v1",
-                ["OptiRouter:Models:2:MaxContextTokens"] = "8192"
-            };
-            var seedConfiguration = new ConfigurationBuilder()
-                .AddInMemoryCollection(appsettings)
-                .Build();
-
-            // 缺失文件仅在首启时从 appsettings 种子；后续合法空数组必须保持权威。
-            Assert.False(File.Exists(path));
-            Program.SeedModelsConfig(seedConfiguration, path);
-            Assert.True(File.Exists(path));
+                CreateModel("appsettings-a"),
+                CreateModel("appsettings-b"),
+                CreateModel("appsettings-c")
+            });
 
             var configuration = new ConfigurationBuilder()
-                .AddInMemoryCollection(appsettings)
-                .Add(new ModelsJsonConfigurationSource { FilePath = path })
+                .Add(new DbAppConfigSource { DbPath = dbPath })
                 .Build();
 
             using var services = new ServiceCollection()
                 .AddLogging()
                 .AddSingleton<ModelsConfigService>(_ => new ModelsConfigService(
-                    path,
+                    store,
                     configuration,
                     NullLogger<ModelsConfigService>.Instance))
                 .AddOptions<RouterOptions>()
@@ -231,17 +230,17 @@ public class RouterOptionsBindingTests
             var monitor = services.GetRequiredService<IOptionsMonitor<RouterOptions>>();
             Assert.Equal(["appsettings-a", "appsettings-b", "appsettings-c"], monitor.CurrentValue.Models.Select(m => m.Name));
 
-            WriteModels(path);
+            store.SaveModels(Array.Empty<ModelEndpointOptions>());
             configuration.Reload();
             Assert.Empty(monitor.CurrentValue.Models);
 
-            WriteModels(path, CreateModel("authoritative-a"));
+            store.SaveModels(new[] { CreateModel("authoritative-a") });
             configuration.Reload();
             Assert.Equal(["authoritative-a"], monitor.CurrentValue.Models.Select(m => m.Name));
 
             var changed = CreateModel("authoritative-local");
             changed.IsLocalOrPrivate = true;
-            WriteModels(path, changed);
+            store.SaveModels(new[] { changed });
             configuration.Reload();
             var current = Assert.Single(monitor.CurrentValue.Models);
             Assert.Equal("authoritative-local", current.Name);
@@ -265,14 +264,4 @@ public class RouterOptionsBindingTests
         MaxRetries = 0,
         Enabled = true
     };
-
-    private static void WriteModels(string path, params ModelEndpointOptions[] models)
-    {
-        File.WriteAllText(path, JsonSerializer.Serialize(models, new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
-        }));
-    }
 }

@@ -25,27 +25,27 @@
             <div class="budget-bar" style="margin-top: 8px;">
                 <div class="budget-fill" style="width: @(BudgetPercent)%"></div>
             </div>
-            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">@BudgetPercent.ToString("F2")% / 上限 $@((Metrics?.System.Budget.DailyBudgetUsd ?? 0).ToString("F2"))</div>
+            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">@BudgetPercent.ToString("F2")% / 上限 $@((Metrics?.System.Budget.DailyBudgetUsd ?? 0).ToString("F2"))</div>
         </div>
         <div class="stat-card">
             <div class="stat-card-label">累计消费</div>
-            <div class="stat-card-val" style="color:#38bdf8;">$@((Metrics?.System.Budget.TotalSpend ?? 0).ToString("F6"))</div>
-            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">服务启动以来合计</div>
+            <div class="stat-card-val" style="color:var(--info-text);">$@((Metrics?.System.Budget.TotalSpend ?? 0).ToString("F6"))</div>
+            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">服务启动以来合计</div>
         </div>
         <div class="stat-card">
             <div class="stat-card-label">总请求数</div>
             <div class="stat-card-val">@((Metrics?.System.TotalRequests ?? 0).ToString("N0"))</div>
-            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">QPS: @((Metrics?.System.Qps ?? 0).ToString("F1"))</div>
+            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">QPS: @((Metrics?.System.Qps ?? 0).ToString("F1"))</div>
         </div>
         <div class="stat-card">
             <div class="stat-card-label">总 Token 数</div>
             <div class="stat-card-val">@((Metrics?.System.TotalTokens ?? 0).ToString("N0"))</div>
-            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">缓存命中 @((Metrics?.System.CachedInputTokens ?? 0).ToString("N0")) / 写入 @((Metrics?.System.CacheWriteInputTokens ?? 0).ToString("N0"))</div>
+            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">缓存命中 @((Metrics?.System.CachedInputTokens ?? 0).ToString("N0")) / 写入 @((Metrics?.System.CacheWriteInputTokens ?? 0).ToString("N0"))</div>
         </div>
         <div class="stat-card">
             <div class="stat-card-label">平均延迟</div>
             <div class="stat-card-val">@((Metrics?.System.AvgLatencyMs ?? 0).ToString("F1")) ms</div>
-            <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">平均 TTFT: @(Metrics?.System.AvgTtftMs is { } ttft ? $"{ttft:F1} ms" : "--")</div>
+            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">平均 TTFT: @(Metrics?.System.AvgTtftMs is { } ttft ? $"{ttft:F1} ms" : "--")</div>
         </div>
     </div>
 
@@ -128,13 +128,13 @@
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">缓存命中率</div>
-                    <div class="stat-card-val" style="color:#34d399;">@WindowData.CacheHitRatePercent.ToString("F1")%</div>
-                    <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">命中 @WindowData.CachedInputTokens.ToString("N0") / 未缓存 @WindowData.UncachedInputTokens.ToString("N0")</div>
+                    <div class="stat-card-val" style="color:var(--ok-text);">@WindowData.CacheHitRatePercent.ToString("F1")%</div>
+                    <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">命中 @WindowData.CachedInputTokens.ToString("N0") / 未缓存 @WindowData.UncachedInputTokens.ToString("N0")</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">错误率</div>
-                    <div class="stat-card-val" style="color:@(WindowData.ErrorRatePercent > 0 ? "#f87171" : "#e2e8f0");">@WindowData.ErrorRatePercent.ToString("F2")%</div>
-                    <div style="font-size:0.7rem;color:#9ca3af;margin-top:4px;">失败 @WindowData.Failures.ToString("N0") / 请求 @WindowData.TotalRequests.ToString("N0")</div>
+                    <div class="stat-card-val" style="color:@(WindowData.ErrorRatePercent > 0 ? "var(--warn-text)" : "var(--faint-text)");">@WindowData.ErrorRatePercent.ToString("F2")%</div>
+                    <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">失败 @WindowData.Failures.ToString("N0") / 请求 @WindowData.TotalRequests.ToString("N0")</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">平均延迟</div>
@@ -142,7 +142,7 @@
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">总成本</div>
-                    <div class="stat-card-val" style="color:#34d399;">$@WindowData.TotalCost.ToString("F4")</div>
+                    <div class="stat-card-val" style="color:var(--ok-text);">$@WindowData.TotalCost.ToString("F4")</div>
                 </div>
             </div>
         }
@@ -258,13 +258,13 @@
                         {
                             <tr>
                                 <td>@r.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
-                                <td><code style="font-size: 0.8rem; color: #a7f3d0;">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
+                                <td><code style="font-size: 0.8rem; color: var(--ok-text-strong);">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
                                 <td><strong>@r.Model</strong></td>
                                 <td><span class="tag tag-info">@r.RoutedTier</span></td>
-                                <td><span style="font-size: 0.8rem; color: #94a3b8; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
+                                <td><span style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
                                 <td>@r.PromptTokens / @r.CompletionTokens</td>
                                 <td>@r.LatencyMs.ToString("F0") ms / @(r.TimeToFirstTokenMs is { } reqTtft ? $"{reqTtft:F0} ms" : "--")</td>
-                                <td style="color: #34d399; font-weight: bold;">$@r.Cost.ToString("F6")</td>
+                                <td style="color: var(--ok-text); font-weight: bold;">$@r.Cost.ToString("F6")</td>
                                 <td>
                                     <span class="tag tag-secondary">@(r.IsStreaming ? "流式" : "JSON")</span>
                                     @if (!string.IsNullOrEmpty(r.FusionRole))

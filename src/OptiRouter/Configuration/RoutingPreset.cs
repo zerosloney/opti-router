@@ -46,6 +46,26 @@ public static class RoutingPreset
     };
 
     /// <summary>
+    /// 返回三档预设的只读视图（预设名 → {配置项 → 值}），供 dashboard 预设入口展示与应用。
+    /// enum 值转为字符串，避免序列化为数字。
+    /// </summary>
+    public static IReadOnlyDictionary<string, IReadOnlyDictionary<string, object?>> GetPresets()
+    {
+        static IReadOnlyDictionary<string, object?> Normalize(Dictionary<string, object?> preset) =>
+            preset.ToDictionary(
+                kvp => kvp.Key,
+                kvp => kvp.Value is Enum e ? e.ToString() : kvp.Value,
+                StringComparer.OrdinalIgnoreCase);
+
+        return new Dictionary<string, IReadOnlyDictionary<string, object?>>
+        {
+            ["cost-first"] = Normalize(CostFirstPreset),
+            ["balanced"] = Normalize(BalancedPreset),
+            ["quality-first"] = Normalize(QualityFirstPreset)
+        };
+    }
+
+    /// <summary>
     /// 应用路由预设到 <see cref="RoutingOptions"/>。
     /// 仅对未在配置文件中显式配置的项进行赋值（显式配置永远赢）。
     /// </summary>

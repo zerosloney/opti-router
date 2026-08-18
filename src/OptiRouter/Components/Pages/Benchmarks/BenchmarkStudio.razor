@@ -259,6 +259,30 @@
     .stat-value { font-weight: 600; color: #e2e8f0; font-size: 13px; }
     .stat-label { font-size: 11px; color: #94a3b8; margin-top: 2px; }
     @@media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 1fr; } }
+
+    /* 浅色主题覆盖（本页样式块为独立深色设计，需按 data-theme 重映射） */
+    [data-theme="light"] .studio-container { color: #0f172a; }
+    [data-theme="light"] .studio-header { border-bottom-color: #e2e8f0; }
+    [data-theme="light"] .studio-title { color: #0f172a; }
+    [data-theme="light"] .studio-subtitle { color: #64748b; }
+    [data-theme="light"] .card { background: #ffffff; border-color: #e2e8f0; }
+    [data-theme="light"] .card-header h2 { color: #1e293b; }
+    [data-theme="light"] .badge-secondary { background: #e2e8f0; color: #334155; }
+    [data-theme="light"] .metric-box { background: #f8fafc; border-color: #e2e8f0; }
+    [data-theme="light"] .metric-value { color: #0f172a; }
+    [data-theme="light"] .metric-value.highlight { color: #0284c7; }
+    [data-theme="light"] .metric-label { color: #64748b; }
+    [data-theme="light"] .data-table th, [data-theme="light"] .data-table td { border-bottom-color: #e2e8f0; }
+    [data-theme="light"] .data-table th { color: #475569; background: #f1f5f9; }
+    [data-theme="light"] .pill { background: #ffffff; border-color: #cbd5e1; color: #0369a1; }
+    [data-theme="light"] .mesh-node-item { background: #f8fafc; border-color: #e2e8f0; }
+    [data-theme="light"] .node-title { color: #0f172a; }
+    [data-theme="light"] .node-meta { color: #64748b; }
+    [data-theme="light"] .stat-item { background: #f8fafc; border-color: #e2e8f0; }
+    [data-theme="light"] .stat-value { color: #1e293b; }
+    [data-theme="light"] .stat-label { color: #64748b; }
+    [data-theme="light"] .control-group { color: #475569; }
+    [data-theme="light"] .form-control { background: #ffffff; border-color: #cbd5e1; color: #0f172a; }
 </style>
 
 @code {

@@ -354,4 +354,79 @@ public class CostLedgerStoreTests
         }
         catch { /* 测试清理容忍失败 */ }
     }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void ResetDaily_PreservesArchivedHistory(Func<ICostLedgerStore> factory)
+    {
+        // M6 契约钉子：ResetDaily 归零当日累计，但 SnapshotDaily 已归档的历史必须保留
+        //（Postgres/Redis 的按日期分键实现据此只清当日条目——清全部会毁掉趋势数据）。
+        using var store = factory();
+        var today = DateTime.UtcNow;
+
+        store.AddDaily(today, 5.0m);
+        store.SnapshotDaily(today);
+        store.ResetDaily();
+
+        Assert.Equal(0m, store.GetDaily(today));
+        var history = store.GetDailyHistory(1);
+        var entry = Assert.Single(history);
+        Assert.Equal(today.Date, entry.Date);
+        Assert.Equal(5.0m, entry.Amount);
+    }
+
+    [Fact]
+    public void PostgresStore_ConnectionFailure_FallsBackWithSingleErrorLog()
+    {
+        // M5：DB 不可达时降级内存必须留痕；构造 + 多次操作失败按状态迁移只告警一次，不逐请求刷屏。
+        var logger = new CountingLogger();
+        using var store = new PostgresCostLedgerStore(
+            "Host=127.0.0.1;Port=1;Username=u;Password=p;Timeout=2", logger: logger);
+
+        Assert.Equal(1.5m, store.AddDaily(DateTime.UtcNow, 1.5m));
+        Assert.Equal(2.5m, store.AddDaily(DateTime.UtcNow, 1.0m));
+        Assert.Equal(0m, store.GetTotal());
+
+        Assert.Equal(1, logger.ErrorCount);
+        Assert.Contains("degraded", logger.Messages[0]);
+    }
+
+    [Fact]
+    public void RedisStore_ConstructionFailure_LogsErrorAndFallsBack()
+    {
+        // M5：Redis 构造失败即永久降级内存（无重连路径），必须记一次错误日志。
+        var logger = new CountingLogger();
+        using var store = new RedisCostLedgerStore(
+            "127.0.0.1:1,connectTimeout=200,connectRetry=1", logger: logger);
+
+        Assert.Equal(1.5m, store.AddDaily(DateTime.UtcNow, 1.5m));
+
+        Assert.Equal(1, logger.ErrorCount);
+        Assert.Contains("Redis cost ledger unavailable", logger.Messages[0]);
+    }
+
+    /// <summary>计数型 ILogger 桩：记录 Error 次数与消息，验证降级日志行为。</summary>
+    private sealed class CountingLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public int ErrorCount { get; private set; }
+        public List<string> Messages { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == Microsoft.Extensions.Logging.LogLevel.Error)
+            {
+                ErrorCount++;
+            }
+            Messages.Add(formatter(state, exception));
+        }
+    }
 }

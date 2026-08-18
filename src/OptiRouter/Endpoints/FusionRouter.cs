@@ -15,7 +15,8 @@ namespace OptiRouter.Endpoints;
 /// <remarks>
 /// 成本语义：N 个 panel + 1 analyst + 1 outer 全部按真实/预估成本入账。
 /// 审计语义：每条调用记一条记录，共享 <c>ParallelGroupId</c>，<c>FusionRole</c> 区分 panel/analyst/outer。
-/// 断路器语义：panel 各占探测槽位后用 RecordSuccess/ReleaseProbe 结算；analyst/outer 直接调用不占槽位（非候选链探活）。
+/// 断路器语义：panel 各占探测槽位后用 RecordSuccess/ReleaseProbe 结算；analyst/outer 未经 TryBeginProbe
+/// 放行，健康信号经 releaseProbe:false 上报（参与状态转换，但不消耗/释放探测槽位）。
 /// </remarks>
 public sealed class FusionRouter
 {
@@ -336,7 +337,7 @@ public sealed class FusionRouter
                 _recorder.RecordCost(analystCost, sessionId);
 
             _recorder.RecordQuota(analystModel.Name, analystResponse.Metadata);
-            _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
+            _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses, releaseProbe: false);
             double analystReward = _recorder.RecordThompsonOutcome(
                 analystModel.Name,
                 analystElapsedMs,
@@ -365,7 +366,7 @@ public sealed class FusionRouter
             }
             else
             {
-                _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
+                _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown, releaseProbe: false);
                 analystFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
@@ -405,7 +406,7 @@ public sealed class FusionRouter
                 if (retryUsage is not null)
                     _recorder.RecordCost(retryCost, sessionId);
                 _recorder.RecordQuota(analystModel.Name, retryResponse.Metadata);
-                _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses);
+                _healthTracker.RecordSuccess(analystModel.Name, requiredSuccesses, releaseProbe: false);
                 double retryReward = _recorder.RecordThompsonOutcome(analystModel.Name, retryElapsedMs, decision, completionTokens: retryUsage?.CompletionTokens ?? 0);
                 _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, retryUsage, retryCost, retryElapsedMs,
                     sessionId, decision.Reason + "; fusion-router: analyst retry(parse)", true, null, false, routedTier,
@@ -449,7 +450,7 @@ public sealed class FusionRouter
                 }
                 else
                 {
-                    _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown);
+                    _healthTracker.RecordFailure(analystModel.Name, threshold, cooldown, releaseProbe: false);
                     retryFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                 }
                 int retryStatus = UpstreamFailureClassifier.GetStatus(ex);
@@ -491,7 +492,7 @@ public sealed class FusionRouter
                 _recorder.RecordCost(outerCost, sessionId);
 
             _recorder.RecordQuota(outerModel.Name, outerResponse.Metadata);
-            _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses);
+            _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses, releaseProbe: false);
             double outerReward = _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds, decision, completionTokens: outerUsage?.CompletionTokens ?? 0);
             _recorder.RecordAffinity(sessionId, outerModel.Name, AffinitySignal.Weak);
             _recorder.RecordPromptCacheAffinity(request, outerModel.Name);
@@ -520,7 +521,7 @@ public sealed class FusionRouter
             }
             else
             {
-                _healthTracker.RecordFailure(outerModel.Name, threshold, cooldown);
+                _healthTracker.RecordFailure(outerModel.Name, threshold, cooldown, releaseProbe: false);
                 outerFailureReward = _recorder.RecordThompsonOutcome(outerModel.Name, null, decision);
             }
             int status = UpstreamFailureClassifier.GetStatus(ex);
@@ -805,7 +806,7 @@ public sealed class FusionRouter
                     if (usage is not null)
                         _recorder.RecordCost(cost, sessionId);
                     _recorder.RecordQuota(analystModel.Name, analystResp.Metadata);
-                    _healthTracker.RecordSuccess(analystModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
+                    _healthTracker.RecordSuccess(analystModel.Name, routing.FailoverHalfOpenRequiredSuccesses, releaseProbe: false);
                     double streamAnalystReward = _recorder.RecordThompsonOutcome(analystModel.Name, analystSw.ElapsedMilliseconds, decision);
                     _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, usage, cost,
                         analystSw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: analyst",
@@ -824,7 +825,7 @@ public sealed class FusionRouter
                     }
                     else if (!ct.IsCancellationRequested)
                     {
-                        _healthTracker.RecordFailure(analystModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
+                        _healthTracker.RecordFailure(analystModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds, releaseProbe: false);
                         streamAnalystFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                     }
                     _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, null, 0m,

@@ -138,6 +138,55 @@ public sealed class NativeProtocolClientTests
     }
 
     [Fact]
+    public async Task AnthropicClient_StreamRaw_SendsStreamFlagSamplingParamsAndNameFallback()
+    {
+        // 修复回归：① 请求体必须带 stream:true（真实 Anthropic API 仅凭 Accept 头不返回 SSE）；
+        // ② temperature/top_p/stop 需映射；③ Id 留空时 model 回退 Name（UpstreamModelId）。
+        string? capturedBody = null;
+        var http = await StartMockServerAsync("/v1/messages", _ => """
+            data: {"type":"message_start","message":{"id":"msg_1"}}
+
+            data: {"type":"message_stop"}
+
+            """, b => capturedBody = b);
+        var endpoint = new ModelEndpointOptions
+        {
+            Name = "claude-3-5-sonnet", // Id 留空
+            BaseUrl = "http://localhost",
+            ApiKey = "sk-test",
+            Tier = ModelTier.Strong,
+            Protocol = ProviderProtocol.Anthropic,
+            Enabled = true
+        };
+        var client = new AnthropicModelClient(endpoint, http);
+
+        var request = new ChatRequest
+        {
+            Model = "auto",
+            Stream = true,
+            Temperature = 0.7,
+            MaxTokens = 64,
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") },
+            ExtensionData = new Dictionary<string, JsonElement>
+            {
+                ["top_p"] = JsonSerializer.SerializeToElement(0.9),
+                ["stop"] = JsonSerializer.SerializeToElement("\n\n")
+            }
+        };
+
+        await foreach (var _ in client.StreamRawAsync(request, CancellationToken.None)) { }
+
+        Assert.NotNull(capturedBody);
+        using var doc = JsonDocument.Parse(capturedBody!);
+        var root = doc.RootElement;
+        Assert.Equal("claude-3-5-sonnet", root.GetProperty("model").GetString());
+        Assert.True(root.GetProperty("stream").GetBoolean());
+        Assert.Equal(0.7, root.GetProperty("temperature").GetDouble());
+        Assert.Equal(0.9, root.GetProperty("top_p").GetDouble());
+        Assert.Equal("\n\n", root.GetProperty("stop_sequences")[0].GetString());
+    }
+
+    [Fact]
     public async Task GeminiClient_CompleteRaw_ReturnsOpenAiContract()
     {
         string? capturedBody = null;
@@ -163,7 +212,8 @@ public sealed class NativeProtocolClientTests
     [Fact]
     public async Task GeminiClient_StreamRaw_TranslatesDataLines()
     {
-        var http = await StartMockServerAsync("/v1beta/models/gemini-1.5-pro:generateContent", _ => """
+        // 修复后流式走 :streamGenerateContent（mock 路径同步更新；打到 :generateContent 会 404）
+        var http = await StartMockServerAsync("/v1beta/models/gemini-1.5-pro:streamGenerateContent", _ => """
             data: {"candidates":[{"content":{"parts":[{"text":"Hola "}],"role":"model"}}]}
 
             data: {"candidates":[{"content":{"parts":[{"text":"mundo"}],"role":"model"}}]}
@@ -183,6 +233,47 @@ public sealed class NativeProtocolClientTests
         Assert.Contains("Hola", lines[0].Data);
         Assert.Contains("mundo", lines[1].Data);
         Assert.Equal("[DONE]", lines[^1].Data);
+    }
+
+    [Fact]
+    public async Task GeminiClient_StreamRaw_UsesStreamEndpointWithAltSseAndNameFallback()
+    {
+        // 修复回归：流式必须请求 :streamGenerateContent?alt=sse（真实 Gemini 在 :generateContent
+        // 只返回单个 JSON），且 Id 留空时路径回退 Name。mock 只注册正确路径，打错路径即 404 失败。
+        string? capturedTarget = null;
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        var app = builder.Build();
+        app.MapPost("/v1beta/models/gemini-1.5-pro:streamGenerateContent", async (HttpContext ctx) =>
+        {
+            capturedTarget = ctx.Request.Path + ctx.Request.QueryString;
+            ctx.Response.ContentType = "text/event-stream";
+            await ctx.Response.WriteAsync("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hola\"}],\"role\":\"model\"}}]}\n\n");
+        });
+        await app.StartAsync();
+
+        var endpoint = new ModelEndpointOptions
+        {
+            Name = "gemini-1.5-pro", // Id 留空
+            BaseUrl = "http://localhost",
+            ApiKey = "sk-test",
+            Tier = ModelTier.Strong,
+            Protocol = ProviderProtocol.Gemini,
+            Enabled = true
+        };
+        var client = new GeminiModelClient(endpoint, app.GetTestClient());
+
+        var lines = new List<RawStreamLine>();
+        await foreach (var line in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None))
+        {
+            lines.Add(line);
+        }
+
+        Assert.NotEmpty(lines);
+        Assert.Contains("Hola", lines[0].Data);
+        Assert.NotNull(capturedTarget);
+        Assert.Contains(":streamGenerateContent", capturedTarget);
+        Assert.Contains("alt=sse", capturedTarget);
     }
 
     [Fact]

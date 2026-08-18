@@ -13,15 +13,18 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
     private readonly IDatabase? _db;
     private readonly string _prefix;
     private readonly ICostLedgerStore _fallback;
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
     private bool _disposed;
 
     /// <summary>
     /// 初始化 Redis 成本账本。
     /// </summary>
-    public RedisCostLedgerStore(string? connectionString, string prefix = "optirouter:", ICostLedgerStore? fallback = null)
+    public RedisCostLedgerStore(string? connectionString, string prefix = "optirouter:", ICostLedgerStore? fallback = null,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _prefix = prefix ?? "optirouter:";
         _fallback = fallback ?? new InMemoryCostLedgerStore();
+        _logger = logger;
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -35,8 +38,13 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
             _redis = ConnectionMultiplexer.Connect(connectionString);
             _db = _redis.GetDatabase();
         }
-        catch
+        catch (Exception ex)
         {
+            // 构造失败即永久降级内存（本实例无重连路径）：必须留日志，否则多节点部署下
+            // 预算/断路器状态静默退化为单节点，重启归零且无从排查。
+            _logger?.LogError(ex,
+                "Redis cost ledger unavailable: connection failed, permanently falling back to in-memory store. " +
+                "Budget/circuit state will be per-node and lost on restart until the process is restarted with a reachable Redis");
             _redis = null;
             _db = null;
         }

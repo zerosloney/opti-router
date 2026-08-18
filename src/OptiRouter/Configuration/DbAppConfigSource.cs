@@ -1,0 +1,116 @@
+using System.Text.Json;
+using Microsoft.Extensions.Configuration;
+
+namespace OptiRouter.Configuration;
+
+/// <summary>
+/// 将 SQLite 应用配置库（routing/budget 文档 + 模型列表）映射为 IConfiguration 的
+/// "OptiRouter:Routing" / "OptiRouter:Budget" / "OptiRouter:Models" 节点。
+/// 配置写入由 <see cref="AppConfigDbStore"/> 完成，随后 IConfigurationRoot.Reload()
+/// 重新触发本提供者的 <see cref="Load"/>，IOptionsMonitor 热生效。
+/// </summary>
+public sealed class DbAppConfigProvider : ConfigurationProvider
+{
+    private readonly string _dbPath;
+
+    public DbAppConfigProvider(string dbPath)
+    {
+        ArgumentNullException.ThrowIfNull(dbPath);
+        _dbPath = dbPath;
+    }
+
+    public override void Load()
+    {
+        try
+        {
+            using var store = new AppConfigDbStore(_dbPath);
+            var data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+
+            AddDocument(store, AppConfigDbStore.RoutingScope, "OptiRouter:Routing", data);
+            AddDocument(store, AppConfigDbStore.BudgetScope, "OptiRouter:Budget", data);
+
+            var models = store.LoadModelsRaw();
+            for (int i = 0; i < models.Count; i++)
+            {
+                Flatten(
+                    JsonSerializer.SerializeToElement(models[i], AppConfigDbStore.ModelsFileJsonOptions),
+                    $"OptiRouter:Models:{i}",
+                    data);
+            }
+
+            Data = data;
+        }
+        catch (Exception ex)
+        {
+            // 配置库损坏时以默认值继续，不阻断启动；但必须留下原因。
+            Console.Error.WriteLine(
+                $"[DbAppConfigProvider] config db '{_dbPath}' failed to load: {ex.Message}. " +
+                "Continuing with default config; routing/model values from the database are unavailable.");
+            Data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static void AddDocument(
+        AppConfigDbStore store,
+        string scope,
+        string prefix,
+        IDictionary<string, string?> data)
+    {
+        if (store.LoadDocument(scope) is not { } json || string.IsNullOrWhiteSpace(json))
+            return;
+        try
+        {
+            Flatten(JsonDocument.Parse(json).RootElement, prefix, data);
+        }
+        catch (JsonException)
+        {
+            // 单文档损坏：跳过该段，保留其余（启动后由页面重新保存修复）。
+        }
+    }
+
+    /// <summary>通用 JSON → 扁平配置键（对象/数组递归展开，标量转字符串，null 跳过=回退绑定默认值）。</summary>
+    private static void Flatten(JsonElement el, string prefix, IDictionary<string, string?> data)
+    {
+        switch (el.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var prop in el.EnumerateObject())
+                    Flatten(prop.Value, $"{prefix}:{prop.Name}", data);
+                break;
+            case JsonValueKind.Array:
+                int i = 0;
+                foreach (var item in el.EnumerateArray())
+                    Flatten(item, $"{prefix}:{i++}", data);
+                break;
+            case JsonValueKind.String:
+                data[prefix] = el.GetString();
+                break;
+            case JsonValueKind.Number:
+                data[prefix] = el.GetRawText();
+                break;
+            case JsonValueKind.True:
+                data[prefix] = "true";
+                break;
+            case JsonValueKind.False:
+                data[prefix] = "false";
+                break;
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+                break;
+        }
+    }
+}
+
+/// <summary>
+/// 配合 <see cref="DbAppConfigProvider"/> 的配置源。
+/// </summary>
+public sealed class DbAppConfigSource : IConfigurationSource
+{
+    /// <summary>SQLite 配置库路径。</summary>
+    public string DbPath { get; init; } = string.Empty;
+
+    public IConfigurationProvider Build(IConfigurationBuilder builder)
+    {
+        return new DbAppConfigProvider(DbPath);
+    }
+}

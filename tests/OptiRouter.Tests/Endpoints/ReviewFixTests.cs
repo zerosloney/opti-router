@@ -259,18 +259,19 @@ public class ReviewFixTests
     #region #6 损坏配置
 
     [Fact]
-    public void ModelsProvider_CorruptJson_EmptyDataWithoutThrow()
+    public void DbConfigProvider_CorruptDocument_EmptyDataWithoutThrow()
     {
         string dir = Path.Combine(Path.GetTempPath(), "optirouter-provider-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
-        string path = Path.Combine(dir, "models-config.json");
+        string dbPath = Path.Combine(dir, "config.db");
         try
         {
-            File.WriteAllText(path, "{ this is not valid json !!!");
-            var provider = new ModelsJsonConfigurationProvider(path);
+            using var store = new AppConfigDbStore(dbPath);
+            store.SaveDocument(AppConfigDbStore.RoutingScope, "{ not valid json !!!");
+            var provider = new DbAppConfigProvider(dbPath);
             provider.Load();
-            // Data 为 protected，经 TryGet 断言无任何模型键（空配置继续运行）
-            Assert.False(provider.TryGet("OptiRouter:Models:0:Name", out _));
+            // Data 为 protected，经 TryGet 断言无任何路由键（空配置继续运行）
+            Assert.False(provider.TryGet("OptiRouter:Routing:EnableFailover", out _));
         }
         finally
         {
@@ -368,6 +369,39 @@ public class ReviewFixTests
         Assert.Contains("\"inlineData\"", body);
         Assert.Contains("\"mimeType\":\"image/jpeg\"", body);
         Assert.Contains("\"data\":\"aGVsbG8=\"", body);
+    }
+
+    #endregion
+
+    #region #7 /benchmarks 管理端鉴权（C1：未登录可访问进程内压测页）
+
+    [Fact]
+    public async Task Benchmarks_Page_WithoutAuth_RedirectsToLogin()
+    {
+        // 修复前 /benchmarks 不在 AdminPathPrefixes：页面经 fallback 直接渲染，
+        // 未登录者可运行 StressBenchmarkEngine（进程内 100 并发压测）并查看 Mesh 内部状态。
+        var factory = CreateFactory(opt => opt.Models.Add(CreateEndpoint("model-a")));
+        // 默认 CreateClient 会自动跟随 302；关掉以断言重定向本身
+        using var client = factory.CreateClient(
+            new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+
+        var response = await client.GetAsync("/benchmarks");
+
+        Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
+        Assert.Equal("/login", response.Headers.Location?.ToString());
+    }
+
+    [Fact]
+    public async Task Benchmarks_Page_WithAdminBearer_ServesPage()
+    {
+        // 携带管理密钥的合法访问仍可打开页面（不影响正常管理台使用）。
+        var factory = CreateFactory(opt => opt.Models.Add(CreateEndpoint("model-a")));
+        factory.AdminApiKey = "test-admin-key";
+        using var client = factory.CreateClient("test-admin-key");
+
+        var response = await client.GetAsync("/benchmarks");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 
     #endregion

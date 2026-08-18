@@ -11,6 +11,10 @@
             <span>实时请求流 (Live Request Stream)</span>
             <span class="tag tag-success" style="font-size: 0.75rem;">● 实时抓取</span>
         </div>
+        @if (!string.IsNullOrEmpty(LoadError))
+        {
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @LoadError</div>
+        }
         <div class="table-wrap">
             <table class="log-table">
                 <thead>
@@ -25,13 +29,13 @@
                         {
                             <tr>
                                 <td>@r.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
-                                <td><code style="font-size: 0.8rem; color: #a7f3d0;">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
+                                <td><code style="font-size: 0.8rem; color: var(--ok-text-strong);">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
                                 <td><strong>@r.Model</strong></td>
                                 <td><span class="tag tag-info">@r.RoutedTier</span></td>
-                                <td><span style="font-size: 0.8rem; color: #94a3b8; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
+                                <td><span style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
                                 <td>@r.PromptTokens / @r.CompletionTokens</td>
                                 <td>@r.LatencyMs.ToString("F0") ms / @(r.TimeToFirstTokenMs is { } reqTtft ? $"{reqTtft:F0} ms" : "--")</td>
-                                <td style="color: #34d399; font-weight: bold;">$@r.Cost.ToString("F6")</td>
+                                <td style="color: var(--ok-text); font-weight: bold;">$@r.Cost.ToString("F6")</td>
                                 <td>
                                     <span class="tag tag-secondary">@(r.IsStreaming ? "流式" : "JSON")</span>
                                     @if (!string.IsNullOrEmpty(r.FusionRole))
@@ -268,9 +272,15 @@
             var page = await Api.GetAuditLogAsync(LogLimit, LogOffset, LogFilterModel, LogFilterTier, LogFilterStatus, LogFilterMinLatency > 0 ? LogFilterMinLatency : null);
             AuditItems = page.Items;
             AuditTotal = page.TotalCount;
+            LoadError = null;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            LoadError = "请求日志加载失败：" + ex.Message;
+        }
     }
+
+    private string? LoadError;
 
     protected override async Task OnInitializedAsync()
     {
@@ -300,8 +310,13 @@
         try
         {
             Metrics = await Api.GetMetricsAsync();
+            LoadError = null;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 轮询失败保留上一次数据，仅更新错误提示（与 LoadLogs 共用横幅）
+            LoadError = "实时指标刷新失败：" + ex.Message;
+        }
     }
 
     private static string Truncate(string val, int maxLen)

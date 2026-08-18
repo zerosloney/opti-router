@@ -70,7 +70,7 @@ public static class ModelsConfigHandler
                 m.Tags,
                 HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
             });
-            return Results.Json(new { models = data, configFile = cfg.ConfigFilePath });
+            return Results.Json(new { models = data, configStore = "sqlite" });
         });
 
         // 4. POST create new model
@@ -90,7 +90,7 @@ public static class ModelsConfigHandler
                 ApiKey = req.ApiKey,
                 Provider = req.Provider?.Trim() ?? string.Empty,
                 Family = req.Family?.Trim() ?? string.Empty,
-                Tier = req.Tier ?? ModelTier.Medium,
+                Tier = Enum.TryParse<ModelTier>(req.Tier, ignoreCase: true, out var tier) ? tier : ModelTier.Medium,
                 MaxContextTokens = (req.MaxContextTokens is > 0) ? req.MaxContextTokens.Value : 200_000,
                 InputPricePerMillion = (req.InputPricePerMillion ?? 0) < 0 ? 0 : req.InputPricePerMillion!.Value,
                 OutputPricePerMillion = (req.OutputPricePerMillion ?? 0) < 0 ? 0 : req.OutputPricePerMillion!.Value,
@@ -159,7 +159,7 @@ public static class ModelsConfigHandler
         if (req.BaseUrl is not null && !string.IsNullOrWhiteSpace(req.BaseUrl)) model.BaseUrl = req.BaseUrl.TrimEnd('/');
         if (req.Id is not null) model.Id = req.Id.Trim(); // 空字符串表示清除（回退 Name 作上游 id）
         if (req.ApiKey is not null) model.ApiKey = req.ApiKey; // 空字符串表示清除
-        if (req.Tier is not null) model.Tier = req.Tier.Value;
+        if (req.Tier is not null && Enum.TryParse<ModelTier>(req.Tier, ignoreCase: true, out var tier)) model.Tier = tier;
         if (req.MaxContextTokens is > 0) model.MaxContextTokens = req.MaxContextTokens.Value;
         if (req.TimeoutSeconds is > 0) model.TimeoutSeconds = req.TimeoutSeconds.Value;
         if (req.MaxRetries is >= 0) model.MaxRetries = req.MaxRetries.Value;
@@ -251,7 +251,7 @@ public static class ModelsConfigHandler
     private record UpdateModelRequest(
         string? BaseUrl,
         string? ApiKey,
-        ModelTier? Tier,
+        string? Tier,
         int? MaxContextTokens,
         int? TimeoutSeconds,
         int? MaxRetries,
@@ -269,7 +269,7 @@ public static class ModelsConfigHandler
         string? Name,
         string BaseUrl,
         string? ApiKey,
-        ModelTier? Tier,
+        string? Tier,
         int? MaxContextTokens,
         int? TimeoutSeconds,
         int? MaxRetries,

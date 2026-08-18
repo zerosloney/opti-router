@@ -14,6 +14,11 @@
             </button>
         </div>
 
+        @if (!string.IsNullOrEmpty(StatusError))
+        {
+            <div class="alert-banner alert-error" style="margin-top: 10px;">⚠️ @StatusError</div>
+        }
+
         @if (ShowAddKeyForm)
         {
             <div class="add-form" style="margin-top: 12px;">
@@ -105,9 +110,13 @@
     {
         try
         {
+            StatusError = null;
             KeyList = await Api.GetClientKeysAsync();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            StatusError = "密钥列表加载失败：" + ex.Message;
+        }
     }
 
     private void ToggleAddKeyForm()
@@ -124,7 +133,7 @@
     private async Task CreateClientKey()
     {
         if (string.IsNullOrWhiteSpace(NewTenantName)) return;
-        var created = await Api.CreateClientKeyAsync(NewTenantName, NewTenantBudget, NewTenantQps);
+        var (created, error) = await Api.CreateClientKeyAsync(NewTenantName, NewTenantBudget, NewTenantQps);
         if (created != null)
         {
             // 明文仅此一次返回：模态框展示并支持复制，关闭后服务端只留哈希、不可重取。
@@ -133,13 +142,19 @@
             CopyFeedback = "";
             ShowAddKeyForm = false;
             NewTenantName = "";
+            StatusError = null;
             await LoadClientKeys();
+        }
+        else
+        {
+            StatusError = "签发失败：" + (error ?? "未知错误");
         }
     }
 
     private string? IssuedPlaintextKey;
     private string? IssuedTenant;
     private string CopyFeedback = "";
+    private string? StatusError;
 
     private async Task CopyIssuedKey()
     {
@@ -156,13 +171,21 @@
 
     private async Task ToggleKeyEnabled(ApiService.ClientKeyDto k)
     {
-        await Api.UpdateClientKeyAsync(k.KeyId, !k.Enabled, k.DailyBudgetUsd, k.MaxQps);
+        var (ok, error) = await Api.UpdateClientKeyAsync(k.KeyId, !k.Enabled, k.DailyBudgetUsd, k.MaxQps);
+        if (!ok)
+        {
+            StatusError = (k.Enabled ? "禁用" : "启用") + $"「{k.TenantName}」失败：" + (error ?? "未知错误");
+        }
         await LoadClientKeys();
     }
 
     private async Task DeleteKey(string key)
     {
-        await Api.DeleteClientKeyAsync(key);
+        var (ok, error) = await Api.DeleteClientKeyAsync(key);
+        if (!ok)
+        {
+            StatusError = "删除失败：" + (error ?? "未知错误");
+        }
         await LoadClientKeys();
     }
 }

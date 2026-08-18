@@ -64,7 +64,10 @@ public interface ICostLedgerStore : ICircuitStateStore, IDisposable
     decimal GetSession(string sessionId);
 
     /// <summary>
-    /// 重置日花费（跨 UTC 日触发）。语义上等价于清空当天及更早记录。
+    /// 重置日花费（跨 UTC 日触发）。保证调用后 <see cref="GetDaily"/> 读当日为 0；
+    /// 历史归档数据（<see cref="GetDailyHistory"/> 的数据源）不得被删除。
+    /// 实现差异：单表累计型（Sqlite daily_spend）可整表清空，按日期分键型
+    /// （Postgres 行 / Redis 键——当日条目即历史载体）只清当日条目。
     /// </summary>
     void ResetDaily();
 

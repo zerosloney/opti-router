@@ -32,6 +32,9 @@ internal sealed class SmokeWebApplicationFactory : WebApplicationFactory<Program
     {
         builder.UseSetting("OptiRouter:ProxyApiKey", TestProxyApiKey);
         builder.UseSetting("OptiRouter:RequestsPerMinute", "60");
+        // 测试用临时配置库，避免读/写真实 data/optirouter-config.db。
+        builder.UseSetting("OptiRouter:ConfigDbPath",
+            Path.Combine(Path.GetTempPath(), "optirouter-config-test-" + Guid.NewGuid().ToString("N") + ".db"));
         // 测试用内存账本，避免写真实 SQLite 文件。
         builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
         builder.ConfigureServices(services =>

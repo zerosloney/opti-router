@@ -1,4 +1,5 @@
 @inherits LayoutComponentBase
+@inject IJSRuntime JS
 
 <div class="app-shell">
     <aside class="side-nav">
@@ -28,6 +29,10 @@
             </NavLink>
         </nav>
         <div class="side-nav-footer">
+            <button class="theme-toggle" @onclick="ToggleTheme" title="@(IsLightTheme ? "切换到深色主题" : "切换到浅色主题")">
+                <span class="theme-toggle-icon">@(IsLightTheme ? "🌙" : "☀")</span>
+                <span>@(IsLightTheme ? "切换深色" : "切换浅色")</span>
+            </button>
             <div class="side-nav-user">管理员</div>
             <a href="/logout" class="side-nav-logout">退出登录</a>
         </div>
@@ -37,3 +42,22 @@
         @Body
     </main>
 </div>
+
+@code {
+    private bool IsLightTheme;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            IsLightTheme = await JS.InvokeAsync<string>("getTheme") == "light";
+            StateHasChanged();
+        }
+    }
+
+    private async Task ToggleTheme()
+    {
+        var theme = await JS.InvokeAsync<string>("toggleTheme");
+        IsLightTheme = theme == "light";
+    }
+}

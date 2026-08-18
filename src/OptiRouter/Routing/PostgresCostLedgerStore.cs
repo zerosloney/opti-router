@@ -11,15 +11,20 @@ public sealed class PostgresCostLedgerStore : ICostLedgerStore
 {
     private readonly string? _connectionString;
     private readonly ICostLedgerStore _fallback;
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
+    // 0 = Postgres 正常，1 = 已降级内存。按状态迁移记日志，DB 故障期间不逐请求刷屏。
+    private int _degraded;
     private bool _disposed;
 
     /// <summary>
     /// 初始化 PostgreSQL 成本账本。
     /// </summary>
-    public PostgresCostLedgerStore(string? connectionString, ICostLedgerStore? fallback = null)
+    public PostgresCostLedgerStore(string? connectionString, ICostLedgerStore? fallback = null,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _connectionString = connectionString;
         _fallback = fallback ?? new InMemoryCostLedgerStore();
+        _logger = logger;
 
         if (!string.IsNullOrWhiteSpace(_connectionString))
         {
@@ -27,10 +32,31 @@ public sealed class PostgresCostLedgerStore : ICostLedgerStore
             {
                 EnsureTablesCreated();
             }
-            catch
+            catch (Exception ex)
             {
-                // 初始化异常时优雅降级
+                MarkDegraded(nameof(EnsureTablesCreated), ex);
             }
+        }
+    }
+
+    private void MarkDegraded(string operation, Exception ex)
+    {
+        if (Interlocked.Exchange(ref _degraded, 1) == 0)
+        {
+            _logger?.LogError(ex,
+                "Postgres cost ledger degraded: {Operation} failed, falling back to in-memory store. " +
+                "Budget/circuit state is per-node until Postgres recovers and is NOT merged back on recovery",
+                operation);
+        }
+    }
+
+    private void MarkRecovered()
+    {
+        if (Interlocked.Exchange(ref _degraded, 0) == 1)
+        {
+            _logger?.LogWarning(
+                "Postgres cost ledger recovered; subsequent writes go to Postgres again. " +
+                "Note: spend recorded during the degraded window stayed in the in-memory fallback and was not merged");
         }
     }
 
@@ -88,10 +114,12 @@ RETURNING amount;
             cmd.Parameters.AddWithValue("date", utcDate.Date);
             cmd.Parameters.AddWithValue("delta", delta);
             var res = cmd.ExecuteScalar();
+            MarkRecovered();
             return res is decimal d ? d : Convert.ToDecimal(res);
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(AddDaily), ex);
             return _fallback.AddDaily(utcDate, delta);
         }
     }
@@ -115,10 +143,12 @@ RETURNING amount;
 ";
             cmd.Parameters.AddWithValue("delta", delta);
             var res = cmd.ExecuteScalar();
+            MarkRecovered();
             return res is decimal d ? d : Convert.ToDecimal(res);
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(AddTotal), ex);
             return _fallback.AddTotal(delta);
         }
     }
@@ -135,10 +165,12 @@ RETURNING amount;
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "SELECT amount FROM optirouter_total_cost WHERE id = 1;";
             var res = cmd.ExecuteScalar();
+            MarkRecovered();
             return res is null or DBNull ? 0m : Convert.ToDecimal(res);
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(GetTotal), ex);
             return _fallback.GetTotal();
         }
     }
@@ -155,9 +187,11 @@ RETURNING amount;
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "DELETE FROM optirouter_total_cost WHERE id = 1;";
             cmd.ExecuteNonQuery();
+            MarkRecovered();
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(ResetTotal), ex);
             _fallback.ResetTotal();
         }
     }
@@ -183,10 +217,12 @@ RETURNING amount;
             cmd.Parameters.AddWithValue("sid", sessionId);
             cmd.Parameters.AddWithValue("delta", delta);
             var res = cmd.ExecuteScalar();
+            MarkRecovered();
             return res is decimal d ? d : Convert.ToDecimal(res);
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(AddSession), ex);
             return _fallback.AddSession(sessionId, delta);
         }
     }
@@ -204,10 +240,12 @@ RETURNING amount;
             cmd.CommandText = "SELECT amount FROM optirouter_daily_cost WHERE utc_date = @date;";
             cmd.Parameters.AddWithValue("date", utcDate.Date);
             var res = cmd.ExecuteScalar();
+            MarkRecovered();
             return res is null or DBNull ? 0m : Convert.ToDecimal(res);
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(GetDaily), ex);
             return _fallback.GetDaily(utcDate);
         }
     }
@@ -232,10 +270,12 @@ RETURNING amount;
                 list.Add((reader.GetDateTime(0), reader.GetDecimal(1)));
             }
             list.Reverse();
+            MarkRecovered();
             return list;
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(GetDailyHistory), ex);
             return _fallback.GetDailyHistory(days);
         }
     }
@@ -258,10 +298,12 @@ RETURNING amount;
             cmd.CommandText = "SELECT amount FROM optirouter_session_cost WHERE session_id = @sid;";
             cmd.Parameters.AddWithValue("sid", sessionId);
             var res = cmd.ExecuteScalar();
+            MarkRecovered();
             return res is null or DBNull ? 0m : Convert.ToDecimal(res);
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(GetSession), ex);
             return _fallback.GetSession(sessionId);
         }
     }
@@ -279,9 +321,11 @@ RETURNING amount;
             cmd.CommandText = "DELETE FROM optirouter_daily_cost WHERE utc_date = @date;";
             cmd.Parameters.AddWithValue("date", DateTime.UtcNow.Date);
             cmd.ExecuteNonQuery();
+            MarkRecovered();
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(ResetDaily), ex);
             _fallback.ResetDaily();
         }
     }
@@ -299,9 +343,11 @@ RETURNING amount;
             cmd.CommandText = "DELETE FROM optirouter_session_cost WHERE session_id = @sid;";
             cmd.Parameters.AddWithValue("sid", sessionId);
             cmd.ExecuteNonQuery();
+            MarkRecovered();
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(ResetSession), ex);
             _fallback.ResetSession(sessionId);
         }
     }
@@ -318,10 +364,13 @@ RETURNING amount;
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "DELETE FROM optirouter_session_cost WHERE updated_at < @cutoff;";
             cmd.Parameters.AddWithValue("cutoff", cutoff);
-            return cmd.ExecuteNonQuery();
+            int removed = cmd.ExecuteNonQuery();
+            MarkRecovered();
+            return removed;
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(EvictSessionsBefore), ex);
             return _fallback.EvictSessionsBefore(cutoff);
         }
     }
@@ -338,9 +387,11 @@ RETURNING amount;
             using var cmd = conn.CreateCommand();
             cmd.CommandText = "TRUNCATE TABLE optirouter_daily_cost, optirouter_session_cost, optirouter_total_cost, optirouter_circuit_state;";
             cmd.ExecuteNonQuery();
+            MarkRecovered();
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(ClearAll), ex);
             _fallback.ClearAll();
         }
     }
@@ -367,9 +418,11 @@ SET is_open = EXCLUDED.is_open, open_until = EXCLUDED.open_until;
             cmd.Parameters.AddWithValue("open", state == CircuitState.Open);
             cmd.Parameters.AddWithValue("until", cooldownUntil);
             cmd.ExecuteNonQuery();
+            MarkRecovered();
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(SaveCircuitState), ex);
             _fallback.SaveCircuitState(modelName, state, failureCount, cooldownUntil);
         }
     }
@@ -395,10 +448,12 @@ SET is_open = EXCLUDED.is_open, open_until = EXCLUDED.open_until;
                 DateTime cooldown = reader.IsDBNull(2) ? DateTime.MinValue : reader.GetDateTime(2);
                 dict[model] = (isOpen ? CircuitState.Open : CircuitState.Closed, isOpen ? 5 : 0, cooldown);
             }
+            MarkRecovered();
             return dict;
         }
-        catch
+        catch (Exception ex)
         {
+            MarkDegraded(nameof(LoadCircuitStates), ex);
             return _fallback.LoadCircuitStates();
         }
     }

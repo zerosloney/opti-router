@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Components;
 using OptiRouter.Configuration;
@@ -32,6 +33,30 @@ public class ApiService
     }
 
     private static string Url(string path) => path;
+
+    /// <summary>
+    /// 从非 2xx 响应提取后端可读错误（Dashboard/Models API 的 {"error":"..."} 信封）；
+    /// 解析失败回退状态码文本。变更类方法经此把后端校验错误带回 UI 展示。
+    /// </summary>
+    private static async Task<string> ReadErrorAsync(HttpResponseMessage resp)
+    {
+        try
+        {
+            string body = await resp.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("error", out var err)
+                && err.ValueKind == JsonValueKind.String
+                && !string.IsNullOrWhiteSpace(err.GetString()))
+            {
+                return err.GetString()!;
+            }
+            return string.IsNullOrWhiteSpace(body) ? $"HTTP {(int)resp.StatusCode}" : body;
+        }
+        catch (JsonException)
+        {
+            return $"HTTP {(int)resp.StatusCode}";
+        }
+    }
 
     // ── Dashboard ──────────────────────────────────────────────────
 
@@ -83,12 +108,20 @@ public class ApiService
         }
     }
 
-    public async Task<SandboxResult?> RunSandboxRouteAsync(string prompt)
+    /// <summary>运行路由沙盒仿真。返回 (结果, 失败原因)；失败原因为空表示成功。</summary>
+    public async Task<(SandboxResult? Result, string? Error)> RunSandboxRouteAsync(string prompt)
     {
-        using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/sandbox/route"), new { prompt });
-        if (resp.IsSuccessStatusCode)
-            return await resp.Content.ReadFromJsonAsync<SandboxResult>();
-        return null;
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/sandbox/route"), new { prompt });
+            if (resp.IsSuccessStatusCode)
+                return (await resp.Content.ReadFromJsonAsync<SandboxResult>(), null);
+            return (null, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
     }
 
     /// <summary>运行回归评测（可传自定义题库；空则后端回落内置题库）。返回 (报告, 失败原因)。</summary>
@@ -115,8 +148,10 @@ public class ApiService
             var result = await _http.GetFromJsonAsync<List<EvalReportDto>>(Url("/api/dashboard/eval/batches"));
             return result ?? new List<EvalReportDto>();
         }
-        catch
+        catch (Exception ex)
         {
+            // UI 无法区分"空数据"与"加载失败"，至少在服务端留诊断线索
+            _logger?.LogWarning(ex, "GetEvalBatchesAsync failed");
             return new List<EvalReportDto>();
         }
     }
@@ -144,8 +179,9 @@ public class ApiService
             var page = await _http.GetFromJsonAsync<QuotaPageDto>(Url("/api/dashboard/state/quota"));
             return page?.Items ?? new List<QuotaStateDto>();
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogWarning(ex, "GetQuotaStateAsync failed");
             return new List<QuotaStateDto>();
         }
     }
@@ -157,8 +193,9 @@ public class ApiService
             return await _http.GetFromJsonAsync<AffinityPageDto>(Url("/api/dashboard/state/cache-affinity"))
                    ?? new AffinityPageDto(0, new List<AffinityStateDto>());
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogWarning(ex, "GetCacheAffinityAsync failed");
             return new AffinityPageDto(0, new List<AffinityStateDto>());
         }
     }
@@ -169,8 +206,9 @@ public class ApiService
         {
             return await _http.GetFromJsonAsync<ResponseCacheStatsDto>(Url("/api/dashboard/state/response-cache"));
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogWarning(ex, "GetResponseCacheStatsAsync failed");
             return null;
         }
     }
@@ -181,8 +219,9 @@ public class ApiService
         {
             return await _http.GetFromJsonAsync<SemanticRoutesDto>(Url("/api/dashboard/semantic-routes"));
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogWarning(ex, "GetSemanticRoutesAsync failed");
             return null;
         }
     }
@@ -207,6 +246,12 @@ public class ApiService
     public Task<SystemConfigDto?> GetSystemConfigAsync()
         => _http.GetFromJsonAsync<SystemConfigDto>(Url("/api/dashboard/config"));
 
+    /// <summary>三档路由预设（预设名 → 配置项 → 值），供配置页一键填充。</summary>
+    public async Task<Dictionary<string, Dictionary<string, JsonElement>>?> GetPresetsAsync()
+    {
+        return await _http.GetFromJsonAsync<Dictionary<string, Dictionary<string, JsonElement>>>(Url("/api/dashboard/config/presets"));
+    }
+
     /// <summary>返回 (是否成功, 失败原因)。400 校验错误时 Error 含 RouterOptionsValidator 的具体消息。</summary>
     public async Task<(bool Ok, string? Error)> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
     {
@@ -217,10 +262,20 @@ public class ApiService
         return (false, body);
     }
 
-    public async Task<bool> OverrideCircuitStateAsync(string modelName, string targetState)
+    /// <summary>手动覆盖模型断路器状态。返回 (是否成功, 失败原因)。</summary>
+    public async Task<(bool Ok, string? Error)> OverrideCircuitStateAsync(string modelName, string targetState)
     {
-        using var resp = await _http.PostAsJsonAsync(Url($"/api/dashboard/circuits/{Uri.EscapeDataString(modelName)}/override"), new { targetState });
-        return resp.IsSuccessStatusCode;
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync(Url($"/api/dashboard/circuits/{Uri.EscapeDataString(modelName)}/override"), new { targetState });
+            if (resp.IsSuccessStatusCode)
+                return (true, null);
+            return (false, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 
     public async Task<List<ClientKeyDto>> GetClientKeysAsync()
@@ -229,24 +284,50 @@ public class ApiService
         return result ?? new List<ClientKeyDto>();
     }
 
-    public async Task<CreatedClientKeyDto?> CreateClientKeyAsync(string tenantName, decimal dailyBudgetUsd, int maxQps)
+    /// <summary>签发租户密钥。返回 (新密钥信息, 失败原因)；成功时 Key 非空，明文仅此一次返回。</summary>
+    public async Task<(CreatedClientKeyDto? Key, string? Error)> CreateClientKeyAsync(string tenantName, decimal dailyBudgetUsd, int maxQps)
     {
-        using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/keys"), new { tenantName, dailyBudgetUsd, maxQps });
-        if (resp.IsSuccessStatusCode)
-            return await resp.Content.ReadFromJsonAsync<CreatedClientKeyDto>();
-        return null;
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/keys"), new { tenantName, dailyBudgetUsd, maxQps });
+            if (resp.IsSuccessStatusCode)
+                return (await resp.Content.ReadFromJsonAsync<CreatedClientKeyDto>(), null);
+            return (null, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
     }
 
-    public async Task<bool> UpdateClientKeyAsync(string key, bool enabled, decimal dailyBudgetUsd, int maxQps)
+    public async Task<(bool Ok, string? Error)> UpdateClientKeyAsync(string key, bool enabled, decimal dailyBudgetUsd, int maxQps)
     {
-        using var resp = await _http.PutAsJsonAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"), new { enabled, dailyBudgetUsd, maxQps });
-        return resp.IsSuccessStatusCode;
+        try
+        {
+            using var resp = await _http.PutAsJsonAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"), new { enabled, dailyBudgetUsd, maxQps });
+            if (resp.IsSuccessStatusCode)
+                return (true, null);
+            return (false, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 
-    public async Task<bool> DeleteClientKeyAsync(string key)
+    public async Task<(bool Ok, string? Error)> DeleteClientKeyAsync(string key)
     {
-        using var resp = await _http.DeleteAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"));
-        return resp.IsSuccessStatusCode;
+        try
+        {
+            using var resp = await _http.DeleteAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"));
+            if (resp.IsSuccessStatusCode)
+                return (true, null);
+            return (false, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 
     // ── Models ────────────────────────────────────────────────────
@@ -257,22 +338,49 @@ public class ApiService
         return result ?? new List<ModelDto>();
     }
 
-    public async Task<bool> CreateModelAsync(CreateModelRequest req)
+    public async Task<(bool Ok, string? Error)> CreateModelAsync(CreateModelRequest req)
     {
-        using var resp = await _http.PostAsJsonAsync(Url("/api/models"), req);
-        return resp.IsSuccessStatusCode;
+        try
+        {
+            using var resp = await _http.PostAsJsonAsync(Url("/api/models"), req);
+            if (resp.IsSuccessStatusCode)
+                return (true, null);
+            return (false, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 
-    public async Task<bool> UpdateModelAsync(string name, UpdateModelRequest req)
+    public async Task<(bool Ok, string? Error)> UpdateModelAsync(string name, UpdateModelRequest req)
     {
-        using var resp = await _http.PutAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"), req);
-        return resp.IsSuccessStatusCode;
+        try
+        {
+            using var resp = await _http.PutAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"), req);
+            if (resp.IsSuccessStatusCode)
+                return (true, null);
+            return (false, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 
-    public async Task<bool> DeleteModelAsync(string name)
+    public async Task<(bool Ok, string? Error)> DeleteModelAsync(string name)
     {
-        using var resp = await _http.DeleteAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"));
-        return resp.IsSuccessStatusCode;
+        try
+        {
+            using var resp = await _http.DeleteAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"));
+            if (resp.IsSuccessStatusCode)
+                return (true, null);
+            return (false, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (false, ex.Message);
+        }
     }
 
     public async Task<ModelTestResultDto?> TestModelConnectionAsync(string name)
@@ -628,51 +736,125 @@ public class ApiService
         RoutingConfigDto Routing,
         BudgetConfigDto Budget);
 
-    public record RoutingConfigDto(
-        bool EnableFailover,
-        bool EnableBudgetGuard,
-        bool EnableRuleClassifier,
-        bool EnableLatencyAware,
-        bool EnableSemanticRouter,
-        bool EnablePiiAnonymization,
-        bool EnableDataSovereignty,
-        bool EnableJsonAstAutoRepair,
-        bool EnableFusionRouter,
-        bool EnableThompsonSampling = false,
-        bool EnableContextualBandit = false,
-        double ExplorationEpsilon = 0.0,
-        long ExplorationStarvedN = 0,
-        bool EnableResponseCache = false,
-        int ResponseCacheTtlSeconds = 3600,
-        int ResponseCacheMaxEntries = 1000,
-        int FailoverFailureThreshold = 3,
-        int FailoverCooldownSeconds = 60);
+    /// <summary>
+    /// 配置读取 DTO。属性式（与后端 GET 字段一一对应；新增字段给默认值保持向后兼容）。
+    /// </summary>
+    public record RoutingConfigDto
+    {
+        public string? Preset { get; init; }
+        // ① 基础路由
+        public string DefaultTier { get; init; } = "Medium";
+        public bool EnableRuleClassifier { get; init; } = true;
+        public bool EnableSemanticRouter { get; init; } = true;
+        public bool EnableSessionAffinity { get; init; } = true;
+        public bool EnableLatencyAware { get; init; }
+        public bool EnableLoadBalance { get; init; } = true;
+        public bool EnableKalmanLoadBalance { get; init; }
+        // ② 可靠性与预算
+        public bool EnableFailover { get; init; } = true;
+        public int FailoverFailureThreshold { get; init; } = 3;
+        public int FailoverCooldownSeconds { get; init; } = 60;
+        public int FailoverGlobalTimeoutSeconds { get; init; }
+        public bool EnableBudgetGuard { get; init; } = true;
+        public bool EnableHealthProbe { get; init; } = true;
+        // ③ 学习与优化
+        public bool EnableThompsonSampling { get; init; }
+        public bool EnableContextualBandit { get; init; }
+        public double ExplorationEpsilon { get; init; }
+        public long ExplorationStarvedN { get; init; }
+        public bool EnableResponseCache { get; init; }
+        public int ResponseCacheTtlSeconds { get; init; } = 3600;
+        public int ResponseCacheMaxEntries { get; init; } = 1000;
+        public bool EnableSemanticCache { get; init; }
+        public double SemanticCacheSimilarityThreshold { get; init; } = 0.94;
+        public int SemanticCacheTtlMinutes { get; init; } = 60;
+        public bool EnableCascadeUpgrade { get; init; }
+        public double CascadeUpgradeSampleRate { get; init; } = 0.1;
+        public bool EnableRegenerateFeedback { get; init; }
+        // ④ 合规与安全
+        public bool EnablePiiAnonymization { get; init; }
+        public bool EnableDataSovereignty { get; init; }
+        public bool EnableContentModeration { get; init; }
+        public double ModerationSampleRate { get; init; } = 1.0;
+        public double ModerationThreshold { get; init; } = 0.8;
+        public bool EnableStreamingComplianceFilter { get; init; }
+        public bool EnablePersonaDriftProtection { get; init; } = true;
+        public bool EnablePromptCompression { get; init; }
+        // ⑤ 高级编排
+        public bool EnableFusionRouter { get; init; }
+        public string FusionRouterMinComplexity { get; init; } = "Standard";
+        public bool EnableFusionMode { get; init; }
+        public bool EnableByzantineConsensus { get; init; }
+        public bool EnableJsonAstAutoRepair { get; init; } = true;
+        // ⑥ 观测
+        public bool EnableDistributedTracing { get; init; }
+        public bool AuditStoreRequestContent { get; init; } = true;
+    }
 
     public record BudgetConfigDto(
         decimal DailyBudgetUsd,
         string EnforceOnExhausted);
 
-    public record UpdateSystemConfigRequest(
-        bool? EnableFailover,
-        bool? EnableBudgetGuard,
-        bool? EnableRuleClassifier,
-        bool? EnableLatencyAware,
-        bool? EnableSemanticRouter,
-        bool? EnablePiiAnonymization,
-        bool? EnableDataSovereignty,
-        bool? EnableJsonAstAutoRepair,
-        bool? EnableFusionRouter,
-        bool? EnableThompsonSampling,
-        bool? EnableContextualBandit,
-        double? ExplorationEpsilon,
-        long? ExplorationStarvedN,
-        bool? EnableResponseCache,
-        int? ResponseCacheTtlSeconds,
-        int? ResponseCacheMaxEntries,
-        int? FailoverFailureThreshold,
-        int? FailoverCooldownSeconds,
-        decimal? DailyBudgetUsd,
-        string? EnforceOnExhausted);
+    /// <summary>配置更新请求。null = 不修改；属性式与后端 DTO 对齐。</summary>
+    public sealed record UpdateSystemConfigRequest
+    {
+        // ① 基础路由
+        public bool? EnableRuleClassifier { get; init; }
+        public bool? EnableSemanticRouter { get; init; }
+        public bool? EnableSessionAffinity { get; init; }
+        public bool? EnableLatencyAware { get; init; }
+        public bool? EnableLoadBalance { get; init; }
+        public bool? EnableKalmanLoadBalance { get; init; }
+        public string? DefaultTier { get; init; }
+        // ② 可靠性与预算
+        public bool? EnableFailover { get; init; }
+        public int? FailoverFailureThreshold { get; init; }
+        public int? FailoverCooldownSeconds { get; init; }
+        public int? FailoverGlobalTimeoutSeconds { get; init; }
+        public bool? EnableBudgetGuard { get; init; }
+        public bool? EnableHealthProbe { get; init; }
+        public decimal? DailyBudgetUsd { get; init; }
+        public string? EnforceOnExhausted { get; init; }
+        // ③ 学习与优化
+        public bool? EnableThompsonSampling { get; init; }
+        public bool? EnableContextualBandit { get; init; }
+        public double? ExplorationEpsilon { get; init; }
+        public long? ExplorationStarvedN { get; init; }
+        public bool? EnableResponseCache { get; init; }
+        public int? ResponseCacheTtlSeconds { get; init; }
+        public int? ResponseCacheMaxEntries { get; init; }
+        public bool? EnableSemanticCache { get; init; }
+        public double? SemanticCacheSimilarityThreshold { get; init; }
+        public int? SemanticCacheTtlMinutes { get; init; }
+        public bool? EnableCascadeUpgrade { get; init; }
+        public double? CascadeUpgradeSampleRate { get; init; }
+        public bool? EnableRegenerateFeedback { get; init; }
+        // ④ 合规与安全
+        public bool? EnablePiiAnonymization { get; init; }
+        public bool? EnableDataSovereignty { get; init; }
+        public bool? EnableContentModeration { get; init; }
+        public double? ModerationSampleRate { get; init; }
+        public double? ModerationThreshold { get; init; }
+        public bool? EnableStreamingComplianceFilter { get; init; }
+        public bool? EnablePersonaDriftProtection { get; init; }
+        public bool? EnablePromptCompression { get; init; }
+        // ⑤ 高级编排
+        public bool? EnableFusionRouter { get; init; }
+        public string? FusionRouterMinComplexity { get; init; }
+        public bool? EnableFusionMode { get; init; }
+        public bool? EnableByzantineConsensus { get; init; }
+        public bool? EnableJsonAstAutoRepair { get; init; }
+        // ⑥ 观测
+        public bool? EnableDistributedTracing { get; init; }
+        public bool? AuditStoreRequestContent { get; init; }
+    }
+
+    /// <summary>预设展示项：名称 + 中文标题 + 描述 + 原始字段值（供配置页填充表单）。</summary>
+    public record PresetSummaryDto(
+        string Name,
+        string Title,
+        string Description,
+        Dictionary<string, JsonElement> Values);
 
     public record ClientKeyDto(
         string KeyId,

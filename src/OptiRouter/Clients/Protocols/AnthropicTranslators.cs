@@ -50,10 +50,41 @@ public static class AnthropicTranslators
 
         var body = new Dictionary<string, object?>
         {
-            ["model"] = endpoint.Id,
+            // UpstreamModelId：Id 留空（仅配置 Name）时回退 Name，与 OpenAI 客户端语义一致
+            ["model"] = endpoint.UpstreamModelId,
             ["max_tokens"] = request.MaxTokens ?? 4096,
             ["messages"] = messages
         };
+
+        // Anthropic 流式开关在请求体内（仅 Accept 头不够）：stream=true 才会返回 SSE
+        if (request.Stream)
+        {
+            body["stream"] = true;
+        }
+        if (request.Temperature is not null)
+        {
+            body["temperature"] = request.Temperature;
+        }
+        // OpenAI 的 top_p / stop 经 ExtensionData 透传，映射到 Anthropic 同义字段
+        if (request.ExtensionData is not null)
+        {
+            if (request.ExtensionData.TryGetValue("top_p", out var topP) && topP.ValueKind == JsonValueKind.Number)
+            {
+                body["top_p"] = topP.GetDouble();
+            }
+            if (request.ExtensionData.TryGetValue("stop", out var stop))
+            {
+                // OpenAI stop 允许 string 或 string[]；Anthropic stop_sequences 只收数组
+                if (stop.ValueKind == JsonValueKind.String)
+                {
+                    body["stop_sequences"] = new[] { stop.GetString() };
+                }
+                else if (stop.ValueKind == JsonValueKind.Array)
+                {
+                    body["stop_sequences"] = JsonSerializer.SerializeToElement(stop);
+                }
+            }
+        }
 
         if (systemParts.Count > 0)
         {

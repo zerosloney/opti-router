@@ -98,7 +98,8 @@ public sealed class ModelHealthProbeService : BackgroundService
 
                 if (result.Healthy)
                 {
-                    _healthTracker.RecordSuccess(endpoint.Name, requiredSuccesses);
+                    // 主动探活未经 TryBeginProbe 放行：releaseProbe:false，不消耗半开探测槽位
+                    _healthTracker.RecordSuccess(endpoint.Name, requiredSuccesses, releaseProbe: false);
                     if (_logger.IsEnabled(LogLevel.Debug))
                         _logger.LogDebug("Health probe OK: {Name} ({Ms}ms)", endpoint.Name, result.LatencyMs);
                 }
@@ -111,14 +112,14 @@ public sealed class ModelHealthProbeService : BackgroundService
                             endpoint.Name, 429);
                         continue;
                     }
-                    bool tripped = _healthTracker.RecordFailure(endpoint.Name, threshold, cooldown);
+                    bool tripped = _healthTracker.RecordFailure(endpoint.Name, threshold, cooldown, releaseProbe: false);
                     _logger.LogWarning("Health probe FAILED: {Name} ({Reason}){Tripped}",
                         endpoint.Name, result.Error ?? "unknown", tripped ? " (circuit tripped)" : "");
                 }
             }
             catch (Exception ex)
             {
-                bool tripped = _healthTracker.RecordFailure(endpoint.Name, threshold, cooldown);
+                bool tripped = _healthTracker.RecordFailure(endpoint.Name, threshold, cooldown, releaseProbe: false);
                 _logger.LogWarning(ex, "Health probe threw for {Name}{Tripped}",
                     endpoint.Name, tripped ? " (circuit tripped)" : "");
             }

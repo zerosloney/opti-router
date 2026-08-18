@@ -129,6 +129,9 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
 
     public int RequestsPerMinute { get; set; } = 60;
 
+    /// <summary>测试用管理密钥；null = 不覆盖（沿用 appsettings/环境的值）。</summary>
+    public string? AdminApiKey { get; set; } = null;
+
     public new HttpClient CreateClient()
     {
         return CreateClient(TestProxyApiKey);
@@ -147,6 +150,13 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
     {
         builder.UseSetting("OptiRouter:ProxyApiKey", ProxyApiKey);
         builder.UseSetting("OptiRouter:RequestsPerMinute", RequestsPerMinute.ToString());
+        if (AdminApiKey is not null)
+        {
+            builder.UseSetting("OptiRouter:AdminApiKey", AdminApiKey);
+        }
+        // 测试用临时配置库：路由/预算/模型配置隔离在各自测试实例，不污染真实 data/optirouter-config.db。
+        builder.UseSetting("OptiRouter:ConfigDbPath",
+            Path.Combine(Path.GetTempPath(), "optirouter-config-test-" + Guid.NewGuid().ToString("N") + ".db"));
         // 测试用内存账本，避免写真实 SQLite 文件与跨测试状态残留。
         builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
         builder.ConfigureServices(services =>

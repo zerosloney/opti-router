@@ -24,6 +24,9 @@ public class DashboardMetricsTests
         /// <summary>预设延迟统计的 stub provider。</summary>
         public ILatencyStatsProvider StatsProvider { get; set; } = new LatencyStatsCache();
 
+        /// <summary>非 null 时把该标记值写入 Routing.ModerationApiKey，用于密钥泄漏断言。</summary>
+        public string? ModerationKeyMarker { get; set; }
+
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseSetting("OptiRouter:ProxyApiKey", Key);
@@ -50,6 +53,10 @@ public class DashboardMetricsTests
                     // 关闭后台服务避免干扰。
                     opt.Routing.EnableHealthProbe = false;
                     opt.Routing.EnableLatencyAware = false;
+                    if (ModerationKeyMarker is not null)
+                    {
+                        opt.Routing.ModerationApiKey = ModerationKeyMarker;
+                    }
                 });
                 // 用 stub 覆盖生产 LatencyStatsCache。
                 services.AddSingleton(StatsProvider);
@@ -139,5 +146,34 @@ public class DashboardMetricsTests
         Assert.Equal(1.0, b.GetProperty("alpha").GetDouble(), precision: 4);
         Assert.Equal(2.0, b.GetProperty("beta").GetDouble(), precision: 4);
         Assert.Equal(1, b.GetProperty("samples").GetInt64());
+    }
+
+    [Fact]
+    public async Task Metrics_DoesNotLeakSecretConfigFields()
+    {
+        // M7 回归：routingPolicy 必须是白名单投影（前端 RoutingPolicyInfo 的 7 个开关），
+        // 不得整包下发 RoutingOptions——其中 ModerationApiKey / MetricsApiKey / MeshRedisConnectionString
+        // 是密钥类字段。修复前这三个属性名会随 dump 出现在响应 JSON 中。
+        using var factory = new MetricsFactory { ModerationKeyMarker = "secret-moderation-marker" };
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MetricsFactory.Key);
+
+        var resp = await client.GetAsync("/api/dashboard/metrics");
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        string body = await resp.Content.ReadAsStringAsync();
+
+        // 白名单开关仍在（前端 RouterStudio 消费）。
+        using var doc = JsonDocument.Parse(body);
+        var routing = doc.RootElement.GetProperty("system").GetProperty("routingPolicy");
+        Assert.True(routing.GetProperty("enableFailover").ValueKind == JsonValueKind.True
+            || routing.GetProperty("enableFailover").ValueKind == JsonValueKind.False);
+        Assert.Equal(7, routing.EnumerateObject().Count());
+
+        // 密钥类字段：属性名与值都不得出现。
+        Assert.DoesNotContain("moderationApiKey", body);
+        Assert.DoesNotContain("metricsApiKey", body);
+        Assert.DoesNotContain("meshRedisConnectionString", body);
+        Assert.DoesNotContain("secret-moderation-marker", body);
     }
 }

@@ -2,6 +2,8 @@ using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -34,26 +36,14 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
 });
 
-// 注册 models-config.json 为配置源（后于 appsettings.json，覆盖 OptiRouter:Models 段）。
-// Dashboard 写入该文件后 ModelsConfigService 触发 IConfigurationRoot.Reload()，IOptionsMonitor 派发到 router。
-// 首启种子：models-config.json 不存在时，把 appsettings.json 的 Models 段写入一次。
-// 合法空数组是权威配置，不得在重启时被 appsettings.json 的模型重新填充。
-string modelsConfigPath = Path.Combine(builder.Environment.ContentRootPath, "models-config.json");
-if (!File.Exists(modelsConfigPath))
-{
-    try
-    {
-        Program.SeedModelsConfig(builder.Configuration, modelsConfigPath);
-    }
-    catch (IOException)
-    {
-        // 并发初始化防御：忽略并发创建竞争
-    }
-}
-builder.Configuration.Sources.Add(new ModelsJsonConfigurationSource
-{
-    FilePath = modelsConfigPath
-});
+// 配置存储：Routing/Budget/模型配置全部落 SQLite（默认 data/optirouter-config.db，路径由
+// OptiRouter:ConfigDbPath 覆盖）。页面写入经 AppConfigDbStore → IConfigurationRoot.Reload() 热生效。
+// 首启迁移：库为空时从 appsettings.json 的 Routing/Budget 段与遗留 models-config.json 导入一次，
+// 之后 DB 为唯一权威，appsettings.json 仅保留部署级设置（密钥/端口/限流/DB 路径）。
+string configDbPath = builder.Configuration["OptiRouter:ConfigDbPath"]
+    ?? Path.Combine(builder.Environment.ContentRootPath, "data", "optirouter-config.db");
+builder.Services.AddSingleton(sp => new AppConfigDbStore(configDbPath));
+builder.Configuration.Sources.Add(new DbAppConfigSource { DbPath = configDbPath });
 
 // Bind and validate RouterOptions on startup.
 builder.Services.AddMemoryCache(options =>
@@ -109,11 +99,13 @@ builder.Services.AddSingleton<ICostLedgerStore>(sp =>
 
     if (string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase))
     {
-        return new PostgresCostLedgerStore(options.Budget.PostgresConnectionString);
+        return new PostgresCostLedgerStore(options.Budget.PostgresConnectionString,
+            logger: sp.GetService<ILogger<PostgresCostLedgerStore>>());
     }
     if (string.Equals(provider, "Redis", StringComparison.OrdinalIgnoreCase))
     {
-        return new RedisCostLedgerStore(options.Budget.RedisConnectionString, options.Budget.RedisKeyPrefix);
+        return new RedisCostLedgerStore(options.Budget.RedisConnectionString, options.Budget.RedisKeyPrefix,
+            logger: sp.GetService<ILogger<RedisCostLedgerStore>>());
     }
     if (!options.Budget.UsePersistentStore || string.Equals(provider, "InMemory", StringComparison.OrdinalIgnoreCase))
     {
@@ -153,22 +145,27 @@ builder.Services.AddSingleton<IRequestAuditStore>(sp =>
     return new SqliteRequestAuditStore(storePath, sp.GetRequiredService<ILogger<SqliteRequestAuditStore>>());
 });
 
-// 配置 OpenTelemetry OTLP Exporter 链路追踪导出（无缝对接 Jaeger, Tempo 或 Datadog）
+// 配置 OpenTelemetry OTLP Exporter 链路追踪导出（无缝对接 Jaeger, Tempo 或 Datadog）。
+// OTLP 为部署级设置，保留在 appsettings.json（OptiRouter:Otlp* 顶层键），不随 Routing 落库。
 builder.Services.AddOpenTelemetry()
     .WithTracing(tracerProviderBuilder =>
     {
-        var routingOptions = builder.Configuration.GetSection("OptiRouter:Routing").Get<RoutingOptions>() ?? new RoutingOptions();
+        string? otlpServiceName = builder.Configuration["OptiRouter:OtlpServiceName"];
+        bool enableOtlpTracing = builder.Configuration.GetValue<bool?>("OptiRouter:EnableOtlpTracing") ?? false;
+        string? otlpEndpoint = builder.Configuration["OptiRouter:OtlpEndpoint"];
+        string? otlpProtocol = builder.Configuration["OptiRouter:OtlpProtocol"];
 
         tracerProviderBuilder
-            .SetResourceBuilder(OpenTelemetry.Resources.ResourceBuilder.CreateDefault().AddService(routingOptions.OtlpServiceName ?? "OptiRouter"))
+            .SetResourceBuilder(OpenTelemetry.Resources.ResourceBuilder.CreateDefault().AddService(
+                string.IsNullOrEmpty(otlpServiceName) ? "OptiRouter" : otlpServiceName))
             .AddSource("OptiRouter.Tracing");
 
-        if (routingOptions.EnableOtlpTracing && !string.IsNullOrWhiteSpace(routingOptions.OtlpEndpoint))
+        if (enableOtlpTracing && !string.IsNullOrWhiteSpace(otlpEndpoint))
         {
             tracerProviderBuilder.AddOtlpExporter(otlpOptions =>
             {
-                otlpOptions.Endpoint = new Uri(routingOptions.OtlpEndpoint);
-                otlpOptions.Protocol = string.Equals(routingOptions.OtlpProtocol, "http/protobuf", StringComparison.OrdinalIgnoreCase)
+                otlpOptions.Endpoint = new Uri(otlpEndpoint);
+                otlpOptions.Protocol = string.Equals(otlpProtocol, "http/protobuf", StringComparison.OrdinalIgnoreCase)
                     ? OpenTelemetry.Exporter.OtlpExportProtocol.HttpProtobuf
                     : OpenTelemetry.Exporter.OtlpExportProtocol.Grpc;
             });
@@ -464,16 +461,13 @@ builder.Services.AddSingleton<ProxyOrchestrator>();
 // 后台 MetricsGaugeUpdaterService 周期刷新花费/断路器 gauge。
 builder.Services.AddSingleton<OptiRouter.Metrics.RouterMetrics>();
 
-// 模型配置文件服务（独立 models-config.json，Dashboard 读写，IConfigurationRoot.Reload() 热生效）。
+// 模型配置服务（SQLite 配置库，Dashboard 读写，IConfigurationRoot.Reload() 热生效）。
 builder.Services.AddSingleton<ModelsConfigService>(sp =>
 {
-    var env = sp.GetRequiredService<IWebHostEnvironment>();
+    var store = sp.GetRequiredService<AppConfigDbStore>();
     var configRoot = (IConfigurationRoot)sp.GetRequiredService<IConfiguration>();
     var logger = sp.GetRequiredService<ILogger<ModelsConfigService>>();
-    return new ModelsConfigService(
-        Path.Combine(env.ContentRootPath, "models-config.json"),
-        configRoot,
-        logger);
+    return new ModelsConfigService(store, configRoot, logger);
 });
 
 // 后台定时主动探活：启动预热一轮，随后按 HealthProbeIntervalSeconds 周期对所有启用模型探测，
@@ -604,6 +598,14 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+// 首启迁移：配置库为空时从 appsettings.json 的 Routing/Budget 段与遗留 models-config.json 导入一次。
+// 之后 DB 为唯一权威；Reload 让配置提供者读到迁移值（ValidateOnStart 前完成）。
+SeedConfigFromLegacySources(
+    app.Services.GetRequiredService<AppConfigDbStore>(),
+    app.Configuration,
+    Path.Combine(app.Environment.ContentRootPath, "models-config.json"));
+((IConfigurationRoot)app.Configuration).Reload();
 
 if (string.IsNullOrWhiteSpace(app.Configuration["OptiRouter:AdminApiKey"]))
 {
@@ -1007,31 +1009,93 @@ public partial class Program
         "/models",
         "/router",
         "/keys",
+        "/benchmarks",
         "/api/dashboard",
         "/api/models"
     };
 
-    internal static void SeedModelsConfig(
+    /// <summary>
+    /// 首启迁移：配置库无数据时，把 appsettings.json 的 Routing/Budget 段与遗留 models-config.json
+    /// 的模型列表导入 SQLite。之后 DB 为唯一权威，不再读取文件配置。
+    /// </summary>
+    internal static void SeedConfigFromLegacySources(
+        AppConfigDbStore store,
         Microsoft.Extensions.Configuration.IConfiguration configuration,
-        string filePath)
+        string legacyModelsPath)
     {
+        ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(configuration);
-        ArgumentNullException.ThrowIfNull(filePath);
 
-        var seeded = configuration.GetSection("OptiRouter:Models")
-            .Get<List<OptiRouter.Configuration.ModelEndpointOptions>>();
-        string? parentDir = Path.GetDirectoryName(filePath);
-        if (!string.IsNullOrEmpty(parentDir))
-            Directory.CreateDirectory(parentDir);
+        if (store.HasData())
+            return;
 
-        using var stream = new FileStream(filePath, FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite);
-        System.Text.Json.JsonSerializer.Serialize(stream,
-            seeded ?? new List<OptiRouter.Configuration.ModelEndpointOptions>(),
-            new System.Text.Json.JsonSerializerOptions
+        bool seeded = false;
+        var routing = SectionToJson(configuration.GetSection("OptiRouter:Routing")) as JsonObject;
+        if (routing is { Count: > 0 })
+        {
+            store.SaveDocument(AppConfigDbStore.RoutingScope, routing.ToJsonString());
+            seeded = true;
+        }
+
+        var budget = SectionToJson(configuration.GetSection("OptiRouter:Budget")) as JsonObject;
+        if (budget is { Count: > 0 })
+        {
+            store.SaveDocument(AppConfigDbStore.BudgetScope, budget.ToJsonString());
+            seeded = true;
+        }
+
+        if (!string.IsNullOrEmpty(legacyModelsPath) && File.Exists(legacyModelsPath))
+        {
+            try
             {
-                WriteIndented = true,
-                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
-                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(System.Text.Json.JsonNamingPolicy.CamelCase) }
-            });
+                var legacy = System.Text.Json.JsonSerializer.Deserialize<List<ModelEndpointOptions>>(
+                    File.ReadAllText(legacyModelsPath),
+                    AppConfigDbStore.ModelsFileJsonOptions);
+                if (legacy is { Count: > 0 })
+                {
+                    store.SaveModels(legacy);
+                    seeded = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[SeedConfigFromLegacySources] failed to import '{legacyModelsPath}': {ex.Message}");
+            }
+        }
+
+        if (seeded)
+            Console.WriteLine("[SeedConfigFromLegacySources] migrated appsettings Routing/Budget + models-config.json into config database (data/optirouter-config.db)");
+    }
+
+    /// <summary>IConfiguration 节 → JsonNode（数字键子节收敛为数组，保证 SemanticRoutes 等数组形态正确）。</summary>
+    private static JsonNode? SectionToJson(Microsoft.Extensions.Configuration.IConfigurationSection section)
+    {
+        var children = section.GetChildren().ToList();
+        if (children.Count == 0)
+            return ParseScalar(section.Value);
+
+        if (children.All(c => int.TryParse(c.Key, out _)))
+        {
+            var arr = new JsonArray();
+            foreach (var c in children.OrderBy(c => int.Parse(c.Key)))
+                arr.Add(SectionToJson(c));
+            return arr;
+        }
+
+        var obj = new JsonObject();
+        foreach (var c in children)
+            obj[c.Key] = SectionToJson(c);
+        return obj;
+    }
+
+    private static JsonNode? ParseScalar(string? value)
+    {
+        if (value is null)
+            return null;
+        if (bool.TryParse(value, out bool b))
+            return JsonValue.Create(b);
+        if (decimal.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out decimal d))
+            return JsonValue.Create(d);
+        return JsonValue.Create(value);
     }
 }

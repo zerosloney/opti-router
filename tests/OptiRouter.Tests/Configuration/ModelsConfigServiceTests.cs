@@ -1,19 +1,20 @@
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using OptiRouter.Configuration;
 
 namespace OptiRouter.Tests.Configuration;
 
+/// <summary>
+/// ModelsConfigService 测试：存储后端为 SQLite 配置库（AppConfigDbStore）。
+/// 覆盖并发 Upsert/Delete、env: 引用展开与保存时字面量恢复、空 ApiKey 保留、明文写回。
+/// </summary>
 public sealed class ModelsConfigServiceTests
 {
     [Fact]
     public async Task ConcurrentUpserts_DoNotLoseDistinctModels()
     {
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
-        using var service = CreateService(path);
+        using var store = CreateStore(out var service);
 
         var models = Enumerable.Range(0, 24)
             .Select(i => CreateModel($"model-{i}"))
@@ -26,18 +27,12 @@ public sealed class ModelsConfigServiceTests
         Assert.Equal(
             models.Select(model => model.Name).OrderBy(name => name),
             stored.Select(model => model.Name).OrderBy(name => name));
-        AssertValidJson(path);
-
-        service.Dispose();
-        Directory.Delete(directory, recursive: true);
     }
 
     [Fact]
     public async Task ConcurrentDeleteAndUpsert_PreservesBothOperations()
     {
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
-        using var service = CreateService(path);
+        using var store = CreateStore(out var service);
         service.SaveModels(new[] { CreateModel("keep"), CreateModel("delete-me") });
 
         using var start = new ManualResetEventSlim(false);
@@ -58,185 +53,100 @@ public sealed class ModelsConfigServiceTests
 
         var names = service.LoadModels().Select(model => model.Name).OrderBy(name => name).ToArray();
         Assert.Equal(new[] { "added", "keep" }, names);
-        AssertValidJson(path);
-
-        service.Dispose();
-        Directory.Delete(directory, recursive: true);
     }
-
-    [Fact]
-    public void FailedAtomicReplacement_LeavesPreviousFileAndCleansTemporaryFile()
-    {
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
-        File.WriteAllText(path, SerializeModels(CreateModel("original")));
-        using var service = CreateService(path);
-        string original = File.ReadAllText(path);
-        service.AtomicReplaceHook = (_, _) => throw new IOException("injected replacement failure");
-
-        Assert.Throws<IOException>(() => service.UpsertModel(CreateModel("replacement")));
-
-        Assert.Equal(original, File.ReadAllText(path));
-        Assert.Equal(new[] { "original" }, service.LoadModels().Select(model => model.Name));
-        Assert.Empty(Directory.EnumerateFiles(directory, ".models-config.json.*.tmp"));
-
-        service.Dispose();
-        Directory.Delete(directory, recursive: true);
-    }
-
-    [Fact]
-    public void Upsert_InvalidJsonDoesNotOverwriteOriginalFile()
-        => AssertInvalidJsonMutationPreservesFile(service => service.UpsertModel(CreateModel("replacement")));
-
-    [Fact]
-    public void Delete_InvalidJsonDoesNotOverwriteOriginalFile()
-        => AssertInvalidJsonMutationPreservesFile(service => service.DeleteModel("existing"));
 
     [Fact]
     public void LoadModels_WithEnvPrefix_ResolvesEnvironmentVariable()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
         Environment.SetEnvironmentVariable("TEST_API_KEY_1", "resolved-key-from-env");
-
         try
         {
+            using var store = CreateStore(out var service);
             var model = CreateModel("test-model");
             model.ApiKey = "env:TEST_API_KEY_1";
-            File.WriteAllText(path, SerializeModels(model));
+            store.UpsertModel(model);
 
-            using var service = CreateService(path);
-
-            // Act
             var loaded = service.LoadModels();
 
-            // Assert
             Assert.Single(loaded);
             Assert.Equal("resolved-key-from-env", loaded[0].ApiKey);
         }
         finally
         {
             Environment.SetEnvironmentVariable("TEST_API_KEY_1", null);
-            Directory.Delete(directory, recursive: true);
         }
     }
 
     [Fact]
     public void LoadModels_WithEnvPrefix_VariableNotSet_ReturnsEmpty()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
-
-        // Ensure environment variable is not set
         Environment.SetEnvironmentVariable("TEST_NONEXISTENT_VAR", null);
+        using var store = CreateStore(out var service);
+        var model = CreateModel("test-model");
+        model.ApiKey = "env:TEST_NONEXISTENT_VAR";
+        store.UpsertModel(model);
 
-        try
-        {
-            var model = CreateModel("test-model");
-            model.ApiKey = "env:TEST_NONEXISTENT_VAR";
-            File.WriteAllText(path, SerializeModels(model));
+        var loaded = service.LoadModels();
 
-            using var service = CreateService(path);
-
-            // Act
-            var loaded = service.LoadModels();
-
-            // Assert
-            Assert.Single(loaded);
-            Assert.Equal("", loaded[0].ApiKey); // Should be empty string when env var is missing
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        Assert.Single(loaded);
+        Assert.Equal("", loaded[0].ApiKey);
     }
 
     [Fact]
     public void LoadModels_WithEnvPrefix_VariableSetToEmpty_ReturnsEmpty()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
         Environment.SetEnvironmentVariable("TEST_EMPTY_VAR", "");
-
         try
         {
+            using var store = CreateStore(out var service);
             var model = CreateModel("test-model");
             model.ApiKey = "env:TEST_EMPTY_VAR";
-            File.WriteAllText(path, SerializeModels(model));
+            store.UpsertModel(model);
 
-            using var service = CreateService(path);
-
-            // Act
             var loaded = service.LoadModels();
 
-            // Assert
             Assert.Single(loaded);
-            Assert.Equal("", loaded[0].ApiKey); // Should be empty string when env var is empty
+            Assert.Equal("", loaded[0].ApiKey);
         }
         finally
         {
             Environment.SetEnvironmentVariable("TEST_EMPTY_VAR", null);
-            Directory.Delete(directory, recursive: true);
         }
     }
 
     [Fact]
     public void LoadModels_WithoutEnvPrefix_PreservesOriginalValue()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
+        using var store = CreateStore(out var service);
+        var model = CreateModel("test-model");
+        model.ApiKey = "sk-plain-api-key";
+        store.UpsertModel(model);
 
-        try
-        {
-            var model = CreateModel("test-model");
-            model.ApiKey = "sk-plain-api-key";
-            File.WriteAllText(path, SerializeModels(model));
+        var loaded = service.LoadModels();
 
-            using var service = CreateService(path);
-
-            // Act
-            var loaded = service.LoadModels();
-
-            // Assert
-            Assert.Single(loaded);
-            Assert.Equal("sk-plain-api-key", loaded[0].ApiKey);
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        Assert.Single(loaded);
+        Assert.Equal("sk-plain-api-key", loaded[0].ApiKey);
     }
 
     [Fact]
     public void SaveModels_PreservesEnvLiteral_WhenKeyUnchanged()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
         Environment.SetEnvironmentVariable("TEST_SAVE_ENV_KEY", "resolved-value");
-
         try
         {
+            using var store = CreateStore(out var service);
             var model = CreateModel("test-model");
             model.ApiKey = "env:TEST_SAVE_ENV_KEY";
-            File.WriteAllText(path, SerializeModels(model));
+            store.UpsertModel(model);
 
-            using var service = CreateService(path);
+            // 传入解析后的对象（ApiKey 已是 resolved 值）
             var loaded = service.LoadModels();
-
-            // Act: SaveModels 传入解析后的对象（ApiKey 已是 resolved 值）
             service.SaveModels(loaded);
 
-            // Assert: 文件应仍是 env: 字面量
-            var fileContent = File.ReadAllText(path);
-            Assert.Contains("env:TEST_SAVE_ENV_KEY", fileContent);
-            Assert.DoesNotContain("resolved-value", fileContent);
+            // 库中仍应是 env: 字面量
+            Assert.Equal("env:TEST_SAVE_ENV_KEY", store.GetRawApiKey("test-model"));
 
-            // 验证重新加载仍然正确解析
+            // 重新加载仍然正确解析
             var reloaded = service.LoadModels();
             Assert.Single(reloaded);
             Assert.Equal("resolved-value", reloaded[0].ApiKey);
@@ -244,38 +154,28 @@ public sealed class ModelsConfigServiceTests
         finally
         {
             Environment.SetEnvironmentVariable("TEST_SAVE_ENV_KEY", null);
-            Directory.Delete(directory, recursive: true);
         }
     }
 
     [Fact]
     public void UpsertModel_EmptyApiKey_KeepsEnvLiteral()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
         Environment.SetEnvironmentVariable("TEST_UPSERT_ENV_KEY", "original-env-value");
-
         try
         {
+            using var store = CreateStore(out var service);
             var model = CreateModel("test-model");
             model.ApiKey = "env:TEST_UPSERT_ENV_KEY";
-            File.WriteAllText(path, SerializeModels(model));
+            store.UpsertModel(model);
+            service.LoadModels(); // 重建 env 字面量映射
 
-            using var service = CreateService(path);
-
-            // Act: UpsertModel 传入空 ApiKey（保留现有）+ 改 BaseUrl
             var updateModel = CreateModel("test-model");
             updateModel.ApiKey = ""; // 空 ApiKey 应保留现有 env: 引用
             updateModel.BaseUrl = "https://updated.example.com/v1";
             service.UpsertModel(updateModel);
 
-            // Assert: 文件应保留 env: 字面量
-            var fileContent = File.ReadAllText(path);
-            Assert.Contains("env:TEST_UPSERT_ENV_KEY", fileContent);
-            Assert.Contains("https://updated.example.com", fileContent);
+            Assert.Equal("env:TEST_UPSERT_ENV_KEY", store.GetRawApiKey("test-model"));
 
-            // 验证重新加载仍然正确解析
             var reloaded = service.LoadModels();
             Assert.Single(reloaded);
             Assert.Equal("original-env-value", reloaded[0].ApiKey);
@@ -284,37 +184,27 @@ public sealed class ModelsConfigServiceTests
         finally
         {
             Environment.SetEnvironmentVariable("TEST_UPSERT_ENV_KEY", null);
-            Directory.Delete(directory, recursive: true);
         }
     }
 
     [Fact]
     public void UpsertModel_NewPlaintextKey_WritesPlaintext()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
         Environment.SetEnvironmentVariable("TEST_PLAINTEXT_ENV_KEY", "env-value");
-
         try
         {
+            using var store = CreateStore(out var service);
             var model = CreateModel("test-model");
             model.ApiKey = "env:TEST_PLAINTEXT_ENV_KEY";
-            File.WriteAllText(path, SerializeModels(model));
+            store.UpsertModel(model);
+            service.LoadModels(); // 重建 env 字面量映射
 
-            using var service = CreateService(path);
-
-            // Act: UpsertModel 传入新明文 key（不同于环境变量值）
             var updateModel = CreateModel("test-model");
             updateModel.ApiKey = "sk-new-plaintext-key";
             service.UpsertModel(updateModel);
 
-            // Assert: 文件应是明文，不是 env: 引用
-            var fileContent = File.ReadAllText(path);
-            Assert.Contains("sk-new-plaintext-key", fileContent);
-            Assert.DoesNotContain("env:TEST_PLAINTEXT_ENV_KEY", fileContent);
+            Assert.Equal("sk-new-plaintext-key", store.GetRawApiKey("test-model"));
 
-            // 验证重新加载
             var reloaded = service.LoadModels();
             Assert.Single(reloaded);
             Assert.Equal("sk-new-plaintext-key", reloaded[0].ApiKey);
@@ -322,36 +212,27 @@ public sealed class ModelsConfigServiceTests
         finally
         {
             Environment.SetEnvironmentVariable("TEST_PLAINTEXT_ENV_KEY", null);
-            Directory.Delete(directory, recursive: true);
         }
     }
 
     [Fact]
     public void UpsertModel_NewEnvReference_PassesThrough()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
         Environment.SetEnvironmentVariable("TEST_NEW_ENV_VAR", "new-env-value");
-
         try
         {
+            using var store = CreateStore(out var service);
             var model = CreateModel("test-model");
             model.ApiKey = "old-plaintext-key";
-            File.WriteAllText(path, SerializeModels(model));
+            store.UpsertModel(model);
+            service.LoadModels(); // 重建 env 字面量映射
 
-            using var service = CreateService(path);
-
-            // Act: UpsertModel 传新的 env: 引用
             var updateModel = CreateModel("test-model");
             updateModel.ApiKey = "env:TEST_NEW_ENV_VAR";
             service.UpsertModel(updateModel);
 
-            // Assert: 文件应是新的 env: 引用
-            var fileContent = File.ReadAllText(path);
-            Assert.Contains("env:TEST_NEW_ENV_VAR", fileContent);
+            Assert.Equal("env:TEST_NEW_ENV_VAR", store.GetRawApiKey("test-model"));
 
-            // 验证重新加载正确解析
             var reloaded = service.LoadModels();
             Assert.Single(reloaded);
             Assert.Equal("new-env-value", reloaded[0].ApiKey);
@@ -359,59 +240,70 @@ public sealed class ModelsConfigServiceTests
         finally
         {
             Environment.SetEnvironmentVariable("TEST_NEW_ENV_VAR", null);
-            Directory.Delete(directory, recursive: true);
         }
     }
 
     [Fact]
     public void SaveModels_PlaintextModel_BehaviorUnchanged()
     {
-        // Arrange
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
+        using var store = CreateStore(out var service);
+        var model = CreateModel("test-model");
+        model.ApiKey = "sk-always-plaintext";
+        store.UpsertModel(model);
 
-        try
-        {
-            var model = CreateModel("test-model");
-            model.ApiKey = "sk-always-plaintext";
-            File.WriteAllText(path, SerializeModels(model));
+        var loaded = service.LoadModels();
+        service.SaveModels(loaded);
 
-            using var service = CreateService(path);
-            var loaded = service.LoadModels();
+        Assert.Equal("sk-always-plaintext", store.GetRawApiKey("test-model"));
 
-            // Act: SaveModels 传入明文模型
-            service.SaveModels(loaded);
-
-            // Assert: 文件应仍是明文（回归测试）
-            var fileContent = File.ReadAllText(path);
-            Assert.Contains("sk-always-plaintext", fileContent);
-            Assert.DoesNotContain("env:", fileContent);
-
-            var reloaded = service.LoadModels();
-            Assert.Single(reloaded);
-            Assert.Equal("sk-always-plaintext", reloaded[0].ApiKey);
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
+        var reloaded = service.LoadModels();
+        Assert.Single(reloaded);
+        Assert.Equal("sk-always-plaintext", reloaded[0].ApiKey);
     }
 
-    private static ModelsConfigService CreateService(string path)
+    [Fact]
+    public void UpsertModel_InvalidModel_ThrowsAndDoesNotPersist()
     {
-        var configuration = new ConfigurationBuilder()
-            .Add(new ModelsJsonConfigurationSource { FilePath = path })
-            .Build();
-        return new ModelsConfigService(path, configuration, NullLogger<ModelsConfigService>.Instance);
+        using var store = CreateStore(out var service);
+
+        var invalid = CreateModel("bad-model");
+        invalid.MaxContextTokens = -1; // 触发 RouterOptionsValidator 拒绝
+
+        Assert.Throws<ArgumentException>(() => service.UpsertModel(invalid));
+        Assert.Empty(store.LoadModelsRaw());
     }
 
-    private static string CreateDirectory()
+    [Fact]
+    public void DeleteModel_UnknownName_ReturnsFalse()
     {
-        string directory = Path.Combine(
+        using var store = CreateStore(out var service);
+        Assert.False(service.DeleteModel("does-not-exist"));
+    }
+
+    [Fact]
+    public void IdOnlyModels_GetStableRowKeys()
+    {
+        using var store = CreateStore(out var service);
+        var model = CreateModel("");
+        model.Id = "upstream-model-id";
+        model.BaseUrl = "https://example.test/v1";
+        store.UpsertModel(model);
+
+        var loaded = service.LoadModels();
+        Assert.Single(loaded);
+        Assert.Equal("", loaded[0].Name);
+        Assert.Equal("upstream-model-id", loaded[0].Id);
+    }
+
+    private static AppConfigDbStore CreateStore(out ModelsConfigService service)
+    {
+        string dbPath = Path.Combine(
             Path.GetTempPath(),
-            "optirouter-model-service-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(directory);
-        return directory;
+            "optirouter-model-service-" + Guid.NewGuid().ToString("N") + ".db");
+        var store = new AppConfigDbStore(dbPath);
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection().Build();
+        service = new ModelsConfigService(store, configuration, NullLogger<ModelsConfigService>.Instance);
+        return store;
     }
 
     private static ModelEndpointOptions CreateModel(string name) => new()
@@ -425,41 +317,4 @@ public sealed class ModelsConfigServiceTests
         MaxRetries = 0,
         Enabled = true
     };
-
-    private static string SerializeModels(params ModelEndpointOptions[] models)
-        => JsonSerializer.Serialize(models, new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
-        });
-
-    private static void AssertInvalidJsonMutationPreservesFile(Action<ModelsConfigService> mutate)
-    {
-        string directory = CreateDirectory();
-        string path = Path.Combine(directory, "models-config.json");
-        const string invalidJson = "{not-json";
-        File.WriteAllText(path, invalidJson);
-
-        try
-        {
-            using (var service = CreateService(path))
-            {
-                Assert.Throws<JsonException>(() => mutate(service));
-
-                Assert.Equal(invalidJson, File.ReadAllText(path));
-                Assert.Empty(Directory.EnumerateFiles(directory, ".models-config.json.*.tmp"));
-            }
-        }
-        finally
-        {
-            Directory.Delete(directory, recursive: true);
-        }
-    }
-
-    private static void AssertValidJson(string path)
-    {
-        using var document = JsonDocument.Parse(File.ReadAllText(path));
-        Assert.Equal(JsonValueKind.Array, document.RootElement.ValueKind);
-    }
 }

@@ -1,4 +1,27 @@
-// Shared JS for OptiRouter Blazor components (drawTrendChart, copyToClipboard)
+// Shared JS for OptiRouter Blazor components (theme, drawTrendChart, copyToClipboard)
+
+// 主题：默认浅色，localStorage 持久化，data-theme 属性驱动 CSS 变量切换。
+// 本脚本在 <head> 内同步执行，先于首帧渲染 → 无闪烁。
+(function () {
+    var saved = null;
+    try { saved = localStorage.getItem('optirouter-theme'); } catch (e) { }
+    document.documentElement.setAttribute('data-theme', saved === 'dark' ? 'dark' : 'light');
+})();
+
+window.getTheme = function () {
+    return document.documentElement.getAttribute('data-theme') || 'dark';
+};
+
+window.setTheme = function (theme) {
+    var t = theme === 'light' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', t);
+    try { localStorage.setItem('optirouter-theme', t); } catch (e) { }
+    return t;
+};
+
+window.toggleTheme = function () {
+    return window.setTheme(window.getTheme() === 'light' ? 'dark' : 'light');
+};
 
 // 复制文本到剪贴板。优先 navigator.clipboard（需 secure context）；
 // 非安全上下文（http 非 localhost 访问）回退 textarea + execCommand，返回是否成功。
@@ -41,7 +64,8 @@ window.drawTrendChart = function(canvas, data) {
     var mx = Math.max.apply(null, vals.concat([0.001]));
     
     // Gridlines & Y-Axis Labels
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+    var gridColor = getComputedStyle(document.documentElement).getPropertyValue('--chart-grid').trim() || 'rgba(255, 255, 255, 0.04)';
+    ctx.strokeStyle = gridColor;
     ctx.lineWidth = 1;
     for (var i = 0; i <= 4; i++) {
         var y = pad.t + ch * i / 4;

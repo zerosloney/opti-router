@@ -50,6 +50,16 @@
     --purple-glow: rgba(139, 92, 246, 0.12);
     --purple-border: rgba(139, 92, 246, 0.25);
 
+    /* --- Semantic Text Tints（内联状态文字用；浅色主题下加深） --- */
+    --ok-text: #34d399;
+    --ok-text-strong: #a7f3d0;
+    --info-text: #38bdf8;
+    --danger-text: #f43f5e;
+    --warn-text: #f87171;
+    --dim-text: #9ca3af;
+    --faint-text: #e2e8f0;
+    --chart-grid: rgba(255, 255, 255, 0.04);
+
     /* --- Borders & Outlines --- */
     --border: rgba(255, 255, 255, 0.07);
     --border-subtle: rgba(255, 255, 255, 0.04);
@@ -77,6 +87,132 @@
 }
 
 /* ==========================================================================
+   Light Minimalist Theme (data-theme="light" on <html>)
+   ========================================================================== */
+
+[data-theme="light"] {
+    /* --- Base Canvas & Neutral Surfaces --- */
+    --bg-base: #f4f6fa;
+    --bg-canvas: #f4f6fa;
+    --bg-sidebar: #ffffff;
+    --bg-surface: #ffffff;
+    --bg-card: #ffffff;
+    --bg-card-hover: #eef2f7;
+    --bg-subtle: rgba(15, 23, 42, 0.03);
+    --bg-subtle-hover: rgba(15, 23, 42, 0.06);
+    --bg-input: #ffffff;
+
+    /* --- Typography & Text --- */
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #64748b;
+    --text-faint: #94a3b8;
+    --text-inverse: #f8fafc;
+
+    /* --- Primary Accent --- */
+    --primary: #4f46e5;
+    --primary-hover: #4338ca;
+    --primary-glow: rgba(79, 70, 229, 0.1);
+    --primary-border: rgba(79, 70, 229, 0.3);
+    --primary-gradient: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+
+    /* --- Status & Semantic Colors --- */
+    --success: #059669;
+    --success-glow: rgba(5, 150, 105, 0.1);
+    --success-border: rgba(5, 150, 105, 0.3);
+
+    --warning: #d97706;
+    --warning-glow: rgba(217, 119, 6, 0.1);
+    --warning-border: rgba(217, 119, 6, 0.3);
+
+    --danger: #e11d48;
+    --danger-glow: rgba(225, 29, 72, 0.08);
+    --danger-border: rgba(225, 29, 72, 0.3);
+
+    --info: #0369a1;
+    --info-glow: rgba(3, 105, 161, 0.1);
+    --info-border: rgba(3, 105, 161, 0.3);
+
+    --purple: #7c3aed;
+    --purple-glow: rgba(124, 58, 237, 0.1);
+    --purple-border: rgba(124, 58, 237, 0.3);
+
+    /* --- Semantic Text Tints（浅色加深保证对比度） --- */
+    --ok-text: #059669;
+    --ok-text-strong: #047857;
+    --info-text: #0284c7;
+    --danger-text: #e11d48;
+    --warn-text: #dc2626;
+    --dim-text: #64748b;
+    --faint-text: #cbd5e1;
+    --chart-grid: rgba(15, 23, 42, 0.08);
+
+    /* --- Borders & Outlines --- */
+    --border: rgba(15, 23, 42, 0.1);
+    --border-subtle: rgba(15, 23, 42, 0.06);
+    --border-hover: rgba(15, 23, 42, 0.2);
+    --border-active: #4f46e5;
+
+    /* --- Shadows & Elevation --- */
+    --shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
+    --shadow-card: 0 4px 16px -4px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    --shadow-card-hover: 0 10px 28px -6px rgba(15, 23, 42, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    --shadow-modal: 0 24px 60px -16px rgba(15, 23, 42, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    --shadow-glow: 0 0 20px rgba(79, 70, 229, 0.18);
+}
+
+/* 浅色主题下对硬编码深色值的覆盖 */
+[data-theme="light"] body {
+    background-image:
+        radial-gradient(ellipse 60% 40% at 50% -10%, rgba(79, 70, 229, 0.05), transparent 70%),
+        radial-gradient(circle at 100% 100%, rgba(5, 150, 105, 0.04), transparent 50%);
+}
+
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+    background: rgba(15, 23, 42, 0.18);
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+    background: rgba(15, 23, 42, 0.3);
+}
+
+[data-theme="light"] .budget-bar {
+    background: rgba(15, 23, 42, 0.08);
+}
+[data-theme="light"] .log-table th,
+[data-theme="light"] .config-table th {
+    background: rgba(15, 23, 42, 0.03);
+}
+[data-theme="light"] .key-modal-value {
+    color: #334155;
+}
+[data-theme="light"] .login-error {
+    color: #be123c;
+}
+[data-theme="light"] .toggle-track {
+    background: rgba(15, 23, 42, 0.12);
+}
+[data-theme="light"] .alert-info {
+    color: #0369a1;
+}
+[data-theme="light"] .alert-warning {
+    color: #b45309;
+}
+[data-theme="light"] .alert-error,
+[data-theme="light"] .alert-danger,
+[data-theme="light"] .alert-critical {
+    color: #be123c;
+}
+[data-theme="light"] .alert-success {
+    color: #047857;
+}
+[data-theme="light"] .login-page {
+    background-image:
+        radial-gradient(ellipse 50% 50% at 50% 40%, rgba(79, 70, 229, 0.06) 0%, transparent 60%),
+        linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+}
+
+/* ==========================================================================
    Global Reset & Base
    ========================================================================== */
 
@@ -101,7 +237,7 @@ body {
         radial-gradient(ellipse 60% 40% at 50% -10%, rgba(99, 102, 241, 0.06), transparent 70%),
         radial-gradient(circle at 100% 100%, rgba(16, 185, 129, 0.03), transparent 50%);
     background-attachment: fixed;
-    font-family: 'Inter', 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
     line-height: 1.5;
     letter-spacing: -0.01em;
 }
@@ -123,7 +259,7 @@ body {
 }
 
 code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono {
-    font-family: 'JetBrains Mono', SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-family: SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
     font-variant-numeric: tabular-nums;
 }
 
@@ -257,6 +393,33 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono 
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
+}
+
+.theme-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.45rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-subtle);
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--duration-fast);
+}
+
+.theme-toggle:hover {
+    background: var(--bg-subtle-hover);
+    color: var(--text-primary);
+    border-color: var(--border-hover);
+}
+
+.theme-toggle-icon {
+    font-size: 0.9rem;
+    line-height: 1;
 }
 
 .side-nav-user {
@@ -1242,6 +1405,190 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono 
 @keyframes toast-in {
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
+}
+
+/* ==========================================================================
+   Config Panel: Toggle Switches, Sub-grouping, Dirty State
+   ========================================================================== */
+
+.config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+    gap: 16px;
+    margin-top: 14px;
+}
+
+.config-group-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 16px 0 10px;
+    padding-bottom: 0.4rem;
+    color: var(--text-primary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.config-group-header:first-child {
+    margin-top: 4px;
+}
+
+.config-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.75rem 1rem;
+    border-radius: var(--radius-md);
+    transition: background var(--duration-fast);
+}
+
+.config-item:hover {
+    background: var(--bg-subtle-hover);
+}
+
+.config-item.dirty-field {
+    background: var(--primary-glow);
+    box-shadow: inset 0 0 0 1px var(--primary-border);
+}
+
+.config-item.dirty-field:hover {
+    background: rgba(99, 102, 241, 0.18);
+}
+
+.item-text {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    flex: 1;
+    min-width: 0;
+    max-width: calc(100% - 52px);
+}
+
+.item-title {
+    color: var(--text-primary);
+    font-size: 0.9rem;
+    font-weight: 500;
+    line-height: 1.4;
+}
+
+.item-desc {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    line-height: 1.5;
+}
+
+/* 含 inline 表单行的项（熔断参数/日预算约束等）：标题+描述在上、表单行在下，
+   避免描述文字与行并排时被压成窄竖条（min-width:0 允许收缩导致逐字竖排）。 */
+.config-item:has(.config-row) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+}
+
+.config-item:has(.config-row) .item-text {
+    max-width: 100%;
+}
+
+.config-item:has(.config-row) .config-row {
+    max-width: 100%;
+}
+
+/* Toggle Switch */
+.toggle-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    flex: 0 0 auto;
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.toggle-switch input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-track {
+    position: relative;
+    display: inline-block;
+    width: 44px;
+    height: 24px;
+    border-radius: var(--radius-full);
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border);
+    transition: all var(--duration-normal);
+    flex-shrink: 0;
+}
+
+.toggle-thumb {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--text-secondary);
+    transition: all var(--duration-normal);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.toggle-switch input:checked + .toggle-track {
+    background: rgba(16, 185, 129, 0.2);
+    border-color: var(--success-border);
+}
+
+.toggle-switch input:checked + .toggle-track .toggle-thumb {
+    transform: translateX(20px);
+    background: var(--success);
+    box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+}
+
+.toggle-switch input:disabled + .toggle-track {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.toggle-switch input:focus-visible + .toggle-track {
+    box-shadow: 0 0 0 2px var(--primary-glow);
+    border-color: var(--primary);
+}
+
+/* Disabled item container */
+.config-item.is-disabled {
+    opacity: 0.5;
+}
+
+.config-item.is-disabled .toggle-switch {
+    cursor: not-allowed;
+}
+
+/* Inline form row (select + number) */
+.config-row {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: nowrap;
+    padding: 0.4rem 0;
+    max-width: calc(100% - 52px);
+}
+
+.config-row-label {
+    color: var(--text-secondary);
+    font-size: 0.84rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* 输入框弹性伸缩：窄列（三列布局 ~342px）下三个输入对也保持单行，不换行挤压 */
+.config-row .form-control {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
 /* ==========================================================================

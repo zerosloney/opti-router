@@ -11,36 +11,73 @@
             <span>路由引擎状态</span>
             <span class="tag tag-info" style="font-size: 0.75rem;">● 实时</span>
         </div>
+        @if (!string.IsNullOrEmpty(PollError))
+        {
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @PollError（显示的是上一次成功数据）</div>
+        }
         <div class="stats-row">
             <div class="stat-card">
                 <div class="stat-card-label">故障转移</div>
-                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableFailover == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableFailover == true ? "启用" : "禁用")</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableFailover == true ? "var(--ok-text)" : "#64748b");">@(Metrics?.System.Routing.EnableFailover == true ? "启用" : "禁用")</div>
             </div>
             <div class="stat-card">
                 <div class="stat-card-label">预算防护</div>
-                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableBudgetGuard == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableBudgetGuard == true ? "启用" : "禁用")</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableBudgetGuard == true ? "var(--ok-text)" : "#64748b");">@(Metrics?.System.Routing.EnableBudgetGuard == true ? "启用" : "禁用")</div>
             </div>
             <div class="stat-card">
                 <div class="stat-card-label">规则分类器</div>
-                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableRuleClassifier == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableRuleClassifier == true ? "启用" : "禁用")</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableRuleClassifier == true ? "var(--ok-text)" : "#64748b");">@(Metrics?.System.Routing.EnableRuleClassifier == true ? "启用" : "禁用")</div>
             </div>
             <div class="stat-card">
                 <div class="stat-card-label">延迟感知</div>
-                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableLatencyAware == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableLatencyAware == true ? "启用" : "禁用")</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableLatencyAware == true ? "var(--ok-text)" : "#64748b");">@(Metrics?.System.Routing.EnableLatencyAware == true ? "启用" : "禁用")</div>
             </div>
             <div class="stat-card">
                 <div class="stat-card-label">语义路由</div>
-                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableSemanticRouter == true ? "#34d399" : "#64748b");">@(Metrics?.System.Routing.EnableSemanticRouter == true ? "启用" : "禁用")</div>
+                <div class="stat-card-val" style="color:@(Metrics?.System.Routing.EnableSemanticRouter == true ? "var(--ok-text)" : "#64748b");">@(Metrics?.System.Routing.EnableSemanticRouter == true ? "启用" : "禁用")</div>
             </div>
+        </div>
+    </div>
+
+    <!-- 一键预设 -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span>🚀 推荐配置预设</span>
+            @if (!string.IsNullOrEmpty(CurrentPresetName))
+            {
+                <span class="tag tag-info">配置文件预设: @CurrentPresetName（只填充未显式配置的项）</span>
+            }
+            else
+            {
+                <span class="tag tag-secondary">未使用配置文件预设</span>
+            }
+        </div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 10px;">
+            @foreach (var preset in PresetSummaries)
+            {
+                <div class="sub-card" style="display: flex; flex-direction: column; gap: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <strong style="font-size: 0.92rem;">@preset.Name</strong>
+                        <span class="tag tag-secondary" style="font-size: 0.7rem;">@preset.Title</span>
+                    </div>
+                    <div class="meta-text" style="font-size: 0.74rem;">@preset.Description</div>
+                    <button class="btn-ghost btn-sm" @onclick="() => ApplyPresetToForm(preset.Name)" disabled="@(SelectedPresetName == preset.Name)">
+                        @(SelectedPresetName == preset.Name ? "✓ 已填充到表单" : "填充到表单")
+                    </button>
+                </div>
+            }
+        </div>
+        <div class="meta-text" style="margin-top: 8px;">
+            预设会把下述推荐值填入下方配置表单（可再微调），点「保存并热生效」才落盘——所见即所存。
         </div>
     </div>
 
     <!-- 系统策略与预算动态控制面板 -->
     <div class="glass-card">
         <div class="card-label">
-            <span>⚙️ 系统路由策略与预算配置控制台 (UI Config Studio)</span>
+            <span>⚙️ 系统路由策略与预算配置控制台</span>
             <button class="btn-primary btn-sm" @onclick="SaveSystemConfig" disabled="@IsConfigSaving">
-                @(IsConfigSaving ? "热更新保存中..." : "💾 保存并热生效")
+                @(IsConfigSaving ? "热更新保存中..." : (DirtyCount > 0 ? $"💾 保存并热生效（{DirtyCount} 项变更）" : "💾 保存并热生效"))
             </button>
         </div>
 
@@ -48,113 +85,472 @@
         {
             <div class="alert-banner @(ConfigStatusOk ? "alert-success" : "alert-error")" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">@ConfigStatusMsg</div>
         }
+        @if (DirtyCount > 0)
+        {
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.8rem;">
+                ⚠️ 有 @DirtyCount 项未保存的变更。切换页面或刷新前请先保存。
+                <button class="btn-ghost btn-sm" style="margin-left: 8px;" @onclick="DiscardChanges">放弃更改</button>
+            </div>
+        }
 
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-top: 14px;">
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgFailover" /> 故障转移策略
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgBudgetGuard" /> 预算防护策略
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgRuleClassifier" /> 规则分类器
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgLatencyAware" /> 历史延迟感知重排
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgSemanticRouter" /> 语义向量路由
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgPiiAnonymization" /> PII 隐私脱敏
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgDataSovereignty" /> 数据不出域隔离
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgJsonAstAutoRepair" /> JSON AST 自动修复
-            </label>
-            <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                <input type="checkbox" @bind="CfgFusionRouter" /> Fusion MoA 融合路由
-            </label>
-        </div>
-
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-subtle);">
-            <!-- 学习与探索 -->
+        <div class="config-grid">
+            <!-- ① 基础路由 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">🧠 学习与探索</div>
-                <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                        <input type="checkbox" @bind="CfgThompson" /> Thompson 采样重排
-                    </label>
-                    <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                        <input type="checkbox" @bind="CfgBandit" /> Contextual Bandit (LinUCB)
-                    </label>
-                    @if (CfgThompson && CfgBandit)
-                    {
-                        <div class="alert-banner alert-error" style="padding: 6px 10px; font-size: 0.75rem;">Thompson 与 Bandit 互斥，同时开启会被后端拒绝保存</div>
-                    }
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">ε 探索保底:</span>
-                        <input type="number" step="0.01" min="0" max="1" @bind="CfgEpsilon" style="width: 80px;" />
+                <div class="card-label" style="margin-bottom: 8px;">🧭 基础路由</div>
+                <div class="config-group-header">路由策略</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableRuleClassifier)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">规则分类器</span>
+                            <span class="item-desc">关键词规则给请求分档（代码/数学/翻译）。默认开。</span>
+                        </div>
+                        <label class="toggle-switch" title="关键词规则给请求分档（代码/数学/翻译）。默认开。">
+                            <input type="checkbox" @bind="Cfg.EnableRuleClassifier" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">饥饿定向阈值 N:</span>
-                        <input type="number" step="1" min="0" @bind="CfgStarvedN" style="width: 80px;" />
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableSemanticRouter)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">语义向量路由</span>
+                            <span class="item-desc">按语义路由规则表（下方工作室）把相似问法路由到指定档位。默认开。</span>
+                        </div>
+                        <label class="toggle-switch" title="按语义路由规则表把相似问法路由到指定档位。默认开。">
+                            <input type="checkbox" @bind="Cfg.EnableSemanticRouter" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
                     </div>
-                    <div class="meta-text" style="font-size: 0.72rem;">由「历史延迟感知重排」承载段内重排；ε ∈ [0,1]，低流量建议 0.05，N&gt;0 时探索优先提升样本饥饿模型。</div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableSessionAffinity)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">会话亲和</span>
+                            <span class="item-desc">同 X-Session-Id 的请求尽量固定到同一模型，保持回答风格一致。默认开。</span>
+                        </div>
+                        <label class="toggle-switch" title="同 X-Session-Id 的请求尽量固定到同一模型。默认开。">
+                            <input type="checkbox" @bind="Cfg.EnableSessionAffinity" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="config-group-header">候选重排</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableLatencyAware)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">历史延迟感知重排</span>
+                            <span class="item-desc">按各模型历史延迟重排候选链，慢模型沉底。承载 Thompson/Bandit 学习重排。</span>
+                        </div>
+                        <label class="toggle-switch" title="按各模型历史延迟重排候选链，慢模型沉底。">
+                            <input type="checkbox" @bind="Cfg.EnableLatencyAware" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableLoadBalance)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">负载均衡</span>
+                            <span class="item-desc">同级候选间加权随机分流。默认开。</span>
+                        </div>
+                        <label class="toggle-switch" title="同级候选间加权随机分流。默认开。">
+                            <input type="checkbox" @bind="Cfg.EnableLoadBalance" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableKalmanLoadBalance)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">Kalman 延迟估计分流</span>
+                            <span class="item-desc">用卡尔曼滤波预测各模型实时延迟做分流权重，比静态加权更敏锐。</span>
+                        </div>
+                        <label class="toggle-switch" title="用卡尔曼滤波预测各模型实时延迟做分流权重。">
+                            <input type="checkbox" @bind="Cfg.EnableKalmanLoadBalance" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="config-group-header">默认设置</div>
+                <div class="config-item @(IsDirty(nameof(ConfigForm.DefaultTier)) ? "dirty-field" : "")">
+                    <div class="item-text">
+                        <span class="item-title">默认档位</span>
+                        <span class="item-desc">无任何分类信号命中时的兜底档位。</span>
+                    </div>
+                    <select @bind="Cfg.DefaultTier" class="form-control" style="width: auto; min-width: 160px;">
+                        <option value="Strong">Strong（贵而强）</option>
+                        <option value="Medium">Medium（均衡）</option>
+                        <option value="Cheap">Cheap（廉快）</option>
+                    </select>
                 </div>
             </div>
 
-            <!-- 响应缓存 -->
+            <!-- ② 可靠性与预算 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">💾 响应缓存</div>
-                <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <label style="display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 0.85rem; cursor: pointer;">
-                        <input type="checkbox" @bind="CfgResponseCache" /> 启用响应缓存
+                <div class="card-label" style="margin-bottom: 8px;">🛡️ 可靠性与预算</div>
+                <div class="config-group-header">故障转移</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableFailover)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">故障转移</span>
+                            <span class="item-desc">首选模型失败自动降级到下一候选（含凭证失效 401/403 降级）。</span>
+                        </div>
+                        <label class="toggle-switch" title="首选模型失败自动降级到下一候选。">
+                            <input type="checkbox" @bind="Cfg.EnableFailover" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FailoverFailureThreshold)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FailoverCooldownSeconds)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FailoverGlobalTimeoutSeconds)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">熔断参数</span>
+                            <span class="item-desc">连续失败 N 次熔断进入隔离；冷却期后半开探测，成功才恢复全流量；全局超时兜底防无限等待。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">失败阈值:</span>
+                            <input type="number" step="1" min="1" @bind="Cfg.FailoverFailureThreshold" class="form-control" style="width: 70px;" />
+                            <span class="config-row-label">冷却 (秒):</span>
+                            <input type="number" step="10" min="1" @bind="Cfg.FailoverCooldownSeconds" class="form-control" style="width: 80px;" />
+                            <span class="config-row-label">全局超时 (秒):</span>
+                            <input type="number" step="10" min="0" @bind="Cfg.FailoverGlobalTimeoutSeconds" class="form-control" style="width: 80px;" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="config-group-header">预算防护</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableBudgetGuard)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">预算防护</span>
+                            <span class="item-desc">按日预算约束路由（耗尽时降级或拒绝）。</span>
+                        </div>
+                        <label class="toggle-switch" title="按日预算约束路由。">
+                            <input type="checkbox" @bind="Cfg.EnableBudgetGuard" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.DailyBudgetUsd)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.EnforceOnExhausted)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">日预算约束</span>
+                            <span class="item-desc">预算耗尽后的策略。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">日预算 (USD):</span>
+                            <input type="number" step="1.0" min="0" @bind="Cfg.DailyBudgetUsd" class="form-control" style="width: 100px; color: var(--success); font-weight: 600;" />
+                            <select @bind="Cfg.EnforceOnExhausted" class="form-control" style="width: auto; min-width: 180px;">
+                                <option value="Degrade">Degrade (降级至 Cheap)</option>
+                                <option value="Reject">Reject (直接拒绝 429)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="config-group-header">健康探测</div>
+                <div class="config-item @(IsDirty(nameof(ConfigForm.EnableHealthProbe)) ? "dirty-field" : "")">
+                    <div class="item-text">
+                        <span class="item-title">后台健康探测</span>
+                        <span class="item-desc">周期探测所有模型并上报断路器，坏模型提前熔断。默认开。</span>
+                    </div>
+                    <label class="toggle-switch" title="周期探测所有模型并上报断路器，坏模型提前熔断。默认开。">
+                        <input type="checkbox" @bind="Cfg.EnableHealthProbe" />
+                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
                     </label>
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">单条 TTL (秒):</span>
-                        <input type="number" step="60" min="1" @bind="CfgCacheTtl" style="width: 90px;" />
-                    </div>
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">最大条目数:</span>
-                        <input type="number" step="100" min="1" @bind="CfgCacheMaxEntries" style="width: 90px;" />
-                    </div>
-                    <div class="meta-text" style="font-size: 0.72rem;">仅非流式请求生效；命中直接返回缓存答案，不产生上游调用成本。</div>
                 </div>
             </div>
 
-            <!-- 故障转移 -->
+            <!-- ③ 学习与优化 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">🛡️ 故障转移</div>
-                <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">熔断失败阈值:</span>
-                        <input type="number" step="1" min="1" @bind="CfgFailoverThreshold" style="width: 70px;" />
+                <div class="card-label" style="margin-bottom: 8px;">🧠 学习与优化</div>
+                <div class="config-group-header">强化学习</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableThompsonSampling)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">Thompson 采样重排</span>
+                            <span class="item-desc">按历史奖励自动学习排序模型，简单稳健。</span>
+                        </div>
+                        <label class="toggle-switch" title="按历史奖励自动学习排序模型，简单稳健。">
+                            <input type="checkbox" checked="@Cfg.EnableThompsonSampling" @onchange="@(e => OnThompsonToggled(e.Value is true))" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">冷却时长 (秒):</span>
-                        <input type="number" step="10" min="1" @bind="CfgFailoverCooldown" style="width: 80px;" />
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableContextualBandit)) ? "dirty-field" : "") @(Cfg.EnableThompsonSampling ? "is-disabled" : "")">
+                        <div class="item-text">
+                            <span class="item-title">Contextual Bandit (LinUCB)</span>
+                            <span class="item-desc">二选一：按请求特征（档位/延迟/复杂度）精细决策，需更多流量。</span>
+                        </div>
+                        <label class="toggle-switch" title="按请求特征精细决策，需更多流量。与 Thompson 二选一。">
+                            <input type="checkbox" checked="@Cfg.EnableContextualBandit" disabled="@Cfg.EnableThompsonSampling" @onchange="@(e => OnBanditToggled(e.Value is true))" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
                     </div>
-                    <div class="meta-text" style="font-size: 0.72rem;">连续失败 N 次熔断进入隔离；冷却期后半开探测，成功才恢复全流量。</div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.ExplorationEpsilon)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.ExplorationStarvedN)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">探索策略</span>
+                            <span class="item-desc">ε 探索保底 + 饥饿定向阈值。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">ε 探索保底:</span>
+                            <input type="number" step="0.01" min="0" max="1" @bind="Cfg.ExplorationEpsilon" class="form-control" style="width: 80px;" />
+                            <span class="config-row-label">饥饿定向阈值 N:</span>
+                            <input type="number" step="1" min="0" @bind="Cfg.ExplorationStarvedN" class="form-control" style="width: 80px;" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="config-group-header">响应缓存</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableResponseCache)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">精确响应缓存</span>
+                            <span class="item-desc">同请求原文直接返回缓存答案（仅非流式），零上游成本。</span>
+                        </div>
+                        <label class="toggle-switch" title="同请求原文直接返回缓存答案。仅非流式。">
+                            <input type="checkbox" @bind="Cfg.EnableResponseCache" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.ResponseCacheTtlSeconds)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.ResponseCacheMaxEntries)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">缓存容量</span>
+                            <span class="item-desc">TTL 与最大条目数。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">TTL (秒):</span>
+                            <input type="number" step="60" min="1" @bind="Cfg.ResponseCacheTtlSeconds" class="form-control" style="width: 90px;" />
+                            <span class="config-row-label">最大条目:</span>
+                            <input type="number" step="100" min="1" @bind="Cfg.ResponseCacheMaxEntries" class="form-control" style="width: 90px;" />
+                        </div>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableSemanticCache)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">语义缓存</span>
+                            <span class="item-desc">相似问法（非完全相同）命中也返回缓存答案。阈值调低命中率升但答案相关性降。</span>
+                        </div>
+                        <label class="toggle-switch" title="相似问法命中缓存。阈值调低命中率升但相关性降。">
+                            <input type="checkbox" @bind="Cfg.EnableSemanticCache" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.SemanticCacheSimilarityThreshold)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.SemanticCacheTtlMinutes)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">语义缓存参数</span>
+                            <span class="item-desc">相似度阈值与 TTL。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">相似度阈值:</span>
+                            <input type="number" step="0.01" min="0.5" max="1" @bind="Cfg.SemanticCacheSimilarityThreshold" class="form-control" style="width: 80px;" />
+                            <span class="config-row-label">TTL (分):</span>
+                            <input type="number" step="10" min="1" @bind="Cfg.SemanticCacheTtlMinutes" class="form-control" style="width: 80px;" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="config-group-header">自校验与反馈</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableCascadeUpgrade)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">级联自校验升级</span>
+                            <span class="item-desc">Cheap 首答后自校验，低置信升级 Strong 重答——省钱但多一次调用。</span>
+                        </div>
+                        <label class="toggle-switch" title="Cheap 首答后自校验，低置信升级 Strong 重答。">
+                            <input type="checkbox" @bind="Cfg.EnableCascadeUpgrade" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.CascadeUpgradeSampleRate)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">级联采样率</span>
+                            <span class="item-desc">触发级联升级的采样比例。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">采样率:</span>
+                            <input type="number" step="0.05" min="0.05" max="1" @bind="Cfg.CascadeUpgradeSampleRate" class="form-control" style="width: 80px;" />
+                        </div>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableRegenerateFeedback)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">重发负反馈学习</span>
+                            <span class="item-desc">用户重发同一问题 = 对上次答案不满，惩罚上次模型。</span>
+                        </div>
+                        <label class="toggle-switch" title="用户重发同一问题时惩罚上次模型。">
+                            <input type="checkbox" @bind="Cfg.EnableRegenerateFeedback" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
                 </div>
             </div>
 
-            <!-- 预算 -->
+            <!-- ④ 合规与安全 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">💰 预算</div>
-                <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">日预算 (USD):</span>
-                        <input type="number" step="1.0" min="0" @bind="CfgDailyBudgetUsd" style="width: 100px; color: var(--success); font-weight: 600;" />
+                <div class="card-label" style="margin-bottom: 8px;">🔒 合规与安全</div>
+                <div class="config-group-header">数据与隐私</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnablePiiAnonymization)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">PII 隐私脱敏</span>
+                            <span class="item-desc">发送上游前替换手机号/身份证等敏感数据，返回时还原。默认关：会改变上游看到的原文，影响缓存命中与模型理解。</span>
+                        </div>
+                        <label class="toggle-switch" title="发送上游前替换敏感数据，返回时还原。默认关。">
+                            <input type="checkbox" @bind="Cfg.EnablePiiAnonymization" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">预算耗尽行为:</span>
-                        <select @bind="CfgEnforceBehavior">
-                            <option value="Degrade">Degrade (降级至 Cheap)</option>
-                            <option value="Reject">Reject (直接拒绝 429)</option>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableDataSovereignty)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">数据不出域隔离</span>
+                            <span class="item-desc">带敏感标记的请求只路由到本地/私有部署模型（需模型勾选 IsLocalOrPrivate）。默认关。</span>
+                        </div>
+                        <label class="toggle-switch" title="带敏感标记的请求只路由到本地/私有部署模型。默认关。">
+                            <input type="checkbox" @bind="Cfg.EnableDataSovereignty" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="config-group-header">内容审核</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableContentModeration)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">内容审核</span>
+                            <span class="item-desc">输入/输出过审核 API 判违规。需先在 appsettings 配置 ModerationEndpoint 与 ApiKey，否则保存会被校验拒绝。</span>
+                        </div>
+                        <label class="toggle-switch" title="输入/输出过审核 API 判违规。需先配置 ModerationEndpoint 与 ApiKey。">
+                            <input type="checkbox" @bind="Cfg.EnableContentModeration" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.ModerationSampleRate)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.ModerationThreshold)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">审核参数</span>
+                            <span class="item-desc">采样率与违规阈值。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">采样率:</span>
+                            <input type="number" step="0.1" min="0.1" max="1" @bind="Cfg.ModerationSampleRate" class="form-control" style="width: 80px;" />
+                            <span class="config-row-label">违规阈值:</span>
+                            <input type="number" step="0.05" min="0.5" max="1" @bind="Cfg.ModerationThreshold" class="form-control" style="width: 80px;" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="config-group-header">流式与输出安全</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableStreamingComplianceFilter)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">流式敏感词过滤</span>
+                            <span class="item-desc">流式输出滑动窗口扫描敏感词，命中阻断或脱敏（不依赖外部审核 API）。</span>
+                        </div>
+                        <label class="toggle-switch" title="流式输出滑动窗口扫描敏感词。">
+                            <input type="checkbox" @bind="Cfg.EnableStreamingComplianceFilter" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnablePersonaDriftProtection)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">Persona 漂移保护</span>
+                            <span class="item-desc">多轮会话自动注入人设锚点，防止模型换档后性格/格式突变。默认开。</span>
+                        </div>
+                        <label class="toggle-switch" title="多轮会话自动注入人设锚点。默认开。">
+                            <input type="checkbox" @bind="Cfg.EnablePersonaDriftProtection" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnablePromptCompression)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">提示词压缩</span>
+                            <span class="item-desc">长上下文先裁剪再发上游，省 token 但可能丢细节。</span>
+                        </div>
+                        <label class="toggle-switch" title="长上下文先裁剪再发上游。">
+                            <input type="checkbox" @bind="Cfg.EnablePromptCompression" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ⑤ 高级编排 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">⚡ 高级编排</div>
+                <div class="config-group-header">Fusion MoA</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableFusionRouter)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">Fusion MoA 融合路由</span>
+                            <span class="item-desc">多模型并行作答 + 仲裁 + 合成，质量最高但成本 ×N。需 ≥2 个启用模型，仅非流式。</span>
+                        </div>
+                        <label class="toggle-switch" title="多模型并行作答 + 仲裁 + 合成。需 ≥2 个启用模型，仅非流式。">
+                            <input type="checkbox" @bind="Cfg.EnableFusionRouter" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FusionRouterMinComplexity)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">触发最低复杂度</span>
+                            <span class="item-desc">Fusion 仅在复杂度达到阈值时触发。</span>
+                        </div>
+                        <select @bind="Cfg.FusionRouterMinComplexity" class="form-control" style="width: auto; min-width: 200px;">
+                            <option value="Unknown">Unknown（全部请求）</option>
+                            <option value="Simple">Simple 以上</option>
+                            <option value="Standard">Standard 以上</option>
+                            <option value="Complex">仅 Complex</option>
                         </select>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableByzantineConsensus)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">拜占庭共识短路</span>
+                            <span class="item-desc">Fusion 面板答案一致时直接采纳，跳过仲裁与合成（N+2 → N 次调用）。仅 Fusion 开启时有效。</span>
+                        </div>
+                        <label class="toggle-switch" title="Fusion 面板答案一致时直接采纳，跳过仲裁与合成。">
+                            <input type="checkbox" @bind="Cfg.EnableByzantineConsensus" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="config-group-header">并行竞速</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableFusionMode)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">并行竞速 (Race)</span>
+                            <span class="item-desc">前 N 候选同时发起取最快成功。延迟最低但失败候选也计费。仅非流式。</span>
+                        </div>
+                        <label class="toggle-switch" title="前 N 候选同时发起取最快成功。仅非流式。">
+                            <input type="checkbox" @bind="Cfg.EnableFusionMode" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="config-group-header">输出修复</div>
+                <div class="config-item @(IsDirty(nameof(ConfigForm.EnableJsonAstAutoRepair)) ? "dirty-field" : "")">
+                    <div class="item-text">
+                        <span class="item-title">JSON AST 自动修复</span>
+                        <span class="item-desc">上游输出 JSON 损坏时自动修复再返回，减少工具调用解析失败。默认开。</span>
+                    </div>
+                    <label class="toggle-switch" title="上游输出 JSON 损坏时自动修复再返回。默认开。">
+                        <input type="checkbox" @bind="Cfg.EnableJsonAstAutoRepair" />
+                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                    </label>
+                </div>
+            </div>
+
+            <!-- ⑥ 观测 -->
+            <div class="sub-card">
+                <div class="card-label" style="margin-bottom: 8px;">📊 观测</div>
+                <div class="config-group-header">链路与审计</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableDistributedTracing)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">分布式链路追踪</span>
+                            <span class="item-desc">解析 W3C traceparent 并贯穿 Fusion/Cascade 审计（DAG 甘特图数据源）。</span>
+                        </div>
+                        <label class="toggle-switch" title="解析 W3C traceparent 并贯穿 Fusion/Cascade 审计。">
+                            <input type="checkbox" @bind="Cfg.EnableDistributedTracing" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.AuditStoreRequestContent)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">审计记录请求内容</span>
+                            <span class="item-desc">审计表保存用户 prompt 摘要（500 字符），供请求页排查。关闭则只记元数据。</span>
+                        </div>
+                        <label class="toggle-switch" title="审计表保存用户 prompt 摘要。关闭则只记元数据。">
+                            <input type="checkbox" @bind="Cfg.AuditStoreRequestContent" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
                     </div>
                 </div>
             </div>
@@ -361,6 +757,10 @@
                     @(IsSandboxRunning ? "路由仿真中..." : "🚀 运行路由匹配测试")
                 </button>
             </div>
+            @if (!string.IsNullOrEmpty(SandboxError))
+            {
+                <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">✗ 路由仿真失败：@SandboxError</div>
+            }
         </div>
         @if (SandboxResultData != null)
         {
@@ -546,29 +946,190 @@
     private ApiService.DashboardMetrics? Metrics;
     private List<ApiService.LearningStateDto> LearningStates = new();
 
-    private bool CfgFailover = true;
-    private bool CfgBudgetGuard = true;
-    private bool CfgRuleClassifier = true;
-    private bool CfgLatencyAware = false;
-    private bool CfgSemanticRouter = true;
-    private bool CfgPiiAnonymization = false;
-    private bool CfgDataSovereignty = false;
-    private bool CfgJsonAstAutoRepair = true;
-    private bool CfgFusionRouter = false;
-    private bool CfgThompson = false;
-    private bool CfgBandit = false;
-    private double CfgEpsilon = 0.0;
-    private long CfgStarvedN = 0;
-    private bool CfgResponseCache = false;
-    private int CfgCacheTtl = 3600;
-    private int CfgCacheMaxEntries = 1000;
-    private int CfgFailoverThreshold = 3;
-    private int CfgFailoverCooldown = 60;
-    private decimal CfgDailyBudgetUsd = 10.0m;
-    private string CfgEnforceBehavior = "Degrade";
+    /// <summary>配置表单（可变属性供 @bind；dirty 检测用 JSON 序列化快照比较）。</summary>
+    private sealed class ConfigForm
+    {
+        // ① 基础路由
+        public bool EnableRuleClassifier { get; set; }
+        public bool EnableSemanticRouter { get; set; }
+        public bool EnableSessionAffinity { get; set; }
+        public bool EnableLatencyAware { get; set; }
+        public bool EnableLoadBalance { get; set; }
+        public bool EnableKalmanLoadBalance { get; set; }
+        public string DefaultTier { get; set; } = "Medium";
+        // ② 可靠性与预算
+        public bool EnableFailover { get; set; }
+        public int FailoverFailureThreshold { get; set; } = 3;
+        public int FailoverCooldownSeconds { get; set; } = 60;
+        public int FailoverGlobalTimeoutSeconds { get; set; }
+        public bool EnableBudgetGuard { get; set; }
+        public bool EnableHealthProbe { get; set; } = true;
+        public decimal DailyBudgetUsd { get; set; } = 10.0m;
+        public string EnforceOnExhausted { get; set; } = "Degrade";
+        // ③ 学习与优化
+        public bool EnableThompsonSampling { get; set; }
+        public bool EnableContextualBandit { get; set; }
+        public double ExplorationEpsilon { get; set; }
+        public long ExplorationStarvedN { get; set; }
+        public bool EnableResponseCache { get; set; }
+        public int ResponseCacheTtlSeconds { get; set; } = 3600;
+        public int ResponseCacheMaxEntries { get; set; } = 1000;
+        public bool EnableSemanticCache { get; set; }
+        public double SemanticCacheSimilarityThreshold { get; set; } = 0.94;
+        public int SemanticCacheTtlMinutes { get; set; } = 60;
+        public bool EnableCascadeUpgrade { get; set; }
+        public double CascadeUpgradeSampleRate { get; set; } = 0.1;
+        public bool EnableRegenerateFeedback { get; set; }
+        // ④ 合规与安全
+        public bool EnablePiiAnonymization { get; set; }
+        public bool EnableDataSovereignty { get; set; }
+        public bool EnableContentModeration { get; set; }
+        public double ModerationSampleRate { get; set; } = 1.0;
+        public double ModerationThreshold { get; set; } = 0.8;
+        public bool EnableStreamingComplianceFilter { get; set; }
+        public bool EnablePersonaDriftProtection { get; set; } = true;
+        public bool EnablePromptCompression { get; set; }
+        // ⑤ 高级编排
+        public bool EnableFusionRouter { get; set; }
+        public string FusionRouterMinComplexity { get; set; } = "Standard";
+        public bool EnableFusionMode { get; set; }
+        public bool EnableByzantineConsensus { get; set; }
+        public bool EnableJsonAstAutoRepair { get; set; } = true;
+        // ⑥ 观测
+        public bool EnableDistributedTracing { get; set; }
+        public bool AuditStoreRequestContent { get; set; } = true;
+
+        public ConfigForm Clone() => (ConfigForm)MemberwiseClone();
+    }
+
+    private ConfigForm Cfg = new();
+    private ConfigForm? _baseline;
     private bool IsConfigSaving = false;
     private string ConfigStatusMsg = "";
     private bool ConfigStatusOk = true;
+    private string? CurrentPresetName;
+    private string? SelectedPresetName;
+    private List<ApiService.PresetSummaryDto> PresetSummaries = new();
+
+    /// <summary>与最近一次保存/加载值的差异字段数（逐字段反射比较）。</summary>
+    private int DirtyCount => _baseline is null ? 0 : CountDifferences(_baseline, Cfg);
+
+    private static int CountDifferences(ConfigForm a, ConfigForm b)
+    {
+        int count = 0;
+        foreach (var prop in typeof(ConfigForm).GetProperties())
+        {
+            if (!Equals(prop.GetValue(a), prop.GetValue(b)))
+            {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private bool IsDirty(string propName)
+    {
+        if (_baseline is null) return false;
+        var prop = typeof(ConfigForm).GetProperty(propName);
+        if (prop is null) return false;
+        return !Equals(prop.GetValue(_baseline), prop.GetValue(Cfg));
+    }
+
+    private void OnThompsonToggled(bool value)
+    {
+        Cfg.EnableThompsonSampling = value;
+        if (value) Cfg.EnableContextualBandit = false;
+    }
+
+    private void OnBanditToggled(bool value)
+    {
+        Cfg.EnableContextualBandit = value;
+        if (value) Cfg.EnableThompsonSampling = false;
+    }
+
+    private async Task LoadPresetsAsync()
+    {
+        try
+        {
+            var presets = await Api.GetPresetsAsync();
+            if (presets == null) return;
+            PresetSummaries = presets.Select(kv => new ApiService.PresetSummaryDto(
+                kv.Key,
+                kv.Key switch
+                {
+                    "cost-first" => "成本优先",
+                    "balanced" => "均衡",
+                    _ => "质量优先"
+                },
+                kv.Key switch
+                {
+                    "cost-first" => "Thompson 学习 + 延迟感知 + 响应缓存，默认档 Cheap——尽量省钱。",
+                    "balanced" => "Thompson 学习 + 级联升级 10% 采样 + 响应缓存，默认档 Medium。",
+                    _ => "默认档 Strong + Fusion 多模型融合 + 拜占庭共识 + 级联升级 30%——尽量答好。"
+                },
+                kv.Value)).ToList();
+        }
+        catch (Exception ex)
+        {
+            ConfigStatusOk = false;
+            ConfigStatusMsg = "✗ 路由预设加载失败：" + ex.Message;
+        }
+    }
+
+    /// <summary>把预设值填入表单（不落盘，用户可在保存前继续微调）。</summary>
+    private void ApplyPresetToForm(string presetName)
+    {
+        var preset = PresetSummaries.FirstOrDefault(p => p.Name == presetName);
+        if (preset is null) return;
+
+        foreach (var (key, value) in preset.Values)
+        {
+            switch (key)
+            {
+                case "EnableThompsonSampling" when value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False:
+                    Cfg.EnableThompsonSampling = value.GetBoolean();
+                    if (value.GetBoolean()) Cfg.EnableContextualBandit = false;
+                    break;
+                case "EnableLatencyAware" when value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False:
+                    Cfg.EnableLatencyAware = value.GetBoolean();
+                    break;
+                case "ExplorationEpsilon" when value.ValueKind == JsonValueKind.Number:
+                    Cfg.ExplorationEpsilon = value.GetDouble();
+                    break;
+                case "EnableResponseCache" when value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False:
+                    Cfg.EnableResponseCache = value.GetBoolean();
+                    break;
+                case "EnableCascadeUpgrade" when value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False:
+                    Cfg.EnableCascadeUpgrade = value.GetBoolean();
+                    break;
+                case "CascadeUpgradeSampleRate" when value.ValueKind == JsonValueKind.Number:
+                    Cfg.CascadeUpgradeSampleRate = value.GetDouble();
+                    break;
+                case "EnableFusionRouter" when value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False:
+                    Cfg.EnableFusionRouter = value.GetBoolean();
+                    break;
+                case "EnableByzantineConsensus" when value.ValueKind == JsonValueKind.True || value.ValueKind == JsonValueKind.False:
+                    Cfg.EnableByzantineConsensus = value.GetBoolean();
+                    break;
+                case "DefaultTier" when value.ValueKind == JsonValueKind.String:
+                    Cfg.DefaultTier = value.GetString() ?? "Medium";
+                    break;
+            }
+        }
+        SelectedPresetName = presetName;
+        ConfigStatusOk = true;
+        ConfigStatusMsg = $"✓ 预设「{presetName}」已填充到表单（{DirtyCount} 项待保存变更），可继续微调后保存。";
+    }
+
+    private void DiscardChanges()
+    {
+        if (_baseline is not null)
+        {
+            Cfg = _baseline.Clone();
+        }
+        SelectedPresetName = null;
+        ConfigStatusMsg = "";
+    }
 
     private string SandboxInputPrompt = "写一个 C# 快速排序算法，并说明空间复杂度";
     private bool IsSandboxRunning = false;
@@ -608,29 +1169,70 @@
             var cfg = await Api.GetSystemConfigAsync();
             if (cfg != null)
             {
-                CfgFailover = cfg.Routing.EnableFailover;
-                CfgBudgetGuard = cfg.Routing.EnableBudgetGuard;
-                CfgRuleClassifier = cfg.Routing.EnableRuleClassifier;
-                CfgLatencyAware = cfg.Routing.EnableLatencyAware;
-                CfgSemanticRouter = cfg.Routing.EnableSemanticRouter;
-                CfgPiiAnonymization = cfg.Routing.EnablePiiAnonymization;
-                CfgDataSovereignty = cfg.Routing.EnableDataSovereignty;
-                CfgJsonAstAutoRepair = cfg.Routing.EnableJsonAstAutoRepair;
-                CfgFusionRouter = cfg.Routing.EnableFusionRouter;
-                CfgThompson = cfg.Routing.EnableThompsonSampling;
-                CfgBandit = cfg.Routing.EnableContextualBandit;
-                CfgEpsilon = cfg.Routing.ExplorationEpsilon;
-                CfgStarvedN = cfg.Routing.ExplorationStarvedN;
-                CfgResponseCache = cfg.Routing.EnableResponseCache;
-                CfgCacheTtl = cfg.Routing.ResponseCacheTtlSeconds;
-                CfgCacheMaxEntries = cfg.Routing.ResponseCacheMaxEntries;
-                CfgFailoverThreshold = cfg.Routing.FailoverFailureThreshold;
-                CfgFailoverCooldown = cfg.Routing.FailoverCooldownSeconds;
-                CfgDailyBudgetUsd = cfg.Budget.DailyBudgetUsd;
-                CfgEnforceBehavior = cfg.Budget.EnforceOnExhausted;
+                var r = cfg.Routing;
+                Cfg = new ConfigForm
+                {
+                    // ① 基础路由
+                    EnableRuleClassifier = r.EnableRuleClassifier,
+                    EnableSemanticRouter = r.EnableSemanticRouter,
+                    EnableSessionAffinity = r.EnableSessionAffinity,
+                    EnableLatencyAware = r.EnableLatencyAware,
+                    EnableLoadBalance = r.EnableLoadBalance,
+                    EnableKalmanLoadBalance = r.EnableKalmanLoadBalance,
+                    DefaultTier = string.IsNullOrEmpty(r.DefaultTier) ? "Medium" : r.DefaultTier,
+                    // ② 可靠性与预算
+                    EnableFailover = r.EnableFailover,
+                    FailoverFailureThreshold = r.FailoverFailureThreshold,
+                    FailoverCooldownSeconds = r.FailoverCooldownSeconds,
+                    FailoverGlobalTimeoutSeconds = r.FailoverGlobalTimeoutSeconds,
+                    EnableBudgetGuard = r.EnableBudgetGuard,
+                    EnableHealthProbe = r.EnableHealthProbe,
+                    DailyBudgetUsd = cfg.Budget.DailyBudgetUsd,
+                    EnforceOnExhausted = string.IsNullOrEmpty(cfg.Budget.EnforceOnExhausted) ? "Degrade" : cfg.Budget.EnforceOnExhausted,
+                    // ③ 学习与优化
+                    EnableThompsonSampling = r.EnableThompsonSampling,
+                    EnableContextualBandit = r.EnableContextualBandit,
+                    ExplorationEpsilon = r.ExplorationEpsilon,
+                    ExplorationStarvedN = r.ExplorationStarvedN,
+                    EnableResponseCache = r.EnableResponseCache,
+                    ResponseCacheTtlSeconds = r.ResponseCacheTtlSeconds,
+                    ResponseCacheMaxEntries = r.ResponseCacheMaxEntries,
+                    EnableSemanticCache = r.EnableSemanticCache,
+                    SemanticCacheSimilarityThreshold = r.SemanticCacheSimilarityThreshold,
+                    SemanticCacheTtlMinutes = r.SemanticCacheTtlMinutes,
+                    EnableCascadeUpgrade = r.EnableCascadeUpgrade,
+                    CascadeUpgradeSampleRate = r.CascadeUpgradeSampleRate,
+                    EnableRegenerateFeedback = r.EnableRegenerateFeedback,
+                    // ④ 合规与安全
+                    EnablePiiAnonymization = r.EnablePiiAnonymization,
+                    EnableDataSovereignty = r.EnableDataSovereignty,
+                    EnableContentModeration = r.EnableContentModeration,
+                    ModerationSampleRate = r.ModerationSampleRate,
+                    ModerationThreshold = r.ModerationThreshold,
+                    EnableStreamingComplianceFilter = r.EnableStreamingComplianceFilter,
+                    EnablePersonaDriftProtection = r.EnablePersonaDriftProtection,
+                    EnablePromptCompression = r.EnablePromptCompression,
+                    // ⑤ 高级编排
+                    EnableFusionRouter = r.EnableFusionRouter,
+                    FusionRouterMinComplexity = string.IsNullOrEmpty(r.FusionRouterMinComplexity) ? "Standard" : r.FusionRouterMinComplexity,
+                    EnableFusionMode = r.EnableFusionMode,
+                    EnableByzantineConsensus = r.EnableByzantineConsensus,
+                    EnableJsonAstAutoRepair = r.EnableJsonAstAutoRepair,
+                    // ⑥ 观测
+                    EnableDistributedTracing = r.EnableDistributedTracing,
+                    AuditStoreRequestContent = r.AuditStoreRequestContent
+                };
+                _baseline = Cfg.Clone();
+                CurrentPresetName = r.Preset;
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 配置加载失败必须显式警示：表单当前显示的是代码默认值，
+            // 管理员若不知情直接保存会把默认值覆盖到运行配置。
+            ConfigStatusOk = false;
+            ConfigStatusMsg = "✗ 配置加载失败，下方表单为默认值（请勿直接保存）：" + ex.Message;
+        }
     }
 
     private async Task SaveSystemConfig()
@@ -639,20 +1241,59 @@
         ConfigStatusMsg = "";
         try
         {
-            var req = new ApiService.UpdateSystemConfigRequest(
-                CfgFailover, CfgBudgetGuard, CfgRuleClassifier, CfgLatencyAware,
-                CfgSemanticRouter, CfgPiiAnonymization, CfgDataSovereignty,
-                CfgJsonAstAutoRepair, CfgFusionRouter,
-                CfgThompson, CfgBandit, CfgEpsilon, CfgStarvedN,
-                CfgResponseCache, CfgCacheTtl, CfgCacheMaxEntries,
-                CfgFailoverThreshold, CfgFailoverCooldown,
-                CfgDailyBudgetUsd, CfgEnforceBehavior);
+            var req = new ApiService.UpdateSystemConfigRequest
+            {
+                EnableRuleClassifier = Cfg.EnableRuleClassifier,
+                EnableSemanticRouter = Cfg.EnableSemanticRouter,
+                EnableSessionAffinity = Cfg.EnableSessionAffinity,
+                EnableLatencyAware = Cfg.EnableLatencyAware,
+                EnableLoadBalance = Cfg.EnableLoadBalance,
+                EnableKalmanLoadBalance = Cfg.EnableKalmanLoadBalance,
+                DefaultTier = Cfg.DefaultTier,
+                EnableFailover = Cfg.EnableFailover,
+                FailoverFailureThreshold = Cfg.FailoverFailureThreshold,
+                FailoverCooldownSeconds = Cfg.FailoverCooldownSeconds,
+                FailoverGlobalTimeoutSeconds = Cfg.FailoverGlobalTimeoutSeconds,
+                EnableBudgetGuard = Cfg.EnableBudgetGuard,
+                EnableHealthProbe = Cfg.EnableHealthProbe,
+                DailyBudgetUsd = Cfg.DailyBudgetUsd,
+                EnforceOnExhausted = Cfg.EnforceOnExhausted,
+                EnableThompsonSampling = Cfg.EnableThompsonSampling,
+                EnableContextualBandit = Cfg.EnableContextualBandit,
+                ExplorationEpsilon = Cfg.ExplorationEpsilon,
+                ExplorationStarvedN = Cfg.ExplorationStarvedN,
+                EnableResponseCache = Cfg.EnableResponseCache,
+                ResponseCacheTtlSeconds = Cfg.ResponseCacheTtlSeconds,
+                ResponseCacheMaxEntries = Cfg.ResponseCacheMaxEntries,
+                EnableSemanticCache = Cfg.EnableSemanticCache,
+                SemanticCacheSimilarityThreshold = Cfg.SemanticCacheSimilarityThreshold,
+                SemanticCacheTtlMinutes = Cfg.SemanticCacheTtlMinutes,
+                EnableCascadeUpgrade = Cfg.EnableCascadeUpgrade,
+                CascadeUpgradeSampleRate = Cfg.CascadeUpgradeSampleRate,
+                EnableRegenerateFeedback = Cfg.EnableRegenerateFeedback,
+                EnablePiiAnonymization = Cfg.EnablePiiAnonymization,
+                EnableDataSovereignty = Cfg.EnableDataSovereignty,
+                EnableContentModeration = Cfg.EnableContentModeration,
+                ModerationSampleRate = Cfg.ModerationSampleRate,
+                ModerationThreshold = Cfg.ModerationThreshold,
+                EnableStreamingComplianceFilter = Cfg.EnableStreamingComplianceFilter,
+                EnablePersonaDriftProtection = Cfg.EnablePersonaDriftProtection,
+                EnablePromptCompression = Cfg.EnablePromptCompression,
+                EnableFusionRouter = Cfg.EnableFusionRouter,
+                FusionRouterMinComplexity = Cfg.FusionRouterMinComplexity,
+                EnableFusionMode = Cfg.EnableFusionMode,
+                EnableByzantineConsensus = Cfg.EnableByzantineConsensus,
+                EnableJsonAstAutoRepair = Cfg.EnableJsonAstAutoRepair,
+                EnableDistributedTracing = Cfg.EnableDistributedTracing,
+                AuditStoreRequestContent = Cfg.AuditStoreRequestContent
+            };
 
             var (ok, error) = await Api.UpdateSystemConfigAsync(req);
             if (ok)
             {
                 ConfigStatusOk = true;
                 ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
+                _baseline = Cfg.Clone();
                 await LoadMetrics();
             }
             else
@@ -689,16 +1330,31 @@
     {
         if (string.IsNullOrWhiteSpace(SandboxInputPrompt)) return;
         IsSandboxRunning = true;
+        SandboxError = null;
         try
         {
-            SandboxResultData = await Api.RunSandboxRouteAsync(SandboxInputPrompt);
+            var (result, error) = await Api.RunSandboxRouteAsync(SandboxInputPrompt);
+            if (result != null)
+            {
+                SandboxResultData = result;
+            }
+            else
+            {
+                SandboxResultData = null;
+                SandboxError = error ?? "未知错误";
+            }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            SandboxError = ex.Message;
+        }
         finally
         {
             IsSandboxRunning = false;
         }
     }
+
+    private string? SandboxError;
 
     private async Task RunEval()
     {
@@ -797,6 +1453,7 @@
     protected override async Task OnInitializedAsync()
     {
         await LoadSystemConfig();
+        await LoadPresetsAsync();
         await LoadMetrics();
         await LoadLearning();
         await LoadEvalBatches();
@@ -826,9 +1483,16 @@
         try
         {
             Metrics = await Api.GetMetricsAsync();
+            PollError = null;
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // 轮询失败保留上一次数据，仅更新错误提示
+            PollError = "引擎状态刷新失败：" + ex.Message;
+        }
     }
+
+    private string? PollError;
 
     private async Task LoadLearning()
     {
@@ -836,7 +1500,10 @@
         {
             LearningStates = await Api.GetLearningAsync();
         }
-        catch { }
+        catch (Exception ex)
+        {
+            PollError = "学习状态刷新失败：" + ex.Message;
+        }
     }
 
     private async Task LoadSemanticRoutes()
@@ -851,7 +1518,11 @@
                 SemanticThreshold = dto.SimilarityThreshold;
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            ConfigStatusOk = false;
+            ConfigStatusMsg = "✗ 语义路由规则加载失败：" + ex.Message;
+        }
     }
 
     private void ApplySemanticRouteForm()
