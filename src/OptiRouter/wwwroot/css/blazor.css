@@ -1514,14 +1514,18 @@ button.side-nav-logout {
 }
 
 /* 含 inline 表单行的项（熔断参数/日预算约束等）：标题+描述在上、表单行在下，
-   避免描述文字与行并排时被压成窄竖条（min-width:0 允许收缩导致逐字竖排）。 */
-.config-item:has(.config-row) {
+   避免描述文字与行并排时被压成窄竖条（min-width:0 允许收缩导致逐字竖排）。
+   textarea（Fusion Analyst 提示词）同理：横向 flex 下 width:100% 的多行输入
+   会按自身理想宽度撑开整行与所在网格列。 */
+.config-item:has(.config-row),
+.config-item:has(textarea.form-control) {
     flex-direction: column;
     align-items: stretch;
     gap: 0.5rem;
 }
 
-.config-item:has(.config-row) .item-text {
+.config-item:has(.config-row) .item-text,
+.config-item:has(textarea.form-control) .item-text {
     max-width: 100%;
 }
 
