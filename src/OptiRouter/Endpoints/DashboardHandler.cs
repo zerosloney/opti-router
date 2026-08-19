@@ -4,7 +4,9 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
+using OptiRouter.Health;
 using OptiRouter.Routing;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -93,37 +95,89 @@ public static class DashboardHandler
             });
         });
 
+        // 3b. Learning State Reset：Thompson 与 Contextual Bandit 状态全部回落初始先验
+        //     （调参实验或数据污染后从零学习；含持久化回落）。
+        endpoints.MapPost("/api/dashboard/learning/reset", (ThompsonStateStore tsStore, ContextualBanditState banditState, IMemoryCache cache) =>
+        {
+            int thompsonCleared = tsStore.ResetAll();
+            int banditCleared = banditState.ResetAll();
+            cache.Remove("dashboard:learning");
+            return Results.Ok(new
+            {
+                message = "Learning state reset to uniform prior.",
+                thompsonCleared,
+                banditCleared
+            });
+        });
+
+        // 3c. Learning State CSV Export
+        endpoints.MapGet("/api/dashboard/learning/export", (HttpContext httpContext, ThompsonStateStore tsStore) =>
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("model,alpha,beta,mean_reward,samples,last_update_utc");
+            foreach (var s in tsStore.GetSnapshot())
+            {
+                sb.AppendLine(string.Join(',',
+                    CsvEscape(s.Model),
+                    s.Alpha.ToString("F6", CultureInfo.InvariantCulture),
+                    s.Beta.ToString("F6", CultureInfo.InvariantCulture),
+                    s.Mean.ToString("F6", CultureInfo.InvariantCulture),
+                    s.N,
+                    s.LastUpdateUtc == DateTimeOffset.MinValue ? string.Empty : s.LastUpdateUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")));
+            }
+            httpContext.Response.Headers.ContentDisposition = "attachment; filename=\"learning-state-export.csv\"";
+            return Results.Text("\uFEFF" + sb.ToString(), "text/csv", System.Text.Encoding.UTF8);
+        });
+
+        // 3d. Alert History：告警出现/恢复事件（进程内环形缓冲，重启清空）
+        endpoints.MapGet("/api/dashboard/alerts/history", (AlertHistory history)
+            => Results.Ok(history.GetRecent(100)));
+
+
         // 4. Request Audit Log API with Multi-Filter Support
-        endpoints.MapGet("/api/dashboard/requests", (IRequestAuditStore auditStore, int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null) =>
+        endpoints.MapGet("/api/dashboard/requests", (IRequestAuditStore auditStore, int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null) =>
         {
             if (limit <= 0) limit = 50;
             if (limit > 200) limit = 200;
             if (offset < 0) offset = 0;
 
             var recent = auditStore.GetRecent(500);
-            var filtered = recent.AsEnumerable();
-
-            if (!string.IsNullOrWhiteSpace(model))
-                filtered = filtered.Where(r => r.Model.Equals(model, StringComparison.OrdinalIgnoreCase));
-
-            if (!string.IsNullOrWhiteSpace(tier) && Enum.TryParse<ModelTier>(tier, ignoreCase: true, out var targetTier))
-                filtered = filtered.Where(r => r.RoutedTier == targetTier);
-
-            if (!string.IsNullOrWhiteSpace(status))
-            {
-                if (status.Equals("success", StringComparison.OrdinalIgnoreCase) || status == "200")
-                    filtered = filtered.Where(r => r.Success);
-                else if (status.Equals("error", StringComparison.OrdinalIgnoreCase) || status == "429" || status == "500")
-                    filtered = filtered.Where(r => !r.Success);
-            }
-
-            if (minLatency.HasValue && minLatency.Value > 0)
-                filtered = filtered.Where(r => r.LatencyMs >= minLatency.Value);
+            var filtered = ApplyAuditFilters(recent.AsEnumerable(), model, tier, status, minLatency, q, from, to);
 
             var totalCount = filtered.Count();
             var pageItems = filtered.Skip(offset).Take(limit).ToList();
 
             return Results.Json(new { items = pageItems, totalCount });
+        });
+
+        // 4a. Audit Log CSV Export（与列表接口同一套筛选；作用域同为最近 500 条活动缓冲）
+        endpoints.MapGet("/api/dashboard/requests/export", async (HttpContext httpContext, IRequestAuditStore auditStore, string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null) =>
+        {
+            var rows = ApplyAuditFilters(auditStore.GetRecent(500).AsEnumerable(), model, tier, status, minLatency, q, from, to).ToList();
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("timestamp_utc,request_id,trace_id,model,tier,success,prompt_tokens,completion_tokens,cached_input_tokens,cache_write_input_tokens,cost_usd,latency_ms,ttft_ms,streaming,error_message");
+            foreach (var r in rows)
+            {
+                sb.AppendLine(string.Join(',',
+                    r.Timestamp.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                    CsvEscape(r.RequestId),
+                    CsvEscape(r.TraceId),
+                    CsvEscape(r.Model),
+                    r.RoutedTier,
+                    r.Success,
+                    r.PromptTokens,
+                    r.CompletionTokens,
+                    r.CachedInputTokens,
+                    r.CacheWriteInputTokens,
+                    r.Cost.ToString("F6"),
+                    r.LatencyMs,
+                    r.TimeToFirstTokenMs.HasValue ? r.TimeToFirstTokenMs.Value.ToString() : string.Empty,
+                    r.IsStreaming,
+                    CsvEscape(r.ErrorMessage)));
+            }
+            // 带 BOM 便于 Excel 正确识别 UTF-8 中文。
+            httpContext.Response.Headers.ContentDisposition = "attachment; filename=\"request-audit-export.csv\"";
+            await httpContext.Response.WriteAsync("\uFEFF" + sb.ToString(), httpContext.RequestAborted);
         });
 
         // 4b. Single Request Record Full Trace Detail
@@ -168,7 +222,7 @@ public static class DashboardHandler
         endpoints.MapPost("/api/dashboard/eval/run", async (
             HttpContext httpContext,
             ProxyOrchestrator orchestrator,
-            IMemoryCache cache,
+            AppConfigDbStore store,
             EvalRunRequest? req,
             CancellationToken requestAborted) =>
         {
@@ -186,28 +240,28 @@ public static class DashboardHandler
                 ct: requestAborted);
 
             httpContext.Response.Headers["X-Eval-Consumes-Budget"] = "true";
-            RecordEvalBatch(cache, report);
+            RecordEvalBatch(store, report);
             return Results.Ok(report);
         });
 
-        // 6b. Eval Batch History API（进程内保留最近 10 批，重启清空）
-        endpoints.MapGet("/api/dashboard/eval/batches", (IMemoryCache cache) =>
+        // 6b. Eval Batch History API（SQLite 持久化，保留最近 10 批，重启不丢）
+        endpoints.MapGet("/api/dashboard/eval/batches", (AppConfigDbStore store) =>
         {
-            var batches = GetEvalHistory(cache)
+            var batches = GetEvalHistory(store)
                 .OrderByDescending(r => r.Timestamp)
                 .ToList();
             return Results.Ok(batches);
         });
 
         // 6c. Paired A/B Compare API——复用 OfflineEvalRunner.Compare 按用例 ID 成对比较两个批次
-        endpoints.MapPost("/api/dashboard/eval/compare", (IMemoryCache cache, EvalCompareRequest req) =>
+        endpoints.MapPost("/api/dashboard/eval/compare", (AppConfigDbStore store, EvalCompareRequest req) =>
         {
-            var history = GetEvalHistory(cache);
+            var history = GetEvalHistory(store);
             var baseline = history.FirstOrDefault(r => string.Equals(r.BatchId, req.BaselineBatchId, StringComparison.Ordinal));
             var candidate = history.FirstOrDefault(r => string.Equals(r.BatchId, req.CandidateBatchId, StringComparison.Ordinal));
             if (baseline is null || candidate is null)
             {
-                return Results.NotFound(new { error = "批次不存在。评测历史为进程内状态（重启清空），请先运行评测。" });
+                return Results.NotFound(new { error = "批次不存在，请确认批次 ID 后重试。" });
             }
 
             return Results.Ok(OfflineEvalRunner.Compare(baseline, candidate));
@@ -295,7 +349,7 @@ public static class DashboardHandler
                 return Results.BadRequest(new { error });
             }
 
-            if (!TryPersistRoutingDocuments((IConfigurationRoot)config, store, req.ExpectedVersion, root =>
+            if (!TryPersistRoutingDocuments((IConfigurationRoot)config, store, req.ExpectedVersion, "admin", root =>
             {
                 var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
                 var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
@@ -346,6 +400,7 @@ public static class DashboardHandler
                     opt.Routing.EnableLatencyAware,
                     opt.Routing.EnableLoadBalance,
                     opt.Routing.EnableKalmanLoadBalance,
+                    opt.Routing.EnableCapabilityFilter,
                     // ② 可靠性与预算
                     opt.Routing.EnableFailover,
                     opt.Routing.FailoverFailureThreshold,
@@ -382,9 +437,25 @@ public static class DashboardHandler
                     opt.Routing.EnableFusionMode,
                     opt.Routing.EnableByzantineConsensus,
                     opt.Routing.EnableJsonAstAutoRepair,
+                    opt.Routing.FusionRouterPanelSize,
+                    opt.Routing.EnableDynamicFusionPanelSize,
+                    opt.Routing.FusionRouterMinPanelSize,
+                    opt.Routing.EnableFusionDiversity,
+                    opt.Routing.FusionRouterAnalystModel,
+                    opt.Routing.FusionRouterAnalystPrompt,
+                    opt.Routing.FusionRouterOuterModel,
+                    opt.Routing.FusionRouterMaxOutputTokens,
+                    opt.Routing.FusionRouterTemperature,
+                    opt.Routing.FusionRouterPanelTemperature,
+                    opt.Routing.FusionRouterPanelTimeoutSeconds,
+                    opt.Routing.FusionMaxParallel,
+                    opt.Routing.FusionHedgeDelayMs,
                     // ⑥ 观测
                     opt.Routing.EnableDistributedTracing,
-                    opt.Routing.AuditStoreRequestContent
+                    opt.Routing.AuditStoreRequestContent,
+                    opt.Routing.AuditRetentionHours,
+                    opt.Routing.AlertWebhookUrl,
+                    opt.Routing.AlertWebhookIntervalSeconds
                 },
                 Budget = new
                 {
@@ -397,6 +468,20 @@ public static class DashboardHandler
         // 7b. GET Presets API：三档路由预设（供配置页一键填充表单；应用预设 = 显式 PUT 全部预设字段）。
         endpoints.MapGet("/api/dashboard/config/presets",
             () => Results.Ok(RoutingPreset.GetPresets()));
+
+        // 7c. Config Change History：路由/预算配置每次落库的变更审计（谁在何时改了哪项，保留最近 200 条）。
+        //     Summary 为 [{key, from, to}] 紧凑 JSON；解析失败时原样返回不阻断列表。
+        endpoints.MapGet("/api/dashboard/config/history", (AppConfigDbStore store, int limit = 50) =>
+        {
+            if (limit <= 0 || limit > 200) limit = 50;
+            return Results.Ok(store.LoadConfigChanges(limit).Select(c => new
+            {
+                c.Id,
+                timestamp = c.Ts,
+                c.Actor,
+                changes = TryParseJsonArray(c.Summary)
+            }));
+        });
 
         // 8. PUT Update System Config API（持久化到 appsettings.json + 触发 IConfigurationRoot.Reload，
         //    IOptionsMonitor 自然派发到所有消费方；取代旧版 mutate IOptions.Value 的非持久写法，
@@ -431,7 +516,7 @@ public static class DashboardHandler
                 return Results.BadRequest(new { error = string.Join("; ", validation.Failures) });
             }
 
-            if (!TryPersistRoutingDocuments((IConfigurationRoot)config, store, req.ExpectedVersion, root =>
+            if (!TryPersistRoutingDocuments((IConfigurationRoot)config, store, req.ExpectedVersion, "admin", root =>
             {
                 var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
                 var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
@@ -445,6 +530,7 @@ public static class DashboardHandler
                 if (req.EnableLatencyAware is not null) routing["EnableLatencyAware"] = req.EnableLatencyAware.Value;
                 if (req.EnableLoadBalance is not null) routing["EnableLoadBalance"] = req.EnableLoadBalance.Value;
                 if (req.EnableKalmanLoadBalance is not null) routing["EnableKalmanLoadBalance"] = req.EnableKalmanLoadBalance.Value;
+                if (req.EnableCapabilityFilter is not null) routing["EnableCapabilityFilter"] = req.EnableCapabilityFilter.Value;
                 if (!string.IsNullOrEmpty(req.DefaultTier) && Enum.TryParse<ModelTier>(req.DefaultTier, ignoreCase: true, out var tier)) routing["DefaultTier"] = tier.ToString();
 
                 // ② 可靠性与预算
@@ -486,10 +572,26 @@ public static class DashboardHandler
                 if (req.EnableFusionMode is not null) routing["EnableFusionMode"] = req.EnableFusionMode.Value;
                 if (req.EnableByzantineConsensus is not null) routing["EnableByzantineConsensus"] = req.EnableByzantineConsensus.Value;
                 if (req.EnableJsonAstAutoRepair is not null) routing["EnableJsonAstAutoRepair"] = req.EnableJsonAstAutoRepair.Value;
+                if (req.FusionRouterPanelSize is >= 2 and <= 5) routing["FusionRouterPanelSize"] = req.FusionRouterPanelSize.Value;
+                if (req.EnableDynamicFusionPanelSize is not null) routing["EnableDynamicFusionPanelSize"] = req.EnableDynamicFusionPanelSize.Value;
+                if (req.FusionRouterMinPanelSize is >= 2 and <= 5) routing["FusionRouterMinPanelSize"] = req.FusionRouterMinPanelSize.Value;
+                if (req.EnableFusionDiversity is not null) routing["EnableFusionDiversity"] = req.EnableFusionDiversity.Value;
+                if (req.FusionRouterAnalystModel is not null) routing["FusionRouterAnalystModel"] = req.FusionRouterAnalystModel.Trim();
+                if (req.FusionRouterAnalystPrompt is not null) routing["FusionRouterAnalystPrompt"] = req.FusionRouterAnalystPrompt.Trim();
+                if (req.FusionRouterOuterModel is not null) routing["FusionRouterOuterModel"] = req.FusionRouterOuterModel.Trim();
+                if (req.FusionRouterMaxOutputTokens is > 0) routing["FusionRouterMaxOutputTokens"] = req.FusionRouterMaxOutputTokens.Value;
+                if (req.FusionRouterTemperature is >= 0 and <= 2) routing["FusionRouterTemperature"] = req.FusionRouterTemperature.Value;
+                if (req.FusionRouterPanelTemperature is >= 0 and <= 2) routing["FusionRouterPanelTemperature"] = req.FusionRouterPanelTemperature.Value;
+                if (req.FusionRouterPanelTimeoutSeconds is >= 0) routing["FusionRouterPanelTimeoutSeconds"] = req.FusionRouterPanelTimeoutSeconds.Value;
+                if (req.FusionMaxParallel is >= 2 and <= 5) routing["FusionMaxParallel"] = req.FusionMaxParallel.Value;
+                if (req.FusionHedgeDelayMs is >= 0) routing["FusionHedgeDelayMs"] = req.FusionHedgeDelayMs.Value;
 
                 // ⑥ 观测
                 if (req.EnableDistributedTracing is not null) routing["EnableDistributedTracing"] = req.EnableDistributedTracing.Value;
                 if (req.AuditStoreRequestContent is not null) routing["AuditStoreRequestContent"] = req.AuditStoreRequestContent.Value;
+                if (req.AuditRetentionHours is >= 1) routing["AuditRetentionHours"] = req.AuditRetentionHours.Value;
+                if (req.AlertWebhookUrl is not null) routing["AlertWebhookUrl"] = req.AlertWebhookUrl.Trim();
+                if (req.AlertWebhookIntervalSeconds is >= 5) routing["AlertWebhookIntervalSeconds"] = req.AlertWebhookIntervalSeconds.Value;
 
                 if (req.DailyBudgetUsd is >= 0) budget["DailyBudgetUsd"] = req.DailyBudgetUsd.Value;
                 if (!string.IsNullOrEmpty(req.EnforceOnExhausted) && Enum.TryParse<BudgetExhaustionMode>(req.EnforceOnExhausted, ignoreCase: true, out var behavior))
@@ -635,6 +737,56 @@ public static class DashboardHandler
         key.Enabled,
         key.CreatedAt);
 
+    /// <summary>
+    /// 审计日志统一筛选：model/tier/status/minLatency 为原有语义；
+    /// q = RequestId/TraceId 子串匹配（不区分大小写）；from/to = UTC ISO 时间下界/上界。
+    /// </summary>
+    private static IEnumerable<RequestAuditRecord> ApplyAuditFilters(
+        IEnumerable<RequestAuditRecord> source,
+        string? model, string? tier, string? status, long? minLatency, string? q, string? from, string? to)
+    {
+        if (!string.IsNullOrWhiteSpace(model))
+            source = source.Where(r => r.Model.Equals(model, StringComparison.OrdinalIgnoreCase));
+
+        if (!string.IsNullOrWhiteSpace(tier) && Enum.TryParse<ModelTier>(tier, ignoreCase: true, out var targetTier))
+            source = source.Where(r => r.RoutedTier == targetTier);
+
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            if (status.Equals("success", StringComparison.OrdinalIgnoreCase) || status == "200")
+                source = source.Where(r => r.Success);
+            else if (status.Equals("error", StringComparison.OrdinalIgnoreCase) || status == "429" || status == "500")
+                source = source.Where(r => !r.Success);
+        }
+
+        if (minLatency.HasValue && minLatency.Value > 0)
+            source = source.Where(r => r.LatencyMs >= minLatency.Value);
+
+        if (!string.IsNullOrWhiteSpace(q))
+            source = source.Where(r => (r.RequestId?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)
+                                     || (r.TraceId?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+
+        if (DateTime.TryParse(from, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var fromUtc))
+            source = source.Where(r => r.Timestamp >= fromUtc);
+        if (DateTime.TryParse(to, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var toUtc))
+            source = source.Where(r => r.Timestamp <= toUtc);
+
+        return source;
+    }
+
+    /// <summary>宽松解析 JSON 数组文本；失败时原样返回字符串（配置审计 Summary 兼容展示）。</summary>
+    private static object TryParseJsonArray(string json)
+    {
+        try
+        {
+            return JsonNode.Parse(json) ?? new JsonArray();
+        }
+        catch (JsonException)
+        {
+            return json;
+        }
+    }
+
     private static string CsvEscape(string? value)
     {
         if (string.IsNullOrEmpty(value)) return string.Empty;
@@ -666,6 +818,7 @@ public static class DashboardHandler
         public bool? EnableLatencyAware { get; init; }
         public bool? EnableLoadBalance { get; init; }
         public bool? EnableKalmanLoadBalance { get; init; }
+        public bool? EnableCapabilityFilter { get; init; }
         public string? DefaultTier { get; init; }
 
         // ② 可靠性与预算
@@ -709,10 +862,26 @@ public static class DashboardHandler
         public bool? EnableFusionMode { get; init; }
         public bool? EnableByzantineConsensus { get; init; }
         public bool? EnableJsonAstAutoRepair { get; init; }
+        public int? FusionRouterPanelSize { get; init; }
+        public bool? EnableDynamicFusionPanelSize { get; init; }
+        public int? FusionRouterMinPanelSize { get; init; }
+        public bool? EnableFusionDiversity { get; init; }
+        public string? FusionRouterAnalystModel { get; init; }
+        public string? FusionRouterAnalystPrompt { get; init; }
+        public string? FusionRouterOuterModel { get; init; }
+        public int? FusionRouterMaxOutputTokens { get; init; }
+        public double? FusionRouterTemperature { get; init; }
+        public double? FusionRouterPanelTemperature { get; init; }
+        public int? FusionRouterPanelTimeoutSeconds { get; init; }
+        public int? FusionMaxParallel { get; init; }
+        public int? FusionHedgeDelayMs { get; init; }
 
         // ⑥ 观测
         public bool? EnableDistributedTracing { get; init; }
         public bool? AuditStoreRequestContent { get; init; }
+        public int? AuditRetentionHours { get; init; }
+        public string? AlertWebhookUrl { get; init; }
+        public int? AlertWebhookIntervalSeconds { get; init; }
     }
 
     /// <summary>
@@ -730,6 +899,7 @@ public static class DashboardHandler
         if (req.EnableLatencyAware is not null) routing.EnableLatencyAware = req.EnableLatencyAware.Value;
         if (req.EnableLoadBalance is not null) routing.EnableLoadBalance = req.EnableLoadBalance.Value;
         if (req.EnableKalmanLoadBalance is not null) routing.EnableKalmanLoadBalance = req.EnableKalmanLoadBalance.Value;
+        if (req.EnableCapabilityFilter is not null) routing.EnableCapabilityFilter = req.EnableCapabilityFilter.Value;
         if (!string.IsNullOrEmpty(req.DefaultTier) && Enum.TryParse<ModelTier>(req.DefaultTier, ignoreCase: true, out var tier))
         {
             routing.DefaultTier = tier;
@@ -782,10 +952,28 @@ public static class DashboardHandler
         if (req.EnableFusionMode is not null) routing.EnableFusionMode = req.EnableFusionMode.Value;
         if (req.EnableByzantineConsensus is not null) routing.EnableByzantineConsensus = req.EnableByzantineConsensus.Value;
         if (req.EnableJsonAstAutoRepair is not null) routing.EnableJsonAstAutoRepair = req.EnableJsonAstAutoRepair.Value;
+        if (req.FusionRouterPanelSize is >= 2 and <= 5) routing.FusionRouterPanelSize = req.FusionRouterPanelSize.Value;
+        if (req.EnableDynamicFusionPanelSize is not null) routing.EnableDynamicFusionPanelSize = req.EnableDynamicFusionPanelSize.Value;
+        if (req.FusionRouterMinPanelSize is >= 2 and <= 5) routing.FusionRouterMinPanelSize = req.FusionRouterMinPanelSize.Value;
+        if (req.EnableFusionDiversity is not null) routing.EnableFusionDiversity = req.EnableFusionDiversity.Value;
+        // 模型名/提示词：请求非 null 即写入（空串 = 清除回落默认主候选）。
+        if (req.FusionRouterAnalystModel is not null) routing.FusionRouterAnalystModel = req.FusionRouterAnalystModel.Trim();
+        if (req.FusionRouterAnalystPrompt is not null) routing.FusionRouterAnalystPrompt = req.FusionRouterAnalystPrompt.Trim();
+        if (req.FusionRouterOuterModel is not null) routing.FusionRouterOuterModel = req.FusionRouterOuterModel.Trim();
+        if (req.FusionRouterMaxOutputTokens is > 0) routing.FusionRouterMaxOutputTokens = req.FusionRouterMaxOutputTokens.Value;
+        if (req.FusionRouterTemperature is >= 0 and <= 2) routing.FusionRouterTemperature = req.FusionRouterTemperature.Value;
+        if (req.FusionRouterPanelTemperature is >= 0 and <= 2) routing.FusionRouterPanelTemperature = req.FusionRouterPanelTemperature.Value;
+        if (req.FusionRouterPanelTimeoutSeconds is >= 0) routing.FusionRouterPanelTimeoutSeconds = req.FusionRouterPanelTimeoutSeconds.Value;
+        if (req.FusionMaxParallel is >= 2 and <= 5) routing.FusionMaxParallel = req.FusionMaxParallel.Value;
+        if (req.FusionHedgeDelayMs is >= 0) routing.FusionHedgeDelayMs = req.FusionHedgeDelayMs.Value;
 
         // ⑥ 观测
         if (req.EnableDistributedTracing is not null) routing.EnableDistributedTracing = req.EnableDistributedTracing.Value;
         if (req.AuditStoreRequestContent is not null) routing.AuditStoreRequestContent = req.AuditStoreRequestContent.Value;
+        if (req.AuditRetentionHours is >= 1) routing.AuditRetentionHours = req.AuditRetentionHours.Value;
+        // Webhook URL：请求非 null 即写入（空串 = 禁用推送，仅保留 Dashboard/历史展示）。
+        if (req.AlertWebhookUrl is not null) routing.AlertWebhookUrl = req.AlertWebhookUrl.Trim();
+        if (req.AlertWebhookIntervalSeconds is >= 5) routing.AlertWebhookIntervalSeconds = req.AlertWebhookIntervalSeconds.Value;
     }
 
     public record EvalRunRequest(List<EvalCaseRequest>? Cases);
@@ -884,39 +1072,48 @@ public static class DashboardHandler
         return dataset;
     }
 
-    private const string EvalHistoryCacheKey = "dashboard:eval-history";
+    /// <summary>评测批次历史上限（与存储层裁剪保持一致）。</summary>
     private const int EvalHistoryMaxBatches = 10;
-    private static readonly object EvalHistoryLock = new();
 
-    private static List<BatchEvalReport> GetEvalHistory(IMemoryCache cache)
-        => cache.Get<List<BatchEvalReport>>(EvalHistoryCacheKey) ?? new List<BatchEvalReport>();
-
-    private static void RecordEvalBatch(IMemoryCache cache, BatchEvalReport report)
+    private static List<BatchEvalReport> GetEvalHistory(AppConfigDbStore store)
     {
-        lock (EvalHistoryLock)
+        var result = new List<BatchEvalReport>();
+        foreach (var (_, _, json) in store.LoadEvalBatches())
         {
-            var history = cache.GetOrCreate(EvalHistoryCacheKey, entry =>
+            try
             {
-                entry.Size = 1;
-                entry.Priority = CacheItemPriority.NeverRemove;
-                return new List<BatchEvalReport>();
-            })!;
-            history.Add(report);
-            if (history.Count > EvalHistoryMaxBatches)
+                var report = JsonSerializer.Deserialize<BatchEvalReport>(json, AppConfigDbStore.JsonOptions);
+                if (report is not null)
+                    result.Add(report);
+            }
+            catch (JsonException)
             {
-                history.RemoveRange(0, history.Count - EvalHistoryMaxBatches);
+                // 单批损坏跳过，不阻断其余批次（与模型配置容错语义一致）。
             }
         }
+        return result;
+    }
+
+    private static void RecordEvalBatch(AppConfigDbStore store, BatchEvalReport report)
+    {
+        string json = JsonSerializer.Serialize(report, AppConfigDbStore.JsonOptions);
+        store.SaveEvalBatch(
+            report.BatchId,
+            report.Timestamp.ToString("yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'", CultureInfo.InvariantCulture),
+            json,
+            EvalHistoryMaxBatches);
     }
 
     /// <summary>
     /// 把路由/预算配置变更持久化到 SQLite 配置库并触发热重载。
     /// 变更以"当前 DB 文档 + 请求字段"合并后整体写回（与旧 appsettings.json 落盘语义一致）。
+    /// 写入成功后计算新旧文档 key 级 diff 并记入配置变更审计（config_change_history）。
     /// </summary>
     private static bool TryPersistRoutingDocuments(
         IConfigurationRoot configRoot,
         AppConfigDbStore store,
         string? expectedVersion,
+        string actor,
         Action<JsonObject> mutate,
         out string version)
     {
@@ -962,6 +1159,13 @@ public static class DashboardHandler
                 continue;
             }
 
+            // 变更审计：对比落库前后的 key 级差异（上限 50 条，防整表替换撑爆 summary）。
+            var diff = BuildConfigDiff(snapshot.RoutingJson, snapshot.BudgetJson, routingJson, budgetJson);
+            if (diff.Count > 0)
+            {
+                store.AppendConfigChange(actor, diff.ToJsonString());
+            }
+
             // Reload 同步扇出 IOptionsMonitor 回调（RouterEngine/ModelClientProvider 等热生效）。
             configRoot.Reload();
             return true;
@@ -969,6 +1173,41 @@ public static class DashboardHandler
 
         version = store.LoadRoutingBudgetSnapshot().Version;
         return false;
+    }
+
+    /// <summary>对比新旧路由/预算文档顶层 key，产出 [{key, from, to}] 差异数组（from/to 为 JSON 值文本）。</summary>
+    private static JsonArray BuildConfigDiff(string? oldRouting, string? oldBudget, string? newRouting, string? newBudget)
+    {
+        static Dictionary<string, string?> Flatten(string? routing, string? budget)
+        {
+            var map = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var (prefix, json) in new[] { ("Routing:", routing), ("Budget:", budget) })
+            {
+                if (string.IsNullOrWhiteSpace(json) || JsonNode.Parse(json) is not JsonObject obj)
+                    continue;
+                foreach (var (key, value) in obj)
+                {
+                    map[prefix + key] = value?.ToJsonString();
+                }
+            }
+            return map;
+        }
+
+        var oldMap = Flatten(oldRouting, oldBudget);
+        var newMap = Flatten(newRouting, newBudget);
+        var diff = new JsonArray();
+        const int maxEntries = 50;
+        foreach (var key in oldMap.Keys.Union(newMap.Keys).OrderBy(k => k, StringComparer.Ordinal))
+        {
+            string? oldValue = oldMap.TryGetValue(key, out var v) ? v : null;
+            string? newValue = newMap.TryGetValue(key, out var w) ? w : null;
+            if (string.Equals(oldValue, newValue, StringComparison.Ordinal))
+                continue;
+            diff.Add(new JsonObject { ["key"] = key, ["from"] = oldValue, ["to"] = newValue });
+            if (diff.Count >= maxEntries)
+                break;
+        }
+        return diff;
     }
 
     private static readonly string[] ValidWindows = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };

@@ -9,9 +9,12 @@
     <div class="glass-card">
         <div class="card-label">
             <span>🔑 客户端 API Key 与租户配额控制台 (Client Quota Studio)</span>
-            <button class="btn-primary btn-sm" @onclick="ToggleAddKeyForm">
-                @(ShowAddKeyForm ? "- 取消签发" : "+ 签发租户 API Key")
-            </button>
+            <span style="display: flex; gap: 8px;">
+                <button class="btn-ghost btn-sm" @onclick="ExportUsageCsv">⬇ 导出用量 CSV</button>
+                <button class="btn-primary btn-sm" @onclick="ToggleAddKeyForm">
+                    @(ShowAddKeyForm ? "- 取消签发" : "+ 签发租户 API Key")
+                </button>
+            </span>
         </div>
 
         @if (!string.IsNullOrEmpty(ListLoadError))
@@ -46,7 +49,7 @@
             <table class="config-table">
                 <thead>
                     <tr>
-                        <th scope="col">租户/部门</th><th scope="col">API Key</th><th scope="col">日预算 ($)</th><th scope="col">QPS 限制</th><th scope="col">状态</th><th scope="col">签发时间</th><th scope="col">操作</th>
+                        <th scope="col">租户/部门</th><th scope="col">API Key</th><th scope="col">日预算 ($)</th><th scope="col">今日消费</th><th scope="col">用量占比</th><th scope="col">今日请求</th><th scope="col">QPS 限制</th><th scope="col">状态</th><th scope="col">签发时间</th><th scope="col">操作</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -58,6 +61,15 @@
                                 <td><strong>@k.TenantName</strong></td>
                                 <td class="table-mono" style="color: var(--primary);">@k.KeyPrefix</td>
                                 <td>$@k.DailyBudgetUsd.ToString("N0")</td>
+                                <td style="color: var(--success); font-weight: 600;">$@k.DailySpendUsd.ToString("F4")</td>
+                                <td style="min-width: 130px;">
+                                    <div style="display: flex; align-items: center; gap: 8px;">
+                                        <div class="quota-bar"><div class="quota-fill @((k.QuotaUtilization >= 80) ? "quota-fill-danger" : "")" style="width: @(Math.Min(100, k.QuotaUtilization).ToString("F0"))%;"></div></div>
+                                        <span class="@(k.QuotaUtilization >= 80 ? "text-danger" : "text-secondary")" style="font-size: 0.8rem; white-space: nowrap;">@k.QuotaUtilization.ToString("F1")%</span>
+                                    </div>
+                                    <div class="text-secondary" style="font-size: 0.72rem; margin-top: 2px;">剩余 $@k.RemainingBudgetUsd.ToString("F2")</div>
+                                </td>
+                                <td>@k.DailyRequestCount</td>
                                 <td>@k.MaxQps QPS</td>
                                 <td>
                                     <span class="@(k.Enabled ? "text-success" : "text-secondary")" style="font-weight: 600;">@(k.Enabled ? "正常" : "已禁用")</span>
@@ -65,14 +77,14 @@
                                 <td>@k.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
                                 <td style="display: flex; gap: 6px;">
                                     <button class="btn-ghost btn-sm" @onclick="() => ToggleKeyEnabled(k)">@(k.Enabled ? "禁用" : "启用")</button>
-                                    <button class="btn-danger btn-sm" @onclick="() => DeleteKey(k.KeyId)">删除</button>
+                                    <button class="btn-danger btn-sm" @onclick="() => DeleteKey(k)">删除</button>
                                 </td>
                             </tr>
                         }
                     }
                     else
                     {
-                        <tr><td colspan="7" class="text-center text-secondary">暂无签发的客户端 API Key，点击上方 "+ 签发租户 API Key" 开始分配。</td></tr>
+                        <tr><td colspan="10" class="text-center text-secondary">暂无签发的客户端 API Key，点击上方 "+ 签发租户 API Key" 开始分配。</td></tr>
                     }
                 </tbody>
             </table>
@@ -100,7 +112,7 @@
 }
 
 @code {
-    private List<ApiService.ClientKeyDto> KeyList = new();
+    private List<ApiService.TenantUsageDto> KeyList = new();
     private bool ShowAddKeyForm = false;
     private string NewTenantName = "";
     private decimal NewTenantBudget = 100.0m;
@@ -115,12 +127,12 @@
     {
         try
         {
-            KeyList = await Api.GetClientKeysAsync();
+            KeyList = await Api.GetClientKeysUsageAsync();
             ListLoadError = null;
         }
         catch (Exception ex)
         {
-            ListLoadError = "密钥列表加载失败：" + ex.Message;
+            ListLoadError = "密钥用量加载失败：" + ex.Message;
         }
     }
 
@@ -162,6 +174,11 @@
     private string? ListLoadError;
     private string? MutationError;
 
+    private async Task ExportUsageCsv()
+    {
+        await JS.InvokeVoidAsync("open", Api.BuildKeysUsageExportUrl(), "_blank");
+    }
+
     private async Task CopyIssuedKey()
     {
         if (IssuedPlaintextKey == null) return;
@@ -175,7 +192,7 @@
         CopyFeedback = "";
     }
 
-    private async Task ToggleKeyEnabled(ApiService.ClientKeyDto k)
+    private async Task ToggleKeyEnabled(ApiService.TenantUsageDto k)
     {
         var (ok, error) = await Api.UpdateClientKeyAsync(k.KeyId, !k.Enabled, k.DailyBudgetUsd, k.MaxQps);
         if (!ok)
@@ -189,9 +206,13 @@
         await LoadClientKeys();
     }
 
-    private async Task DeleteKey(string key)
+    private async Task DeleteKey(ApiService.TenantUsageDto k)
     {
-        var (ok, error) = await Api.DeleteClientKeyAsync(key);
+        // 删除不可恢复：浏览器原生确认兜底误点。
+        bool confirmed = await JS.InvokeAsync<bool>("confirm", $"确定删除租户「{k.TenantName}」的 API Key？\n删除后该租户所有请求将立即被拒绝，且不可恢复。");
+        if (!confirmed) return;
+
+        var (ok, error) = await Api.DeleteClientKeyAsync(k.KeyId);
         if (!ok)
         {
             MutationError = "删除失败：" + (error ?? "未知错误");

@@ -196,6 +196,29 @@ public sealed class ContextualBanditState
     }
 
     /// <summary>
+    /// 重置全部 arm 状态为初始先验（内存清空 + 持久化回落单位阵/零向量）。
+    /// 供 Dashboard 手动触发：调参实验或数据污染后从零开始学习。
+    /// </summary>
+    /// <returns>清除的内存条目数。</returns>
+    public int ResetAll()
+    {
+        int removed = 0;
+        foreach (var key in _arms.Keys)
+        {
+            if (_arms.TryRemove(key, out _)) removed++;
+        }
+
+        if (_persistence is null) return removed;
+        foreach (var (model, (dim, _, _, _)) in _persistence.LoadAll())
+        {
+            var identity = new double[dim, dim];
+            for (int i = 0; i < dim; i++) identity[i, i] = 1.0;
+            _persistence.Save(model, dim, identity, new double[dim], 0);
+        }
+        return removed;
+    }
+
+    /// <summary>
     /// 解线性方程组 A·x = b（高斯-约旦消元 + 部分主元）。
     /// A 为对称正定（岭回归），数值稳定。命名揭示 O(d³) 成本，避免误以为是 O(d²) 三角求解。
     /// </summary>

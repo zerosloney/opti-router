@@ -17,6 +17,49 @@
         </div>
     }
 
+    <!-- 告警历史：出现/恢复事件留痕（进程内环形缓冲，重启清空） -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>🔔 告警历史 (Alert History)</span>
+            <span class="text-secondary" style="font-size: 0.75rem;">@AlertHistory.Count 条最近事件</span>
+        </div>
+        @if (AlertHistory.Any())
+        {
+            <div class="table-wrap">
+                <table class="log-table">
+                    <thead>
+                        <tr><th scope="col">时间</th><th scope="col">事件</th><th scope="col">级别</th><th scope="col">类别</th><th scope="col">详情</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var evt in AlertHistory.Take(15))
+                        {
+                            <tr>
+                                <td>@evt.Timestamp.ToLocalTime().ToString("MM-dd HH:mm:ss")</td>
+                                <td>
+                                    @if (evt.EventType == "resolved")
+                                    {
+                                        <span class="tag tag-success">✓ 已恢复</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="tag tag-danger">⚠ 告警</span>
+                                    }
+                                </td>
+                                <td><span class="badge @(evt.Level == "critical" ? "badge-danger" : "badge-info")">@evt.Level</span></td>
+                                <td>@evt.Category</td>
+                                <td><span style="font-size: 0.82rem; color: var(--text-secondary);">@evt.Message</span></td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <div class="text-secondary text-center" style="padding: 16px;">暂无告警事件——服务启动以来未检测到预算/熔断/失败率异常，或历史已被重启清空。</div>
+        }
+    </div>
+
     <!-- 核心指标卡 -->
     @if (MetricsLoading)
     {
@@ -299,6 +342,7 @@
     private bool MetricsLoading = true;
     private List<ApiService.DailySpend> Trends = new();
     private List<ApiService.AlertInfo> Alerts => Metrics?.System.Alerts ?? new();
+    private List<ApiService.AlertEventDto> AlertHistory = new();
 
     // 路由内部状态：上游配额 / 缓存亲和 / 响应缓存。低频刷新（每 3 个轮询周期一次）。
     private List<ApiService.QuotaStateDto> QuotaStates = new();
@@ -383,10 +427,12 @@
             var quotaTask = Api.GetQuotaStateAsync();
             var affinityTask = Api.GetCacheAffinityAsync();
             var cacheStatsTask = Api.GetResponseCacheStatsAsync();
-            await Task.WhenAll(quotaTask, affinityTask, cacheStatsTask);
+            var alertHistoryTask = Api.GetAlertHistoryAsync();
+            await Task.WhenAll(quotaTask, affinityTask, cacheStatsTask, alertHistoryTask);
             QuotaStates = quotaTask.Result;
             AffinityState = affinityTask.Result;
             ResponseCacheStats = cacheStatsTask.Result;
+            AlertHistory = alertHistoryTask.Result;
         }
         catch (Exception ex)
         {

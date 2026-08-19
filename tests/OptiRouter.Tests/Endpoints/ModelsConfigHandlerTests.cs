@@ -116,6 +116,42 @@ public class ModelsConfigHandlerTests
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
+    [Fact]
+    public async Task UpdateModel_TagsAreReplacedTrimmedAndDeduplicated()
+    {
+        using var factory = new ModelsFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        string name = "tags-" + Guid.NewGuid().ToString("N");
+        await CreateModelAsync(client, name, "sk-tags-test-value-123");
+
+        // 更新 Tags：含空白项与重复项，应 trim + 去空 + 去重
+        string body = JsonSerializer.Serialize(new { tags = new[] { " vision ", "", "tool-use", "VISION" } });
+        using var update = await client.PutAsync($"/api/models?name={name}",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        Assert.True(update.IsSuccessStatusCode, await update.Content.ReadAsStringAsync());
+
+        using var list = await client.GetAsync("/api/models");
+        list.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await list.Content.ReadAsStringAsync());
+        var model = doc.RootElement.EnumerateArray().Single(m => m.GetProperty("name").GetString() == name);
+        var tags = model.GetProperty("tags").EnumerateArray().Select(t => t.GetString()).ToList();
+        Assert.Equal(new[] { "vision", "tool-use" }, tags);
+
+        // 空数组 = 清空
+        string clear = JsonSerializer.Serialize(new { tags = Array.Empty<string>() });
+        using var clearResp = await client.PutAsync($"/api/models?name={name}",
+            new StringContent(clear, Encoding.UTF8, "application/json"));
+        Assert.True(clearResp.IsSuccessStatusCode, await clearResp.Content.ReadAsStringAsync());
+
+        using var list2 = await client.GetAsync("/api/models");
+        list2.EnsureSuccessStatusCode();
+        using var doc2 = JsonDocument.Parse(await list2.Content.ReadAsStringAsync());
+        var model2 = doc2.RootElement.EnumerateArray().Single(m => m.GetProperty("name").GetString() == name);
+        Assert.Equal(0, model2.GetProperty("tags").GetArrayLength());
+    }
+
     private static async Task CreateModelAsync(HttpClient client, string name, string apiKey)
     {
         string body = JsonSerializer.Serialize(new

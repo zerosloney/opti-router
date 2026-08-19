@@ -39,6 +39,20 @@ public class ApiServiceTests
     }
 
     [Fact]
+    public void BuildAuditExportUrl_UsesQuestionMarkForFirstParamAndAmpersandAfter()
+    {
+        // 导出基址无查询前缀：首个参数必须用 ? 连接（曾出过 & 拼接 bug 导致 query 整体失效）。
+        using var http = new HttpClient(new RecordingHandler());
+        var service = new ApiService(http, new TestNavigationManager("http://localhost/requests"));
+
+        string noFilter = service.BuildAuditExportUrl();
+        string withQuery = service.BuildAuditExportUrl(model: "gpt", q: "req-1");
+
+        Assert.Equal("http://localhost/api/dashboard/requests/export", noFilter);
+        Assert.Equal("http://localhost/api/dashboard/requests/export?model=gpt&q=req-1", withQuery);
+    }
+
+    [Fact]
     public async Task DashboardRequests_NoKeyAppended()
     {
         // 管理端鉴权改走登录会话 Cookie：请求 URL 不再附加 ?key=，保持路径原样。

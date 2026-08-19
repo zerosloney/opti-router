@@ -62,8 +62,125 @@ public sealed class AppConfigDbStore : IDisposable
                 updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
                 PRIMARY KEY (scope, key)
             );
+            CREATE TABLE IF NOT EXISTS config_change_history (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                actor   TEXT NOT NULL,
+                summary TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS eval_batches (
+                batch_id    TEXT PRIMARY KEY,
+                ts          TEXT NOT NULL,
+                report_json TEXT NOT NULL
+            );
             """;
         cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>一条配置变更记录（Summary 为变更键值对的紧凑 JSON 数组）。</summary>
+    public sealed record ConfigChangeEntry(long Id, string Ts, string Actor, string Summary);
+
+    /// <summary>追加一条配置变更记录；超过 200 条时淘汰最旧。</summary>
+    public void AppendConfigChange(string actor, string summary)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(actor);
+        ArgumentNullException.ThrowIfNull(summary);
+        lock (_gate)
+        {
+            using (var cmd = _connection.CreateCommand())
+            {
+                cmd.CommandText = "INSERT INTO config_change_history (actor, summary) VALUES ($a, $s);";
+                cmd.Parameters.AddWithValue("$a", actor);
+                cmd.Parameters.AddWithValue("$s", summary);
+                cmd.ExecuteNonQuery();
+            }
+            using var prune = _connection.CreateCommand();
+            prune.CommandText = """
+                DELETE FROM config_change_history
+                WHERE id <= (SELECT MAX(id) FROM config_change_history) - 200;
+                """;
+            prune.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>读取最近的配置变更记录（按时间倒序）。</summary>
+    public IList<ConfigChangeEntry> LoadConfigChanges(int limit = 50)
+    {
+        if (limit <= 0) limit = 50;
+        lock (_gate)
+        {
+            var result = new List<ConfigChangeEntry>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT id, ts, actor, summary FROM config_change_history ORDER BY id DESC LIMIT $l;";
+            cmd.Parameters.AddWithValue("$l", limit);
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add(new ConfigChangeEntry(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+            }
+            return result;
+        }
+    }
+
+    /// <summary>保存一份评测批次报告（JSON），并裁剪到最近 <paramref name="maxBatches"/> 批。</summary>
+    public void SaveEvalBatch(string batchId, string timestamp, string reportJson, int maxBatches = 10)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
+        ArgumentNullException.ThrowIfNull(reportJson);
+        lock (_gate)
+        {
+            using var tx = _connection.BeginTransaction();
+            try
+            {
+                using (var cmd = _connection.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText = """
+                        INSERT INTO eval_batches (batch_id, ts, report_json) VALUES ($b, $t, $j)
+                        ON CONFLICT(batch_id) DO UPDATE SET ts = excluded.ts, report_json = excluded.report_json;
+                        """;
+                    cmd.Parameters.AddWithValue("$b", batchId);
+                    cmd.Parameters.AddWithValue("$t", timestamp ?? string.Empty);
+                    cmd.Parameters.AddWithValue("$j", reportJson);
+                    cmd.ExecuteNonQuery();
+                }
+                using (var prune = _connection.CreateCommand())
+                {
+                    prune.Transaction = tx;
+                    prune.CommandText = """
+                        DELETE FROM eval_batches
+                        WHERE batch_id NOT IN (
+                            SELECT batch_id FROM eval_batches ORDER BY ts DESC LIMIT $m
+                        );
+                        """;
+                    prune.Parameters.AddWithValue("$m", maxBatches);
+                    prune.ExecuteNonQuery();
+                }
+                tx.Commit();
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>读取全部已持久化的评测批次（batchId, 时间戳, 报告 JSON），按时间倒序。</summary>
+    public IList<(string BatchId, string Timestamp, string ReportJson)> LoadEvalBatches()
+    {
+        lock (_gate)
+        {
+            var result = new List<(string, string, string)>();
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "SELECT batch_id, ts, report_json FROM eval_batches ORDER BY ts DESC;";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                result.Add((reader.GetString(0), reader.GetString(1), reader.GetString(2)));
+            }
+            return result;
+        }
     }
 
     /// <summary>是否存在任何已持久化配置（决定是否执行首启迁移）。</summary>

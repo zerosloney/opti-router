@@ -11,7 +11,8 @@ namespace OptiRouter.Health;
 /// 周期性调用 <see cref="AlertEngine.Check"/> 对比活跃告警集合：
 /// 新出现的告警推送 <c>alert</c> 事件，消失的告警推送 <c>resolved</c> 事件（含恢复提示），
 /// 同一告警去重（按 AlertRecord.Id）不会重复推送；推送失败保留队首下周期重试。
-/// 未配置 <see cref="RoutingOptions.AlertWebhookUrl"/> 时静默禁用。
+/// 未配置 <see cref="RoutingOptions.AlertWebhookUrl"/> 时跳过推送但仍周期检查，
+/// 转换事件记入 <see cref="AlertHistory"/>（供 Dashboard 历史），URL 配置后热生效。
 /// </summary>
 public sealed class AlertWebhookNotifier : BackgroundService
 {
@@ -19,6 +20,7 @@ public sealed class AlertWebhookNotifier : BackgroundService
     private readonly HttpClient _httpClient;
     private readonly ILogger<AlertWebhookNotifier> _logger;
     private readonly IOptionsMonitor<RouterOptions> _options;
+    private readonly AlertHistory? _history;
 
     private readonly Queue<(AlertRecord Alert, bool IsResolved)> _pending = new();
     private HashSet<string> _activeAlertIds = new(StringComparer.Ordinal);
@@ -33,26 +35,19 @@ public sealed class AlertWebhookNotifier : BackgroundService
         Func<IReadOnlyList<AlertRecord>> checkAlerts,
         HttpClient httpClient,
         IOptionsMonitor<RouterOptions> options,
-        ILogger<AlertWebhookNotifier>? logger = null)
+        ILogger<AlertWebhookNotifier>? logger = null,
+        AlertHistory? history = null)
     {
         _checkAlerts = checkAlerts ?? throw new ArgumentNullException(nameof(checkAlerts));
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? NullLogger<AlertWebhookNotifier>.Instance;
+        _history = history;
     }
 
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var routing = _options.CurrentValue.Routing;
-        if (string.IsNullOrWhiteSpace(routing.AlertWebhookUrl))
-        {
-            _logger.LogInformation("Alert webhook not configured; notification service disabled.");
-            return;
-        }
-
-        int intervalSeconds = Math.Max(5, routing.AlertWebhookIntervalSeconds);
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -69,6 +64,8 @@ public sealed class AlertWebhookNotifier : BackgroundService
                 _logger.LogWarning(ex, "Alert webhook check failed; will retry next cycle");
             }
 
+            // URL/间隔每周期重读：运行期通过 Dashboard 配置后无需重启即生效。
+            int intervalSeconds = Math.Max(5, _options.CurrentValue.Routing.AlertWebhookIntervalSeconds);
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), stoppingToken).ConfigureAwait(false);
@@ -95,6 +92,7 @@ public sealed class AlertWebhookNotifier : BackgroundService
             {
                 _pending.Enqueue((alert, IsResolved: false));
                 _lastMessages[alert.Id] = alert.Message;
+                _history?.Record(new AlertEvent(alert.Timestamp, "alert", alert.Id, alert.Level, alert.Category, alert.Message));
             }
         }
 
@@ -121,9 +119,9 @@ public sealed class AlertWebhookNotifier : BackgroundService
             string detail = _lastMessages.TryGetValue(id, out var lastMessage)
                 ? lastMessage
                 : $"Alert '{id}' recovered.";
-            _pending.Enqueue((
-                new AlertRecord(id, "info", "recovery", $"Recovered: {detail}", DateTime.UtcNow),
-                IsResolved: true));
+            var resolved = new AlertRecord(id, "info", "recovery", $"Recovered: {detail}", DateTime.UtcNow);
+            _pending.Enqueue((resolved, IsResolved: true));
+            _history?.Record(new AlertEvent(resolved.Timestamp, "resolved", resolved.Id, resolved.Level, resolved.Category, resolved.Message));
             _lastMessages.Remove(id);
         }
 
@@ -136,7 +134,13 @@ public sealed class AlertWebhookNotifier : BackgroundService
     internal async Task DrainPendingAsync(CancellationToken ct)
     {
         string? webhookUrl = _options.CurrentValue.Routing.AlertWebhookUrl;
-        if (string.IsNullOrWhiteSpace(webhookUrl)) return;
+        if (string.IsNullOrWhiteSpace(webhookUrl))
+        {
+            // 未配置推送目标：事件已进 AlertHistory，丢弃待推队列防止无界增长。
+            // 后续配置 URL 时，存量告警已在活跃集中去重，仅新转换会被推送。
+            _pending.Clear();
+            return;
+        }
         // 仅允许 http(s)，拒绝其他 scheme 的错误配置
         if (!webhookUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
             && !webhookUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))

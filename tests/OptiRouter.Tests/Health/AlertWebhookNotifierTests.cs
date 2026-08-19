@@ -145,4 +145,35 @@ public sealed class AlertWebhookNotifierTests
 
         Assert.Empty(handler.RequestBodies);
     }
+
+    [Fact]
+    public async Task Tick_RecordsAlertAndResolvedEventsIntoHistory()
+    {
+        var alerts = new List<AlertRecord> { Alert("budget-warning") };
+        var handler = new FakeHttpMessageHandler();
+        var options = new TestOptionsMonitor();
+        options.CurrentValue.Routing.AlertWebhookUrl = string.Empty; // 不推送，仅记录历史
+        var history = new AlertHistory();
+        var notifier = new AlertWebhookNotifier(() => alerts, new HttpClient(handler), options, history: history);
+
+        notifier.Tick();
+        await notifier.DrainPendingAsync(CancellationToken.None);
+
+        // 未配置 URL 也不推送，但出现事件已入历史
+        Assert.Empty(handler.RequestBodies);
+        var appeared = Assert.Single(history.GetRecent(10));
+        Assert.Equal("alert", appeared.EventType);
+        Assert.Equal("budget-warning", appeared.AlertId);
+
+        // 告警消失（2 个周期防抖后）→ resolved 事件入历史
+        alerts.Clear();
+        notifier.Tick();
+        notifier.Tick();
+        await notifier.DrainPendingAsync(CancellationToken.None);
+
+        var recent = history.GetRecent(10);
+        Assert.Equal(2, recent.Count);
+        Assert.Equal("resolved", recent[0].EventType);
+        Assert.Equal("budget-warning", recent[0].AlertId);
+    }
 }

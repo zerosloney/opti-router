@@ -337,6 +337,21 @@ curl http://localhost:5000/health
 }
 ```
 
+## 管理控制台（Dashboard Console）
+
+Blazor Server 管理台（`/overview` `/requests` `/models` `/router` `/keys` `/benchmarks`），登录会话或 `AdminApiKey` Bearer 鉴权。配置类操作写入 SQLite 配置库并触发热重载，无需重启。
+
+| 能力 | 说明 |
+|------|------|
+| 告警历史与 Webhook 订阅 | 告警出现/恢复事件进程内留痕（200 条环形缓冲，Overview 展示）；`AlertWebhookUrl` / `AlertWebhookIntervalSeconds` 在路由页「告警订阅」组编辑，保存后热生效——未配置 URL 时仍记录历史，配置后即推送（无需重启） |
+| 配置变更审计 | 路由/预算配置每次落库自动记录 key 级 diff（如 `Routing:EnableFailover: true → false`），保留最近 200 条，路由页「配置变更历史」卡片可查 |
+| 请求审计筛选/搜索/导出 | 审计日志支持按 Request/Trace ID 子串搜索与 UTC 时间范围过滤，可导出 CSV（`GET /api/dashboard/requests/export`，同筛选条件） |
+| 租户 Key 用量与导出 | Keys 页展示每个租户的今日消费、用量占比（≥80% 变红）、剩余预算与请求数；`GET /api/dashboard/keys/usage/export` 导出 CSV；删除 Key 需二次确认 |
+| 模型能力标签 | 模型弹窗编辑 `Tags`（`vision` / `tool-use` / `json-mode`，逗号分隔自动去重），列表显示标签芯片；配合路由页「能力过滤」开关按能力硬过滤候选 |
+| 评测批次持久化 | Golden Dataset 评测报告落 SQLite（保留最近 10 批），重启不丢失，A/B 对比跨重启可用 |
+| 学习状态管理 | Thompson / Contextual Bandit 状态可一键重置为初始先验（含持久化回落，需确认）或导出 CSV |
+| Fusion 编排参数 | 面板规模（数量/动态/最小/多样性）、Analyst/Outer 模型下拉、采样与预算（最大输出/温度/Panel 超时）、Analyst 提示词、竞速参数（并发数/Hedge 延迟）全部可在路由页编辑并热生效 |
+
 ## curl 示例
 
 非流式：

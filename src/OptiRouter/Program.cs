@@ -202,6 +202,9 @@ builder.Services.AddSingleton<AlertEngine>(sp =>
     return new AlertEngine(ledger, healthTracker, auditStore, routerOptions);
 });
 
+// 告警历史环形缓冲：告警出现/恢复事件进程内留痕，供 Dashboard 历史查询。
+builder.Services.AddSingleton<OptiRouter.Health.AlertHistory>();
+
 // Token 估算器：Tiktoken 模式用 SharpToken 真实 BPE 计数（内置词表、离线可用，异常自动回退分桶粗估）；
 // Bucket 模式用分桶加权粗估。编码名校验由 RouterOptionsValidator 在启动时完成。
 builder.Services.AddSingleton<ITokenEstimator>(sp =>
@@ -488,15 +491,16 @@ builder.Services.AddHostedService<AuditRetentionService>();
 // EnableMetrics=false 时不影响功能，但 gauge 保持零值。
 builder.Services.AddHostedService<MetricsGaugeUpdaterService>();
 
-// 告警 Webhook 推送：周期检查 AlertEngine 活跃告警，新增推送 alert、恢复推送 resolved。
-// 未配置 AlertWebhookUrl 时服务直接禁用（见 AlertWebhookNotifier）。
+// 告警 Webhook 推送：周期检查 AlertEngine 活跃告警，新增推送 alert、恢复推送 resolved，
+// 转换事件同步记入 AlertHistory；未配置 AlertWebhookUrl 时仅记录历史，URL 配置后热生效。
 builder.Services.AddHttpClient();
 builder.Services.AddHostedService<OptiRouter.Health.AlertWebhookNotifier>(sp =>
     new OptiRouter.Health.AlertWebhookNotifier(
         () => sp.GetRequiredService<AlertEngine>().Check(),
         sp.GetRequiredService<IHttpClientFactory>().CreateClient("alert-webhook"),
         sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
-        sp.GetService<ILogger<OptiRouter.Health.AlertWebhookNotifier>>()));
+        sp.GetService<ILogger<OptiRouter.Health.AlertWebhookNotifier>>(),
+        sp.GetRequiredService<OptiRouter.Health.AlertHistory>()));
 
 // 内容审核（Moderation）：ConfigurableModerator 每次审核读 IOptionsMonitor 当前值，
 // ModerationEndpoint/ApiKey/Threshold 热重载即时生效（与其余 Routing 项一致）。

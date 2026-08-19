@@ -1,5 +1,6 @@
 @page "/requests"
 @inject ApiService Api
+@inject IJSRuntime JS
 @implements IDisposable
 
 <PageTitle>OptiRouter - 请求追踪</PageTitle>
@@ -74,6 +75,10 @@
         }
         <div class="log-controls">
             <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" style="width: 140px;" />
+            <input type="text" placeholder="搜索 Request/Trace ID..." @bind="LogFilterQuery" style="width: 170px;" />
+            <input type="datetime-local" title="起始时间（本地时区）" @bind="LogFilterFrom" style="width: 170px;" />
+            <span class="text-secondary">→</span>
+            <input type="datetime-local" title="结束时间（本地时区）" @bind="LogFilterTo" style="width: 170px;" />
             <select @bind="LogFilterTier">
                 <option value="">全能力分档</option>
                 <option value="Strong">Strong</option>
@@ -96,6 +101,7 @@
                 <option value="100">每页 100 条</option>
             </select>
             <button class="btn-primary" @onclick="ApplyLogFilters">🔍 组合筛选</button>
+            <button class="btn-ghost" @onclick="ExportLogCsv">⬇ 导出 CSV</button>
         </div>
         <div class="table-wrap">
             <table class="log-table">
@@ -262,11 +268,18 @@
     private string LogFilterTier = "";
     private string LogFilterStatus = "";
     private long LogFilterMinLatency = 0;
+    private string LogFilterQuery = "";
+    private DateTime? LogFilterFrom;
+    private DateTime? LogFilterTo;
     private ApiService.AuditItem? SelectedLogItem;
     private int _selectLogVersion;
 
     private PeriodicTimer? _timer;
     private CancellationTokenSource _cts = new();
+
+    /// <summary>datetime-local 绑定值（Kind=Unspecified 的本地墙钟时间）转 UTC ISO 8601；空返回 null。</summary>
+    private static string? ToUtcIso(DateTime? localDateTime)
+        => localDateTime?.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
 
     private async Task SelectLogItem(ApiService.AuditItem item)
     {
@@ -287,7 +300,16 @@
     {
         try
         {
-            var page = await Api.GetAuditLogAsync(LogLimit, LogOffset, LogFilterModel, LogFilterTier, LogFilterStatus, LogFilterMinLatency > 0 ? LogFilterMinLatency : null);
+            var page = await Api.GetAuditLogAsync(
+                LogLimit,
+                LogOffset,
+                LogFilterModel,
+                LogFilterTier,
+                LogFilterStatus,
+                LogFilterMinLatency > 0 ? LogFilterMinLatency : null,
+                string.IsNullOrWhiteSpace(LogFilterQuery) ? null : LogFilterQuery.Trim(),
+                ToUtcIso(LogFilterFrom),
+                ToUtcIso(LogFilterTo));
             AuditItems = page.Items;
             AuditTotal = page.TotalCount;
             AuditError = null;
@@ -296,6 +318,19 @@
         {
             AuditError = "请求日志加载失败：" + ex.Message;
         }
+    }
+
+    private async Task ExportLogCsv()
+    {
+        var url = Api.BuildAuditExportUrl(
+            LogFilterModel,
+            LogFilterTier,
+            LogFilterStatus,
+            LogFilterMinLatency > 0 ? LogFilterMinLatency : null,
+            string.IsNullOrWhiteSpace(LogFilterQuery) ? null : LogFilterQuery.Trim(),
+            ToUtcIso(LogFilterFrom),
+            ToUtcIso(LogFilterTo));
+        await JS.InvokeVoidAsync("open", url, "_blank");
     }
 
     private string? AuditError;

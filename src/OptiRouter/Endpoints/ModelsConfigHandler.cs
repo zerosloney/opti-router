@@ -201,6 +201,13 @@ public static class ModelsConfigHandler
         if (req.IsLocalOrPrivate is not null) model.IsLocalOrPrivate = req.IsLocalOrPrivate.Value;
         if (req.Provider is not null) model.Provider = req.Provider.Trim();
         if (req.Family is not null) model.Family = req.Family.Trim();
+        // Tags 非空列表 = 整表替换（trim + 去空去重）；null = 不改。空列表允许清空。
+        if (req.Tags is not null)
+            model.Tags = req.Tags
+                .Select(t => t.Trim())
+                .Where(t => t.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         if (req.InputPricePerMillion >= 0) model.InputPricePerMillion = req.InputPricePerMillion.Value;
         if (req.OutputPricePerMillion >= 0) model.OutputPricePerMillion = req.OutputPricePerMillion.Value;
         if (req.CachedInputPricePerMillion >= 0) model.CachedInputPricePerMillion = req.CachedInputPricePerMillion.Value;
@@ -297,7 +304,8 @@ public static class ModelsConfigHandler
         string? Id = null,
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
-        bool? IsLocalOrPrivate = null);
+        bool? IsLocalOrPrivate = null,
+        List<string>? Tags = null);
 
     private record CreateModelRequest(
         string? Name,

@@ -120,20 +120,76 @@ public class ApiService
         return result ?? new List<LearningStateDto>();
     }
 
-    public async Task<AuditPage> GetAuditLogAsync(int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null)
+    /// <summary>重置 Thompson/Bandit 学习状态为初始先验（含持久化回落）。</summary>
+    public async Task<(bool Ok, string? Error)> ResetLearningAsync()
     {
-        var url = $"/api/dashboard/requests?limit={limit}&offset={offset}";
-        if (!string.IsNullOrEmpty(model))
-            url += $"&model={Uri.EscapeDataString(model)}";
-        if (!string.IsNullOrEmpty(tier))
-            url += $"&tier={Uri.EscapeDataString(tier)}";
-        if (!string.IsNullOrEmpty(status))
-            url += $"&status={Uri.EscapeDataString(status)}";
-        if (minLatency.HasValue && minLatency.Value > 0)
-            url += $"&minLatency={minLatency.Value}";
+        using var resp = await SendAsync(HttpMethod.Post, Url("/api/dashboard/learning/reset"));
+        return resp.IsSuccessStatusCode ? (true, null) : (false, await ReadErrorAsync(resp));
+    }
 
+    /// <summary>学习状态 CSV 导出 URL（绝对地址）。</summary>
+    public string BuildLearningExportUrl() => _nav.BaseUri.TrimEnd('/') + "/api/dashboard/learning/export";
+
+    /// <summary>告警历史（出现/恢复事件，进程内环形缓冲，重启清空）。</summary>
+    public async Task<List<AlertEventDto>> GetAlertHistoryAsync()
+    {
+        try
+        {
+            var result = await GetFromJsonAsync<List<AlertEventDto>>(Url("/api/dashboard/alerts/history"));
+            return result ?? new List<AlertEventDto>();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "GetAlertHistoryAsync failed");
+            return new List<AlertEventDto>();
+        }
+    }
+
+    /// <summary>配置变更审计历史（谁在何时改了哪项配置）。</summary>
+    public async Task<List<ConfigChangeDto>> GetConfigChangesAsync(int limit = 50)
+    {
+        try
+        {
+            var result = await GetFromJsonAsync<List<ConfigChangeDto>>(Url($"/api/dashboard/config/history?limit={limit}"));
+            return result ?? new List<ConfigChangeDto>();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "GetConfigChangesAsync failed");
+            return new List<ConfigChangeDto>();
+        }
+    }
+
+    public async Task<AuditPage> GetAuditLogAsync(int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null)
+    {
+        var url = AppendAuditFilters($"/api/dashboard/requests?limit={limit}&offset={offset}", model, tier, status, minLatency, q, from, to);
         var result = await GetFromJsonAsync<AuditPage>(Url(url));
         return result ?? new AuditPage(new List<AuditItem>(), 0);
+    }
+
+    /// <summary>审计日志 CSV 导出 URL（绝对地址；window.open 同源请求自带管理 Cookie）。</summary>
+    public string BuildAuditExportUrl(string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null)
+        => _nav.BaseUri.TrimEnd('/') + AppendAuditFilters("/api/dashboard/requests/export", model, tier, status, minLatency, q, from, to);
+
+    private static string AppendAuditFilters(string url, string? model, string? tier, string? status, long? minLatency, string? q, string? from, string? to)
+    {
+        // 列表 URL 已带 ?limit=..，导出 URL 无查询前缀——首个参数用 ? 后续用 &。
+        static string Join(string url, string pair) => url.Contains('?') ? url + "&" + pair : url + "?" + pair;
+        if (!string.IsNullOrEmpty(model))
+            url = Join(url, $"model={Uri.EscapeDataString(model)}");
+        if (!string.IsNullOrEmpty(tier))
+            url = Join(url, $"tier={Uri.EscapeDataString(tier)}");
+        if (!string.IsNullOrEmpty(status))
+            url = Join(url, $"status={Uri.EscapeDataString(status)}");
+        if (minLatency.HasValue && minLatency.Value > 0)
+            url = Join(url, $"minLatency={minLatency.Value}");
+        if (!string.IsNullOrEmpty(q))
+            url = Join(url, $"q={Uri.EscapeDataString(q)}");
+        if (!string.IsNullOrEmpty(from))
+            url = Join(url, $"from={Uri.EscapeDataString(from)}");
+        if (!string.IsNullOrEmpty(to))
+            url = Join(url, $"to={Uri.EscapeDataString(to)}");
+        return url;
     }
 
     public async Task<AuditItem?> GetAuditDetailAsync(string id)
@@ -344,6 +400,16 @@ public class ApiService
         var result = await GetFromJsonAsync<List<ClientKeyDto>>(Url("/api/dashboard/keys"));
         return result ?? new List<ClientKeyDto>();
     }
+
+    /// <summary>租户用量视图（日消费/剩余预算/用量占比/请求数；不含 KeyHash）。</summary>
+    public async Task<List<TenantUsageDto>> GetClientKeysUsageAsync()
+    {
+        var result = await GetFromJsonAsync<List<TenantUsageDto>>(Url("/api/dashboard/keys/usage"));
+        return result ?? new List<TenantUsageDto>();
+    }
+
+    /// <summary>租户用量 CSV 导出 URL（绝对地址）。</summary>
+    public string BuildKeysUsageExportUrl() => _nav.BaseUri.TrimEnd('/') + "/api/dashboard/keys/usage/export";
 
     /// <summary>签发租户密钥。返回 (新密钥信息, 失败原因)；成功时 Key 非空，明文仅此一次返回。</summary>
     public async Task<(CreatedClientKeyDto? Key, string? Error)> CreateClientKeyAsync(string tenantName, decimal dailyBudgetUsd, int maxQps)
@@ -698,7 +764,8 @@ public class ApiService
         string? Family = null,
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
-        bool? IsLocalOrPrivate = null);
+        bool? IsLocalOrPrivate = null,
+        List<string>? Tags = null);
 
     public record ModelTestResultDto(
         bool Success,
@@ -840,6 +907,7 @@ public class ApiService
         public bool EnableLatencyAware { get; init; }
         public bool EnableLoadBalance { get; init; } = true;
         public bool EnableKalmanLoadBalance { get; init; }
+        public bool EnableCapabilityFilter { get; init; }
         // ② 可靠性与预算
         public bool EnableFailover { get; init; } = true;
         public int FailoverFailureThreshold { get; init; } = 3;
@@ -876,9 +944,25 @@ public class ApiService
         public bool EnableFusionMode { get; init; }
         public bool EnableByzantineConsensus { get; init; }
         public bool EnableJsonAstAutoRepair { get; init; } = true;
+        public int FusionRouterPanelSize { get; init; } = 3;
+        public bool EnableDynamicFusionPanelSize { get; init; }
+        public int FusionRouterMinPanelSize { get; init; } = 2;
+        public bool EnableFusionDiversity { get; init; }
+        public string? FusionRouterAnalystModel { get; init; }
+        public string? FusionRouterAnalystPrompt { get; init; }
+        public string? FusionRouterOuterModel { get; init; }
+        public int FusionRouterMaxOutputTokens { get; init; } = 16000;
+        public double FusionRouterTemperature { get; init; }
+        public double? FusionRouterPanelTemperature { get; init; }
+        public int FusionRouterPanelTimeoutSeconds { get; init; }
+        public int FusionMaxParallel { get; init; } = 2;
+        public int FusionHedgeDelayMs { get; init; }
         // ⑥ 观测
         public bool EnableDistributedTracing { get; init; }
         public bool AuditStoreRequestContent { get; init; } = false;
+        public int AuditRetentionHours { get; init; } = 168;
+        public string AlertWebhookUrl { get; init; } = "";
+        public int AlertWebhookIntervalSeconds { get; init; } = 30;
     }
 
     public record BudgetConfigDto(
@@ -897,6 +981,7 @@ public class ApiService
         public bool? EnableLatencyAware { get; init; }
         public bool? EnableLoadBalance { get; init; }
         public bool? EnableKalmanLoadBalance { get; init; }
+        public bool? EnableCapabilityFilter { get; init; }
         public string? DefaultTier { get; init; }
         // ② 可靠性与预算
         public bool? EnableFailover { get; init; }
@@ -936,9 +1021,25 @@ public class ApiService
         public bool? EnableFusionMode { get; init; }
         public bool? EnableByzantineConsensus { get; init; }
         public bool? EnableJsonAstAutoRepair { get; init; }
+        public int? FusionRouterPanelSize { get; init; }
+        public bool? EnableDynamicFusionPanelSize { get; init; }
+        public int? FusionRouterMinPanelSize { get; init; }
+        public bool? EnableFusionDiversity { get; init; }
+        public string? FusionRouterAnalystModel { get; init; }
+        public string? FusionRouterAnalystPrompt { get; init; }
+        public string? FusionRouterOuterModel { get; init; }
+        public int? FusionRouterMaxOutputTokens { get; init; }
+        public double? FusionRouterTemperature { get; init; }
+        public double? FusionRouterPanelTemperature { get; init; }
+        public int? FusionRouterPanelTimeoutSeconds { get; init; }
+        public int? FusionMaxParallel { get; init; }
+        public int? FusionHedgeDelayMs { get; init; }
         // ⑥ 观测
         public bool? EnableDistributedTracing { get; init; }
         public bool? AuditStoreRequestContent { get; init; }
+        public int? AuditRetentionHours { get; init; }
+        public string? AlertWebhookUrl { get; init; }
+        public int? AlertWebhookIntervalSeconds { get; init; }
     }
 
     /// <summary>预设展示项：名称 + 中文标题 + 描述 + 原始字段值（供配置页填充表单）。</summary>
@@ -957,6 +1058,32 @@ public class ApiService
         int MaxQps,
         bool Enabled,
         DateTime CreatedAt);
+
+    /// <summary>租户实时用量（后端 /keys/usage）：占比 0-100，预算为 0 时为 0。</summary>
+    public record TenantUsageDto(
+        string KeyId,
+        string KeyPrefix,
+        string TenantName,
+        decimal DailyBudgetUsd,
+        decimal DailySpendUsd,
+        decimal RemainingBudgetUsd,
+        double QuotaUtilization,
+        int DailyRequestCount,
+        int MaxQps,
+        bool Enabled,
+        DateTime CreatedAt);
+
+    /// <summary>告警历史事件：EventType 为 alert（出现）/ resolved（恢复）。</summary>
+    public record AlertEventDto(
+        DateTimeOffset Timestamp,
+        string EventType,
+        string AlertId,
+        string Level,
+        string Category,
+        string Message);
+
+    /// <summary>配置变更记录：Changes 为 [{key, from, to}]（from/to 为 JSON 值文本，可能为 null）。</summary>
+    public record ConfigChangeDto(long Id, string Timestamp, string Actor, JsonElement Changes);
 
     /// <summary>创建密钥的一次性响应：明文仅此一次返回，之后只存哈希、不可重取。</summary>
     public record CreatedClientKeyDto(

@@ -132,6 +132,24 @@ public sealed class ThompsonStateStore
     }
 
     /// <summary>
+    /// 重置全部学习状态为均匀先验（内存清空 + 持久化回落 α=β=1）。
+    /// 供 Dashboard 手动触发：调参实验或数据污染后从零开始学习。
+    /// </summary>
+    /// <returns>清除的内存条目数。</returns>
+    public int ResetAll()
+    {
+        int removed = Retain(null);
+        if (_persistence is not null)
+        {
+            foreach (var (model, _) in _persistence.LoadAll())
+            {
+                _persistence.Save(model, 1.0, 1.0);
+            }
+        }
+        return removed;
+    }
+
+    /// <summary>
     /// 记录一次端点请求表现（二值兼容重载）。
     /// </summary>
     /// <param name="modelName">模型唯一标识。</param>

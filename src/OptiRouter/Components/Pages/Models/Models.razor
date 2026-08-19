@@ -41,6 +41,15 @@
                                     {
                                         <span class="tag tag-success" style="font-size: 0.7rem; margin-left: 4px;" title="本地/私有部署节点">🏠</span>
                                     }
+                                    @if (m.Tags is { Count: > 0 })
+                                    {
+                                        <div style="margin-top: 3px; display: flex; gap: 4px; flex-wrap: wrap;">
+                                            @foreach (var tag in m.Tags)
+                                            {
+                                                <span class="tag tag-info" style="font-size: 0.68rem;" title="能力标签（供路由能力过滤匹配）">@tag</span>
+                                            }
+                                        </div>
+                                    }
                                 </td>
                                 <td title="@m.BaseUrl">@Truncate(m.BaseUrl, 28)</td>
                                 <td>
@@ -281,6 +290,11 @@
                         <option value="local">🏠 本地/私有（数据不出域）</option>
                     </select>
                 </div>
+                <div class="form-field full">
+                    <label for="nm-tags">能力标签 Tags（逗号分隔）</label>
+                    <input type="text" id="nm-tags" @bind="Form.Tags" placeholder="如 vision, tool-use, json-mode" />
+                    <span class="text-secondary" style="font-size: 0.72rem; margin-top: 2px;">路由「能力过滤」按这些标签匹配请求所需能力；白名单：vision / tool-use / json-mode。</span>
+                </div>
             </div>
 
             @if (!string.IsNullOrEmpty(ErrorMsg))
@@ -484,7 +498,8 @@
             InputPricePerMillion = m.InputPricePerMillion,
             OutputPricePerMillion = m.OutputPricePerMillion,
             CachedInputPricePerMillion = m.CachedInputPricePerMillion,
-            CacheWritePricePerMillion = m.CacheWriteInputPricePerMillion
+            CacheWritePricePerMillion = m.CacheWriteInputPricePerMillion,
+            Tags = m.Tags is { Count: > 0 } ? string.Join(", ", m.Tags) : ""
         };
         ShowModalApiKey = true;
         ErrorMsg = null;
@@ -593,7 +608,8 @@
                     string.IsNullOrWhiteSpace(Form.Family) ? "" : Form.Family.Trim(),
                     Form.CachedInputPricePerMillion,
                     Form.CacheWritePricePerMillion,
-                    Form.DeployTypeStr == "local");
+                    Form.DeployTypeStr == "local",
+                    ParseTags(Form.Tags));
 
                 var (ok, error) = await Api.UpdateModelAsync(EditingName!, req);
                 if (ok)
@@ -619,7 +635,7 @@
                     bool.Parse(Form.EnabledStr),
                     Math.Max(0, Form.InputPricePerMillion),
                     Math.Max(0, Form.OutputPricePerMillion),
-                    null,
+                    ParseTags(Form.Tags),
                     string.IsNullOrWhiteSpace(Form.Provider) ? null : Form.Provider.Trim(),
                     string.IsNullOrWhiteSpace(Form.Family) ? null : Form.Family.Trim(),
                     Form.CachedInputPricePerMillion,
@@ -709,6 +725,13 @@
 
     private static string Truncate(string? s, int len) => s != null && s.Length > len ? s[..len] + "..." : s ?? "-";
 
+    /// <summary>逗号分隔的能力标签文本 → 去空去重列表；全空返回空列表（允许清空 Tags）。</summary>
+    private static List<string> ParseTags(string? tagsText)
+        => (tagsText ?? "")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
     private class ModelForm
     {
         public string Name { get; set; } = "";
@@ -727,5 +750,6 @@
         public decimal OutputPricePerMillion { get; set; } = 0;
         public decimal? CachedInputPricePerMillion { get; set; }
         public decimal? CacheWritePricePerMillion { get; set; }
+        public string Tags { get; set; } = "";
     }
 }

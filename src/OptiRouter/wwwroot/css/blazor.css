@@ -619,6 +619,26 @@ button.side-nav-logout {
     transition: width 0.6s var(--ease-out);
 }
 
+/* 表格内迷你配额进度条（租户用量占比） */
+.quota-bar {
+    flex: 1;
+    height: 5px;
+    overflow: hidden;
+    border-radius: var(--radius-full);
+    background: var(--bg-subtle);
+}
+
+.quota-fill {
+    height: 100%;
+    background: var(--success);
+    border-radius: var(--radius-full);
+    transition: width 0.4s var(--ease-out);
+}
+
+.quota-fill-danger {
+    background: var(--danger);
+}
+
 /* ROI Special Card */
 .roi-card {
     border-color: rgba(16, 185, 129, 0.25) !important;

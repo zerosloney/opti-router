@@ -1,5 +1,6 @@
 @page "/router"
 @inject ApiService Api
+@inject IJSRuntime JS
 @implements IDisposable
 
 <PageTitle>OptiRouter - 路由实验室</PageTitle>
@@ -120,6 +121,16 @@
                         </div>
                         <label class="toggle-switch" title="按语义路由规则表把相似问法路由到指定档位。默认开。">
                             <input type="checkbox" @bind="Cfg.EnableSemanticRouter" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableCapabilityFilter)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">能力过滤</span>
+                            <span class="item-desc">按请求能力需求（vision / tool-use / json-mode）过滤模型，仅命中模型配置 Tags 的候选可用。硬约束，过滤后为空直接无候选。</span>
+                        </div>
+                        <label class="toggle-switch" title="按 vision/tool-use/json-mode 能力标签过滤候选模型；Tags 在模型页配置。">
+                            <input type="checkbox" @bind="Cfg.EnableCapabilityFilter" />
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
                     </div>
@@ -502,6 +513,74 @@
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
                     </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FusionRouterPanelSize)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FusionRouterMinPanelSize)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.EnableDynamicFusionPanelSize)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.EnableFusionDiversity)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">面板规模</span>
+                            <span class="item-desc">panel 模型数 [2,5]，取候选链前 N。动态规模按请求复杂度在最小值与设定值之间伸缩；供应商多样性避免 panel 同源。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">Panel 数:</span>
+                            <input type="number" step="1" min="2" max="5" @bind="Cfg.FusionRouterPanelSize" class="form-control" style="width: 60px;" />
+                            <label class="toggle-switch" title="按请求复杂度动态决定 panel 数量。">
+                                <input type="checkbox" @bind="Cfg.EnableDynamicFusionPanelSize" />
+                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            </label>
+                            <span class="config-row-label">动态最小:</span>
+                            <input type="number" step="1" min="2" max="5" @bind="Cfg.FusionRouterMinPanelSize" class="form-control" style="width: 60px;" />
+                            <label class="toggle-switch" title="panel 候选尽量跨供应商/模型家族。">
+                                <input type="checkbox" @bind="Cfg.EnableFusionDiversity" />
+                                <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                            </label>
+                            <span class="config-row-label">多样性</span>
+                        </div>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FusionRouterAnalystModel)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FusionRouterOuterModel)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">仲裁与撰写模型</span>
+                            <span class="item-desc">analyst 读全部 panel 回答产出结构化分析；outer 依分析写最终答案。留空（默认）= 主候选兼任。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">Analyst:</span>
+                            <select @bind="Cfg.FusionRouterAnalystModel" class="form-control" style="width: auto; min-width: 170px;">
+                                <option value="">默认（主候选）</option>
+                                @foreach (var m in FusionModelOptions)
+                                {
+                                    <option value="@m">@m</option>
+                                }
+                            </select>
+                            <span class="config-row-label">Outer:</span>
+                            <select @bind="Cfg.FusionRouterOuterModel" class="form-control" style="width: auto; min-width: 170px;">
+                                <option value="">默认（主候选）</option>
+                                @foreach (var m in FusionModelOptions)
+                                {
+                                    <option value="@m">@m</option>
+                                }
+                            </select>
+                        </div>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FusionRouterMaxOutputTokens)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FusionRouterTemperature)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FusionRouterPanelTemperature)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FusionRouterPanelTimeoutSeconds)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">采样与预算</span>
+                            <span class="item-desc">outer 最大输出 token；温度 [0,2]（panel 温度留空沿用主温度）；panel 单次超时秒数（0 = 不额外限制）。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">最大输出:</span>
+                            <input type="number" step="1000" min="1" @bind="Cfg.FusionRouterMaxOutputTokens" class="form-control" style="width: 90px;" />
+                            <span class="config-row-label">温度:</span>
+                            <input type="number" step="0.1" min="0" max="2" @bind="Cfg.FusionRouterTemperature" class="form-control" style="width: 64px;" />
+                            <span class="config-row-label">Panel 温度:</span>
+                            <input type="number" step="0.1" min="0" max="2" @bind="Cfg.FusionRouterPanelTemperature" class="form-control" style="width: 64px;" />
+                            <span class="config-row-label">Panel 超时 (秒):</span>
+                            <input type="number" step="10" min="0" @bind="Cfg.FusionRouterPanelTimeoutSeconds" class="form-control" style="width: 70px;" />
+                        </div>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FusionRouterAnalystPrompt)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">Analyst 分析提示词</span>
+                            <span class="item-desc">留空使用内置 JSON 契约提示词（共识/矛盾/缺口/洞察）。自定义时需保持输出为可解析 JSON。</span>
+                        </div>
+                        <textarea class="form-control" rows="3" @bind="Cfg.FusionRouterAnalystPrompt" placeholder="留空使用内置提示词" style="width: 100%; min-height: 60px; font-size: 0.82rem; font-family: 'JetBrains Mono', monospace;"></textarea>
+                    </div>
                 </div>
 
                 <div class="config-group-header">并行竞速</div>
@@ -515,6 +594,18 @@
                             <input type="checkbox" @bind="Cfg.EnableFusionMode" />
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FusionMaxParallel)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FusionHedgeDelayMs)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">竞速参数</span>
+                            <span class="item-desc">首轮并发数 [2,5]；Hedge 延迟 &gt;0 时仅在主请求慢于该阈值才启动备选（对冲请求，显著省钱）。0 = 总是并行。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">并发数:</span>
+                            <input type="number" step="1" min="2" max="5" @bind="Cfg.FusionMaxParallel" class="form-control" style="width: 60px;" />
+                            <span class="config-row-label">Hedge 延迟 (ms):</span>
+                            <input type="number" step="100" min="0" @bind="Cfg.FusionHedgeDelayMs" class="form-control" style="width: 90px;" />
+                        </div>
                     </div>
                 </div>
 
@@ -556,19 +647,102 @@
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
                     </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.AuditRetentionHours)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">审计保留时长</span>
+                            <span class="item-desc">审计记录保留小时数（默认 168 = 7 天），后台周期淘汰过期记录防止无界增长。必须 ≥ 1。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">保留 (小时):</span>
+                            <input type="number" step="24" min="1" @bind="Cfg.AuditRetentionHours" class="form-control" style="width: 80px;" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="config-group-header">告警订阅</div>
+                <div style="display: flex; flex-direction: column; gap: 6px;">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.AlertWebhookUrl)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.AlertWebhookIntervalSeconds)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">告警 Webhook 推送</span>
+                            <span class="item-desc">新告警推送 alert 事件、恢复推送 resolved 事件到任意 HTTP 端点（Slack/钉钉/飞书/自建）。URL 留空 = 仅 Dashboard 展示。保存后热生效，无需重启。</span>
+                        </div>
+                        <div class="config-row" style="flex-wrap: wrap;">
+                            <input type="text" @bind="Cfg.AlertWebhookUrl" class="form-control" placeholder="https://hooks.example.com/..." style="width: 260px;" />
+                            <span class="config-row-label">检查间隔 (秒):</span>
+                            <input type="number" step="5" min="5" @bind="Cfg.AlertWebhookIntervalSeconds" class="form-control" style="width: 70px;" />
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
+    </div>
+
+    <!-- 配置变更审计历史：谁在何时改了哪项路由/预算配置（最近 200 次落库） -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>📝 配置变更历史 (Config Change Audit)</span>
+            <button class="btn-ghost btn-sm" @onclick="LoadConfigChanges">↻ 刷新</button>
+        </div>
+        @if (ConfigChanges.Any())
+        {
+            <div class="table-wrap">
+                <table class="config-table">
+                    <thead>
+                        <tr><th scope="col">时间</th><th scope="col">操作者</th><th scope="col">变更项</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var c in ConfigChanges)
+                        {
+                            <tr>
+                                <td style="white-space: nowrap;">@FormatConfigChangeTime(c.Timestamp)</td>
+                                <td>@c.Actor</td>
+                                <td>
+                                    @if (c.Changes.ValueKind == System.Text.Json.JsonValueKind.Array)
+                                    {
+                                        @foreach (var change in c.Changes.EnumerateArray())
+                                        {
+                                            <div style="font-size: 0.8rem;">
+                                                <span class="table-mono" style="color: var(--primary);">@FormatConfigKey(change)</span>
+                                                <span class="text-secondary">：</span>
+                                                <span class="table-mono" style="color: var(--text-secondary); text-decoration: line-through;">@FormatConfigValue(change, "from")</span>
+                                                <span class="text-secondary"> → </span>
+                                                <span class="table-mono" style="color: var(--success); font-weight: 600;">@FormatConfigValue(change, "to")</span>
+                                            </div>
+                                        }
+                                    }
+                                    else
+                                    {
+                                        <span class="text-secondary" style="font-size: 0.8rem;">@c.Changes.ToString()</span>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <div class="text-secondary text-center" style="padding: 16px;">暂无配置变更记录（首次保存配置后在此留痕）。</div>
+        }
     </div>
 
     <!-- Thompson 学习状态监控 -->
     <div class="glass-card">
         <div class="card-label">
             <span>🧠 强化学习状态监控 (Thompson Sampling Explorer)</span>
-            <span class="tag @(Metrics?.System.Routing.EnableLatencyAware == true ? "tag-success" : "tag-warning")">
-                延迟感知重排 @(Metrics?.System.Routing.EnableLatencyAware == true ? "已启用" : "未启用")
+            <span style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                <span class="tag @(Metrics?.System.Routing.EnableLatencyAware == true ? "tag-success" : "tag-warning")">
+                    延迟感知重排 @(Metrics?.System.Routing.EnableLatencyAware == true ? "已启用" : "未启用")
+                </span>
+                <button class="btn-ghost btn-sm" @onclick="ExportLearningCsv">⬇ 导出 CSV</button>
+                <button class="btn-danger btn-sm" @onclick="ResetLearningState">↺ 重置学习状态</button>
             </span>
         </div>
+        @if (!string.IsNullOrEmpty(LearningStatusMsg))
+        {
+            <div class="alert-banner @(LearningStatusOk ? "alert-success" : "alert-error")" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">@LearningStatusMsg</div>
+        }
         @if (LearningStates.Any())
         {
             <div class="table-wrap">
@@ -949,6 +1123,68 @@
 @code {
     private ApiService.DashboardMetrics? Metrics;
     private List<ApiService.LearningStateDto> LearningStates = new();
+    private List<ApiService.ConfigChangeDto> ConfigChanges = new();
+    private string? LearningStatusMsg;
+    private bool LearningStatusOk;
+
+    /// <summary>Fusion 编排模型下拉选项（当前已配置的模型名，含停用项——编排目标可能临时停用但保留配置）。</summary>
+    private List<string> FusionModelOptions => Metrics?.Models?.Select(m => m.Name).ToList() ?? new List<string>();
+
+    private async Task ResetLearningState()
+    {
+        LearningStatusMsg = "重置中...";
+        try
+        {
+            bool confirmed = await JS.InvokeAsync<bool>("confirm", "确定重置全部 Thompson / Bandit 学习状态？\n所有模型将回到均匀先验（含持久化），路由学习从零开始，不可恢复。");
+            if (!confirmed)
+            {
+                LearningStatusMsg = null;
+                return;
+            }
+            var (ok, error) = await Api.ResetLearningAsync();
+            LearningStatusOk = ok;
+            LearningStatusMsg = ok ? "✓ 学习状态已重置为均匀先验。" : "✗ 重置失败：" + (error ?? "未知错误");
+            if (ok)
+            {
+                await LoadLearning();
+            }
+        }
+        catch (Exception ex)
+        {
+            LearningStatusOk = false;
+            LearningStatusMsg = "✗ 重置异常：" + ex.Message;
+        }
+    }
+
+    private async Task ExportLearningCsv()
+    {
+        await JS.InvokeVoidAsync("open", Api.BuildLearningExportUrl(), "_blank");
+    }
+
+    private async Task LoadConfigChanges()
+    {
+        ConfigChanges = await Api.GetConfigChangesAsync(50);
+    }
+
+    private static string FormatConfigKey(System.Text.Json.JsonElement change)
+        => change.TryGetProperty("key", out var k) && k.GetString() is { } key ? key : "?";
+
+    /// <summary>配置变更值展示：JSON 字符串去引号，null/缺失显示 (未设置)，其余原样。</summary>
+    private static string FormatConfigValue(System.Text.Json.JsonElement change, string prop)
+    {
+        if (!change.TryGetProperty(prop, out var v) || v.ValueKind == System.Text.Json.JsonValueKind.Null)
+            return "(未设置)";
+        return v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() ?? "" : v.ToString();
+    }
+
+    private static string FormatConfigChangeTime(string ts)
+    {
+        return DateTime.TryParse(ts, System.Globalization.CultureInfo.InvariantCulture,
+                   System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                   out var parsed)
+            ? parsed.ToLocalTime().ToString("MM-dd HH:mm:ss")
+            : ts;
+    }
 
     /// <summary>配置表单（可变属性供 @bind；dirty 检测用 JSON 序列化快照比较）。</summary>
     private sealed class ConfigForm
@@ -960,6 +1196,7 @@
         public bool EnableLatencyAware { get; set; }
         public bool EnableLoadBalance { get; set; }
         public bool EnableKalmanLoadBalance { get; set; }
+        public bool EnableCapabilityFilter { get; set; }
         public string DefaultTier { get; set; } = "Medium";
         // ② 可靠性与预算
         public bool EnableFailover { get; set; }
@@ -999,9 +1236,25 @@
         public bool EnableFusionMode { get; set; }
         public bool EnableByzantineConsensus { get; set; }
         public bool EnableJsonAstAutoRepair { get; set; } = true;
+        public int FusionRouterPanelSize { get; set; } = 3;
+        public bool EnableDynamicFusionPanelSize { get; set; }
+        public int FusionRouterMinPanelSize { get; set; } = 2;
+        public bool EnableFusionDiversity { get; set; }
+        public string FusionRouterAnalystModel { get; set; } = "";
+        public string FusionRouterAnalystPrompt { get; set; } = "";
+        public string FusionRouterOuterModel { get; set; } = "";
+        public int FusionRouterMaxOutputTokens { get; set; } = 16000;
+        public double FusionRouterTemperature { get; set; }
+        public double? FusionRouterPanelTemperature { get; set; }
+        public int FusionRouterPanelTimeoutSeconds { get; set; }
+        public int FusionMaxParallel { get; set; } = 2;
+        public int FusionHedgeDelayMs { get; set; }
         // ⑥ 观测
         public bool EnableDistributedTracing { get; set; }
         public bool AuditStoreRequestContent { get; set; } = false;
+        public int AuditRetentionHours { get; set; } = 168;
+        public string AlertWebhookUrl { get; set; } = "";
+        public int AlertWebhookIntervalSeconds { get; set; } = 30;
 
         public ConfigForm Clone() => (ConfigForm)MemberwiseClone();
     }
@@ -1040,8 +1293,12 @@
         return !Equals(prop.GetValue(_baseline), prop.GetValue(Cfg));
     }
 
-    private T? Dirty<T>(string propName, T value) where T : struct =>
-        IsDirty(propName) ? value : null;
+    private T? Dirty<T>(string propName, T value) where T : struct
+        => IsDirty(propName) ? value : null;
+
+    /// <summary>可空数值专用（如 FusionRouterPanelTemperature：null = 沿用主温度）。</summary>
+    private double? Dirty(string propName, double? value)
+        => IsDirty(propName) ? value : null;
 
     private string? Dirty(string propName, string value) =>
         IsDirty(propName) ? value : null;
@@ -1198,6 +1455,7 @@
                     EnableLatencyAware = r.EnableLatencyAware,
                     EnableLoadBalance = r.EnableLoadBalance,
                     EnableKalmanLoadBalance = r.EnableKalmanLoadBalance,
+                    EnableCapabilityFilter = r.EnableCapabilityFilter,
                     DefaultTier = string.IsNullOrEmpty(r.DefaultTier) ? "Medium" : r.DefaultTier,
                     // ② 可靠性与预算
                     EnableFailover = r.EnableFailover,
@@ -1237,9 +1495,25 @@
                     EnableFusionMode = r.EnableFusionMode,
                     EnableByzantineConsensus = r.EnableByzantineConsensus,
                     EnableJsonAstAutoRepair = r.EnableJsonAstAutoRepair,
+                    FusionRouterPanelSize = r.FusionRouterPanelSize,
+                    EnableDynamicFusionPanelSize = r.EnableDynamicFusionPanelSize,
+                    FusionRouterMinPanelSize = r.FusionRouterMinPanelSize,
+                    EnableFusionDiversity = r.EnableFusionDiversity,
+                    FusionRouterAnalystModel = r.FusionRouterAnalystModel ?? "",
+                    FusionRouterAnalystPrompt = r.FusionRouterAnalystPrompt ?? "",
+                    FusionRouterOuterModel = r.FusionRouterOuterModel ?? "",
+                    FusionRouterMaxOutputTokens = r.FusionRouterMaxOutputTokens,
+                    FusionRouterTemperature = r.FusionRouterTemperature,
+                    FusionRouterPanelTemperature = r.FusionRouterPanelTemperature,
+                    FusionRouterPanelTimeoutSeconds = r.FusionRouterPanelTimeoutSeconds,
+                    FusionMaxParallel = r.FusionMaxParallel,
+                    FusionHedgeDelayMs = r.FusionHedgeDelayMs,
                     // ⑥ 观测
                     EnableDistributedTracing = r.EnableDistributedTracing,
-                    AuditStoreRequestContent = r.AuditStoreRequestContent
+                    AuditStoreRequestContent = r.AuditStoreRequestContent,
+                    AuditRetentionHours = r.AuditRetentionHours,
+                    AlertWebhookUrl = r.AlertWebhookUrl ?? "",
+                    AlertWebhookIntervalSeconds = r.AlertWebhookIntervalSeconds
             };
             _baseline = Cfg.Clone();
             _configVersion = cfg.Version;
@@ -1278,6 +1552,7 @@
                 EnableLatencyAware = Dirty(nameof(ConfigForm.EnableLatencyAware), Cfg.EnableLatencyAware),
                 EnableLoadBalance = Dirty(nameof(ConfigForm.EnableLoadBalance), Cfg.EnableLoadBalance),
                 EnableKalmanLoadBalance = Dirty(nameof(ConfigForm.EnableKalmanLoadBalance), Cfg.EnableKalmanLoadBalance),
+                EnableCapabilityFilter = Dirty(nameof(ConfigForm.EnableCapabilityFilter), Cfg.EnableCapabilityFilter),
                 DefaultTier = Dirty(nameof(ConfigForm.DefaultTier), Cfg.DefaultTier),
                 EnableFailover = Dirty(nameof(ConfigForm.EnableFailover), Cfg.EnableFailover),
                 FailoverFailureThreshold = Dirty(nameof(ConfigForm.FailoverFailureThreshold), Cfg.FailoverFailureThreshold),
@@ -1313,8 +1588,24 @@
                 EnableFusionMode = Dirty(nameof(ConfigForm.EnableFusionMode), Cfg.EnableFusionMode),
                 EnableByzantineConsensus = Dirty(nameof(ConfigForm.EnableByzantineConsensus), Cfg.EnableByzantineConsensus),
                 EnableJsonAstAutoRepair = Dirty(nameof(ConfigForm.EnableJsonAstAutoRepair), Cfg.EnableJsonAstAutoRepair),
+                FusionRouterPanelSize = Dirty(nameof(ConfigForm.FusionRouterPanelSize), Cfg.FusionRouterPanelSize),
+                EnableDynamicFusionPanelSize = Dirty(nameof(ConfigForm.EnableDynamicFusionPanelSize), Cfg.EnableDynamicFusionPanelSize),
+                FusionRouterMinPanelSize = Dirty(nameof(ConfigForm.FusionRouterMinPanelSize), Cfg.FusionRouterMinPanelSize),
+                EnableFusionDiversity = Dirty(nameof(ConfigForm.EnableFusionDiversity), Cfg.EnableFusionDiversity),
+                FusionRouterAnalystModel = Dirty(nameof(ConfigForm.FusionRouterAnalystModel), Cfg.FusionRouterAnalystModel),
+                FusionRouterAnalystPrompt = Dirty(nameof(ConfigForm.FusionRouterAnalystPrompt), Cfg.FusionRouterAnalystPrompt),
+                FusionRouterOuterModel = Dirty(nameof(ConfigForm.FusionRouterOuterModel), Cfg.FusionRouterOuterModel),
+                FusionRouterMaxOutputTokens = Dirty(nameof(ConfigForm.FusionRouterMaxOutputTokens), Cfg.FusionRouterMaxOutputTokens),
+                FusionRouterTemperature = Dirty(nameof(ConfigForm.FusionRouterTemperature), Cfg.FusionRouterTemperature),
+                FusionRouterPanelTemperature = Dirty(nameof(ConfigForm.FusionRouterPanelTemperature), Cfg.FusionRouterPanelTemperature),
+                FusionRouterPanelTimeoutSeconds = Dirty(nameof(ConfigForm.FusionRouterPanelTimeoutSeconds), Cfg.FusionRouterPanelTimeoutSeconds),
+                FusionMaxParallel = Dirty(nameof(ConfigForm.FusionMaxParallel), Cfg.FusionMaxParallel),
+                FusionHedgeDelayMs = Dirty(nameof(ConfigForm.FusionHedgeDelayMs), Cfg.FusionHedgeDelayMs),
                 EnableDistributedTracing = Dirty(nameof(ConfigForm.EnableDistributedTracing), Cfg.EnableDistributedTracing),
-                AuditStoreRequestContent = Dirty(nameof(ConfigForm.AuditStoreRequestContent), Cfg.AuditStoreRequestContent)
+                AuditStoreRequestContent = Dirty(nameof(ConfigForm.AuditStoreRequestContent), Cfg.AuditStoreRequestContent),
+                AuditRetentionHours = Dirty(nameof(ConfigForm.AuditRetentionHours), Cfg.AuditRetentionHours),
+                AlertWebhookUrl = Dirty(nameof(ConfigForm.AlertWebhookUrl), Cfg.AlertWebhookUrl),
+                AlertWebhookIntervalSeconds = Dirty(nameof(ConfigForm.AlertWebhookIntervalSeconds), Cfg.AlertWebhookIntervalSeconds)
             };
 
             var (ok, error, newVersion) = await Api.UpdateSystemConfigAsync(req);
@@ -1333,6 +1624,7 @@
                 ConfigStatusOk = true;
                 ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
                 await LoadMetrics();
+                await LoadConfigChanges();
             }
             else
             {
@@ -1512,6 +1804,7 @@
         await LoadLearning();
         await LoadEvalBatches();
         await LoadSemanticRoutes();
+        await LoadConfigChanges();
 
         _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         _ = PollMetricsLoopAsync();
