@@ -16,9 +16,13 @@ public sealed class MemoryResponseCache : IResponseCache
     private long _misses;
     private long _sets;
 
-    public MemoryResponseCache(IMemoryCache cache, int maxEntries, bool useSize = false)
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
+
+    public MemoryResponseCache(IMemoryCache cache, int maxEntries, bool useSize = false,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        _logger = logger;
         _maxEntries = maxEntries > 0 ? maxEntries : 1000;
         // 底层 MemoryCache 若设了 SizeLimit（本项目 Program.cs 设 100_000），entry 必须申报 Size 才能写入，
         // 否则 _cache.Set 抛 InvalidOperationException。由调用方告知底层是否启用 SizeLimit。
@@ -61,9 +65,11 @@ public sealed class MemoryResponseCache : IResponseCache
         {
             _cache.Set(key, response, options);
         }
-        catch
+        catch (Exception ex)
         {
             System.Threading.Interlocked.Decrement(ref _count);
+            // Set 失败常见于 SizeLimit 配置不一致；留日志便于排查
+            _logger?.LogWarning(ex, "Response cache Set failed; entry not cached");
         }
     }
 }

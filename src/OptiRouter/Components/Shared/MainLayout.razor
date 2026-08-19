@@ -29,12 +29,16 @@
             </NavLink>
         </nav>
         <div class="side-nav-footer">
-            <button class="theme-toggle" @onclick="ToggleTheme" title="@(IsLightTheme ? "切换到深色主题" : "切换到浅色主题")">
+            <button class="theme-toggle" @onclick="ToggleTheme" title="@(IsLightTheme ? "切换到深色主题" : "切换到浅色主题")"
+                    aria-pressed="@IsLightTheme" aria-label="切换深色/浅色主题">
                 <span class="theme-toggle-icon">@(IsLightTheme ? "🌙" : "☀")</span>
                 <span>@(IsLightTheme ? "切换深色" : "切换浅色")</span>
             </button>
             <div class="side-nav-user">管理员</div>
-            <a href="/logout" class="side-nav-logout">退出登录</a>
+            <form method="post" action="/logout">
+                <AntiforgeryToken />
+                <button type="submit" class="side-nav-logout">退出登录</button>
+            </form>
         </div>
     </aside>
 

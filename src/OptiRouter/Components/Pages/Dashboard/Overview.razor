@@ -72,7 +72,7 @@
                 <button class="@(TrendDays == 30 ? "active" : "")" @onclick="() => SetTrendDays(30)">近30天</button>
             </div>
             <div class="chart-container">
-                <canvas id="trend-chart" @ref="ChartCanvas"></canvas>
+                <canvas id="trend-chart" @ref="ChartCanvas" role="img" aria-label="每日费用趋势图"></canvas>
             </div>
         </div>
 
@@ -248,7 +248,7 @@
             <table class="log-table">
                 <thead>
                     <tr>
-                        <th>时间</th><th>请求 ID</th><th>路由模型</th><th>分档 Tier</th><th>请求内容</th><th>Tokens (In/Out)</th><th>延迟 / TTFT</th><th>成本</th><th>类型</th><th>状态</th>
+                        <th scope="col">时间</th><th scope="col">请求 ID</th><th scope="col">路由模型</th><th scope="col">分档 Tier</th><th scope="col">请求内容</th><th scope="col">Tokens (In/Out)</th><th scope="col">延迟 / TTFT</th><th scope="col">成本</th><th scope="col">类型</th><th scope="col">状态</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -422,14 +422,21 @@
     private async Task SetWindow(string key)
     {
         WindowKey = key;
+        _windowVersion++;
         await LoadWindowSummary();
     }
+
+    private int _windowVersion;
 
     private async Task LoadWindowSummary()
     {
         try
         {
-            WindowData = await Api.GetWindowSummaryAsync(WindowKey);
+            int version = _windowVersion;
+            var data = await Api.GetWindowSummaryAsync(WindowKey);
+            // 丢弃过期响应：切换窗口瞬间轮询在途请求后返回时，不得覆盖新窗口数据
+            if (version != _windowVersion) return;
+            WindowData = data;
         }
         catch (Exception ex)
         {

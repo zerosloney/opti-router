@@ -91,8 +91,13 @@ public sealed class AlertWebhookNotifierTests
         await notifier.DrainPendingAsync(CancellationToken.None);
         Assert.Equal(1, handler.CallCount);
 
-        // 告警消失 → 下一周期推送 resolved
+        // 告警消失 → 防抖：首个周期不推 resolved（防 flapping 恢复风暴）
         alerts.Clear();
+        notifier.Tick();
+        await notifier.DrainPendingAsync(CancellationToken.None);
+        Assert.Equal(1, handler.CallCount);
+
+        // 连续第二个周期仍不存在 → 推送 resolved
         notifier.Tick();
         await notifier.DrainPendingAsync(CancellationToken.None);
 

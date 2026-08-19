@@ -72,4 +72,10 @@ public interface IStreamingComplianceFilter
     /// <param name="buffer">流式会话绑定的滑动窗口 Buffer。</param>
     /// <returns>检测结果与处理后的文本。</returns>
     ComplianceCheckResult ProcessChunk(string chunkText, StreamingSlidingWindowBuffer buffer);
+
+    /// <summary>
+    /// 流结束时补发因跨 chunk 检测而暂存未下发的尾部文本（Redact 模式的 pending 后缀）。
+    /// 此后不再有增量，跨 chunk 匹配窗口关闭；默认无暂存。
+    /// </summary>
+    string FlushRemaining(StreamingSlidingWindowBuffer buffer) => string.Empty;
 }

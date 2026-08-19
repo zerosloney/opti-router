@@ -118,20 +118,28 @@ public sealed class StreamingSlidingWindowFilter : IStreamingComplianceFilter
                 }
 
                 string redactedCombined = sb.ToString();
-                // 从 redactedCombined 中剔除已被前一 Chunk 输出过的 tailSpan 前缀部分
-                int skipLen = Math.Min(tailSpan.Length, matchedIndexInCombined);
-                string sanitizedChunkText = redactedCombined.Length >= skipLen
-                    ? redactedCombined.Substring(skipLen)
-                    : redactedCombined;
-
-                int maxTailToKeep = Math.Max(0, _maxKeywordLength - 1);
-                buffer.UpdateTail(sanitizedChunkText.AsSpan(), maxTailToKeep);
+                // 暂存末尾 maxKeywordLength-1 字符到下一轮再下发：任何要跨 chunk 才能拼完整的敏感词，
+                // 在完整出现前不会被部分下发（修复"敏感词前缀 + [REDACTED] 并存"的边界泄漏）。
+                // Redact 模式下 Buffer 语义为"未下发的 pending 后缀"，流结束时经 FlushRemaining 补发。
+                int holdbackLen = Math.Min(Math.Max(0, _maxKeywordLength - 1), redactedCombined.Length);
+                int emitLen = redactedCombined.Length - holdbackLen;
+                string sanitizedChunkText = redactedCombined[..emitLen];
+                buffer.UpdateTail(redactedCombined.AsSpan(emitLen), holdbackLen);
 
                 return new ComplianceCheckResult(true, sanitizedChunkText, matchedKeyword);
             }
 
-            // 4. 未命中：更新滑动 Buffer 尾部并原样输出 Chunk
+            // 4. 未命中：Block 模式保持"已输出尾部窗口"语义供跨 chunk 检测；
+            //    Redact 模式同样暂存末尾（本轮未命中不代表下一 chunk 不会补全敏感词前缀）。
             int tailLenToKeep = Math.Max(0, _maxKeywordLength - 1);
+            if (_action == ComplianceAction.Redact)
+            {
+                string combinedText = new string(combinedSpan);
+                int holdbackLen = Math.Min(tailLenToKeep, combinedText.Length);
+                string emitText = combinedText[..(combinedText.Length - holdbackLen)];
+                buffer.UpdateTail(combinedText.AsSpan(combinedText.Length - holdbackLen), holdbackLen);
+                return new ComplianceCheckResult(false, emitText);
+            }
             buffer.UpdateTail(combinedSpan, tailLenToKeep);
 
             return new ComplianceCheckResult(false, chunkText);
@@ -143,5 +151,19 @@ public sealed class StreamingSlidingWindowFilter : IStreamingComplianceFilter
                 System.Buffers.ArrayPool<char>.Shared.Return(rented);
             }
         }
+    }
+
+    /// <inheritdoc />
+    public string FlushRemaining(StreamingSlidingWindowBuffer buffer)
+    {
+        // Redact 模式：补发仍暂存的 pending 后缀（此后不再有增量，暂存前缀不可能补全为敏感词）。
+        if (_action != ComplianceAction.Redact || buffer.TailSpan.Length == 0)
+        {
+            buffer.Clear();
+            return string.Empty;
+        }
+        string pending = new string(buffer.TailSpan);
+        buffer.Clear();
+        return pending;
     }
 }

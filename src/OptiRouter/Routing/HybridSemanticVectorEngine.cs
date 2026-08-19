@@ -27,18 +27,23 @@ public sealed class HybridSemanticVectorEngine : ISemanticVectorEngine
     /// </summary>
     public double HighConfidenceThreshold => _highConfidenceThreshold;
 
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
+
     /// <summary>
     /// 初始化混合语义向量路由引擎。
     /// </summary>
+    /// <param name="logger">可选日志，Dense 引擎降级时留诊断线索。</param>
     /// <param name="sparseEngine">稀疏向量引擎（为空则默认使用 <see cref="TfIdfSemanticVectorEngine"/>）。</param>
     /// <param name="denseEngine">第二阶段引擎（为空则默认使用稳定特征哈希；可注入真正 embedding）。</param>
     /// <param name="highConfidenceThreshold">TF-IDF 高置信短路阈值（默认 0.45）。</param>
     public HybridSemanticVectorEngine(
         ISemanticVectorEngine? sparseEngine = null,
         ISemanticVectorEngine? denseEngine = null,
-        double highConfidenceThreshold = 0.45)
+        double highConfidenceThreshold = 0.45,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _sparseEngine = sparseEngine ?? new TfIdfSemanticVectorEngine();
+        _logger = logger;
         _denseEngine = denseEngine ?? new DenseEmbeddingVectorEngine();
         _highConfidenceThreshold = highConfidenceThreshold;
     }
@@ -72,9 +77,10 @@ public sealed class HybridSemanticVectorEngine : ISemanticVectorEngine
                 return denseResult;
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // 异常优雅降级：Dense 计算异常时降级返回 TF-IDF 结果
+            // 异常优雅降级：Dense 计算异常时降级返回 TF-IDF 结果；留日志使 Dense 引擎故障可观测
+            _logger?.LogWarning(ex, "Hybrid dense engine match failed; falling back to sparse TF-IDF");
         }
 
         return sparseResult;

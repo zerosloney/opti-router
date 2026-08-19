@@ -20,20 +20,26 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         string Prompt,
         float[] NormalizedVector,
         RawChatResponse Response,
-        DateTime ExpiresAtUtc);
+        DateTime ExpiresAtUtc,
+        DateTime CreatedAtUtc);
 
     /// <summary>
     /// 初始化语义响应缓存。
     /// </summary>
+    /// <param name="logger">可选日志，向量化降级时留诊断线索。</param>
     /// <param name="maxEntries">最大条目数。</param>
     /// <param name="vectorEngine">可选的向量匹配引擎（如 ONNX 或 DenseEmbeddingVectorEngine）。为空时使用内置快速 CJK 特征投影。</param>
     /// <param name="enableAnnIndex">是否启用质心分桶索引加速查询（将 O(n) 扫描降为 O(候选集)）。默认开启。</param>
-    public SemanticResponseCache(int maxEntries = 10000, ISemanticVectorEngine? vectorEngine = null, bool enableAnnIndex = true)
+    public SemanticResponseCache(int maxEntries = 10000, ISemanticVectorEngine? vectorEngine = null, bool enableAnnIndex = true,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _maxEntries = Math.Max(100, maxEntries);
         _vectorEngine = vectorEngine;
         _index = enableAnnIndex ? new CentroidIndex() : null;
+        _logger = logger;
     }
+
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
 
     /// <inheritdoc />
     public Task<(bool Hit, RawChatResponse? Response, double Similarity, string? MatchedPrompt)> TryGetAsync(
@@ -128,7 +134,7 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         }
 
         var vector = GetVector(prompt);
-        var item = new CacheItem(prompt, vector, response, now.Add(ttl));
+        var item = new CacheItem(prompt, vector, response, now.Add(ttl), now);
 
         _store[prompt] = item;
         _index?.Add(prompt, vector);
@@ -144,9 +150,10 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
                 var vec = _vectorEngine.Embed(prompt);
                 if (vec != null && vec.Length > 0) return vec;
             }
-            catch
+            catch (Exception ex)
             {
-                // 降级使用内置向量投影
+                // 降级使用内置向量投影；留日志使 ONNX/向量化故障可观测
+                _logger?.LogWarning(ex, "SemanticCache vector embedding failed; falling back to hash projection");
             }
         }
         return BuildNormalizedVector(prompt);
@@ -171,7 +178,8 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         if (_store.Count >= _maxEntries)
         {
             int toRemove = _store.Count / 5;
-            foreach (var key in _store.Keys.Take(toRemove))
+            // 按创建时间最旧驱逐（修复前对 ConcurrentDictionary.Keys.Take 取任意序，可能随机驱逐热条目）
+            foreach (var key in _store.OrderBy(k => k.Value.CreatedAtUtc).Take(toRemove).Select(k => k.Key))
             {
                 _store.TryRemove(key, out _);
             }

@@ -199,7 +199,7 @@ public sealed class AnthropicModelClient : IModelClient
         var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            string errorBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            string errorBody = await BoundedResponseReader.ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
             response.Dispose();
             throw new ModelClientException(response.StatusCode, errorBody);
         }

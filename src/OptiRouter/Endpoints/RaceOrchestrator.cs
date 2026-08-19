@@ -174,18 +174,24 @@ public sealed class RaceOrchestrator
             {
                 // 成本入账（即使后续被取消的也在它们各自的 task 里处理——此处只记采纳者）。
                 ChatUsage? usage = response.Usage;
-                decimal cost = usage is not null ? CostCalculator.Compute(usage, model) : 0m;
-                if (usage is not null)
+                // usage 缺失时按输入 token 预估入账（与串行降级路径口径一致），避免无 usage 上游在 Race 模式下预算低估。
+                decimal cost = usage is not null
+                    ? CostCalculator.Compute(usage, model)
+                    : OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
+                bool adoptedIsEstimated = usage is null;
+                if (!adoptedIsEstimated || cost > 0m)
                     _recorder.RecordCost(cost, sessionId);
 
                 _recorder.RecordQuota(model.Name, response.Metadata);
                 _healthTracker.RecordSuccess(model.Name, requiredSuccesses);
-                double reward = _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision, cost, actualTier: model.Tier, completionTokens: usage?.CompletionTokens ?? 0);
+                // 质量因子与串行路径对齐：截断/空答/JSON 契约违约折减 reward，避免"快而差"的模型被系统性偏爱。
+                double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, options.Routing.QualityPenaltyFactor, request);
+                double reward = _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision, cost, actualTier: model.Tier, qualityFactor: qualityFactor, completionTokens: usage?.CompletionTokens ?? 0);
                 _recorder.RecordAffinity(sessionId, model.Name, AffinitySignal.Weak);
                 _recorder.RecordPromptCacheAffinity(request, model.Name);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,
-                    isAdopted: true, parallelGroupId: groupId,
+                    isAdopted: true, parallelGroupId: groupId, isEstimated: adoptedIsEstimated,
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
                     reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
                 accounted.Add(model.Name);
@@ -322,30 +328,57 @@ public sealed class RaceOrchestrator
                 continue;
             }
 
-            // 真正被取消：释放探测槽位 + 预估成本入账。
-            // 前提假设：请求已发出到上游，上游按已处理的 input 计费（本地拿不到 Usage）。
-            // 该估算标 IsEstimated=true，区分于真实成本；若在 cancel 传播前请求未发出，此项可能高估。
+            // 与主循环同口径区分"被竞速取消"与"真实失败"：race-cancel 传播到 linkedCts 的 OCE 才算取消；
+            // 获胜后到取消生效前完成的真实上游故障（网络/5xx）仍须计入断路器，否则故障模型漏报持续收流量。
             bool postBreakQuotaLimited = UpstreamFailureClassifier.IsQuotaLimited(error);
-            _healthTracker.ReleaseProbe(m.Name);
-            double? postBreakReward = null;
+            bool postBreakCancelledByRace = error is OperationCanceledException
+                && (!perCandidateCts.TryGetValue(m.Name, out var postBreakCts) || postBreakCts.IsCancellationRequested);
+
             if (postBreakQuotaLimited)
             {
+                // 429：仅记配额状态并释放槽位，不计断路器（与主循环配额分支一致）。
                 var quotaError = (ModelClientException)error!;
                 _recorder.RecordQuota(m.Name, quotaError.Metadata, rateLimited: true);
+                _healthTracker.ReleaseProbe(m.Name);
+                _recorder.RecordAudit(null, m.Name, estimatedTokens, null, 0m, elapsedMs, sessionId,
+                    decision.Reason + "; fusion: quota-limited (post-break)", false,
+                    "quota-exhausted", false, routedTier,
+                    isAdopted: false, parallelGroupId: groupId, isEstimated: false,
+                    quotaLimited: true,
+                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+            }
+            else if (postBreakCancelledByRace)
+            {
+                // 真正被取消：释放探测槽位 + 预估成本入账。
+                // 请求已发出到上游，上游按已处理的 input 计费（本地拿不到 Usage），标 IsEstimated=true 区分真实成本。
+                _healthTracker.ReleaseProbe(m.Name);
+                double postBreakReward = _recorder.RecordThompsonRaceCancelled(m.Name, decision);
+                decimal estCost = OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
+                if (estCost > 0m)
+                    _recorder.RecordCost(estCost, sessionId);
+                _recorder.RecordAudit(null, m.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
+                    decision.Reason + "; fusion: cancelled-by-race (post-break)", false,
+                    "cancelled", false, routedTier,
+                    isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
+                    reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
             }
             else
             {
-                postBreakReward = _recorder.RecordThompsonRaceCancelled(m.Name, decision);
+                // 真实失败（获胜后到取消传播前完成的上游故障）：与主循环同口径计入断路器，
+                // 修复前被误归为 cancelled-by-race，故障模型漏报、持续收流量。
+                failedInThisRequest.Add(m.Name);
+                lastModelName = m.Name;
+                bool tripped = _healthTracker.RecordFailure(m.Name, threshold, cooldown);
+                double failureReward = _recorder.RecordThompsonOutcome(m.Name, null, decision);
+                decimal failureEstCost = OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
+                if (failureEstCost > 0m)
+                    _recorder.RecordCost(failureEstCost, sessionId);
+                _recorder.RecordAudit(null, m.Name, estimatedTokens, null, failureEstCost, elapsedMs, sessionId,
+                    decision.Reason + "; fusion: failed (post-break)" + (tripped ? " (circuit tripped)" : ""),
+                    false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited: false), false, routedTier,
+                    isAdopted: false, parallelGroupId: groupId, isEstimated: failureEstCost > 0m,
+                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
             }
-            decimal estCost = postBreakQuotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
-            if (estCost > 0m)
-                _recorder.RecordCost(estCost, sessionId);
-            _recorder.RecordAudit(null, m.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
-                decision.Reason + "; fusion: cancelled-by-race (post-break)", false,
-                postBreakQuotaLimited ? "quota-exhausted" : "cancelled", false, routedTier,
-                isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
-                quotaLimited: postBreakQuotaLimited,
-                reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
             accounted.Add(m.Name);
         }
 

@@ -15,6 +15,8 @@ namespace OptiRouter.Routing;
 public sealed class OnnxEmbeddingVectorEngine : ISemanticVectorEngine, IDisposable
 {
     private readonly InferenceSession? _session;
+    // GetEmbedding 是 Dense 实现特有方法（不在接口上）；共享单例避免每次降级 new
+    private static readonly DenseEmbeddingVectorEngine SharedFallbackEmbedder = new();
     private readonly ISemanticVectorEngine _fallbackEngine;
     private readonly ILogger? _logger;
     private readonly ConcurrentDictionary<string, float[]> _phraseCache = new(StringComparer.OrdinalIgnoreCase);
@@ -154,7 +156,7 @@ public sealed class OnnxEmbeddingVectorEngine : ISemanticVectorEngine, IDisposab
             catch (Exception ex)
             {
                 _logger?.LogWarning(ex, "Failed to infer ONNX embedding for text snippet. Falling back to default feature hash.");
-                return new DenseEmbeddingVectorEngine().GetEmbedding(t);
+                return SharedFallbackEmbedder.GetEmbedding(t);
             }
         });
     }

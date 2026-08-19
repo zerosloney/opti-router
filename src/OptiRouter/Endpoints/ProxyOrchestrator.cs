@@ -307,7 +307,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 lastErrorMessage = fusionResult.LastErrorMessage;
 
                 if (fusionResult.Response is not null)
+                {
+                    // 获胜路径同样要记录 regenerate 反馈键（串行降级路径在成功处 Record），
+                    // 否则同键重发时负反馈找不到实际产出答案的模型。成功时 LastModelName 必非空。
+                    if (fusionResult.LastModelName is not null)
+                    {
+                        _regenerateTracker.Record(feedbackKey, fusionResult.LastModelName, success: true);
+                    }
                     return ProcessResponse(fusionResult.Response, piiMap);
+                }
                 // 失败后继续到 Fusion-lite（若同开且仍有足够候选）或串行降级。
             }
 
@@ -330,7 +338,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 lastErrorMessage = fusionResult.LastErrorMessage;
 
                 if (fusionResult.Response is not null)
+                {
+                    // 获胜路径同样要记录 regenerate 反馈键（串行降级路径在成功处 Record），
+                    // 否则同键重发时负反馈找不到实际产出答案的模型。成功时 LastModelName 必非空。
+                    if (fusionResult.LastModelName is not null)
+                    {
+                        _regenerateTracker.Record(feedbackKey, fusionResult.LastModelName, success: true);
+                    }
                     return ProcessResponse(fusionResult.Response, piiMap);
+                }
                 // 全部失败：failedInThisRequest 已填充，continue 到下一轮串行降级。
                 continue;
             }
@@ -376,7 +392,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (options.Routing.EnableMcpToolExecution && !request.Stream && _mcpToolOrchestrator is not null)
                     {
                         response = await _mcpToolOrchestrator.ExecuteToolCallsAndReplayAsync(
-                            request, response, candidate, options.Routing.MaxMcpToolRounds, effectiveCt).ConfigureAwait(false);
+                            request, response, candidate, options.Routing.MaxMcpToolRounds,
+                            sessionId: sessionId, ct: effectiveCt).ConfigureAwait(false);
                     }
 
                     // 内容审核（输出）：审核模型生成的最终响应文本，违规按策略中断。
@@ -907,6 +924,17 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                     $"Response size limit exceeded ({maxResponseBytes} bytes).");
                             }
                             yield return restored;
+                        }
+
+                        // 流结束：补发 Redact 模式为跨 chunk 匹配而暂存的尾部字符（窗口关闭，前缀不可能再补全为敏感词）。
+                        if (complianceBuffer is not null)
+                        {
+                            string pendingTail = _complianceFilter.FlushRemaining(complianceBuffer);
+                            if (!string.IsNullOrEmpty(pendingTail))
+                            {
+                                yield return new RawStreamLine(
+                                    ReplaceDeltaContent("{\"choices\":[{\"index\":0,\"delta\":{}}]}", pendingTail), null, null);
+                            }
                         }
                     }
                     finally

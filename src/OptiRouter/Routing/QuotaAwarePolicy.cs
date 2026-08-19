@@ -6,7 +6,8 @@ namespace OptiRouter.Routing;
 public sealed class QuotaAwarePolicy : IRouterPolicy
 {
     /// <inheritdoc />
-    public PolicyGroup Group => PolicyGroup.Filter;
+    // 实现只重排（配额不足后置）不剔除，属 Order 语义；声明 Filter 会让 eligibleModels 收缩链路拿到未过滤全集
+    public PolicyGroup Group => PolicyGroup.Order;
 
     private readonly UpstreamQuotaStateStore _store;
     private readonly TimeProvider _timeProvider;

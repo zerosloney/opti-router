@@ -23,6 +23,8 @@ public sealed class AlertWebhookNotifier : BackgroundService
     private readonly Queue<(AlertRecord Alert, bool IsResolved)> _pending = new();
     private HashSet<string> _activeAlertIds = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _lastMessages = new(StringComparer.Ordinal);
+    // resolved 防抖：告警连续 N 个周期消失才推送恢复
+    private readonly Dictionary<string, int> _pendingResolveMisses = new(StringComparer.Ordinal);
 
     /// <summary>活跃告警 ID 集合（含已推送的），用于去重判定。测试可读取。</summary>
     internal IReadOnlySet<string> ActiveAlertIds => _activeAlertIds;
@@ -96,22 +98,36 @@ public sealed class AlertWebhookNotifier : BackgroundService
             }
         }
 
-        // 已消失（恢复）的告警。
+        // 已消失（恢复）的告警：连续 2 个周期不存在才推送 resolved（防 flapping 告警恢复风暴）。
+        // 未满周期的先保留在活跃集中，否则下一周期无从复查、resolved 永远不会推送。
+        var nextActive = new HashSet<string>(currentIds, StringComparer.Ordinal);
         foreach (var id in _activeAlertIds)
         {
-            if (!currentIds.Contains(id))
+            if (currentIds.Contains(id))
             {
-                string detail = _lastMessages.TryGetValue(id, out var lastMessage)
-                    ? lastMessage
-                    : $"Alert '{id}' recovered.";
-                _pending.Enqueue((
-                    new AlertRecord(id, "info", "recovery", $"Recovered: {detail}", DateTime.UtcNow),
-                    IsResolved: true));
-                _lastMessages.Remove(id);
+                _pendingResolveMisses.Remove(id);
+                continue;
             }
+
+            int misses = _pendingResolveMisses.TryGetValue(id, out var m) ? m + 1 : 1;
+            if (misses < 2)
+            {
+                _pendingResolveMisses[id] = misses;
+                nextActive.Add(id);
+                continue;
+            }
+
+            _pendingResolveMisses.Remove(id);
+            string detail = _lastMessages.TryGetValue(id, out var lastMessage)
+                ? lastMessage
+                : $"Alert '{id}' recovered.";
+            _pending.Enqueue((
+                new AlertRecord(id, "info", "recovery", $"Recovered: {detail}", DateTime.UtcNow),
+                IsResolved: true));
+            _lastMessages.Remove(id);
         }
 
-        _activeAlertIds = currentIds;
+        _activeAlertIds = nextActive;
     }
 
     /// <summary>
@@ -121,6 +137,13 @@ public sealed class AlertWebhookNotifier : BackgroundService
     {
         string? webhookUrl = _options.CurrentValue.Routing.AlertWebhookUrl;
         if (string.IsNullOrWhiteSpace(webhookUrl)) return;
+        // 仅允许 http(s)，拒绝其他 scheme 的错误配置
+        if (!webhookUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+            && !webhookUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("AlertWebhookUrl must start with http:// or https://; push skipped");
+            return;
+        }
 
         while (_pending.Count > 0)
         {

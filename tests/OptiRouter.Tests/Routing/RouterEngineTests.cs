@@ -317,7 +317,8 @@ public class RouterEngineTests
         Assert.Equal(PolicyGroup.Filter, new CapabilityFilterPolicy().Group);
         Assert.Equal(PolicyGroup.Filter, new LongInputPolicy().Group);
         Assert.Equal(PolicyGroup.Filter, new FailoverPolicy(new ModelHealthTracker()).Group);
-        Assert.Equal(PolicyGroup.Filter, new QuotaAwarePolicy(new UpstreamQuotaStateStore()).Group);
+        // QuotaAware 只重排（不足后置）不剔除，修正为 Order 语义
+        Assert.Equal(PolicyGroup.Order, new QuotaAwarePolicy(new UpstreamQuotaStateStore()).Group);
         Assert.Equal(PolicyGroup.Classify, new RuleClassifierPolicy().Group);
         Assert.Equal(PolicyGroup.Classify, new SemanticRouterPolicy().Group);
         Assert.Equal(PolicyGroup.Order, new LatencyAwarePolicy(new LatencyStatsCache(), new ThompsonStateStore()).Group);

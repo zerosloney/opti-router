@@ -472,7 +472,7 @@ public static class DashboardHandler
                 }
             });
 
-            return Results.Ok(new { message = "System configuration persisted to appsettings.json and hot-applied via reload." });
+            return Results.Ok(new { message = "System configuration persisted to the SQLite config database and hot-applied via reload." });
         });
 
         // 9. Circuit Breaker Override API

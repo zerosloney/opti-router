@@ -14,6 +14,7 @@
 @inject McpToolComplexityAnalyzer ToolComplexityAnalyzer
 @inject IPromptPruner PromptPruner
 @inject DistributedMeshSynchronizer MeshSynchronizer
+@implements IDisposable
 
 <PageTitle>OptiRouter - 性能基准、MCP 生态与分布式 Mesh 拓扑</PageTitle>
 
@@ -90,14 +91,14 @@
                         <table class="data-table">
                             <thead>
                                 <tr>
-                                    <th>P50</th>
-                                    <th>P75</th>
-                                    <th>P90</th>
-                                    <th>P95</th>
-                                    <th>P99</th>
-                                    <th>P99.9</th>
-                                    <th>GC (0/1/2)</th>
-                                    <th>内存吞吐</th>
+                                    <th scope="col">P50</th>
+                                    <th scope="col">P75</th>
+                                    <th scope="col">P90</th>
+                                    <th scope="col">P95</th>
+                                    <th scope="col">P99</th>
+                                    <th scope="col">P99.9</th>
+                                    <th scope="col">GC (0/1/2)</th>
+                                    <th scope="col">内存吞吐</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -129,12 +130,12 @@
                 <table class="data-table">
                     <thead>
                         <tr>
-                            <th>工具名称</th>
-                            <th>复杂度评分</th>
-                            <th>推荐分档</th>
-                            <th>嵌套深度</th>
-                            <th>属性数量</th>
-                            <th>Schema 状态</th>
+                            <th scope="col">工具名称</th>
+                            <th scope="col">复杂度评分</th>
+                            <th scope="col">推荐分档</th>
+                            <th scope="col">嵌套深度</th>
+                            <th scope="col">属性数量</th>
+                            <th scope="col">Schema 状态</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -323,6 +324,9 @@
     {
         if (isRunningBenchmark) return;
         isRunningBenchmark = true;
+        // 页面级取消源：导航离开（Dispose）即取消压测，避免后台 worker 继续占用 CPU
+        _benchmarkCts?.Dispose();
+        _benchmarkCts = new CancellationTokenSource();
         StateHasChanged();
 
         try
@@ -336,23 +340,34 @@
                 WarmupRequests = 10
             };
 
-            latestReport = await BenchmarkEngine.RunAsync(config, (req, ct) =>
-            {
-                var sw = Stopwatch.StartNew();
-                var decision = Engine.Decide(req, options);
-                sw.Stop();
+            latestReport = await BenchmarkEngine.RunAsync(
+                config,
+                (req, ct) =>
+                {
+                    var sw = Stopwatch.StartNew();
+                    var decision = Engine.Decide(req, options);
+                    sw.Stop();
 
-                return Task.FromResult(new BenchmarkSample(
-                    LatencyMs: sw.Elapsed.TotalMilliseconds,
-                    TtftMs: null,
-                    StatusCode: 200,
-                    Success: decision.Candidates.Count > 0));
-            });
+                    return Task.FromResult(new BenchmarkSample(
+                        LatencyMs: sw.Elapsed.TotalMilliseconds,
+                        TtftMs: null,
+                        StatusCode: 200,
+                        Success: decision.Candidates.Count > 0));
+                },
+                _benchmarkCts.Token);
         }
         finally
         {
             isRunningBenchmark = false;
             StateHasChanged();
         }
+    }
+
+    private CancellationTokenSource? _benchmarkCts;
+
+    public void Dispose()
+    {
+        _benchmarkCts?.Cancel();
+        _benchmarkCts?.Dispose();
     }
 }

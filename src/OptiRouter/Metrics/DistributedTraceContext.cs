@@ -22,7 +22,8 @@ public static class DistributedTraceContext
         }
 
         var parts = traceparentHeader.Trim().Split('-');
-        if (parts.Length >= 3 && parts[1].Length == 32 && parts[2].Length == 16)
+        // W3C 版本段须为 "00"，未知版本按无效头处理（生成新 trace），避免错误解析非标输入
+        if (parts.Length >= 3 && parts[0] == "00" && parts[1].Length == 32 && parts[2].Length == 16)
         {
             return (parts[1], parts[2]);
         }

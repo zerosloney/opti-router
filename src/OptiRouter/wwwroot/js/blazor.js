@@ -74,7 +74,7 @@ window.drawTrendChart = function(canvas, data) {
         ctx.lineTo(W - pad.r, y);
         ctx.stroke();
         
-        ctx.fillStyle = '#64748b';
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
         ctx.font = '11px "JetBrains Mono", monospace';
         ctx.textAlign = 'right';
         ctx.fillText('$' + (mx - mx * i / 4).toFixed(4), pad.l - 10, y + 3.5);
@@ -102,7 +102,7 @@ window.drawTrendChart = function(canvas, data) {
     
     // Line stroke
     ctx.beginPath();
-    ctx.strokeStyle = '#6366f1';
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
@@ -116,7 +116,7 @@ window.drawTrendChart = function(canvas, data) {
         ctx.fillStyle = '#6366f1';
         ctx.fill();
         ctx.lineWidth = 1.5;
-        ctx.strokeStyle = '#0f172a';
+        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#0f172a';
         ctx.stroke();
     });
     

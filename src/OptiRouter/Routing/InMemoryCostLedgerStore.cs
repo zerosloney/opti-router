@@ -119,6 +119,11 @@ public sealed class InMemoryCostLedgerStore : ICostLedgerStore
             if (_daily.TryGetValue(utcDate.Date, out var amount) && amount > 0)
             {
                 _dailyHistory.Add((utcDate.Date, amount));
+                // 上界防泄漏：仅保留最近 366 天（GetDailyHistory 也只会请求更少）
+                if (_dailyHistory.Count > 366)
+                {
+                    _dailyHistory.RemoveRange(0, _dailyHistory.Count - 366);
+                }
             }
         }
     }

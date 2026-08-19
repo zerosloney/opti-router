@@ -21,6 +21,7 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
     private readonly object _lock = new();
     private readonly SqliteConnection _connection;
     private readonly ILogger<SqliteRequestAuditStore> _logger;
+    private int _consecutiveFlushFailures;
     private bool _disposed;
 
     private readonly ConcurrentQueue<RequestAuditRecord> _queue = new();
@@ -235,9 +236,18 @@ public sealed class SqliteRequestAuditStore : IRequestAuditStore, IDisposable
                 BeforeAuditBatchCommitHook?.Invoke();
                 tx.Commit();
             }
-            catch
+            catch (Exception ex)
             {
                 // Commit may be ambiguous; replaying is safer than losing audit records.
+                // 但持久性故障（磁盘满/文件锁死）下无限重试会刷屏并卡住 GetRecent：
+                // 连续 5 批失败后丢弃该批并记 Error，下批重新计数（审计尽力而为）。
+                if (++_consecutiveFlushFailures >= 5)
+                {
+                    _logger.LogError(ex, "Audit flush failed {Failures} consecutive batches; dropping {Count} audit records to unblock the queue",
+                        _consecutiveFlushFailures, batch.Count);
+                    _consecutiveFlushFailures = 0;
+                    return;
+                }
                 foreach (var record in batch)
                     _queue.Enqueue(record);
                 _signal.Release(batch.Count);

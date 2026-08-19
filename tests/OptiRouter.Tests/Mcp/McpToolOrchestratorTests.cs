@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
@@ -72,6 +73,66 @@ public sealed class McpToolOrchestratorTests
     private static RawChatResponse ToRaw(string json) => new(json, null);
 
     [Fact]
+    public async Task ExecuteToolCallsAndReplayAsync_RecordsSupersededRoundCosts_WithoutDoubleCountingFinal()
+    {
+        // C2 成本入账：入口响应与中间轮响应被重放取代时逐轮入账（此前全部漏计导致预算低估），
+        // 最终返回响应留给调用方计费，不重复入账。
+        var registry = CreateRegistry();
+        var executor = new FakeToolExecutor();
+        var endpoint = CreateEndpoint();
+        endpoint.InputPricePerMillion = 2m;
+        endpoint.OutputPricePerMillion = 4m;
+
+        var ledger = new OptiRouter.Routing.CostLedger();
+        var recorder = new OutcomeRecorder(
+            auditStore: null!,
+            metrics: null!,
+            ledger: ledger,
+            options: new FakeOptionsMonitor(new RouterOptions()),
+            affinityCache: new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+            tsStore: new OptiRouter.Routing.ThompsonStateStore(),
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<OutcomeRecorder>.Instance);
+
+        var usageEntry = new ChatUsage { PromptTokens = 10, CompletionTokens = 5, TotalTokens = 15 };
+        var usageMid = new ChatUsage { PromptTokens = 20, CompletionTokens = 6, TotalTokens = 26 };
+        var usageFinal = new ChatUsage { PromptTokens = 30, CompletionTokens = 8, TotalTokens = 38 };
+        int upstreamCalls = 0;
+        var secondToolCallResponse = ToolCallResponse.Replace("chatcmpl-1", "chatcmpl-2").Replace("call_1", "call_2").Replace("Beijing", "Shanghai");
+        var client = new MockModelClient(endpoint, (req, ct) =>
+        {
+            upstreamCalls++;
+            return Task.FromResult(new RawChatResponse(
+                upstreamCalls == 1 ? secondToolCallResponse : FinalResponse,
+                upstreamCalls == 1 ? usageMid : usageFinal));
+        });
+        var orchestrator = new McpToolOrchestrator(registry, executor,
+            new TestModelClientProvider(new Dictionary<string, IModelClient> { [endpoint.Name] = client }), recorder: recorder);
+
+        var request = new ChatRequest
+        {
+            Model = "auto",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Check weather twice") }
+        };
+
+        var result = await orchestrator.ExecuteToolCallsAndReplayAsync(
+            request, new RawChatResponse(ToolCallResponse, usageEntry), endpoint, maxRounds: 4, sessionId: "s-mcp");
+
+        // 两轮工具执行：入口响应（usageEntry）+ 第一轮重放响应（usageMid）被取代入账；最终响应（usageFinal）不入账
+        Assert.Equal(2, upstreamCalls);
+        decimal expected = CostCalculator.Compute(usageEntry, endpoint) + CostCalculator.Compute(usageMid, endpoint);
+        Assert.Equal(expected, ledger.GetSpend().Total);
+    }
+
+    private sealed class FakeOptionsMonitor(RouterOptions current) : IOptionsMonitor<RouterOptions>
+    {
+        public RouterOptions CurrentValue => current;
+        public RouterOptions Get(string? name) => current;
+        public IDisposable? OnChange(Action<RouterOptions, string?> listener) => null;
+    }
+
+    [Fact]
     public async Task ExecuteToolCallsAndReplayAsync_ExecutesToolAndReplaysWithToolMessages()
     {
         var registry = CreateRegistry();
@@ -126,12 +187,13 @@ public sealed class McpToolOrchestratorTests
         int upstreamCalls = 0;
         var receivedRequests = new List<ChatRequest>();
         var endpoint = CreateEndpoint();
-        var secondToolCallResponse = ToolCallResponse.Replace("chatcmpl-1", "chatcmpl-2").Replace("call_1", "call_2");
+        // 第二轮调用同工具但不同参数（city=Shanghai）：签名不同才构成有效多轮推进（同签名重复会被无进展检测终止）
+        var secondToolCallResponse = ToolCallResponse.Replace("chatcmpl-1", "chatcmpl-2").Replace("call_1", "call_2").Replace("Beijing", "Shanghai");
         var client = new MockModelClient(endpoint, (req, ct) =>
         {
             receivedRequests.Add(req);
             upstreamCalls++;
-            return Task.FromResult(upstreamCalls == 1 ? ToRaw(ToolCallResponse) : ToRaw(FinalResponse));
+            return Task.FromResult(upstreamCalls == 1 ? ToRaw(secondToolCallResponse) : ToRaw(FinalResponse));
         });
         var orchestrator = new McpToolOrchestrator(registry, executor, new TestModelClientProvider(new Dictionary<string, IModelClient> { [endpoint.Name] = client }));
 
@@ -176,9 +238,10 @@ public sealed class McpToolOrchestratorTests
 
         var result = await orchestrator.ExecuteToolCallsAndReplayAsync(request, ToRaw(ToolCallResponse), endpoint, maxRounds: 2);
 
-        // 首次 + 2 轮重放后停止，返回最后一轮的工具调用响应
-        Assert.Equal(2, executor.Calls.Count);
-        Assert.Equal(2, upstreamCalls);
+        // C2 无进展检测：模型每轮重复完全相同的 tool_calls（同签名），
+        // 首轮执行后即终止循环——不再烧满剩余轮次（旧行为为执行满 2 轮）。
+        Assert.Single(executor.Calls);
+        Assert.Equal(1, upstreamCalls);
         Assert.Equal(ToolCallResponse, result.Body);
     }
 

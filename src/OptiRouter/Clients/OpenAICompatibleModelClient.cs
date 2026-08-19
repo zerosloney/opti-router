@@ -319,7 +319,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         {
             try
             {
-                var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
+                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
                 httpRequest.Content = new StringContent(json, Encoding.UTF8);
                 httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 

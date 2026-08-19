@@ -383,7 +383,8 @@ builder.Services.AddSingleton<OptiRouter.Mcp.McpToolOrchestrator>(sp =>
         sp.GetRequiredService<OptiRouter.Mcp.McpToolRegistry>(),
         sp.GetRequiredService<OptiRouter.Mcp.IMcpToolExecutor>(),
         sp.GetRequiredService<IModelClientProvider>(),
-        sp.GetService<ILogger<OptiRouter.Mcp.McpToolOrchestrator>>()));
+        sp.GetService<ILogger<OptiRouter.Mcp.McpToolOrchestrator>>(),
+        recorder: sp.GetRequiredService<OptiRouter.Endpoints.OutcomeRecorder>()));
 builder.Services.AddSingleton<OptiRouter.Compression.IPromptPruner, OptiRouter.Compression.AdaptivePromptPruner>();
 builder.Services.AddSingleton<OptiRouter.Clients.IProviderAdapterSandbox, OptiRouter.Clients.ProviderAdapterSandbox>();
 builder.Services.AddSingleton<OptiRouter.Benchmarks.StressBenchmarkEngine>();
@@ -557,7 +558,8 @@ builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 // ApiService 必须 Scoped（circuit 内共享）：Blazor Server 页面间 NavLink 导航 URL 不含 ?key=，
 // Transient 会在每次组件解析时新建实例并从当前 URL 重新提取 key → 导航后全部 401。
-builder.Services.AddHttpClient(nameof(ApiService), client => client.Timeout = TimeSpan.FromSeconds(100));
+// 300s：长评测（eval/run 走真实上游管线）可能超过 100s
+builder.Services.AddHttpClient(nameof(ApiService), client => client.Timeout = TimeSpan.FromSeconds(300));
 builder.Services.AddScoped<ApiService>(sp =>
 {
     var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(ApiService));

@@ -27,17 +27,20 @@ public sealed class McpToolOrchestrator
     private readonly IMcpToolExecutor _executor;
     private readonly IModelClientProvider _clientProvider;
     private readonly ILogger<McpToolOrchestrator> _logger;
+    private readonly OptiRouter.Endpoints.OutcomeRecorder? _recorder;
 
     public McpToolOrchestrator(
         McpToolRegistry registry,
         IMcpToolExecutor executor,
         IModelClientProvider clientProvider,
-        ILogger<McpToolOrchestrator>? logger = null)
+        ILogger<McpToolOrchestrator>? logger = null,
+        OptiRouter.Endpoints.OutcomeRecorder? recorder = null)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _executor = executor ?? throw new ArgumentNullException(nameof(executor));
         _clientProvider = clientProvider ?? throw new ArgumentNullException(nameof(clientProvider));
         _logger = logger ?? NullLogger<McpToolOrchestrator>.Instance;
+        _recorder = recorder;
     }
 
     /// <summary>
@@ -135,6 +138,7 @@ public sealed class McpToolOrchestrator
         RawChatResponse response,
         ModelEndpointOptions candidate,
         int maxRounds,
+        string? sessionId = null,
         CancellationToken ct = default)
     {
         if (response?.Body is null) return response!;
@@ -143,11 +147,34 @@ public sealed class McpToolOrchestrator
         var client = _clientProvider.GetClient(candidate);
         var currentRequest = request;
         var currentResponse = response;
+        // 每次请求内有效的 tool_calls 签名集（防模型无进展地重复相同调用）
+        var _seenCallSignatures = new HashSet<string>(StringComparer.Ordinal);
 
         for (int round = 0; round < maxRounds; round++)
         {
             var toolCalls = ExtractToolCalls(currentResponse.Body);
             if (toolCalls.Count == 0) break;
+
+            // 该响应即将被本轮重放结果取代：真实花费立即入账（含入口首轮）。
+            // 多轮工具调用的中间请求此前全部漏计，导致含工具请求的日/会话预算系统性低估；
+            // 最终返回的响应由调用方（ProxyOrchestrator）计费，此处不重复入账。
+            if (_recorder is not null && currentResponse.Usage is not null)
+            {
+                decimal supersededCost = OptiRouter.Endpoints.CostCalculator.Compute(currentResponse.Usage, candidate);
+                if (supersededCost > 0m)
+                {
+                    _recorder.RecordCost(supersededCost, sessionId);
+                }
+            }
+
+            // 无进展检测：模型重复请求完全相同的 tool_calls（名称+参数签名）说明工具结果没能推动它前进，
+            // 继续重放只会烧满剩余轮次的 token 与延迟——检测到重复签名即终止循环返回当前响应。
+            string roundSignature = string.Join("|", toolCalls.Select(c => $"{c.Name}:{c.Arguments.GetRawText()}"));
+            if (!_seenCallSignatures.Add(roundSignature))
+            {
+                _logger.LogWarning("MCP tool loop round {Round}: duplicate tool_calls signature detected, stopping replay loop", round);
+                break;
+            }
 
             string? assistantMessageJson = ExtractAssistantMessageJson(currentResponse.Body);
             if (assistantMessageJson is null) break;

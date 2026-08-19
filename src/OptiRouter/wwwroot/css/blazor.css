@@ -457,6 +457,12 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono 
     transition: all var(--duration-fast);
 }
 
+button.side-nav-logout {
+    cursor: pointer;
+    font: inherit;
+    width: 100%;
+}
+
 .side-nav-logout:hover {
     border-color: var(--danger-border);
     color: var(--danger);

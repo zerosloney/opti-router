@@ -90,7 +90,7 @@ public sealed class McpToolExecutor : IMcpToolExecutor
                 new { protocolVersion = ProtocolVersion, capabilities = new { }, clientInfo = new { name = "OptiRouter", version = "1.0" } },
                 sessionId, effectiveCt).ConfigureAwait(false))
             {
-                string initBody = await initResponse.Content.ReadAsStringAsync(effectiveCt).ConfigureAwait(false);
+                string initBody = await OptiRouter.Clients.BoundedResponseReader.ReadBodyAsync(initResponse.Content, effectiveCt).ConfigureAwait(false);
                 var (initOk, initError) = ParseRpcResult(initBody);
                 if (!initOk)
                 {
@@ -105,7 +105,7 @@ public sealed class McpToolExecutor : IMcpToolExecutor
             if (!string.IsNullOrWhiteSpace(sessionId))
             {
                 using var notif = await SendJsonRpcAsync(endpoint, "notifications/initialized", server, new { }, sessionId, effectiveCt).ConfigureAwait(false);
-                _ = await notif.Content.ReadAsStringAsync(effectiveCt).ConfigureAwait(false);
+                _ = await OptiRouter.Clients.BoundedResponseReader.ReadBodyAsync(notif.Content, effectiveCt).ConfigureAwait(false);
             }
 
             // 3. tools/call
@@ -114,7 +114,7 @@ public sealed class McpToolExecutor : IMcpToolExecutor
                 new { name = toolName, arguments = arguments },
                 sessionId, effectiveCt).ConfigureAwait(false);
 
-            string body = await callResponse.Content.ReadAsStringAsync(effectiveCt).ConfigureAwait(false);
+            string body = await OptiRouter.Clients.BoundedResponseReader.ReadBodyAsync(callResponse.Content, effectiveCt).ConfigureAwait(false);
             var (callOk, callError) = ParseRpcResult(body);
             if (!callOk)
             {
@@ -179,7 +179,7 @@ public sealed class McpToolExecutor : IMcpToolExecutor
         if (!response.IsSuccessStatusCode)
         {
             int statusCode = (int)response.StatusCode;
-            string errorBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            string errorBody = await OptiRouter.Clients.BoundedResponseReader.ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
             response.Dispose();
             throw new HttpRequestException($"MCP server returned HTTP {statusCode}: {errorBody}");
         }

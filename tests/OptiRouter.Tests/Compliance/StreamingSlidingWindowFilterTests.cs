@@ -59,8 +59,9 @@ public class StreamingSlidingWindowFilterTests
 
         var result = filter.ProcessChunk("Your key is secret_key inside system.", buffer);
 
+        // Redact 模式暂存末尾 maxKeywordLength-1 字符；流结束经 FlushRemaining 补发，拼接后才是完整输出
         Assert.True(result.IsViolation);
-        Assert.Equal("Your key is *** inside system.", result.ProcessedText);
+        Assert.Equal("Your key is *** inside system.", result.ProcessedText + filter.FlushRemaining(buffer));
         Assert.Equal("secret_key", result.MatchedKeyword);
     }
 
@@ -75,6 +76,12 @@ public class StreamingSlidingWindowFilterTests
 
         var result2 = filter.ProcessChunk("word in output.", buffer);
         Assert.True(result2.IsViolation);
-        Assert.Contains("[REDACTED]", result2.ProcessedText);
+
+        // 拼接全量输出（含 FlushRemaining 补发）：敏感词被完整脱敏，
+        // 且任何中间输出都不含裸露的 "forbidden_" 前缀（修复前的边界泄漏）。
+        string full = result1.ProcessedText + result2.ProcessedText + filter.FlushRemaining(buffer);
+        Assert.Equal("This text contains [REDACTED] in output.", full);
+        Assert.DoesNotContain("forbidden_", result1.ProcessedText);
+        Assert.DoesNotContain("forbidden_", result2.ProcessedText);
     }
 }
