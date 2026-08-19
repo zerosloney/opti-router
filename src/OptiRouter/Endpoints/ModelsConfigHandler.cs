@@ -17,7 +17,7 @@ public static class ModelsConfigHandler
         // 1. Models Config UI is now served by Blazor Server via Pages/Models/_Host.cshtml (Razor Pages routing).
         //    Old MapGet removed - was: static models.html served here.
 
-        // 2. GET all (不暴露完整 ApiKey，只返回是否已配置)
+        // 2. GET all (不暴露完整 ApiKey，只返回是否已配置 + 遮蔽预览)
         endpoints.MapGet("/api/models", (ModelsConfigService cfg) =>
         {
             var models = cfg.LoadModels();
@@ -40,7 +40,8 @@ public static class ModelsConfigHandler
                 m.CacheWriteInputPricePerMillion,
                 m.OutputPricePerMillion,
                 m.Tags,
-                HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
+                HasApiKey = !string.IsNullOrEmpty(m.ApiKey),
+                ApiKeyHint = BuildApiKeyHint(m.ApiKey)
             }).ToList();
             return Results.Json(data);
         });
@@ -68,7 +69,8 @@ public static class ModelsConfigHandler
                 m.CacheWriteInputPricePerMillion,
                 m.OutputPricePerMillion,
                 m.Tags,
-                HasApiKey = !string.IsNullOrEmpty(m.ApiKey)
+                HasApiKey = !string.IsNullOrEmpty(m.ApiKey),
+                ApiKeyHint = BuildApiKeyHint(m.ApiKey)
             });
             return Results.Json(new { models = data, configStore = "sqlite" });
         });
@@ -145,6 +147,38 @@ public static class ModelsConfigHandler
             => TestEndpointConnectivity(name, cfg, clientProvider));
         endpoints.MapPost("/api/models/test", (string name, ModelsConfigService cfg, IModelClientProvider clientProvider)
             => TestEndpointConnectivity(name, cfg, clientProvider));
+
+        // 2b. GET single model ApiKey（管理员按需查看完整密钥；列表只下发遮蔽预览，避免批量泄露面）。
+        endpoints.MapGet("/api/models/{name}/apikey", (string name, ModelsConfigService cfg)
+            => RevealApiKey(name, cfg));
+        endpoints.MapGet("/api/models/apikey", (string name, ModelsConfigService cfg)
+            => RevealApiKey(name, cfg));
+    }
+
+    private static IResult RevealApiKey(string name, ModelsConfigService cfg)
+    {
+        var models = cfg.LoadModels();
+        var names = EffectiveNames(models);
+        int idx = names.FindIndex(n => string.Equals(n, name, StringComparison.Ordinal));
+        if (idx < 0)
+            return Results.NotFound(new { error = $"Model '{name}' not found" });
+        return Results.Ok(new { apiKey = models[idx].ApiKey ?? "" });
+    }
+
+    /// <summary>
+    /// 生成 ApiKey 遮蔽预览：前 3 + 后 4（长度 ≤ 8 只露前 2），供管理员在列表中核对配置。
+    /// 完整密钥不回传前端；检测到首尾空白时附加警示——粘贴误差是上游 401 的常见根因。
+    /// </summary>
+    internal static string? BuildApiKeyHint(string? apiKey)
+    {
+        if (string.IsNullOrEmpty(apiKey)) return null;
+
+        string hint = apiKey.Length <= 8
+            ? apiKey[..2] + "••••"
+            : apiKey[..3] + "••••" + apiKey[^4..];
+        if (apiKey != apiKey.Trim())
+            hint += " ⚠含首尾空白";
+        return hint;
     }
 
     private static IResult UpdateModel(string name, ModelsConfigService cfg, UpdateModelRequest req)

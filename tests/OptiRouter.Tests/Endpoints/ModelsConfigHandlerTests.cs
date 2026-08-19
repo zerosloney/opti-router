@@ -63,6 +63,76 @@ public class ModelsConfigHandlerTests
     }
 
     [Fact]
+    public async Task Models_Get_ReturnsMaskedApiKeyHint_WithWhitespaceWarning()
+    {
+        // ApiKeyHint：前 3 + 后 4 遮蔽预览；首尾空白附加警示（粘贴误差是上游 401 常见根因）；完整密钥不回传。
+        using var factory = new ModelsFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        string okName = "hint-ok-" + Guid.NewGuid().ToString("N");
+        string padName = "hint-pad-" + Guid.NewGuid().ToString("N");
+        await CreateModelAsync(client, okName, "sk-test-12345678-wxyz");
+        await CreateModelAsync(client, padName, " sk-bad-key \n");
+
+        using var list = await client.GetAsync("/api/models");
+        list.EnsureSuccessStatusCode();
+        string json = await list.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("12345678", json); // 完整密钥绝不回传
+
+        using var doc = JsonDocument.Parse(json);
+        var ok = doc.RootElement.EnumerateArray().Single(m => m.GetProperty("name").GetString() == okName);
+        Assert.True(ok.GetProperty("hasApiKey").GetBoolean());
+        Assert.Equal("sk-••••wxyz", ok.GetProperty("apiKeyHint").GetString());
+        var padded = doc.RootElement.EnumerateArray().Single(m => m.GetProperty("name").GetString() == padName);
+        Assert.EndsWith("⚠含首尾空白", padded.GetProperty("apiKeyHint").GetString());
+    }
+
+    [Fact]
+    public async Task Models_RevealApiKey_ReturnsFullKeyPerRequest_OnlyForAdmin()
+    {
+        // reveal 端点：管理员按需取完整密钥；未鉴权 401；未知模型 404；列表接口仍不含完整密钥。
+        using var factory = new ModelsFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        string name = "reveal-" + Guid.NewGuid().ToString("N");
+        await CreateModelAsync(client, name, "sk-reveal-secret-value-42");
+
+        // 未鉴权被拒
+        using var anon = factory.CreateClient();
+        using var anonResp = await anon.GetAsync($"/api/models/apikey?name={name}");
+        Assert.Equal(HttpStatusCode.Unauthorized, anonResp.StatusCode);
+
+        // 按需返回完整密钥（query 与 path 两种形态）
+        using var byQuery = await client.GetAsync($"/api/models/apikey?name={name}");
+        byQuery.EnsureSuccessStatusCode();
+        Assert.Contains("sk-reveal-secret-value-42", await byQuery.Content.ReadAsStringAsync());
+        using var byPath = await client.GetAsync($"/api/models/{name}/apikey");
+        byPath.EnsureSuccessStatusCode();
+
+        // 未知模型 404
+        using var missing = await client.GetAsync("/api/models/apikey?name=no-such-model");
+        Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
+    }
+
+    private static async Task CreateModelAsync(HttpClient client, string name, string apiKey)
+    {
+        string body = JsonSerializer.Serialize(new
+        {
+            name,
+            baseUrl = "https://example.com",
+            apiKey,
+            tier = "Medium",
+            inputPricePerMillion = 0,
+            outputPricePerMillion = 0
+        });
+        using var resp = await client.PostAsync("/api/models",
+            new StringContent(body, Encoding.UTF8, "application/json"));
+        Assert.True(resp.IsSuccessStatusCode, await resp.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
     public async Task CreateModel_MissingOrNegativePrices_AreZero()
     {
         using var factory = new ModelsFactory();

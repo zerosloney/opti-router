@@ -446,11 +446,33 @@ public class ApiService
 
     public async Task<ModelTestResultDto?> TestModelConnectionAsync(string name)
     {
-        using var resp = await SendAsync(HttpMethod.Post,Url($"/api/models/test?name={Uri.EscapeDataString(name)}"), new { });
+        using var resp = await SendAsync(HttpMethod.Post, Url($"/api/models/test?name={Uri.EscapeDataString(name)}"), new { });
         if (resp.IsSuccessStatusCode)
             return await resp.Content.ReadFromJsonAsync<ModelTestResultDto>();
         return new ModelTestResultDto(false, 0, "HTTP Request Failed", null);
     }
+
+    /// <summary>按需获取单个模型的完整 ApiKey（管理员鉴权；列表接口只返回遮蔽预览）。</summary>
+    public async Task<(string? Key, string? Error)> RevealModelApiKeyAsync(string name)
+    {
+        try
+        {
+            // 用 query 形态：模型名可含 "/"（display id），path 段无法承载。
+            using var resp = await SendAsync(HttpMethod.Get, Url($"/api/models/apikey?name={Uri.EscapeDataString(name)}"));
+            if (resp.IsSuccessStatusCode)
+            {
+                var result = await resp.Content.ReadFromJsonAsync<RevealApiKeyResponse>();
+                return (result?.ApiKey, null);
+            }
+            return (null, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
+    private sealed record RevealApiKeyResponse(string? ApiKey);
 
     // ── DTOs ─────────────────────────────────────────────────────
 
@@ -637,6 +659,7 @@ public class ApiService
         decimal OutputPricePerMillion,
         List<string> Tags,
         bool HasApiKey,
+        string? ApiKeyHint = null,
         string Provider = "",
         string Family = "",
         decimal? CachedInputPricePerMillion = null,
