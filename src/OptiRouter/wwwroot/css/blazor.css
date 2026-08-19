@@ -388,25 +388,30 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono 
 
 .side-nav-footer {
     margin-top: auto;
-    padding-top: 1.25rem;
+    padding-top: 1rem;
     border-top: 1px solid var(--border-subtle);
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
     gap: 0.6rem;
 }
 
+/* 头部主题切换：icon-only 小方钮，靠 logo 区右缘（全局偏好放头部，底部留给会话身份）。
+   margin-right 负值抵消 logo-area 的右内边距，与底部退出按钮右缘对齐。 */
 .theme-toggle {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.45rem 0.75rem;
+    justify-content: center;
+    margin-left: auto;
+    margin-right: -0.5rem;
+    flex-shrink: 0;
+    padding: 0.35rem 0.45rem;
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     background: var(--bg-subtle);
     color: var(--text-secondary);
     font: inherit;
-    font-size: 0.8rem;
-    font-weight: 500;
     cursor: pointer;
     transition: all var(--duration-fast);
 }
@@ -460,7 +465,8 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono 
 button.side-nav-logout {
     cursor: pointer;
     font: inherit;
-    width: 100%;
+    width: auto;
+    padding: 0.3rem 0.7rem;
 }
 
 .side-nav-logout:hover {
