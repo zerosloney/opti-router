@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.DependencyInjection;
 using OptiRouter.Clients;
+using OptiRouter.Compliance;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
 using OptiRouter.Routing;
@@ -20,6 +21,17 @@ namespace OptiRouter.Tests.Routing;
 /// </summary>
 public class ResponseCacheTests
 {
+    private sealed class AllowingModerator : IContentModerator
+    {
+        public string Name => "test-allowing-moderator";
+
+        public Task<ModerationResult> ModerateTextAsync(
+            string text,
+            ModerationDirection direction,
+            CancellationToken ct = default) =>
+            Task.FromResult(new ModerationResult(false, null, 0.0, null));
+    }
+
     private sealed class CacheFactory : WebApplicationFactory<Program>
     {
         public const string Key = "cache-test-key";
@@ -30,6 +42,9 @@ public class ResponseCacheTests
 
         /// <summary>regenerate 惩罚 reward（默认 0.1，与 RoutingOptions 一致）。</summary>
         public double RegeneratePenaltyReward { get; init; } = 0.1;
+
+        /// <summary>启用审核时同时启用语义缓存，用于验证两类缓存均被安全门禁禁用。</summary>
+        public bool EnableContentModeration { get; init; }
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -58,10 +73,14 @@ public class ResponseCacheTests
                     opt.Routing.EnableHealthProbe = false;
                     opt.Routing.EnableResponseCache = true;
                     opt.Routing.ResponseCacheTtlSeconds = 60;
+                    opt.Routing.EnableContentModeration = EnableContentModeration;
+                    opt.Routing.EnableSemanticCache = EnableContentModeration;
                     opt.Routing.EnableRegenerateFeedback = EnableRegenerateFeedback;
                     opt.Routing.RegeneratePenaltyReward = RegeneratePenaltyReward;
                     opt.Routing.RegenerateFeedbackWindowSeconds = 60;
                 });
+                if (EnableContentModeration)
+                    services.AddSingleton<IContentModerator, AllowingModerator>();
                 services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
             });
         }
@@ -105,6 +124,46 @@ public class ResponseCacheTests
     }
 
     [Fact]
+    public void ResponseCacheKey_IncludesStableMessageExtensionData()
+    {
+        var toolCallA = JsonSerializer.SerializeToElement(new[]
+        {
+            new { id = "call-1", type = "function", function = new { name = "lookup", arguments = "{\"q\":\"a\"}" } }
+        });
+        var toolCallB = JsonSerializer.SerializeToElement(new[]
+        {
+            new { id = "call-1", type = "function", function = new { name = "lookup", arguments = "{\"q\":\"b\"}" } }
+        });
+
+        var requestA = BuildRequest("hello") with
+        {
+            Messages = new List<ChatMessage>
+            {
+                ChatMessage.FromText("user", "hello"),
+                new ChatMessage
+                {
+                    Role = "assistant",
+                    ExtensionData = new Dictionary<string, JsonElement> { ["tool_calls"] = toolCallA }
+                }
+            }
+        };
+        var requestB = requestA with
+        {
+            Messages = new List<ChatMessage>
+            {
+                requestA.Messages[0],
+                new ChatMessage
+                {
+                    Role = "assistant",
+                    ExtensionData = new Dictionary<string, JsonElement> { ["tool_calls"] = toolCallB }
+                }
+            }
+        };
+
+        Assert.NotEqual(ResponseCacheKey.Compute(requestA), ResponseCacheKey.Compute(requestB));
+    }
+
+    [Fact]
     public async Task SameRequest_SecondCall_HitsCache_DoesNotCallUpstream()
     {
         using var factory = new CacheFactory();
@@ -129,6 +188,30 @@ public class ResponseCacheTests
         var b2 = await r2.Content.ReadAsStringAsync(cts.Token);
         Assert.Equal(b1, b2); // 命中缓存返回相同响应
         Assert.Equal(1, calls); // 上游只调一次，第二次命中缓存
+    }
+
+    [Fact]
+    public async Task ContentModerationEnabled_DoesNotUseEitherCache()
+    {
+        using var factory = new CacheFactory { EnableContentModeration = true };
+        int calls = 0;
+        factory.MockClients["m1"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "m1", BaseUrl = "https://example.com" },
+            (req, ct) => { calls++; return Task.FromResult(MakeResponse()); });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", CacheFactory.Key);
+        var json = JsonSerializer.Serialize(BuildRequest("moderation must see every request"));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var c1 = new StringContent(json, Encoding.UTF8, "application/json");
+        using var c2 = new StringContent(json, Encoding.UTF8, "application/json");
+
+        var r1 = await client.PostAsync("/v1/chat/completions", c1, cts.Token);
+        var r2 = await client.PostAsync("/v1/chat/completions", c2, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, r1.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, r2.StatusCode);
+        Assert.Equal(2, calls);
     }
 
     [Fact]

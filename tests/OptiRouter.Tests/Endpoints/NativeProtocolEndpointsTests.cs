@@ -41,7 +41,8 @@ public class NativeProtocolEndpointsTests
     /// <summary>创建注入 mock 模型客户端的工厂：非流式返回固定 OpenAI JSON，流式返回固定增量序列。</summary>
     private static (TestWebApplicationFactory Factory, CapturedRequestContext Captured) CreateFactory(
         string responseBody = OpenAiResponseBody,
-        string modelName = "model-a")
+        string modelName = "model-a",
+        Func<ChatRequest, CancellationToken, IAsyncEnumerable<RawStreamLine>>? streamRawFunc = null)
     {
         var factory = new TestWebApplicationFactory();
         var endpoint = CreateEndpoint(modelName);
@@ -67,7 +68,7 @@ public class NativeProtocolEndpointsTests
                     responseBody,
                     new ChatUsage { PromptTokens = 5, CompletionTokens = 2, TotalTokens = 7 }));
             },
-            (req, ct) => CreateOpenAiStream(req));
+            streamRawFunc ?? ((req, ct) => CreateOpenAiStream(req)));
         return (factory, captured);
     }
 
@@ -84,6 +85,24 @@ public class NativeProtocolEndpointsTests
             new ChatUsage { PromptTokens = 5, CompletionTokens = 2, TotalTokens = 7 });
         yield return new RawStreamLine("[DONE]", null);
         await Task.Yield();
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> ComplianceViolationBeforeFirst(ChatRequest request)
+    {
+        await Task.Yield();
+        if (request.Stream)
+            throw new OptiRouter.Compliance.ComplianceViolationException("content moderation blocked the stream", "violence");
+        yield break;
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> ComplianceViolationAfterFirst(ChatRequest request)
+    {
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-moderated\",\"model\":\"model-a\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"before moderation\"}}]}", null);
+        await Task.Yield();
+        if (request.Stream)
+            throw new OptiRouter.Compliance.ComplianceViolationException("content moderation blocked the stream", "violence");
+        yield break;
     }
 
     private static async Task<HttpResponseMessage> PostAsync(
@@ -212,6 +231,71 @@ public class NativeProtocolEndpointsTests
         Assert.Contains("\"stop_reason\":\"end_turn\"", body);
         Assert.Contains("\"output_tokens\":2", body);
         Assert.Contains("event: message_stop", body);
+    }
+
+    [Fact]
+    public async Task OpenAi_Stream_ComplianceViolationBeforeFirst_EmitsContentModerated()
+    {
+        var (factory, _) = CreateFactory(streamRawFunc: static (request, _) => ComplianceViolationBeforeFirst(request));
+        using var client = factory.CreateClient();
+
+        var response = await PostAsync(client, "/v1/chat/completions", JsonSerializer.Serialize(new
+        {
+            model = "auto",
+            stream = true,
+            messages = new object[] { new { role = "user", content = "Hi" } }
+        }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        string body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"code\":\"CONTENT_MODERATED\"", body);
+        Assert.Contains("\"type\":\"invalid_request_error\"", body);
+        Assert.DoesNotContain("System.", body);
+    }
+
+    [Fact]
+    public async Task OpenAi_Stream_ComplianceViolationMidStream_EmitsContentModerated()
+    {
+        var (factory, _) = CreateFactory(streamRawFunc: static (request, _) => ComplianceViolationAfterFirst(request));
+        using var client = factory.CreateClient();
+
+        var response = await PostAsync(client, "/v1/chat/completions", JsonSerializer.Serialize(new
+        {
+            model = "auto",
+            stream = true,
+            messages = new object[] { new { role = "user", content = "Hi" } }
+        }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        string body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("before moderation", body);
+        Assert.Contains("\"code\":\"CONTENT_MODERATED\"", body);
+        Assert.DoesNotContain("\"code\":\"INTERNAL_ERROR\"", body);
+        Assert.DoesNotContain("System.", body);
+    }
+
+    [Fact]
+    public async Task Anthropic_Stream_ComplianceViolationBeforeFirst_EmitsInvalidRequestError()
+    {
+        var (factory, _) = CreateFactory(streamRawFunc: static (request, _) => ComplianceViolationBeforeFirst(request));
+        using var client = factory.CreateClient();
+
+        var response = await PostAsync(client, "/v1/messages", JsonSerializer.Serialize(new
+        {
+            model = "auto",
+            max_tokens = 100,
+            stream = true,
+            messages = new object[] { new { role = "user", content = "Hi" } }
+        }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        string body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("event: error", body);
+        Assert.Contains("\"type\":\"invalid_request_error\"", body);
+        Assert.DoesNotContain("api_error", body);
+        Assert.DoesNotContain("System.", body);
     }
 
     [Fact]
@@ -347,6 +431,27 @@ public class NativeProtocolEndpointsTests
     }
 
     [Fact]
+    public async Task Gemini_Stream_ComplianceViolationBeforeFirst_EmitsInvalidArgumentError()
+    {
+        var (factory, _) = CreateFactory(streamRawFunc: static (request, _) => ComplianceViolationBeforeFirst(request));
+        using var client = factory.CreateClient();
+
+        var response = await PostAsync(client, "/v1beta/models/model-a:streamGenerateContent?alt=sse", JsonSerializer.Serialize(new
+        {
+            contents = new object[] { new { role = "user", parts = new object[] { new { text = "Hi" } } } },
+            generationConfig = new { maxOutputTokens = 100 }
+        }));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        string body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("\"code\":400", body);
+        Assert.Contains("\"status\":\"INVALID_ARGUMENT\"", body);
+        Assert.DoesNotContain("\"status\":\"INTERNAL\"", body);
+        Assert.DoesNotContain("System.", body);
+    }
+
+    [Fact]
     public async Task Gemini_UnknownModel_Returns404WithErrorEnvelope()
     {
         var (factory, _) = CreateFactory();
@@ -442,6 +547,9 @@ public class NativeProtocolEndpointsTests
         }));
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal("error", document.RootElement.GetProperty("type").GetString());
+        Assert.Equal("authentication_error", document.RootElement.GetProperty("error").GetProperty("type").GetString());
     }
 
     [Fact]
@@ -487,6 +595,10 @@ public class NativeProtocolEndpointsTests
         }));
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var error = document.RootElement.GetProperty("error");
+        Assert.Equal(401, error.GetProperty("code").GetInt32());
+        Assert.Equal("UNAUTHENTICATED", error.GetProperty("status").GetString());
     }
 
     #endregion

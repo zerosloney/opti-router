@@ -18,6 +18,12 @@
     }
 
     <!-- 核心指标卡 -->
+    @if (MetricsLoading)
+    {
+        <div style="padding: 2rem; text-align: center; color: var(--text-secondary);">
+            <span class="tag tag-info">加载中...</span>
+        </div>
+    }
     <div class="stats-row">
         <div class="stat-card">
             <div class="stat-card-label">日预算消耗</div>
@@ -290,6 +296,7 @@
 
 @code {
     private ApiService.DashboardMetrics? Metrics;
+    private bool MetricsLoading = true;
     private List<ApiService.DailySpend> Trends = new();
     private List<ApiService.AlertInfo> Alerts => Metrics?.System.Alerts ?? new();
 
@@ -392,11 +399,13 @@
         try
         {
             Metrics = await Api.GetMetricsAsync();
+            MetricsLoading = false;
         }
         catch (Exception ex)
         {
             // 静默降级保留诊断线索：仪表盘数据停止更新时可定位原因
             Logger.LogDebug(ex, "Overview LoadMetrics failed");
+            MetricsLoading = false;
         }
     }
 

@@ -70,6 +70,12 @@ public sealed class McpToolOrchestratorTests
         "usage":{"prompt_tokens":30,"completion_tokens":8,"total_tokens":38}}
         """;
 
+    private const string MalformedAssistantToolCallResponse = """
+        {"id":"chatcmpl-bad","choices":[{"message":{"role":123,"content":null,
+        "tool_calls":[{"id":"call_bad","type":"function","function":{"name":"get_weather","arguments":"{}"}}]}}],
+        "usage":{"prompt_tokens":11,"completion_tokens":5,"total_tokens":16}}
+        """;
+
     private static RawChatResponse ToRaw(string json) => new(json, null);
 
     [Fact]
@@ -125,11 +131,94 @@ public sealed class McpToolOrchestratorTests
         Assert.Equal(expected, ledger.GetSpend().Total);
     }
 
+    [Fact]
+    public async Task ExecuteToolCallsAndReplayAsync_DuplicateSignature_DoesNotChargeUnreplacedResponse()
+    {
+        var registry = CreateRegistry();
+        var executor = new FakeToolExecutor();
+        var endpoint = CreateEndpoint();
+        endpoint.InputPricePerMillion = 2m;
+        endpoint.OutputPricePerMillion = 4m;
+        var (recorder, ledger) = CreateCostRecorder();
+
+        var entryUsage = new ChatUsage { PromptTokens = 10, CompletionTokens = 5, TotalTokens = 15 };
+        var duplicateUsage = new ChatUsage { PromptTokens = 20, CompletionTokens = 6, TotalTokens = 26 };
+        int upstreamCalls = 0;
+        var client = new MockModelClient(endpoint, (req, ct) =>
+        {
+            upstreamCalls++;
+            return Task.FromResult(new RawChatResponse(ToolCallResponse, duplicateUsage));
+        });
+        var orchestrator = new McpToolOrchestrator(registry, executor,
+            new TestModelClientProvider(new Dictionary<string, IModelClient> { [endpoint.Name] = client }), recorder: recorder);
+
+        var request = new ChatRequest
+        {
+            Model = "auto",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Loop") }
+        };
+
+        var result = await orchestrator.ExecuteToolCallsAndReplayAsync(
+            request, new RawChatResponse(ToolCallResponse, entryUsage), endpoint, maxRounds: 4, sessionId: "s-duplicate");
+
+        Assert.Single(executor.Calls);
+        Assert.Equal(1, upstreamCalls);
+        Assert.Equal(ToolCallResponse, result.Body);
+        Assert.Equal(CostCalculator.Compute(entryUsage, endpoint), ledger.GetSpend().Total);
+    }
+
+    [Fact]
+    public async Task ExecuteToolCallsAndReplayAsync_MalformedAssistant_DoesNotChargeUnreplayedResponse()
+    {
+        var registry = CreateRegistry();
+        var executor = new FakeToolExecutor();
+        var endpoint = CreateEndpoint();
+        endpoint.InputPricePerMillion = 2m;
+        endpoint.OutputPricePerMillion = 4m;
+        var (recorder, ledger) = CreateCostRecorder();
+        var usage = new ChatUsage { PromptTokens = 11, CompletionTokens = 5, TotalTokens = 16 };
+        var client = new MockModelClient(endpoint, (req, ct) =>
+        {
+            throw new InvalidOperationException("replay should not run");
+        });
+        var orchestrator = new McpToolOrchestrator(registry, executor,
+            new TestModelClientProvider(new Dictionary<string, IModelClient> { [endpoint.Name] = client }), recorder: recorder);
+
+        var request = new ChatRequest
+        {
+            Model = "auto",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Malformed") }
+        };
+
+        var result = await orchestrator.ExecuteToolCallsAndReplayAsync(
+            request, new RawChatResponse(MalformedAssistantToolCallResponse, usage), endpoint, maxRounds: 4);
+
+        Assert.Equal(MalformedAssistantToolCallResponse, result.Body);
+        Assert.Empty(executor.Calls);
+        Assert.Equal(0m, ledger.GetSpend().Total);
+    }
+
     private sealed class FakeOptionsMonitor(RouterOptions current) : IOptionsMonitor<RouterOptions>
     {
         public RouterOptions CurrentValue => current;
         public RouterOptions Get(string? name) => current;
         public IDisposable? OnChange(Action<RouterOptions, string?> listener) => null;
+    }
+
+    private static (OutcomeRecorder Recorder, OptiRouter.Routing.CostLedger Ledger) CreateCostRecorder()
+    {
+        var ledger = new OptiRouter.Routing.CostLedger();
+        var recorder = new OutcomeRecorder(
+            auditStore: null!,
+            metrics: null!,
+            ledger: ledger,
+            options: new FakeOptionsMonitor(new RouterOptions()),
+            affinityCache: new Microsoft.Extensions.Caching.Memory.MemoryCache(new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()),
+            tsStore: new OptiRouter.Routing.ThompsonStateStore(),
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: Microsoft.Extensions.Logging.Abstractions.NullLogger<OutcomeRecorder>.Instance);
+        return (recorder, ledger);
     }
 
     [Fact]

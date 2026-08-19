@@ -606,10 +606,9 @@ public sealed class RoutingOptions
 
     /// <summary>
     /// 是否在审计记录中存储请求内容明文（<c>request_content</c> 字段，用于 Dashboard 展示）。
-    /// 默认 true（保持现状，保留 168 小时）。关闭后审计与 Dashboard 不再留存请求内容明文，
-    /// 隐私敏感部署建议关闭以降低数据泄露风险。
+    /// 默认 false。管理员可显式开启以在 Dashboard 展示请求内容；关闭后审计与 Dashboard 不再留存请求内容明文。
     /// </summary>
-    public bool AuditStoreRequestContent { get; set; } = true;
+    public bool AuditStoreRequestContent { get; set; } = false;
 
     /// <summary>
     /// 是否启用 Prometheus 指标导出（<c>/metrics</c> 端点）。默认 true。

@@ -114,10 +114,10 @@ curl http://localhost:5000/health
 | 字段 | 含义 | 默认 |
 |------|------|------|
 | `ProxyApiKey` | 调用 `/v1/*` 与 `/dashboard`、`/api/dashboard/*` 时使用的 Bearer API Key；为空时拒绝访问 | 空 |
-| `RequestsPerMinute` | 每个分区（Session > IP > Auth）的固定窗口每分钟请求上限 | `60` |
+| `RequestsPerMinute` | 每个分区（IP > Auth）的固定窗口每分钟请求上限 | `60` |
 | `MaxConcurrentRequestsPerPartition` | 每个分区同时进行的最大请求数，超出返回 429 | `100` |
 
-> **分区 Key 优先级**：`X-Session-Id` 头 > 客户端 IP（`CF-Connecting-IP` > `X-Forwarded-For` 首段 > `RemoteIpAddress`）> Bearer Token（SHA256 哈希前 16 hex）。带 API Key 的请求仍按 IP 隔离，避免单 key 多用户共享配额。
+> **分区 Key 优先级**：客户端 IP（启用 `TrustProxyHeaders` 时依次使用 `CF-Connecting-IP`、`X-Forwarded-For` 首段，否则使用 `RemoteIpAddress`）> Bearer Token（SHA256 哈希前 16 hex）。仅当无法取得 IP 时按认证标识分区；`X-Session-Id` 不参与限流分区。
 
 ### Models[]（模型端点列表）
 
@@ -125,7 +125,7 @@ curl http://localhost:5000/health
 |------|------|------|
 | `Name` | 模型标识 | `gpt-4o` |
 | `BaseUrl` | 上游 API 基地址 | `https://api.openai.com/v1` |
-| `ApiKey` | 鉴权密钥。支持 `env:VAR_NAME` 语法从环境变量加载（变量缺失时该模型 key 为空并告警）。**边界说明：仅 models-config.json 加载路径生效；appsettings.json 的 Models[] 不支持；通过 Dashboard 保存模型配置会把当前生效密钥明文写回 models-config.json** | `sk-...` |
+| `ApiKey` | 鉴权密钥。支持 `env:VAR_NAME` 语法从环境变量加载（变量缺失时该模型 key 为空并告警）。模型配置权威存储为 SQLite 配置库；通过 Dashboard 保存模型配置会写入配置库并热生效 | `sk-...` |
 | `Tier` | 能力分档：`Strong` / `Medium` / `Cheap` | `Strong` |
 | `MaxContextTokens` | 最大上下文长度 | `128000` |
 | `InputPricePerMillion` | 输入价格（美元/百万 token） | `2.5` |
@@ -224,7 +224,7 @@ curl http://localhost:5000/health
 | `EnableMetrics` | 启用 Prometheus `/metrics` 端点（无鉴权，仅聚合数+模型名） | `true` |
 | `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
 | `MetricsApiKey` | `/metrics` 端点鉴权密钥（Bearer Token）。非空时要求 `Authorization: Bearer <key>`；null 保持无鉴权 | `null` |
-| `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（隐私敏感部署建议设为 `false`） | `true` |
+| `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（默认关闭；管理员可显式设为 `true` 以 opt-in。升级注意：该默认值由早前版本的 `true` 改为 `false`，依赖请求内容留存的部署需显式开启） | `false` |
 
 ### 推荐配置预设 (Presets)
 
@@ -322,7 +322,7 @@ curl http://localhost:5000/health
 
 ### 分布式存储与多节点 K8s 部署 (Kubernetes Multi-Node Deployment)
 
-对于无状态多节点 Kubernetes 部署，OptiRouter 提炼了抽象存储接口 `ICostLedgerStore` 与 `IRequestAuditStore`，支持通过 PostgreSQL 或 Redis 实现跨节点共享分布式账本与审计汇总：
+对于无状态多节点 Kubernetes 部署，OptiRouter 提炼了抽象存储接口 `ICostLedgerStore` 与 `IRequestAuditStore`；PostgreSQL 可跨节点共享成本账本、断路器状态与请求审计汇总，Redis 仅共享成本账本与断路器状态：
 
 ```json
 {

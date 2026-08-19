@@ -646,8 +646,11 @@ public sealed class FusionRouter
                     var resp = await client.CompleteRawAsync(request with { Stream = false }, ct).ConfigureAwait(false);
                     secondarySw.Stop();
                     ChatUsage? usage = resp.Usage;
-                    decimal cost = usage is not null ? CostCalculator.Compute(usage, m) : 0m;
-                    if (usage is not null)
+                    decimal cost = usage is not null
+                        ? CostCalculator.Compute(usage, m)
+                        : OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
+                    bool isEstimated = usage is null;
+                    if (!isEstimated || cost > 0m)
                         _recorder.RecordCost(cost, sessionId);
                     _recorder.RecordQuota(m.Name, resp.Metadata);
                     _healthTracker.RecordSuccess(m.Name, routing.FailoverHalfOpenRequiredSuccesses);
@@ -655,6 +658,7 @@ public sealed class FusionRouter
                     _recorder.RecordAudit(null, m.Name, estimatedTokens, usage, cost,
                         secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary",
                         true, null, true, routedTier, isAdopted: false, fusionRole: "secondary",
+                        isEstimated: isEstimated,
                         timeToFirstTokenMs: resp.Metadata?.ResponseHeaderLatencyMs,
                         reward: secondaryReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
                     return (m.Name, ResponseConfidenceChecker.ExtractAssistantText(resp));
@@ -725,15 +729,18 @@ public sealed class FusionRouter
             anchorElapsedMs = anchorSw.ElapsedMilliseconds;
             if (anchorStreamCompleted)
             {
-                // anchor 成本按真实 usage 计；无 usage 时记 0 并标 IsEstimated=false（与主链流式口径一致）。
-                decimal anchorCost = anchorUsage is not null ? CostCalculator.Compute(anchorUsage, anchorModel) : 0m;
-                if (anchorUsage is not null)
+                // anchor 成本优先按真实 usage 计；无 usage 时按输入 token 估算并标记预估。
+                decimal anchorCost = anchorUsage is not null
+                    ? CostCalculator.Compute(anchorUsage, anchorModel)
+                    : OutcomeRecorder.EstimateInputCost(anchorModel, estimatedTokens);
+                bool anchorIsEstimated = anchorUsage is null;
+                if (!anchorIsEstimated || anchorCost > 0m)
                     _recorder.RecordCost(anchorCost, sessionId);
                 _healthTracker.RecordSuccess(anchorModel.Name, routing.FailoverHalfOpenRequiredSuccesses);
                 double anchorReward = _recorder.RecordThompsonOutcome(anchorModel.Name, anchorElapsedMs, decision, completionTokens: anchorUsage?.CompletionTokens ?? 0);
                 _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, anchorUsage, anchorCost,
                     anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier,
-                    isEstimated: anchorUsage is null,
+                    isEstimated: anchorIsEstimated,
                     reward: anchorReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
             }
             else
@@ -802,8 +809,11 @@ public sealed class FusionRouter
                     analystResp = await analystClient.CompleteRawAsync(analystReq, ct).ConfigureAwait(false);
                     analystSw.Stop();
                     ChatUsage? usage = analystResp.Usage;
-                    decimal cost = usage is not null ? CostCalculator.Compute(usage, analystModel) : 0m;
-                    if (usage is not null)
+                    decimal cost = usage is not null
+                        ? CostCalculator.Compute(usage, analystModel)
+                        : OutcomeRecorder.EstimateInputCost(analystModel, estimatedTokens);
+                    bool isEstimated = usage is null;
+                    if (!isEstimated || cost > 0m)
                         _recorder.RecordCost(cost, sessionId);
                     _recorder.RecordQuota(analystModel.Name, analystResp.Metadata);
                     _healthTracker.RecordSuccess(analystModel.Name, routing.FailoverHalfOpenRequiredSuccesses, releaseProbe: false);
@@ -811,6 +821,7 @@ public sealed class FusionRouter
                     _recorder.RecordAudit(null, analystModel.Name, estimatedTokens, usage, cost,
                         analystSw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: analyst",
                         true, null, true, routedTier, isAdopted: false, fusionRole: "analyst",
+                        isEstimated: isEstimated,
                         timeToFirstTokenMs: analystResp.Metadata?.ResponseHeaderLatencyMs,
                         reward: streamAnalystReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
                 }

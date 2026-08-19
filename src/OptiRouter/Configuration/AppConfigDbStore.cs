@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
@@ -106,6 +108,86 @@ public sealed class AppConfigDbStore : IDisposable
             cmd.Parameters.AddWithValue("$v", json);
             cmd.ExecuteNonQuery();
         }
+    }
+
+    /// <summary>原子读取路由/预算文档及其内容版本。</summary>
+    public (string? RoutingJson, string? BudgetJson, string Version) LoadRoutingBudgetSnapshot()
+    {
+        lock (_gate)
+        {
+            string? routing = LoadDocumentNoLock(RoutingScope, transaction: null);
+            string? budget = LoadDocumentNoLock(BudgetScope, transaction: null);
+            return (routing, budget, ComputeDocumentsVersion(routing, budget));
+        }
+    }
+
+    /// <summary>
+    /// 仅当当前路由/预算文档版本仍等于 <paramref name="expectedVersion"/> 时原子覆盖两份文档。
+    /// </summary>
+    public bool TrySaveRoutingBudgetDocuments(
+        string expectedVersion,
+        string routingJson,
+        string budgetJson,
+        out string version)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(expectedVersion);
+        ArgumentNullException.ThrowIfNull(routingJson);
+        ArgumentNullException.ThrowIfNull(budgetJson);
+
+        lock (_gate)
+        {
+            using var transaction = _connection.BeginTransaction(deferred: false);
+            string? currentRouting = LoadDocumentNoLock(RoutingScope, transaction);
+            string? currentBudget = LoadDocumentNoLock(BudgetScope, transaction);
+            string currentVersion = ComputeDocumentsVersion(currentRouting, currentBudget);
+            if (!string.Equals(expectedVersion, currentVersion, StringComparison.Ordinal))
+            {
+                version = currentVersion;
+                transaction.Rollback();
+                return false;
+            }
+
+            SaveDocumentNoLock(RoutingScope, routingJson, transaction);
+            SaveDocumentNoLock(BudgetScope, budgetJson, transaction);
+            transaction.Commit();
+            version = ComputeDocumentsVersion(routingJson, budgetJson);
+            return true;
+        }
+    }
+
+    private string? LoadDocumentNoLock(string scope, SqliteTransaction? transaction)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = "SELECT value FROM app_config WHERE scope = $s AND key = $k;";
+        cmd.Parameters.AddWithValue("$s", scope);
+        cmd.Parameters.AddWithValue("$k", DocumentKey);
+        return cmd.ExecuteScalar() as string;
+    }
+
+    private void SaveDocumentNoLock(string scope, string json, SqliteTransaction transaction)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = """
+            INSERT INTO app_config (scope, key, value, ord, updated_at)
+            VALUES ($s, $k, $v, 0, strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+            ON CONFLICT (scope, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at;
+            """;
+        cmd.Parameters.AddWithValue("$s", scope);
+        cmd.Parameters.AddWithValue("$k", DocumentKey);
+        cmd.Parameters.AddWithValue("$v", json);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static string ComputeDocumentsVersion(string? routingJson, string? budgetJson)
+    {
+        routingJson ??= string.Empty;
+        budgetJson ??= string.Empty;
+        string content = $"{routingJson.Length}:{routingJson}{budgetJson.Length}:{budgetJson}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
     }
 
     /// <summary>读取原始模型列表（不展开 env: 引用），按 ord 排序。</summary>

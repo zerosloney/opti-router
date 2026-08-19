@@ -10,6 +10,7 @@ namespace OptiRouter.Clients;
 /// </summary>
 public sealed class ModelClientFactory
 {
+    private const string AnthropicVersion = "2023-06-01";
     private readonly ILogger? _logger;
 
     /// <summary>
@@ -42,15 +43,7 @@ public sealed class ModelClientFactory
         // 配置超时。
         httpClient.Timeout = TimeSpan.FromSeconds(endpoint.TimeoutSeconds > 0 ? endpoint.TimeoutSeconds : 120);
 
-        // 配置 Authorization。
-        if (!string.IsNullOrWhiteSpace(endpoint.ApiKey))
-        {
-            httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", endpoint.ApiKey);
-        }
-        else
-        {
-            httpClient.DefaultRequestHeaders.Authorization = null;
-        }
+        ConfigureAuthentication(endpoint, httpClient.DefaultRequestHeaders);
 
         // 按端点协议选择客户端：原生协议（Anthropic/Gemini）在客户端内部完成双向翻译，
         // 下游始终收到 OpenAI 契约响应。
@@ -75,5 +68,30 @@ public sealed class ModelClientFactory
 
         var httpClient = new HttpClient(handler, disposeHandler: false);
         return new ModelClientFactory().Create(endpoint, httpClient);
+    }
+
+    internal static void ConfigureAuthentication(ModelEndpointOptions endpoint, HttpRequestHeaders headers)
+    {
+        headers.Authorization = null;
+        headers.Remove("x-api-key");
+        headers.Remove("x-goog-api-key");
+        headers.Remove("anthropic-version");
+
+        if (string.IsNullOrWhiteSpace(endpoint.ApiKey))
+            return;
+
+        switch (endpoint.Protocol)
+        {
+            case ProviderProtocol.Anthropic:
+                headers.TryAddWithoutValidation("x-api-key", endpoint.ApiKey);
+                headers.TryAddWithoutValidation("anthropic-version", AnthropicVersion);
+                break;
+            case ProviderProtocol.Gemini:
+                headers.TryAddWithoutValidation("x-goog-api-key", endpoint.ApiKey);
+                break;
+            default:
+                headers.Authorization = new AuthenticationHeaderValue("Bearer", endpoint.ApiKey);
+                break;
+        }
     }
 }

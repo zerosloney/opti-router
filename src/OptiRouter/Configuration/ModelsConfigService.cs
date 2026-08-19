@@ -40,33 +40,36 @@ public sealed class ModelsConfigService
     /// </summary>
     public IList<ModelEndpointOptions> LoadModels()
     {
-        var models = _store.LoadModelsRaw();
-        _rawApiKeys.Clear();
-
-        foreach (var model in models)
+        lock (_rawApiKeys)
         {
-            if (!string.IsNullOrWhiteSpace(model.ApiKey) && model.ApiKey.StartsWith("env:", StringComparison.Ordinal))
+            var models = _store.LoadModelsRaw();
+            _rawApiKeys.Clear();
+
+            foreach (var model in models)
             {
-                string envVarName = model.ApiKey.Substring(4);
-                string envValue = Environment.GetEnvironmentVariable(envVarName) ?? "";
-
-                _rawApiKeys[KeyOf(model)] = model.ApiKey;
-
-                if (string.IsNullOrEmpty(envValue))
+                if (!string.IsNullOrWhiteSpace(model.ApiKey) && model.ApiKey.StartsWith("env:", StringComparison.Ordinal))
                 {
-                    _logger.LogWarning(
-                        "模型 {ModelName} 的 ApiKey 引用环境变量 {EnvVarName} 不存在或为空，该模型 ApiKey 视为空",
-                        model.Name, envVarName);
-                    model.ApiKey = "";
-                }
-                else
-                {
-                    model.ApiKey = envValue;
+                    string envVarName = model.ApiKey.Substring(4);
+                    string envValue = Environment.GetEnvironmentVariable(envVarName) ?? "";
+
+                    _rawApiKeys[KeyOf(model)] = model.ApiKey;
+
+                    if (string.IsNullOrEmpty(envValue))
+                    {
+                        _logger.LogWarning(
+                            "模型 {ModelName} 的 ApiKey 引用环境变量 {EnvVarName} 不存在或为空，该模型 ApiKey 视为空",
+                            model.Name, envVarName);
+                        model.ApiKey = "";
+                    }
+                    else
+                    {
+                        model.ApiKey = envValue;
+                    }
                 }
             }
-        }
 
-        return models;
+            return models;
+        }
     }
 
     /// <summary>

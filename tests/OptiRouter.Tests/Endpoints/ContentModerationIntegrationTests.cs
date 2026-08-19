@@ -192,8 +192,9 @@ public sealed class ContentModerationIntegrationTests
 
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-        Assert.Equal("CONTENT_MODERATED", doc.RootElement.GetProperty("code").GetString());
-        Assert.Equal("violence", doc.RootElement.GetProperty("category").GetString());
+        var error = doc.RootElement.GetProperty("error");
+        Assert.Equal("CONTENT_MODERATED", error.GetProperty("code").GetString());
+        Assert.Equal("violence", error.GetProperty("category").GetString());
         Assert.Equal(0, factory.UpstreamCalls); // 未达上游
     }
 

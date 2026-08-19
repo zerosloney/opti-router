@@ -60,7 +60,32 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.LongInputThresholdTokens 必须大于 0。");
         }
 
-        if (options.Budget.UsePersistentStore && string.IsNullOrWhiteSpace(options.Budget.StorePath))
+        if (!string.Equals(options.Budget.StoreProvider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(options.Budget.StoreProvider, "Postgres", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(options.Budget.StoreProvider, "Redis", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(options.Budget.StoreProvider, "InMemory", StringComparison.OrdinalIgnoreCase))
+        {
+            return ValidateOptionsResult.Fail(
+                "Budget.StoreProvider 必须是 'Sqlite'、'Postgres'、'Redis' 或 'InMemory'。");
+        }
+
+        if (string.Equals(options.Budget.StoreProvider, "Postgres", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(options.Budget.PostgresConnectionString))
+        {
+            return ValidateOptionsResult.Fail(
+                "Budget.PostgresConnectionString 不能为空（当 StoreProvider 为 Postgres 时）。");
+        }
+
+        if (string.Equals(options.Budget.StoreProvider, "Redis", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(options.Budget.RedisConnectionString))
+        {
+            return ValidateOptionsResult.Fail(
+                "Budget.RedisConnectionString 不能为空（当 StoreProvider 为 Redis 时）。");
+        }
+
+        if (string.Equals(options.Budget.StoreProvider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+            && options.Budget.UsePersistentStore
+            && string.IsNullOrWhiteSpace(options.Budget.StorePath))
         {
             return ValidateOptionsResult.Fail("Budget.StorePath 不能为空（当 UsePersistentStore 为 true 时）。");
         }

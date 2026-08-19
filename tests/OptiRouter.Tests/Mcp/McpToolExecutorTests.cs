@@ -1,3 +1,5 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -17,6 +19,50 @@ namespace OptiRouter.Tests.Mcp;
 public sealed class McpToolExecutorTests
 {
     private sealed record CapturedRequest(string Method, string Body, string SessionHeader, string? Authorization);
+
+    private sealed class OversizedResponseHandler : HttpMessageHandler
+    {
+        private readonly byte[] _body;
+
+        public TrackingContent? LastContent { get; private set; }
+
+        public OversizedResponseHandler()
+        {
+            string padding = new('x', OptiRouter.Clients.BoundedResponseReader.MaxNonStreamingResponseBytes + 1);
+            _body = Encoding.UTF8.GetBytes($"{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"padding\":\"{padding}\"}}}}");
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            LastContent = new TrackingContent(_body);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = LastContent
+            });
+        }
+    }
+
+    private sealed class TrackingContent(byte[] body) : HttpContent
+    {
+        private int _serializeCalls;
+
+        public int SerializeCalls => Volatile.Read(ref _serializeCalls);
+
+        protected override async Task SerializeToStreamAsync(Stream stream, System.Net.TransportContext? context)
+        {
+            Interlocked.Increment(ref _serializeCalls);
+            await stream.WriteAsync(body);
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync() =>
+            Task.FromResult<Stream>(new MemoryStream(body, writable: false));
+    }
 
     private static async Task<(McpToolExecutor Executor, List<CapturedRequest> Requests)> StartMockServerAsync(
         Func<string, string>? toolsCallResponder = null)
@@ -220,5 +266,20 @@ public sealed class McpToolExecutorTests
 
         Assert.False(result.IsSuccess);
         Assert.Contains("500", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ExecuteToolAsync_OversizedResponse_StreamsBeforeBuffering()
+    {
+        var handler = new OversizedResponseHandler();
+        using var client = new HttpClient(handler);
+        var executor = new McpToolExecutor(client);
+
+        var result = await executor.ExecuteToolAsync(CreateServer(), "large_tool", default);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("exceeded", result.ErrorMessage);
+        Assert.NotNull(handler.LastContent);
+        Assert.Equal(0, handler.LastContent!.SerializeCalls);
     }
 }

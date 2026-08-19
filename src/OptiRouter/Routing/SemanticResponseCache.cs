@@ -18,6 +18,7 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
 
     private sealed record CacheItem(
         string Prompt,
+        string PartitionKey,
         float[] NormalizedVector,
         RawChatResponse Response,
         DateTime ExpiresAtUtc,
@@ -45,13 +46,15 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
     public Task<(bool Hit, RawChatResponse? Response, double Similarity, string? MatchedPrompt)> TryGetAsync(
         string prompt,
         float similarityThreshold = 0.95f,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? partitionKey = null)
     {
         if (string.IsNullOrWhiteSpace(prompt) || _store.IsEmpty)
         {
             return Task.FromResult<(bool, RawChatResponse?, double, string?)>((false, null, 0.0, null));
         }
 
+        string normalizedPartitionKey = NormalizePartitionKey(partitionKey);
         DateTime now = DateTime.UtcNow;
         var queryVector = GetVector(prompt);
 
@@ -76,6 +79,10 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
                     _index.Remove(key, queryVector);
                     continue;
                 }
+                if (!string.Equals(item.PartitionKey, normalizedPartitionKey, StringComparison.Ordinal))
+                {
+                    continue;
+                }
 
                 double sim = ComputeCosineSimilarity(queryVector, item.NormalizedVector);
                 if (sim > maxSim)
@@ -93,6 +100,10 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
                 if (item.ExpiresAtUtc <= now)
                 {
                     _store.TryRemove(kvp.Key, out _);
+                    continue;
+                }
+                if (!string.Equals(item.PartitionKey, normalizedPartitionKey, StringComparison.Ordinal))
+                {
                     continue;
                 }
 
@@ -118,13 +129,15 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         string prompt,
         RawChatResponse response,
         TimeSpan ttl,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? partitionKey = null)
     {
         if (string.IsNullOrWhiteSpace(prompt) || response == null)
         {
             return Task.CompletedTask;
         }
 
+        string normalizedPartitionKey = NormalizePartitionKey(partitionKey);
         DateTime now = DateTime.UtcNow;
 
         // 容量控制：如达到上限则清理过期项及早期的 20% 条目
@@ -134,12 +147,18 @@ public sealed class SemanticResponseCache : ISemanticResponseCache
         }
 
         var vector = GetVector(prompt);
-        var item = new CacheItem(prompt, vector, response, now.Add(ttl), now);
+        var item = new CacheItem(prompt, normalizedPartitionKey, vector, response, now.Add(ttl), now);
+        string cacheKey = BuildCacheKey(prompt, normalizedPartitionKey);
 
-        _store[prompt] = item;
-        _index?.Add(prompt, vector);
+        _store[cacheKey] = item;
+        _index?.Add(cacheKey, vector);
         return Task.CompletedTask;
     }
+
+    private static string NormalizePartitionKey(string? partitionKey) => partitionKey ?? string.Empty;
+
+    private static string BuildCacheKey(string prompt, string partitionKey) =>
+        $"{partitionKey.Length}:{partitionKey}{prompt}";
 
     private float[] GetVector(string prompt)
     {

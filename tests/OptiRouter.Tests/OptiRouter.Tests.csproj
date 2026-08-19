@@ -28,4 +28,12 @@
     <ProjectReference Include="..\..\src\OptiRouter\OptiRouter.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 测试需要读取仓库源文件（README/RouterStudio/appsettings 一致性断言与 legacy 播种）。
+         统一复制到输出目录后从 BaseDirectory 读取，不向上遍历目录树（发布/CI 布局下会脆断）。 -->
+    <None Include="..\..\README.md" Link="RepositoryFiles\README.md" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OptiRouter\Components\Pages\Router\RouterStudio.razor" Link="RepositoryFiles\RouterStudio.razor" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OptiRouter\appsettings.json" Link="RepositoryFiles\appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

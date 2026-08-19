@@ -223,8 +223,14 @@ public sealed class OutcomeRecorder
         {
             _ledger.Record(cost, sessionId);
 
-            var routingOpt = _options.CurrentValue.Routing;
-            if (routingOpt.EnableDistributedStateMesh && routingOpt.MeshBroadcastCostLedger && _meshSynchronizer != null)
+            var routerOpt = _options.CurrentValue;
+            var routingOpt = routerOpt.Routing;
+            bool hasSharedCostLedger = string.Equals(routerOpt.Budget.StoreProvider, "Postgres", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(routerOpt.Budget.StoreProvider, "Redis", StringComparison.OrdinalIgnoreCase);
+            if (!hasSharedCostLedger
+                && routingOpt.EnableDistributedStateMesh
+                && routingOpt.MeshBroadcastCostLedger
+                && _meshSynchronizer != null)
             {
                 _ = _meshSynchronizer.BroadcastCostAsync(cost, sessionId);
             }

@@ -76,7 +76,7 @@ internal sealed class TrackingHttpClient : HttpClient
 }
 
 /// <summary>
-/// ModelClientProvider 单元测试：按名缓存、OnChange 热更新（仅连接相关字段触发重建）、
+/// ModelClientProvider 单元测试：按名缓存、OnChange 热更新（客户端构造/请求相关字段触发重建）、
 /// 退役客户端宽限期释放、Dispose 语义。
 /// </summary>
 public sealed class ModelClientProviderTests
@@ -207,9 +207,59 @@ public sealed class ModelClientProviderTests
     }
 
     [Fact]
+    public void Change_UpstreamModelIdChanged_RebuildsClient()
+    {
+        var initial = Endpoint();
+        initial.Id = "upstream-v1";
+        var monitor = new FakeRouterOptionsMonitor(OptionsWith(initial));
+        using var provider = CreateProvider(monitor);
+        var before = provider.GetClient(initial);
+
+        var reloaded = Endpoint();
+        reloaded.Id = "upstream-v2";
+        monitor.Change(OptionsWith(reloaded));
+
+        var after = provider.GetClient(reloaded);
+        Assert.NotSame(before, after);
+    }
+
+    [Fact]
+    public void Change_ProtocolChanged_RebuildsClient()
+    {
+        var initial = Endpoint();
+        var monitor = new FakeRouterOptionsMonitor(OptionsWith(initial));
+        using var provider = CreateProvider(monitor);
+        var before = provider.GetClient(initial);
+
+        var reloaded = Endpoint();
+        reloaded.Protocol = ProviderProtocol.Anthropic;
+        monitor.Change(OptionsWith(reloaded));
+
+        var after = provider.GetClient(reloaded);
+        Assert.NotSame(before, after);
+        Assert.IsType<AnthropicModelClient>(after);
+    }
+
+    [Fact]
+    public void Change_MaxRetriesChanged_RebuildsClient()
+    {
+        var initial = Endpoint();
+        var monitor = new FakeRouterOptionsMonitor(OptionsWith(initial));
+        using var provider = CreateProvider(monitor);
+        var before = provider.GetClient(initial);
+
+        var reloaded = Endpoint();
+        reloaded.MaxRetries = 2;
+        monitor.Change(OptionsWith(reloaded));
+
+        var after = provider.GetClient(reloaded);
+        Assert.NotSame(before, after);
+    }
+
+    [Fact]
     public void Change_TierOrPriceChanged_KeepsCachedClient()
     {
-        // Tier/价格/上下文长度由路由引擎每请求读取 CurrentValue，不属于连接配置，不应触发重建。
+        // Tier/价格/能力/上下文长度由路由引擎每请求读取 CurrentValue，不属于客户端配置，不应触发重建。
         var monitor = new FakeRouterOptionsMonitor(OptionsWith(Endpoint()));
         using var provider = CreateProvider(monitor);
         var before = provider.GetClient(Endpoint());
@@ -218,6 +268,7 @@ public sealed class ModelClientProviderTests
         reloadedModel.Tier = ModelTier.Strong;
         reloadedModel.InputPricePerMillion = 99m;
         reloadedModel.MaxContextTokens = 200000;
+        reloadedModel.Capabilities["coding"] = 0.99;
         monitor.Change(OptionsWith(reloadedModel));
 
         var after = provider.GetClient(reloadedModel);

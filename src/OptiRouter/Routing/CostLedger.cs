@@ -46,18 +46,19 @@ public class CostLedger
 
     /// <summary>
     /// 记录一笔成本。sessionId 非空时同时累加到该会话账户。
+    /// 使用 RecordAtomic 单事务写入日/总/会话三个账户，避免部分失败导致账户漂移。
     /// </summary>
     /// <param name="cost">成本（USD）。</param>
     /// <param name="sessionId">可选会话 ID。null 或空时仅记日预算。</param>
     public void Record(decimal cost, string? sessionId = null)
     {
         ResetDailyIfNewDay();
-        _store.AddDaily(DateTime.UtcNow, cost);
-        _store.AddTotal(cost);
+        _store.RecordAtomic(
+            DateTime.UtcNow, cost, cost,
+            sessionId, string.IsNullOrEmpty(sessionId) ? null : cost);
 
         if (!string.IsNullOrEmpty(sessionId))
         {
-            _store.AddSession(sessionId, cost);
             TryEvictStaleSessions();
         }
     }

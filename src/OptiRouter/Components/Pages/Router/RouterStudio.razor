@@ -11,9 +11,13 @@
             <span>路由引擎状态</span>
             <span class="tag tag-info" style="font-size: 0.75rem;">● 实时</span>
         </div>
-        @if (!string.IsNullOrEmpty(PollError))
+        @if (!string.IsNullOrEmpty(MetricsError))
         {
-            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @PollError（显示的是上一次成功数据）</div>
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @MetricsError（显示的是上一次成功数据）</div>
+        }
+        @if (!string.IsNullOrEmpty(LearningError))
+        {
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @LearningError（显示的是上一次成功数据）</div>
         }
         <div class="stats-row">
             <div class="stat-card">
@@ -76,7 +80,7 @@
     <div class="glass-card">
         <div class="card-label">
             <span>⚙️ 系统路由策略与预算配置控制台</span>
-            <button class="btn-primary btn-sm" @onclick="SaveSystemConfig" disabled="@IsConfigSaving">
+            <button class="btn-primary btn-sm" @onclick="SaveSystemConfig" disabled="@(IsConfigSaving || _baseline is null || DirtyCount == 0)">
                 @(IsConfigSaving ? "热更新保存中..." : (DirtyCount > 0 ? $"💾 保存并热生效（{DirtyCount} 项变更）" : "💾 保存并热生效"))
             </button>
         </div>
@@ -545,9 +549,9 @@
                     <div class="config-item @(IsDirty(nameof(ConfigForm.AuditStoreRequestContent)) ? "dirty-field" : "")">
                         <div class="item-text">
                             <span class="item-title">审计记录请求内容</span>
-                            <span class="item-desc">审计表保存用户 prompt 摘要（500 字符），供请求页排查。关闭则只记元数据。</span>
+                            <span class="item-desc">审计表保存用户 prompt 摘要（500 字符），供请求页排查。默认关闭；管理员可显式开启，关闭则只记元数据。</span>
                         </div>
-                        <label class="toggle-switch" title="审计表保存用户 prompt 摘要。关闭则只记元数据。">
+                        <label class="toggle-switch" title="审计表保存用户 prompt 摘要。默认关闭；管理员可显式开启，关闭则只记元数据。">
                             <input type="checkbox" @bind="Cfg.AuditStoreRequestContent" />
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
@@ -693,7 +697,7 @@
             </div>
         </div>
         <div class="meta-text" style="margin-top: 8px;">
-            增删改先暂存本地，「保存全部」才写入 appsettings.json 并热生效（策略每请求读取路由表）；相似度阈值与开关在上方配置台调整。
+            增删改先暂存本地，「保存全部」才写入 SQLite 配置库并热生效（策略每请求读取路由表）；相似度阈值与开关在上方配置台调整。
         </div>
     </div>
 
@@ -997,13 +1001,14 @@
         public bool EnableJsonAstAutoRepair { get; set; } = true;
         // ⑥ 观测
         public bool EnableDistributedTracing { get; set; }
-        public bool AuditStoreRequestContent { get; set; } = true;
+        public bool AuditStoreRequestContent { get; set; } = false;
 
         public ConfigForm Clone() => (ConfigForm)MemberwiseClone();
     }
 
     private ConfigForm Cfg = new();
     private ConfigForm? _baseline;
+    private string? _configVersion;
     private bool IsConfigSaving = false;
     private string ConfigStatusMsg = "";
     private bool ConfigStatusOk = true;
@@ -1034,6 +1039,12 @@
         if (prop is null) return false;
         return !Equals(prop.GetValue(_baseline), prop.GetValue(Cfg));
     }
+
+    private T? Dirty<T>(string propName, T value) where T : struct =>
+        IsDirty(propName) ? value : null;
+
+    private string? Dirty(string propName, string value) =>
+        IsDirty(propName) ? value : null;
 
     private void OnThompsonToggled(bool value)
     {
@@ -1146,10 +1157,13 @@
     private string? CompareCandidateId;
     private bool IsComparing = false;
     private ApiService.PairedEvalDto? CompareResult;
+    private CancellationTokenSource? _evalCts;
 
     // 语义路由规则：本地暂存列表 + 编辑表单。保存全部才 PUT 落盘。
     private List<ApiService.SemanticRouteDto> SemanticRoutes = new();
     private bool SemanticRouterEnabled;
+    // 语义路由规则集的配置文档版本（保存时回传做乐观并发；与主配置共享同一份文档版本）。
+    private string? _semanticRoutesVersion;
     private double SemanticThreshold;
     private string SrName = "";
     private string SrTier = "Medium";
@@ -1164,14 +1178,19 @@
 
     private async Task LoadSystemConfig()
     {
+        // 不在入口清空 _baseline/_configVersion：加载失败时保留旧值，
+        // 保存按钮仍可用（服务端 ExpectedVersion 冲突检查兜底并发风险），
+        // 避免保存成功后的重载失败把页面锁死到手动刷新。
+        // 初次加载失败时 _baseline 保持 null，保存按钮天然禁用（防止把默认值覆盖到运行配置）。
         try
         {
             var cfg = await Api.GetSystemConfigAsync();
-            if (cfg != null)
+            if (cfg is null)
+                throw new InvalidOperationException("配置接口返回空响应。");
+
+            var r = cfg.Routing;
+            Cfg = new ConfigForm
             {
-                var r = cfg.Routing;
-                Cfg = new ConfigForm
-                {
                     // ① 基础路由
                     EnableRuleClassifier = r.EnableRuleClassifier,
                     EnableSemanticRouter = r.EnableSemanticRouter,
@@ -1221,10 +1240,10 @@
                     // ⑥ 观测
                     EnableDistributedTracing = r.EnableDistributedTracing,
                     AuditStoreRequestContent = r.AuditStoreRequestContent
-                };
-                _baseline = Cfg.Clone();
-                CurrentPresetName = r.Preset;
-            }
+            };
+            _baseline = Cfg.Clone();
+            _configVersion = cfg.Version;
+            CurrentPresetName = r.Preset;
         }
         catch (Exception ex)
         {
@@ -1237,63 +1256,82 @@
 
     private async Task SaveSystemConfig()
     {
+        if (_baseline is null || string.IsNullOrWhiteSpace(_configVersion))
+        {
+            ConfigStatusOk = false;
+            ConfigStatusMsg = "✗ 配置尚未成功加载，禁止保存。请刷新或重试加载。";
+            return;
+        }
+        if (DirtyCount == 0)
+            return;
+
         IsConfigSaving = true;
         ConfigStatusMsg = "";
         try
         {
             var req = new ApiService.UpdateSystemConfigRequest
             {
-                EnableRuleClassifier = Cfg.EnableRuleClassifier,
-                EnableSemanticRouter = Cfg.EnableSemanticRouter,
-                EnableSessionAffinity = Cfg.EnableSessionAffinity,
-                EnableLatencyAware = Cfg.EnableLatencyAware,
-                EnableLoadBalance = Cfg.EnableLoadBalance,
-                EnableKalmanLoadBalance = Cfg.EnableKalmanLoadBalance,
-                DefaultTier = Cfg.DefaultTier,
-                EnableFailover = Cfg.EnableFailover,
-                FailoverFailureThreshold = Cfg.FailoverFailureThreshold,
-                FailoverCooldownSeconds = Cfg.FailoverCooldownSeconds,
-                FailoverGlobalTimeoutSeconds = Cfg.FailoverGlobalTimeoutSeconds,
-                EnableBudgetGuard = Cfg.EnableBudgetGuard,
-                EnableHealthProbe = Cfg.EnableHealthProbe,
-                DailyBudgetUsd = Cfg.DailyBudgetUsd,
-                EnforceOnExhausted = Cfg.EnforceOnExhausted,
-                EnableThompsonSampling = Cfg.EnableThompsonSampling,
-                EnableContextualBandit = Cfg.EnableContextualBandit,
-                ExplorationEpsilon = Cfg.ExplorationEpsilon,
-                ExplorationStarvedN = Cfg.ExplorationStarvedN,
-                EnableResponseCache = Cfg.EnableResponseCache,
-                ResponseCacheTtlSeconds = Cfg.ResponseCacheTtlSeconds,
-                ResponseCacheMaxEntries = Cfg.ResponseCacheMaxEntries,
-                EnableSemanticCache = Cfg.EnableSemanticCache,
-                SemanticCacheSimilarityThreshold = Cfg.SemanticCacheSimilarityThreshold,
-                SemanticCacheTtlMinutes = Cfg.SemanticCacheTtlMinutes,
-                EnableCascadeUpgrade = Cfg.EnableCascadeUpgrade,
-                CascadeUpgradeSampleRate = Cfg.CascadeUpgradeSampleRate,
-                EnableRegenerateFeedback = Cfg.EnableRegenerateFeedback,
-                EnablePiiAnonymization = Cfg.EnablePiiAnonymization,
-                EnableDataSovereignty = Cfg.EnableDataSovereignty,
-                EnableContentModeration = Cfg.EnableContentModeration,
-                ModerationSampleRate = Cfg.ModerationSampleRate,
-                ModerationThreshold = Cfg.ModerationThreshold,
-                EnableStreamingComplianceFilter = Cfg.EnableStreamingComplianceFilter,
-                EnablePersonaDriftProtection = Cfg.EnablePersonaDriftProtection,
-                EnablePromptCompression = Cfg.EnablePromptCompression,
-                EnableFusionRouter = Cfg.EnableFusionRouter,
-                FusionRouterMinComplexity = Cfg.FusionRouterMinComplexity,
-                EnableFusionMode = Cfg.EnableFusionMode,
-                EnableByzantineConsensus = Cfg.EnableByzantineConsensus,
-                EnableJsonAstAutoRepair = Cfg.EnableJsonAstAutoRepair,
-                EnableDistributedTracing = Cfg.EnableDistributedTracing,
-                AuditStoreRequestContent = Cfg.AuditStoreRequestContent
+                ExpectedVersion = _configVersion,
+                EnableRuleClassifier = Dirty(nameof(ConfigForm.EnableRuleClassifier), Cfg.EnableRuleClassifier),
+                EnableSemanticRouter = Dirty(nameof(ConfigForm.EnableSemanticRouter), Cfg.EnableSemanticRouter),
+                EnableSessionAffinity = Dirty(nameof(ConfigForm.EnableSessionAffinity), Cfg.EnableSessionAffinity),
+                EnableLatencyAware = Dirty(nameof(ConfigForm.EnableLatencyAware), Cfg.EnableLatencyAware),
+                EnableLoadBalance = Dirty(nameof(ConfigForm.EnableLoadBalance), Cfg.EnableLoadBalance),
+                EnableKalmanLoadBalance = Dirty(nameof(ConfigForm.EnableKalmanLoadBalance), Cfg.EnableKalmanLoadBalance),
+                DefaultTier = Dirty(nameof(ConfigForm.DefaultTier), Cfg.DefaultTier),
+                EnableFailover = Dirty(nameof(ConfigForm.EnableFailover), Cfg.EnableFailover),
+                FailoverFailureThreshold = Dirty(nameof(ConfigForm.FailoverFailureThreshold), Cfg.FailoverFailureThreshold),
+                FailoverCooldownSeconds = Dirty(nameof(ConfigForm.FailoverCooldownSeconds), Cfg.FailoverCooldownSeconds),
+                FailoverGlobalTimeoutSeconds = Dirty(nameof(ConfigForm.FailoverGlobalTimeoutSeconds), Cfg.FailoverGlobalTimeoutSeconds),
+                EnableBudgetGuard = Dirty(nameof(ConfigForm.EnableBudgetGuard), Cfg.EnableBudgetGuard),
+                EnableHealthProbe = Dirty(nameof(ConfigForm.EnableHealthProbe), Cfg.EnableHealthProbe),
+                DailyBudgetUsd = Dirty(nameof(ConfigForm.DailyBudgetUsd), Cfg.DailyBudgetUsd),
+                EnforceOnExhausted = Dirty(nameof(ConfigForm.EnforceOnExhausted), Cfg.EnforceOnExhausted),
+                EnableThompsonSampling = Dirty(nameof(ConfigForm.EnableThompsonSampling), Cfg.EnableThompsonSampling),
+                EnableContextualBandit = Dirty(nameof(ConfigForm.EnableContextualBandit), Cfg.EnableContextualBandit),
+                ExplorationEpsilon = Dirty(nameof(ConfigForm.ExplorationEpsilon), Cfg.ExplorationEpsilon),
+                ExplorationStarvedN = Dirty(nameof(ConfigForm.ExplorationStarvedN), Cfg.ExplorationStarvedN),
+                EnableResponseCache = Dirty(nameof(ConfigForm.EnableResponseCache), Cfg.EnableResponseCache),
+                ResponseCacheTtlSeconds = Dirty(nameof(ConfigForm.ResponseCacheTtlSeconds), Cfg.ResponseCacheTtlSeconds),
+                ResponseCacheMaxEntries = Dirty(nameof(ConfigForm.ResponseCacheMaxEntries), Cfg.ResponseCacheMaxEntries),
+                EnableSemanticCache = Dirty(nameof(ConfigForm.EnableSemanticCache), Cfg.EnableSemanticCache),
+                SemanticCacheSimilarityThreshold = Dirty(nameof(ConfigForm.SemanticCacheSimilarityThreshold), Cfg.SemanticCacheSimilarityThreshold),
+                SemanticCacheTtlMinutes = Dirty(nameof(ConfigForm.SemanticCacheTtlMinutes), Cfg.SemanticCacheTtlMinutes),
+                EnableCascadeUpgrade = Dirty(nameof(ConfigForm.EnableCascadeUpgrade), Cfg.EnableCascadeUpgrade),
+                CascadeUpgradeSampleRate = Dirty(nameof(ConfigForm.CascadeUpgradeSampleRate), Cfg.CascadeUpgradeSampleRate),
+                EnableRegenerateFeedback = Dirty(nameof(ConfigForm.EnableRegenerateFeedback), Cfg.EnableRegenerateFeedback),
+                EnablePiiAnonymization = Dirty(nameof(ConfigForm.EnablePiiAnonymization), Cfg.EnablePiiAnonymization),
+                EnableDataSovereignty = Dirty(nameof(ConfigForm.EnableDataSovereignty), Cfg.EnableDataSovereignty),
+                EnableContentModeration = Dirty(nameof(ConfigForm.EnableContentModeration), Cfg.EnableContentModeration),
+                ModerationSampleRate = Dirty(nameof(ConfigForm.ModerationSampleRate), Cfg.ModerationSampleRate),
+                ModerationThreshold = Dirty(nameof(ConfigForm.ModerationThreshold), Cfg.ModerationThreshold),
+                EnableStreamingComplianceFilter = Dirty(nameof(ConfigForm.EnableStreamingComplianceFilter), Cfg.EnableStreamingComplianceFilter),
+                EnablePersonaDriftProtection = Dirty(nameof(ConfigForm.EnablePersonaDriftProtection), Cfg.EnablePersonaDriftProtection),
+                EnablePromptCompression = Dirty(nameof(ConfigForm.EnablePromptCompression), Cfg.EnablePromptCompression),
+                EnableFusionRouter = Dirty(nameof(ConfigForm.EnableFusionRouter), Cfg.EnableFusionRouter),
+                FusionRouterMinComplexity = Dirty(nameof(ConfigForm.FusionRouterMinComplexity), Cfg.FusionRouterMinComplexity),
+                EnableFusionMode = Dirty(nameof(ConfigForm.EnableFusionMode), Cfg.EnableFusionMode),
+                EnableByzantineConsensus = Dirty(nameof(ConfigForm.EnableByzantineConsensus), Cfg.EnableByzantineConsensus),
+                EnableJsonAstAutoRepair = Dirty(nameof(ConfigForm.EnableJsonAstAutoRepair), Cfg.EnableJsonAstAutoRepair),
+                EnableDistributedTracing = Dirty(nameof(ConfigForm.EnableDistributedTracing), Cfg.EnableDistributedTracing),
+                AuditStoreRequestContent = Dirty(nameof(ConfigForm.AuditStoreRequestContent), Cfg.AuditStoreRequestContent)
             };
 
-            var (ok, error) = await Api.UpdateSystemConfigAsync(req);
+            var (ok, error, newVersion) = await Api.UpdateSystemConfigAsync(req);
             if (ok)
             {
+                // 先采纳保存响应的新版本：即使随后的重载失败，下一次保存也不会
+                // 因持有过期版本被 409 拒绝。
+                if (!string.IsNullOrWhiteSpace(newVersion))
+                {
+                    _configVersion = newVersion;
+                    _semanticRoutesVersion = newVersion;
+                }
+                await LoadSystemConfig();
+                if (_baseline is null)
+                    return;
                 ConfigStatusOk = true;
                 ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
-                _baseline = Cfg.Clone();
                 await LoadMetrics();
             }
             else
@@ -1358,6 +1396,8 @@
 
     private async Task RunEval()
     {
+        if (IsEvalRunning) return;
+
         List<ApiService.EvalCaseDto>? cases = null;
         if (ShowCustomCases && !string.IsNullOrWhiteSpace(CustomCasesJson))
         {
@@ -1383,20 +1423,30 @@
 
         IsEvalRunning = true;
         EvalStatusMsg = "";
+        using var evalCts = new CancellationTokenSource();
+        _evalCts = evalCts;
         try
         {
-            var (report, error) = await Api.RunEvalBenchmarkAsync(cases);
+            var (report, error) = await Api.RunEvalBenchmarkAsync(cases, evalCts.Token);
             if (report != null)
             {
+                evalCts.Token.ThrowIfCancellationRequested();
                 EvalReportData = report;
                 EvalStatusOk = true;
-                await LoadEvalBatches();
+                if (!evalCts.IsCancellationRequested)
+                {
+                    await LoadEvalBatches();
+                }
             }
             else
             {
                 EvalStatusOk = false;
                 EvalStatusMsg = "✗ 评测失败: " + ExtractErrorBody(error);
             }
+        }
+        catch (OperationCanceledException) when (evalCts.IsCancellationRequested)
+        {
+            // 离页取消不属于评测失败，不在页面显示错误。
         }
         catch (Exception ex)
         {
@@ -1405,6 +1455,10 @@
         }
         finally
         {
+            if (ReferenceEquals(_evalCts, evalCts))
+            {
+                _evalCts = null;
+            }
             IsEvalRunning = false;
         }
     }
@@ -1483,26 +1537,28 @@
         try
         {
             Metrics = await Api.GetMetricsAsync();
-            PollError = null;
+            MetricsError = null;
         }
         catch (Exception ex)
         {
             // 轮询失败保留上一次数据，仅更新错误提示
-            PollError = "引擎状态刷新失败：" + ex.Message;
+            MetricsError = "引擎状态刷新失败：" + ex.Message;
         }
     }
 
-    private string? PollError;
+    private string? MetricsError;
+    private string? LearningError;
 
     private async Task LoadLearning()
     {
         try
         {
             LearningStates = await Api.GetLearningAsync();
+            LearningError = null;
         }
         catch (Exception ex)
         {
-            PollError = "学习状态刷新失败：" + ex.Message;
+            LearningError = "学习状态刷新失败：" + ex.Message;
         }
     }
 
@@ -1516,6 +1572,7 @@
                 SemanticRoutes = dto.Routes?.ToList() ?? new List<ApiService.SemanticRouteDto>();
                 SemanticRouterEnabled = dto.Enabled;
                 SemanticThreshold = dto.SimilarityThreshold;
+                _semanticRoutesVersion = dto.Version;
             }
         }
         catch (Exception ex)
@@ -1594,12 +1651,25 @@
             var payload = SemanticRoutes
                 .Select(r => new ApiService.SemanticRouteUpsertDto(r.Name, r.Phrases, r.TargetTier))
                 .ToList();
-            var (ok, error) = await Api.UpdateSemanticRoutesAsync(payload);
+            var (ok, error, conflict, version) = await Api.UpdateSemanticRoutesAsync(payload, _semanticRoutesVersion);
             SrStatusOk = ok;
             SrStatusMsg = ok
                 ? $"✓ {SemanticRoutes.Count} 条语义路由已保存并热生效。"
-                : "✗ 保存被拒绝: " + ExtractErrorBody(error);
+                : conflict
+                    ? "✗ 规则已被并发修改，已重新加载最新规则，请核对后重试保存。"
+                    : "✗ 保存被拒绝: " + ExtractErrorBody(error);
             if (ok)
+            {
+                // 语义路由与主配置共享同一份配置文档版本：保存成功后同步版本，
+                // 避免随后的主配置保存因持有过期版本被 409 拒绝。
+                if (!string.IsNullOrWhiteSpace(version))
+                {
+                    _configVersion = version;
+                    _semanticRoutesVersion = version;
+                }
+            }
+            // 成功或版本冲突都需要重载规则集（刷新版本号与规则内容）。
+            if (ok || conflict)
             {
                 await LoadSemanticRoutes();
             }
@@ -1624,6 +1694,7 @@
     public void Dispose()
     {
         _cts.Cancel();
+        _evalCts?.Cancel();
         _cts.Dispose();
         _timer?.Dispose();
     }

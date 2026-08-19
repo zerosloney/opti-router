@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Components;
@@ -290,6 +291,7 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
             ? CookieSecurePolicy.Always
             : CookieSecurePolicy.SameAsRequest;
     });
+builder.Services.AddAuthorization();
 
 // 管理端登录失败限流（单实例内存，按 IP 计数）。
 builder.Services.AddSingleton<LoginRateLimiter>();
@@ -556,16 +558,17 @@ builder.Services.AddSwaggerGen(c =>
 // 需 AddRazorPages 提供 PersistentComponentState 等预渲染服务，否则 AntiforgeryStateProvider 解析失败。
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
-// ApiService 必须 Scoped（circuit 内共享）：Blazor Server 页面间 NavLink 导航 URL 不含 ?key=，
-// Transient 会在每次组件解析时新建实例并从当前 URL 重新提取 key → 导航后全部 401。
+// ApiService 必须 Scoped（circuit 内共享）：Blazor Server 页面间 NavLink 导航后保持同一实例。
+// Cookie 注入在 ApiService 内部按请求执行（构造时捕获 Cookie 存于 Scoped 实例、HttpContext 可用时刷新）。
+// 不用 DelegatingHandler：HttpClientFactory 的 handler 管道跨 circuit 缓存共享，
+// 其实例字段（Cookie 缓存/401 跳转标记）会造成多管理员会话间状态串扰。
 // 300s：长评测（eval/run 走真实上游管线）可能超过 100s
 builder.Services.AddHttpClient(nameof(ApiService), client => client.Timeout = TimeSpan.FromSeconds(300));
 builder.Services.AddScoped<ApiService>(sp =>
 {
     var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(nameof(ApiService));
     var nav = sp.GetRequiredService<NavigationManager>();
-    var httpContextAccessor = sp.GetRequiredService<IHttpContextAccessor>();
-    return new ApiService(client, nav, httpContextAccessor, sp.GetService<ILogger<ApiService>>());
+    return new ApiService(client, nav, sp.GetService<IHttpContextAccessor>(), sp.GetService<ILogger<ApiService>>());
 });
 
 int requestsPerMinute = builder.Configuration.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? 60;
@@ -575,6 +578,15 @@ if (requestsPerMinute <= 0)
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (rejectionContext, cancellationToken) =>
+    {
+        await ProtocolErrorHelper.WriteProxyErrorAsync(
+            rejectionContext.HttpContext,
+            StatusCodes.Status429TooManyRequests,
+            "Rate limit exceeded. Please slow down.",
+            "RATE_LIMIT_EXCEEDED",
+            retryAfterSeconds: 60).ConfigureAwait(false);
+    };
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
     {
         if (!IsProxyPath(context.Request.Path))
@@ -633,6 +645,7 @@ app.UseStaticFiles();
 
 // 解析登录会话 Cookie（管理端可视化界面鉴权）。
 app.UseAuthentication();
+app.UseAuthorization();
 
 app.Use(async (context, next) =>
 {
@@ -739,7 +752,8 @@ app.Use(async (context, next) =>
                     context,
                     StatusCodes.Status429TooManyRequests,
                     "Client key rate limit exceeded",
-                    authorizationResult.RetryAfterSeconds).ConfigureAwait(false);
+                    authorizationResult.RetryAfterSeconds,
+                    "RATE_LIMIT_EXCEEDED").ConfigureAwait(false);
                 return;
 
             case ClientKeyAuthorizationStatus.BudgetExhausted:
@@ -747,7 +761,8 @@ app.Use(async (context, next) =>
                     context,
                     StatusCodes.Status429TooManyRequests,
                     "Client key daily budget exhausted",
-                    authorizationResult.RetryAfterSeconds).ConfigureAwait(false);
+                    authorizationResult.RetryAfterSeconds,
+                    "BUDGET_EXHAUSTED").ConfigureAwait(false);
                 return;
 
             case ClientKeyAuthorizationStatus.Invalid:
@@ -756,7 +771,8 @@ app.Use(async (context, next) =>
                 await WriteClientKeyProblemAsync(
                     context,
                     StatusCodes.Status401Unauthorized,
-                    "Unauthorized").ConfigureAwait(false);
+                    "Unauthorized",
+                    code: "INVALID_API_KEY").ConfigureAwait(false);
                 return;
         }
     }
@@ -782,7 +798,11 @@ app.Use(async (context, next) =>
     }
     else if (!AdminKeyVerifier.IsValid(proxyKey, ExtractBearerToken(context)))
     {
-        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ProtocolErrorHelper.WriteProxyErrorAsync(
+            context,
+            StatusCodes.Status401Unauthorized,
+            "Unauthorized",
+            "INVALID_API_KEY").ConfigureAwait(false);
         return;
     }
 
@@ -823,17 +843,15 @@ static async Task WriteClientKeyProblemAsync(
     HttpContext context,
     int statusCode,
     string title,
-    int retryAfterSeconds = 0)
+    int retryAfterSeconds = 0,
+    string code = "INVALID_API_KEY")
 {
-    context.Response.StatusCode = statusCode;
-    if (retryAfterSeconds > 0)
-        context.Response.Headers.RetryAfter = retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
-
-    await context.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
-    {
-        Status = statusCode,
-        Title = title
-    }).ConfigureAwait(false);
+    await ProtocolErrorHelper.WriteProxyErrorAsync(
+        context,
+        statusCode,
+        title,
+        code,
+        retryAfterSeconds).ConfigureAwait(false);
 }
 
 // M2 阶段：分区最大并发数控制，防止单用户请求洪水打满线程池
@@ -853,14 +871,12 @@ app.Use(async (context, next) =>
 
     if (!await sem.WaitAsync(0).ConfigureAwait(false))
     {
-        context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-        context.Response.Headers["Retry-After"] = "5";
-        await context.Response.WriteAsJsonAsync(new Microsoft.AspNetCore.Mvc.ProblemDetails
-        {
-            Title = "Too many concurrent requests",
-            Detail = "Concurrency limit exceeded. Please slow down.",
-            Status = StatusCodes.Status429TooManyRequests
-        }).ConfigureAwait(false);
+        await ProtocolErrorHelper.WriteProxyErrorAsync(
+            context,
+            StatusCodes.Status429TooManyRequests,
+            "Too many concurrent requests",
+            "CONCURRENCY_LIMIT_EXCEEDED",
+            retryAfterSeconds: 5).ConfigureAwait(false);
         return;
     }
 
@@ -952,7 +968,19 @@ app.MapGet("/", context =>
     return Task.CompletedTask;
 });
 app.MapRazorPages();
-app.MapBlazorHub();
+var blazorHub = app.MapBlazorHub().RequireAuthorization();
+blazorHub.Add(endpointBuilder =>
+{
+    // MapBlazorHub also registers its public blazor.server.js static-file endpoint.
+    // Keep that endpoint anonymous while retaining authorization on the SignalR hub.
+    // Match by the /_framework/ route prefix (public URL contract) rather than the
+    // framework-internal DisplayName string, which can change across .NET versions.
+    if (endpointBuilder is RouteEndpointBuilder routeBuilder
+        && routeBuilder.RoutePattern.RawText?.StartsWith("/_framework/", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        endpointBuilder.Metadata.Add(new AllowAnonymousAttribute());
+    }
+});
 app.MapFallbackToPage("/Dashboard/_Host");
 
 app.MapDashboardEndpoints();

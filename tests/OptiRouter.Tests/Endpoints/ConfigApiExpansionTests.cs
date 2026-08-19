@@ -67,17 +67,9 @@ public class ConfigApiExpansionTests
             }
         }
 
+        // 源 appsettings.json 由测试项目复制到输出目录（见 OptiRouter.Tests.csproj），不向上遍历目录树。
         private static string FindSourceAppsettings()
-        {
-            var dir = new DirectoryInfo(AppContext.BaseDirectory);
-            while (dir is not null)
-            {
-                string candidate = Path.Combine(dir.FullName, "src", "OptiRouter", "appsettings.json");
-                if (File.Exists(candidate)) return candidate;
-                dir = dir.Parent;
-            }
-            throw new InvalidOperationException("Cannot locate src/OptiRouter/appsettings.json");
-        }
+            => Path.Combine(AppContext.BaseDirectory, "RepositoryFiles", "appsettings.json");
     }
 
     private static HttpClient CreateClient(ConfigFactory factory) =>
@@ -101,6 +93,7 @@ public class ConfigApiExpansionTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.False(string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("version").GetString()));
         var routing = doc.RootElement.GetProperty("routing");
 
         // ① 基础路由
@@ -161,9 +154,10 @@ public class ConfigApiExpansionTests
     {
         using var factory = new ConfigFactory();
         using var client = CreateClient(factory);
+        string version = await GetVersionAsync(client);
 
         using var content = new StringContent(
-            JsonSerializer.Serialize(new { EnableSemanticCache = true, SemanticCacheSimilarityThreshold = 5.0 }),
+            JsonSerializer.Serialize(new { ExpectedVersion = version, EnableSemanticCache = true, SemanticCacheSimilarityThreshold = 5.0 }),
             Encoding.UTF8,
             "application/json");
         var response = await client.PutAsync("/api/dashboard/config", content);
@@ -177,14 +171,61 @@ public class ConfigApiExpansionTests
     {
         using var factory = new ConfigFactory();
         using var client = CreateClient(factory);
+        string version = await GetVersionAsync(client);
 
         using var content = new StringContent(
-            JsonSerializer.Serialize(new { DefaultTier = "NotATier" }),
+            JsonSerializer.Serialize(new { ExpectedVersion = version, DefaultTier = "NotATier" }),
             Encoding.UTF8,
             "application/json");
         var response = await client.PutAsync("/api/dashboard/config", content);
 
         // 非法枚举串被 Enum.TryParse 拒绝 → 字段不应用；请求本身可成功（null 语义）
         Assert.True(response.StatusCode is HttpStatusCode.OK or HttpStatusCode.BadRequest);
+    }
+
+    [Fact]
+    public async Task PutConfig_MissingVersion_IsRejected()
+    {
+        using var factory = new ConfigFactory();
+        using var client = CreateClient(factory);
+        using var content = new StringContent(
+            JsonSerializer.Serialize(new { EnableFailover = false }),
+            Encoding.UTF8,
+            "application/json");
+
+        using var response = await client.PutAsync("/api/dashboard/config", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PutConfig_StaleVersion_ReturnsConflictWithoutOverwritingFirstSave()
+    {
+        using var factory = new ConfigFactory();
+        using var client = CreateClient(factory);
+        string version = await GetVersionAsync(client);
+
+        using var firstContent = new StringContent(
+            JsonSerializer.Serialize(new { ExpectedVersion = version, EnableFailover = false }),
+            Encoding.UTF8,
+            "application/json");
+        using var first = await client.PutAsync("/api/dashboard/config", firstContent);
+        using var staleContent = new StringContent(
+            JsonSerializer.Serialize(new { ExpectedVersion = version, EnableFailover = true }),
+            Encoding.UTF8,
+            "application/json");
+        using var stale = await client.PutAsync("/api/dashboard/config", staleContent);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        using var current = JsonDocument.Parse(await client.GetStringAsync("/api/dashboard/config"));
+        Assert.False(current.RootElement.GetProperty("routing").GetProperty("enableFailover").GetBoolean());
+    }
+
+    private static async Task<string> GetVersionAsync(HttpClient client)
+    {
+        using var doc = JsonDocument.Parse(await client.GetStringAsync("/api/dashboard/config"));
+        return doc.RootElement.GetProperty("version").GetString()
+            ?? throw new InvalidOperationException("Config response did not include a version.");
     }
 }

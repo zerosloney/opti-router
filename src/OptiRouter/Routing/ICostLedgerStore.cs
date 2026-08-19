@@ -87,4 +87,21 @@ public interface ICostLedgerStore : ICircuitStateStore, IDisposable
     /// 清空所有记录（日 + 全部会话）。测试与管理用。
     /// </summary>
     void ClearAll();
+
+    /// <summary>
+    /// 原子记录一笔成本到日/总/会话三个账户（单事务保证一致性）。
+    /// 默认实现依次调用三个独立方法——支持单事务的 store 应覆写此方法。
+    /// </summary>
+    /// <param name="utcDate">UTC 日期。</param>
+    /// <param name="dailyDelta">日预算增量。</param>
+    /// <param name="totalDelta">全局累计增量。</param>
+    /// <param name="sessionId">会话 ID；null 或空时跳过会话账户。</param>
+    /// <param name="sessionDelta">会话增量；null 时跳过会话账户。</param>
+    void RecordAtomic(DateTime utcDate, decimal dailyDelta, decimal totalDelta, string? sessionId, decimal? sessionDelta)
+    {
+        AddDaily(utcDate, dailyDelta);
+        AddTotal(totalDelta);
+        if (!string.IsNullOrEmpty(sessionId) && sessionDelta.HasValue)
+            AddSession(sessionId, sessionDelta.Value);
+    }
 }

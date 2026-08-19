@@ -11,15 +11,18 @@ public sealed class PostgresRequestAuditStore : IRequestAuditStore
 {
     private readonly string? _connectionString;
     private readonly IRequestAuditStore _fallback;
+    private readonly Microsoft.Extensions.Logging.ILogger? _logger;
     private bool _disposed;
 
     /// <summary>
     /// 初始化 PostgreSQL 请求审计存储。
     /// </summary>
-    public PostgresRequestAuditStore(string? connectionString, IRequestAuditStore? fallback = null)
+    public PostgresRequestAuditStore(string? connectionString, IRequestAuditStore? fallback = null,
+        Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _connectionString = connectionString;
         _fallback = fallback ?? new InMemoryRequestAuditStore();
+        _logger = logger;
 
         if (!string.IsNullOrWhiteSpace(_connectionString))
         {
@@ -27,9 +30,9 @@ public sealed class PostgresRequestAuditStore : IRequestAuditStore
             {
                 EnsureTableCreated();
             }
-            catch
+            catch (Exception ex)
             {
-                // 初始化异常处理
+                _logger?.LogError(ex, "PostgresRequestAuditStore 初始化失败（EnsureTableCreated），后续操作将降级到内存 fallback");
             }
         }
     }
@@ -80,6 +83,42 @@ CREATE TABLE IF NOT EXISTS optirouter_request_audits (
 CREATE INDEX IF NOT EXISTS idx_audits_timestamp ON optirouter_request_audits (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_audits_model ON optirouter_request_audits (model);
 ";
+        cmd.ExecuteNonQuery();
+
+        // 增量列迁移：旧表可能缺少后续新增列，用 ADD COLUMN IF NOT EXISTS 补加（Postgres 9.6+）。
+        EnsureColumn("cached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("cache_write_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("uncached_input_tokens", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn("quota_limited", "BOOLEAN NOT NULL DEFAULT FALSE");
+        EnsureColumn("trace_id", "TEXT");
+        EnsureColumn("span_id", "TEXT");
+        EnsureColumn("parent_span_id", "TEXT");
+        EnsureColumn("reward", "DOUBLE PRECISION");
+        EnsureColumn("epsilon_promoted_model", "TEXT");
+        EnsureColumn("request_content", "TEXT");
+    }
+
+    // 信任边界守卫：EnsureColumn 用插值拼 DDL（标识符无法参数化）。列名必须是纯小写
+    // 标识符；DDL 片段禁止多语句/注释注入字符。当前调用点全为硬编码字面量，
+    // 此校验防止后续维护者把外部输入传进来（构造方 try/catch 会转降级而非崩溃）。
+    private static readonly System.Text.RegularExpressions.Regex SafeColumnIdentifier =
+        new("^[a-z_][a-z0-9_]*$", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private void EnsureColumn(string columnName, string definition)
+    {
+        if (string.IsNullOrWhiteSpace(_connectionString)) return;
+
+        if (!SafeColumnIdentifier.IsMatch(columnName)
+            || definition.Contains(';') || definition.Contains("--"))
+        {
+            throw new ArgumentException(
+                $"Refusing to execute DDL migration for column '{columnName}': identifier/definition failed the safety whitelist.");
+        }
+
+        using var conn = new NpgsqlConnection(_connectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"ALTER TABLE optirouter_request_audits ADD COLUMN IF NOT EXISTS {columnName} {definition};";
         cmd.ExecuteNonQuery();
     }
 
@@ -132,8 +171,9 @@ VALUES
             cmd.Parameters.AddWithValue("reqcontent", (object?)record.RequestContent ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.Append 失败，降级到内存 fallback");
             _fallback.Append(record);
         }
     }
@@ -153,8 +193,9 @@ VALUES
 
             return ReadRecords(cmd);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.GetRecent 失败，降级到内存 fallback");
             return _fallback.GetRecent(limit);
         }
     }
@@ -175,8 +216,9 @@ VALUES
 
             return ReadRecords(cmd);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.GetByModel 失败，降级到内存 fallback");
             return _fallback.GetByModel(modelName, limit);
         }
     }
@@ -207,8 +249,9 @@ VALUES
             var items = ReadRecords(cmd);
             return (items, total);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.GetByTimeRange 失败，降级到内存 fallback");
             return _fallback.GetByTimeRange(from, to, limit, offset);
         }
     }
@@ -241,8 +284,9 @@ WHERE timestamp >= @from AND timestamp <= @to;
             }
             return (0, 0);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.GetFailureStats 失败，降级到内存 fallback");
             return _fallback.GetFailureStats(from, to);
         }
     }
@@ -294,8 +338,9 @@ WHERE timestamp >= @from AND timestamp <= @to;
 
             return new WindowAggregateStats(0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.GetAggregateStats 失败，降级到内存 fallback");
             return _fallback.GetAggregateStats(from, to);
         }
     }
@@ -314,8 +359,9 @@ WHERE timestamp >= @from AND timestamp <= @to;
             cmd.Parameters.AddWithValue("cutoff", cutoff);
             return cmd.ExecuteNonQuery();
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.EvictBefore 失败，降级到内存 fallback");
             return _fallback.EvictBefore(cutoff);
         }
     }
@@ -331,7 +377,7 @@ WHERE timestamp >= @from AND timestamp <= @to;
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-SELECT model, AVG(latency_ms), COUNT(*)
+SELECT model, AVG(latency_ms), percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), COUNT(*)
 FROM optirouter_request_audits
 WHERE success = TRUE AND timestamp >= @since
 GROUP BY model;
@@ -344,13 +390,15 @@ GROUP BY model;
             {
                 string model = reader.GetString(0);
                 double avg = reader.GetDouble(1);
-                int count = Convert.ToInt32(reader.GetValue(2));
-                dict[model] = new ModelLatencyStats(avg, avg * 1.2, count);
+                double p95 = reader.IsDBNull(2) ? avg : reader.GetDouble(2);
+                int count = Convert.ToInt32(reader.GetValue(3));
+                dict[model] = new ModelLatencyStats(avg, p95, count);
             }
             return dict;
         }
-        catch
+        catch (Exception ex)
         {
+            _logger?.LogError(ex, "PostgresRequestAuditStore.GetLatencyStatsSince 失败，降级到内存 fallback");
             return _fallback.GetLatencyStatsSince(since);
         }
     }

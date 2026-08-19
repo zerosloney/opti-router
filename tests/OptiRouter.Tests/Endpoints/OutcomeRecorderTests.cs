@@ -4,6 +4,7 @@ using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
+using OptiRouter.Mesh;
 using OptiRouter.Routing;
 using System.Text.Json;
 using Xunit;
@@ -197,6 +198,38 @@ public class OutcomeRecorderTests
         Assert.Equal(0.001m, OutcomeRecorder.EstimateInputCost(model, estimatedTokens: 100));
     }
 
+    [Theory]
+    [InlineData("Postgres")]
+    [InlineData("postgres")]
+    [InlineData("POSTGRES")]
+    [InlineData("Redis")]
+    [InlineData("redis")]
+    [InlineData("REDIS")]
+    public void RecordCost_SharedStore_DoesNotBroadcastCost(string storeProvider)
+    {
+        var fixture = CreateCostRecorder(storeProvider);
+        using var synchronizer = fixture.Synchronizer;
+
+        fixture.Recorder.RecordCost(1.25m, "session-1");
+
+        Assert.Equal(1.25m, fixture.Ledger.GetSpend().Total);
+        Assert.Equal(0, fixture.Mesh.GetStats().PublishedEventsCount);
+    }
+
+    [Theory]
+    [InlineData("Sqlite")]
+    [InlineData("InMemory")]
+    public void RecordCost_LocalStore_BroadcastsCostOnce(string storeProvider)
+    {
+        var fixture = CreateCostRecorder(storeProvider);
+        using var synchronizer = fixture.Synchronizer;
+
+        fixture.Recorder.RecordCost(1.25m, "session-1");
+
+        Assert.Equal(1.25m, fixture.Ledger.GetSpend().Total);
+        Assert.Equal(1, fixture.Mesh.GetStats().PublishedEventsCount);
+    }
+
     [Fact]
     public void RecordThompsonOutcome_DefaultConfig_NoNormalization()
     {
@@ -360,5 +393,63 @@ public class OutcomeRecorderTests
         double reward = recorder.RecordThompsonOutcome("m1", null, decision, cost: 0m, completionTokens: 2000);
 
         Assert.Equal(0.0, reward);
+    }
+
+    private static (OutcomeRecorder Recorder, CostLedger Ledger, RecordingMesh Mesh, DistributedMeshSynchronizer Synchronizer)
+        CreateCostRecorder(string storeProvider)
+    {
+        var options = new RouterOptions
+        {
+            Budget = new BudgetOptions { StoreProvider = storeProvider },
+            Routing = new RoutingOptions
+            {
+                EnableDistributedStateMesh = true,
+                MeshBroadcastCostLedger = true
+            }
+        };
+        var ledger = new CostLedger();
+        var mesh = new RecordingMesh();
+        var synchronizer = new DistributedMeshSynchronizer(mesh);
+        var recorder = new OutcomeRecorder(
+            auditStore: null!,
+            metrics: null!,
+            ledger: ledger,
+            options: new FakeRouterOptionsMonitor(options),
+            affinityCache: null!,
+            tsStore: null!,
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: NullLogger<OutcomeRecorder>.Instance,
+            meshSynchronizer: synchronizer);
+
+        return (recorder, ledger, mesh, synchronizer);
+    }
+
+    private sealed class RecordingMesh : IDistributedStateMesh
+    {
+        private long _publishedEventsCount;
+
+        public string NodeId => "recording-node";
+
+        public Task PublishAsync<TEvent>(string channel, TEvent payload, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref _publishedEventsCount);
+            return Task.CompletedTask;
+        }
+
+        public IDisposable Subscribe<TEvent>(string channel, Action<TEvent> onReceived)
+            => NoopDisposable.Instance;
+
+        public MeshStats GetStats()
+            => new(NodeId, Interlocked.Read(ref _publishedEventsCount), 0, 0);
+
+        private sealed class NoopDisposable : IDisposable
+        {
+            public static NoopDisposable Instance { get; } = new();
+
+            public void Dispose()
+            {
+            }
+        }
     }
 }

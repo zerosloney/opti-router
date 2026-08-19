@@ -10,7 +10,8 @@ namespace OptiRouter.Routing;
 /// </summary>
 /// <remarks>
 /// 含 model / messages / temperature / max_tokens + 经 <see cref="ChatRequest.ExtensionData"/> 透传的生成参数
-///（top_p / seed / n / stop / response_format 等）。忽略 stream（仅非流式才缓存）。
+///（top_p / seed / n / stop / response_format 等），以及每条 <see cref="ChatMessage.ExtensionData"/>
+///（tool_calls / tool_call_id 等）。忽略 stream（仅非流式才缓存）。
 /// <see cref="ChatRequest.ExtensionData"/> 按 key 排序以保证键稳定（Dictionary 顺序不保证）。
 /// 必须在 PII 脱敏<strong>之前</strong>调用：用原始请求算键，避免不同 PII 脱敏后占位符相同导致缓存串扰。
 /// </remarks>
@@ -33,6 +34,17 @@ public static class ResponseCacheKey
                 if (msg is null) continue;
                 sb.Append("r=").Append(msg.Role ?? string.Empty).Append('\n');
                 sb.Append("c=").Append(msg.Content is { } el ? el.GetRawText() : "null").Append('\n');
+
+                // Message-level extension data carries tool_calls/tool_call_id and other
+                // generation context. Sort keys so dictionary insertion order cannot change
+                // the key, while retaining the original JSON value for upstream compatibility.
+                if (msg.ExtensionData is { Count: > 0 } messageExt)
+                {
+                    foreach (var kv in messageExt.OrderBy(k => k.Key, StringComparer.Ordinal))
+                    {
+                        sb.Append("me=").Append(kv.Key).Append('=').Append(kv.Value.GetRawText()).Append('\n');
+                    }
+                }
             }
         }
 

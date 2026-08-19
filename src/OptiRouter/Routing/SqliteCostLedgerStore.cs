@@ -39,14 +39,14 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         Execute("""
             CREATE TABLE IF NOT EXISTS daily_spend (
                 date TEXT PRIMARY KEY,
-                amount REAL NOT NULL DEFAULT 0
+                amount INTEGER NOT NULL DEFAULT 0
             );
             """);
 
         Execute("""
             CREATE TABLE IF NOT EXISTS session_spend (
                 session_id TEXT PRIMARY KEY,
-                amount REAL NOT NULL DEFAULT 0,
+                amount INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             );
             """);
@@ -54,7 +54,7 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         Execute("""
             CREATE TABLE IF NOT EXISTS total_spend (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                amount REAL NOT NULL DEFAULT 0
+                amount INTEGER NOT NULL DEFAULT 0
             );
             """);
         // 确保总累计行存在（单行表，id 固定为 1）。
@@ -63,9 +63,13 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         Execute("""
             CREATE TABLE IF NOT EXISTS daily_spend_history (
                 date TEXT PRIMARY KEY,
-                amount REAL NOT NULL DEFAULT 0
+                amount INTEGER NOT NULL DEFAULT 0
             );
             """);
+
+        // 迁移：旧表用 REAL 存储美元金额，新版改为 INTEGER 存储毫分（1/1000 USD）。
+        // user_version=0 表示未迁移，迁移后设为 1。
+        MigrateToMills();
 
         Execute("""
             CREATE TABLE IF NOT EXISTS model_circuits (
@@ -75,6 +79,54 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
                 cooldown_until TEXT NOT NULL
             );
             """);
+    }
+
+    /// <inheritdoc />
+    public void RecordAtomic(DateTime utcDate, decimal dailyDelta, decimal totalDelta, string? sessionId, decimal? sessionDelta)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        string dateKey = FormatDate(utcDate);
+
+        lock (_lock)
+        {
+            using var tx = _connection.BeginTransaction();
+            using var cmd = _connection.CreateCommand();
+            cmd.Transaction = tx;
+
+            // 1. 日预算累加（毫分）
+            cmd.CommandText = """
+                INSERT INTO daily_spend (date, amount) VALUES (@date, @dailyDelta)
+                ON CONFLICT(date) DO UPDATE SET amount = amount + @dailyDelta;
+                """;
+            cmd.Parameters.AddWithValue("@date", dateKey);
+            cmd.Parameters.AddWithValue("@dailyDelta", ToMills(dailyDelta));
+            cmd.ExecuteNonQuery();
+
+            // 2. 全局累计累加（毫分）
+            if (totalDelta != 0m)
+            {
+                cmd.CommandText = "UPDATE total_spend SET amount = amount + @totalDelta WHERE id = 1;";
+                cmd.Parameters.Clear();
+                cmd.Parameters.AddWithValue("@totalDelta", ToMills(totalDelta));
+                cmd.ExecuteNonQuery();
+            }
+
+            // 3. 会话账户累加（毫分）
+            if (!string.IsNullOrEmpty(sessionId) && sessionDelta.HasValue)
+            {
+                cmd.CommandText = """
+                    INSERT INTO session_spend (session_id, amount, updated_at) VALUES (@sid, @sessionDelta, @ts)
+                    ON CONFLICT(session_id) DO UPDATE SET amount = amount + @sessionDelta, updated_at = @ts;
+                    """;
+                cmd.Parameters.Clear();
+                cmd.Parameters.AddWithValue("@sid", sessionId);
+                cmd.Parameters.AddWithValue("@sessionDelta", ToMills(sessionDelta.Value));
+                cmd.Parameters.AddWithValue("@ts", FormatTimestamp(DateTime.UtcNow));
+                cmd.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+        }
     }
 
     /// <inheritdoc />
@@ -94,11 +146,11 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
                 RETURNING amount;
                 """;
             cmd.Parameters.AddWithValue("@date", key);
-            cmd.Parameters.AddWithValue("@delta", delta);
+            cmd.Parameters.AddWithValue("@delta", ToMills(delta));
 
             object? result = cmd.ExecuteScalar();
             tx.Commit();
-            return ToDecimal(result);
+            return FromMills(result);
         }
     }
 
@@ -117,11 +169,11 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
                 UPDATE total_spend SET amount = amount + @delta WHERE id = 1
                 RETURNING amount;
                 """;
-            cmd.Parameters.AddWithValue("@delta", delta);
+            cmd.Parameters.AddWithValue("@delta", ToMills(delta));
 
             object? result = cmd.ExecuteScalar();
             tx.Commit();
-            return ToDecimal(result);
+            return FromMills(result);
         }
     }
 
@@ -133,7 +185,7 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         {
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = "SELECT amount FROM total_spend WHERE id = 1;";
-            return ToDecimal(cmd.ExecuteScalar());
+            return FromMills(cmd.ExecuteScalar());
         }
     }
 
@@ -164,12 +216,12 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
                 RETURNING amount;
                 """;
             cmd.Parameters.AddWithValue("@sid", sessionId);
-            cmd.Parameters.AddWithValue("@delta", delta);
+            cmd.Parameters.AddWithValue("@delta", ToMills(delta));
             cmd.Parameters.AddWithValue("@ts", FormatTimestamp(DateTime.UtcNow));
 
             object? result = cmd.ExecuteScalar();
             tx.Commit();
-            return ToDecimal(result);
+            return FromMills(result);
         }
     }
 
@@ -184,7 +236,7 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = "SELECT amount FROM daily_spend WHERE date = @date;";
             cmd.Parameters.AddWithValue("@date", key);
-            return ToDecimal(cmd.ExecuteScalar());
+            return FromMills(cmd.ExecuteScalar());
         }
     }
 
@@ -199,7 +251,7 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = "SELECT amount FROM session_spend WHERE session_id = @sid;";
             cmd.Parameters.AddWithValue("@sid", sessionId);
-            return ToDecimal(cmd.ExecuteScalar());
+            return FromMills(cmd.ExecuteScalar());
         }
     }
 
@@ -229,8 +281,8 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
             var result = checkCmd.ExecuteScalar();
             if (result is null || result == DBNull.Value) return;
 
-            decimal amount = ToDecimal(result);
-            if (amount == 0m) return;
+            long mills = Convert.ToInt64(result, CultureInfo.InvariantCulture);
+            if (mills == 0) return;
 
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = """
@@ -239,7 +291,7 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
                 ON CONFLICT(date) DO UPDATE SET amount = excluded.amount;
                 """;
             cmd.Parameters.AddWithValue("@date", todayKey);
-            cmd.Parameters.AddWithValue("@amount", (double)amount);
+            cmd.Parameters.AddWithValue("@amount", mills);
             cmd.ExecuteNonQuery();
         }
     }
@@ -268,7 +320,7 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
                 if (DateTime.TryParseExact(dateStr, "yyyy-MM-dd", CultureInfo.InvariantCulture,
                     DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var date))
                 {
-                    result.Add((date, ToDecimal(reader.GetValue(1))));
+                    result.Add((date, FromMills(reader.GetValue(1))));
                 }
             }
             return result;
@@ -393,6 +445,38 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// 迁移旧版 REAL 金额（美元）到 INTEGER 毫分。用 PRAGMA user_version 标记迁移状态。
+    /// 幂等：已迁移的 DB 不会重复执行。
+    /// </summary>
+    private void MigrateToMills()
+    {
+        using var versionCmd = _connection.CreateCommand();
+        versionCmd.CommandText = "PRAGMA user_version;";
+        long version = Convert.ToInt64(versionCmd.ExecuteScalar(), CultureInfo.InvariantCulture);
+
+        if (version >= 1) return; // 已迁移
+
+        // 旧表数据是 REAL（美元），乘以 1000 转为 INTEGER（毫分）。
+        // SQLite 的 CAST 会截断小数部分；旧 REAL 值的微小浮点漂移在毫分级可忽略。
+        Execute("UPDATE daily_spend SET amount = CAST(ROUND(amount * 1000.0) AS INTEGER) WHERE amount != 0;");
+        Execute("UPDATE total_spend SET amount = CAST(ROUND(amount * 1000.0) AS INTEGER) WHERE id = 1 AND amount != 0;");
+        Execute("UPDATE session_spend SET amount = CAST(ROUND(amount * 1000.0) AS INTEGER) WHERE amount != 0;");
+        Execute("UPDATE daily_spend_history SET amount = CAST(ROUND(amount * 1000.0) AS INTEGER) WHERE amount != 0;");
+
+        Execute("PRAGMA user_version = 1;");
+    }
+
+    /// <summary>将 decimal（美元）转为 long（毫分），四舍五入避免截断损失。</summary>
+    private static long ToMills(decimal usd) => (long)Math.Round(usd * 1000m, MidpointRounding.ToEven);
+
+    /// <summary>将 long（毫分）转为 decimal（美元）。</summary>
+    private static decimal FromMills(object? value)
+    {
+        if (value is null || value == DBNull.Value) return 0m;
+        return (decimal)Convert.ToInt64(value, CultureInfo.InvariantCulture) / 1000m;
+    }
+
     private static string FormatDate(DateTime utc)
     {
         // UTC 日期键：yyyy-MM-dd。CultureInvariant 避免本地化。
@@ -404,11 +488,5 @@ public sealed class SqliteCostLedgerStore : ICostLedgerStore
         // ISO 8601 完整时间戳（UTC），用于 session_spend.updated_at 与淘汰比较。
         // 字典序与时间序一致，支持字符串比较淘汰。
         return utc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
-    }
-
-    private static decimal ToDecimal(object? value)
-    {
-        if (value is null || value == DBNull.Value) return 0m;
-        return Convert.ToDecimal(value, CultureInfo.InvariantCulture);
     }
 }

@@ -197,18 +197,31 @@ public class ChatCompletionsEndpointTests
         };
     }
 
-    private static async Task<HttpResponseMessage> PostChatAsync(HttpClient client, string model = "auto")
+    private static async Task<HttpResponseMessage> PostChatAsync(
+        HttpClient client,
+        string model = "auto",
+        string? sessionId = null,
+        bool stream = false)
     {
-        using var content = new StringContent(
-            JsonSerializer.Serialize(BuildRequest(model)),
-            Encoding.UTF8,
-            "application/json");
-        return await client.PostAsync("/v1/chat/completions", content);
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(BuildRequest(model, stream)),
+                Encoding.UTF8,
+                "application/json")
+        };
+        if (sessionId is not null)
+            request.Headers.Add("X-Session-Id", sessionId);
+
+        return await client.SendAsync(
+            request,
+            stream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead);
     }
 
     private static TenantKeyFixture CreateTenantKeyFixture(
         decimal dailyBudgetUsd = 100m,
-        int maxQps = 50)
+        int maxQps = 50,
+        Action? onUpstream = null)
     {
         string directory = Path.Combine(
             Path.GetTempPath(),
@@ -217,7 +230,7 @@ public class ChatCompletionsEndpointTests
         string filePath = Path.Combine(directory, "client-keys.json");
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero));
 
-        var factory = CreateSecurityFactory();
+        var factory = CreateSecurityFactory(onUpstream);
         var existingConfiguration = factory.ConfigureTestServicesAction;
         factory.ConfigureTestServicesAction = services =>
         {
@@ -381,7 +394,61 @@ public class ChatCompletionsEndpointTests
 
         // Assert
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        using (var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync()))
+        {
+            var error = document.RootElement.GetProperty("error");
+            Assert.Equal("authentication_error", error.GetProperty("type").GetString());
+            Assert.Equal("INVALID_API_KEY", error.GetProperty("code").GetString());
+            Assert.False(string.IsNullOrEmpty(error.GetProperty("message").GetString()));
+        }
         Assert.Equal(0, attempts);
+    }
+
+    [Fact]
+    public async Task Post_AssistantNullContentWithToolCalls_IsAccepted_ButToolNullContentIsRejected()
+    {
+        int attempts = 0;
+        using var factory = CreateSecurityFactory(() => attempts++);
+        using var client = factory.CreateClient();
+
+        using var assistantContent = new StringContent(
+            "{\"model\":\"auto\",\"messages\":[{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"weather\",\"arguments\":\"{}\"}}]}]}",
+            Encoding.UTF8,
+            "application/json");
+        using var assistantResponse = await client.PostAsync("/v1/chat/completions", assistantContent);
+
+        Assert.Equal(HttpStatusCode.OK, assistantResponse.StatusCode);
+        Assert.Equal(1, attempts);
+
+        using var toolContent = new StringContent(
+            "{\"model\":\"auto\",\"messages\":[{\"role\":\"tool\",\"content\":null,\"tool_call_id\":\"call_1\"}]}",
+            Encoding.UTF8,
+            "application/json");
+        using var toolResponse = await client.PostAsync("/v1/chat/completions", toolContent);
+
+        Assert.Equal(HttpStatusCode.BadRequest, toolResponse.StatusCode);
+        using var toolDocument = JsonDocument.Parse(await toolResponse.Content.ReadAsStringAsync());
+        var toolError = toolDocument.RootElement.GetProperty("error");
+        Assert.Equal("invalid_request_error", toolError.GetProperty("type").GetString());
+        Assert.Equal("invalid_request_error", toolError.GetProperty("code").GetString());
+        Assert.Equal(1, attempts);
+    }
+
+    [Fact]
+    public async Task Post_UnknownModel_ReturnsOpenAiErrorEnvelope()
+    {
+        using var factory = CreateSecurityFactory();
+        using var client = factory.CreateClient();
+
+        using var response = await PostChatAsync(client, model: "no-such-model");
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var error = document.RootElement.GetProperty("error");
+        Assert.Equal("invalid_request_error", error.GetProperty("type").GetString());
+        Assert.Equal("model_not_found", error.GetProperty("code").GetString());
     }
 
     [Fact]
@@ -411,6 +478,115 @@ public class ChatCompletionsEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.True(Assert.Single(tenant.Service.GetAllKeys()).DailySpendUsd > 0m);
+    }
+
+    [Fact]
+    public async Task Post_TenantSessionId_IsScopedPerClientKey_AndStableForSameTenant()
+    {
+        using var tenant = CreateTenantKeyFixture();
+        var secondTenant = tenant.Service.CreateKey("tenant-two");
+        using var firstClient = tenant.Factory.CreateClient(tenant.PlaintextKey);
+        using var secondClient = tenant.Factory.CreateClient(secondTenant.PlaintextKey);
+
+        using var first = await PostChatAsync(firstClient, sessionId: "shared-session");
+        using var sameTenant = await PostChatAsync(firstClient, sessionId: "shared-session");
+        using var otherTenant = await PostChatAsync(secondClient, sessionId: "shared-session");
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, sameTenant.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, otherTenant.StatusCode);
+        _ = await first.Content.ReadAsStringAsync();
+        _ = await sameTenant.Content.ReadAsStringAsync();
+        _ = await otherTenant.Content.ReadAsStringAsync();
+
+        var audits = GetTenantSessionAudits(tenant.Factory, expectedCount: 3);
+        var bySession = audits.GroupBy(record => record.SessionId).ToList();
+        Assert.Equal(2, bySession.Count);
+        Assert.Contains(bySession, group => group.Count() == 2);
+        Assert.Contains(bySession, group => group.Count() == 1);
+
+        var sameTenantSession = bySession.Single(group => group.Count() == 2).Key!;
+        var otherTenantSession = bySession.Single(group => group.Count() == 1).Key!;
+        Assert.Contains(tenant.Info.KeyId, sameTenantSession, StringComparison.Ordinal);
+        Assert.Contains(secondTenant.Info.KeyId, otherTenantSession, StringComparison.Ordinal);
+        Assert.NotEqual(sameTenantSession, otherTenantSession);
+
+        var ledger = tenant.Factory.Services.GetRequiredService<CostLedger>();
+        Assert.Equal(
+            bySession.Single(group => group.Key == sameTenantSession).Sum(record => record.Cost),
+            ledger.GetSessionSpend(sameTenantSession));
+        Assert.Equal(
+            bySession.Single(group => group.Key == otherTenantSession).Sum(record => record.Cost),
+            ledger.GetSessionSpend(otherTenantSession));
+    }
+
+    [Fact]
+    public async Task Post_StreamingTenantSessionId_IsScopedPerClientKey_AndStableForSameTenant()
+    {
+        using var tenant = CreateTenantKeyFixture();
+        var secondTenant = tenant.Service.CreateKey("tenant-two");
+        var endpoint = CreateEndpoint("model-a");
+        tenant.Factory.MockClients["model-a"] = new MockModelClient(
+            endpoint,
+            streamRawFunc: (_, ct) => CreateStreamChunks("tenant stream", ct));
+        using var firstClient = tenant.Factory.CreateClient(tenant.PlaintextKey);
+        using var secondClient = tenant.Factory.CreateClient(secondTenant.PlaintextKey);
+
+        using var first = await PostChatAsync(firstClient, sessionId: "shared-session", stream: true);
+        using var sameTenant = await PostChatAsync(firstClient, sessionId: "shared-session", stream: true);
+        using var otherTenant = await PostChatAsync(secondClient, sessionId: "shared-session", stream: true);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, sameTenant.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, otherTenant.StatusCode);
+        _ = await first.Content.ReadAsStringAsync();
+        _ = await sameTenant.Content.ReadAsStringAsync();
+        _ = await otherTenant.Content.ReadAsStringAsync();
+
+        var audits = GetTenantSessionAudits(tenant.Factory, expectedCount: 3);
+        var bySession = audits.GroupBy(record => record.SessionId).ToList();
+        Assert.Equal(2, bySession.Count);
+        Assert.Equal(2, bySession.Single(group => group.Count() == 2).Count());
+        Assert.Single(bySession.Single(group => group.Count() == 1));
+        Assert.NotEqual(
+            bySession.Single(group => group.Count() == 2).Key,
+            bySession.Single(group => group.Count() == 1).Key);
+    }
+
+    private static List<RequestAuditRecord> GetTenantSessionAudits(
+        TestWebApplicationFactory factory,
+        int expectedCount)
+    {
+        var records = factory.Services.GetRequiredService<IRequestAuditStore>()
+            .GetRecent(10)
+            .Where(record => record.Success && record.SessionId is not null)
+            .ToList();
+        Assert.Equal(expectedCount, records.Count);
+        return records;
+    }
+
+    [Fact]
+    public async Task Post_ResponseCache_IsPartitionedByTenantKey()
+    {
+        int attempts = 0;
+        using var tenant = CreateTenantKeyFixture(onUpstream: () => attempts++);
+        var secondTenant = tenant.Service.CreateKey("tenant-two");
+        var routing = tenant.Factory.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue.Routing;
+        routing.EnableResponseCache = true;
+        routing.ResponseCacheTtlSeconds = 60;
+        routing.EnableSemanticCache = false;
+
+        using var firstClient = tenant.Factory.CreateClient(tenant.PlaintextKey);
+        using var secondClient = tenant.Factory.CreateClient(secondTenant.PlaintextKey);
+
+        using var first = await PostChatAsync(firstClient);
+        using var sameTenant = await PostChatAsync(firstClient);
+        using var otherTenant = await PostChatAsync(secondClient);
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, sameTenant.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, otherTenant.StatusCode);
+        Assert.Equal(2, attempts);
     }
 
     [Fact]
@@ -450,6 +626,11 @@ public class ChatCompletionsEndpointTests
         var body = await second.Content.ReadAsStringAsync();
         Assert.DoesNotContain("tenant-test", body, StringComparison.Ordinal);
         Assert.DoesNotContain(tenant.PlaintextKey, body, StringComparison.Ordinal);
+        using var document = JsonDocument.Parse(body);
+        var error = document.RootElement.GetProperty("error");
+        Assert.Equal("application/json", second.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("rate_limit_error", error.GetProperty("type").GetString());
+        Assert.Equal("RATE_LIMIT_EXCEEDED", error.GetProperty("code").GetString());
     }
 
     [Fact]
@@ -523,6 +704,11 @@ public class ChatCompletionsEndpointTests
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, second.StatusCode);
         Assert.Equal(1, attempts);
+        using var document = JsonDocument.Parse(await second.Content.ReadAsStringAsync());
+        var error = document.RootElement.GetProperty("error");
+        Assert.Equal("application/json", second.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("rate_limit_error", error.GetProperty("type").GetString());
+        Assert.Equal("RATE_LIMIT_EXCEEDED", error.GetProperty("code").GetString());
     }
 
     [Fact]
@@ -980,7 +1166,15 @@ public class ChatCompletionsEndpointTests
         // Assert
         Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
         Assert.Equal(0, fallbackAttempts);
-        Assert.DoesNotContain("sensitive upstream body", await response.Content.ReadAsStringAsync());
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("sensitive upstream body", body);
+        using (var document = JsonDocument.Parse(body))
+        {
+            var error = document.RootElement.GetProperty("error");
+            Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+            Assert.Equal("upstream_error", error.GetProperty("type").GetString());
+            Assert.Equal("UPSTREAM_REJECTION", error.GetProperty("code").GetString());
+        }
         Assert.False(factory.Services.GetRequiredService<ModelHealthTracker>().IsCoolingDown("model-a"));
     }
 
@@ -1024,6 +1218,11 @@ public class ChatCompletionsEndpointTests
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("All model candidates failed", body);
         Assert.Contains("model-a, model-b", body);
+        using var document = JsonDocument.Parse(body);
+        var error = document.RootElement.GetProperty("error");
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("all_candidates_failed", error.GetProperty("type").GetString());
+        Assert.Equal("ALL_CANDIDATES_FAILED", error.GetProperty("code").GetString());
     }
 
     [Fact]
@@ -1069,6 +1268,11 @@ public class ChatCompletionsEndpointTests
         Assert.Equal(HttpStatusCode.TooManyRequests, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("Budget exhausted", body);
+        using var document = JsonDocument.Parse(body);
+        var error = document.RootElement.GetProperty("error");
+        Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
+        Assert.Equal("budget_exceeded", error.GetProperty("type").GetString());
+        Assert.Equal("BUDGET_EXHAUSTED", error.GetProperty("code").GetString());
     }
 
     #endregion
@@ -1756,13 +1960,11 @@ public class ChatCompletionsEndpointTests
     #region Semantic cache + PII anonymization combination
 
     /// <summary>
-    /// 语义缓存与 PII 脱敏组合开关的键一致性：
-    /// 启用 EnableSemanticCache + EnablePiiAnonymization 时，同一请求第二次必须命中语义缓存
-    /// （上游仅调用一次）；且缓存命中返回的响应须用当前请求 piiMap 还原 PII 占位符，
-    /// 不得直接透出占位符或上一请求的明文数据。
+    /// 敏感 PII 请求不得进入语义缓存：即使两次请求文本相同，也必须分别经过上游，
+    /// 避免缓存响应绕过当前 PII 安全边界。每次上游响应仍须按当前请求还原 PII 占位符。
     /// </summary>
     [Fact]
-    public async Task Post_SemanticCacheWithPiiAnonymization_KeysConsistentAndPiiRestored()
+    public async Task Post_SemanticCacheWithSensitivePii_DoesNotReuseCachedResponse()
     {
         // Arrange
         int attempts = 0;
@@ -1787,14 +1989,14 @@ public class ChatCompletionsEndpointTests
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal(HttpStatusCode.OK, second.StatusCode);
 
-        // 语义缓存 TryGet/Store 使用同一（脱敏后）prompt 键 → 第二次命中 → 上游仅调用一次
-        Assert.Equal(1, attempts);
+        // 敏感 PII 请求完全禁用语义缓存 → 两次请求均调用上游。
+        Assert.Equal(2, attempts);
 
         var firstBody = await first.Content.ReadAsStringAsync();
         var secondBody = await second.Content.ReadAsStringAsync();
         // 首次请求：上游占位符响应被还原为真实 PII
         Assert.Contains("13800138000", firstBody);
-        // 第二次（缓存命中）：同样还原为当前请求的 PII，而非泄漏占位符
+        // 第二次请求同样还原为当前请求的 PII，而非泄漏占位符
         Assert.Contains("13800138000", secondBody);
         Assert.DoesNotContain("PII_PHONE", secondBody);
     }

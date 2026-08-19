@@ -14,9 +14,14 @@
             </button>
         </div>
 
-        @if (!string.IsNullOrEmpty(StatusError))
+        @if (!string.IsNullOrEmpty(ListLoadError))
         {
-            <div class="alert-banner alert-error" style="margin-top: 10px;">⚠️ @StatusError</div>
+            <div class="alert-banner alert-error" style="margin-top: 10px;">⚠️ @ListLoadError</div>
+        }
+
+        @if (!string.IsNullOrEmpty(MutationError))
+        {
+            <div class="alert-banner alert-error" style="margin-top: 10px;">⚠️ @MutationError</div>
         }
 
         @if (ShowAddKeyForm)
@@ -110,12 +115,12 @@
     {
         try
         {
-            StatusError = null;
             KeyList = await Api.GetClientKeysAsync();
+            ListLoadError = null;
         }
         catch (Exception ex)
         {
-            StatusError = "密钥列表加载失败：" + ex.Message;
+            ListLoadError = "密钥列表加载失败：" + ex.Message;
         }
     }
 
@@ -142,19 +147,20 @@
             CopyFeedback = "";
             ShowAddKeyForm = false;
             NewTenantName = "";
-            StatusError = null;
+            MutationError = null;
             await LoadClientKeys();
         }
         else
         {
-            StatusError = "签发失败：" + (error ?? "未知错误");
+            MutationError = "签发失败：" + (error ?? "未知错误");
         }
     }
 
     private string? IssuedPlaintextKey;
     private string? IssuedTenant;
     private string CopyFeedback = "";
-    private string? StatusError;
+    private string? ListLoadError;
+    private string? MutationError;
 
     private async Task CopyIssuedKey()
     {
@@ -174,7 +180,11 @@
         var (ok, error) = await Api.UpdateClientKeyAsync(k.KeyId, !k.Enabled, k.DailyBudgetUsd, k.MaxQps);
         if (!ok)
         {
-            StatusError = (k.Enabled ? "禁用" : "启用") + $"「{k.TenantName}」失败：" + (error ?? "未知错误");
+            MutationError = (k.Enabled ? "禁用" : "启用") + $"「{k.TenantName}」失败：" + (error ?? "未知错误");
+        }
+        else
+        {
+            MutationError = null;
         }
         await LoadClientKeys();
     }
@@ -184,7 +194,11 @@
         var (ok, error) = await Api.DeleteClientKeyAsync(key);
         if (!ok)
         {
-            StatusError = "删除失败：" + (error ?? "未知错误");
+            MutationError = "删除失败：" + (error ?? "未知错误");
+        }
+        else
+        {
+            MutationError = null;
         }
         await LoadClientKeys();
     }

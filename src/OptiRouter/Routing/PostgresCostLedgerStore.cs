@@ -88,10 +88,85 @@ CREATE TABLE IF NOT EXISTS optirouter_total_cost (
 CREATE TABLE IF NOT EXISTS optirouter_circuit_state (
     model_name TEXT PRIMARY KEY,
     is_open BOOLEAN NOT NULL DEFAULT FALSE,
-    open_until TIMESTAMPTZ NULL
+    open_until TIMESTAMPTZ NULL,
+    failure_count INT NOT NULL DEFAULT 0
 );
 ";
         cmd.ExecuteNonQuery();
+
+        // 增量迁移：旧表无 failure_count 列时补加（Postgres 9.6+ 支持 IF NOT EXISTS）。
+        using var migrateCmd = conn.CreateCommand();
+        migrateCmd.CommandText = @"
+ALTER TABLE optirouter_circuit_state ADD COLUMN IF NOT EXISTS failure_count INT NOT NULL DEFAULT 0;
+";
+        migrateCmd.ExecuteNonQuery();
+    }
+
+    /// <inheritdoc />
+    public void RecordAtomic(DateTime utcDate, decimal dailyDelta, decimal totalDelta, string? sessionId, decimal? sessionDelta)
+    {
+        if (string.IsNullOrWhiteSpace(_connectionString))
+        {
+            _fallback.RecordAtomic(utcDate, dailyDelta, totalDelta, sessionId, sessionDelta);
+            return;
+        }
+
+        try
+        {
+            using var conn = new NpgsqlConnection(_connectionString);
+            conn.Open();
+            using var tx = conn.BeginTransaction();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.Transaction = tx;
+
+                cmd.CommandText = @"
+INSERT INTO optirouter_daily_cost (utc_date, amount)
+VALUES (@date, @delta)
+ON CONFLICT (utc_date) DO UPDATE
+SET amount = optirouter_daily_cost.amount + EXCLUDED.amount;
+";
+                cmd.Parameters.AddWithValue("date", utcDate.Date);
+                cmd.Parameters.AddWithValue("delta", dailyDelta);
+                cmd.ExecuteNonQuery();
+
+                if (totalDelta != 0m)
+                {
+                    cmd.Parameters.Clear();
+                    cmd.CommandText = @"
+INSERT INTO optirouter_total_cost (id, amount)
+VALUES (1, @delta)
+ON CONFLICT (id) DO UPDATE
+SET amount = optirouter_total_cost.amount + EXCLUDED.amount;
+";
+                    cmd.Parameters.AddWithValue("delta", totalDelta);
+                    cmd.ExecuteNonQuery();
+                }
+
+                if (!string.IsNullOrEmpty(sessionId) && sessionDelta.HasValue)
+                {
+                    cmd.Parameters.Clear();
+                    cmd.CommandText = @"
+INSERT INTO optirouter_session_cost (session_id, amount, updated_at)
+VALUES (@sid, @delta, NOW())
+ON CONFLICT (session_id) DO UPDATE
+SET amount = optirouter_session_cost.amount + EXCLUDED.amount,
+    updated_at = NOW();
+";
+                    cmd.Parameters.AddWithValue("sid", sessionId);
+                    cmd.Parameters.AddWithValue("delta", sessionDelta.Value);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            tx.Commit();
+            MarkRecovered();
+        }
+        catch (Exception ex)
+        {
+            // 事务整体失败（三个账户都未写入），降级回退到内存 store 保持既有降级语义。
+            MarkDegraded(nameof(RecordAtomic), ex);
+            _fallback.RecordAtomic(utcDate, dailyDelta, totalDelta, sessionId, sessionDelta);
+        }
     }
 
     /// <inheritdoc />
@@ -311,23 +386,12 @@ RETURNING amount;
     /// <inheritdoc />
     public void ResetDaily()
     {
-        if (string.IsNullOrWhiteSpace(_connectionString)) { _fallback.ResetDaily(); return; }
-
-        try
-        {
-            using var conn = new NpgsqlConnection(_connectionString);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = "DELETE FROM optirouter_daily_cost WHERE utc_date = @date;";
-            cmd.Parameters.AddWithValue("date", DateTime.UtcNow.Date);
-            cmd.ExecuteNonQuery();
-            MarkRecovered();
-        }
-        catch (Exception ex)
-        {
-            MarkDegraded(nameof(ResetDaily), ex);
+        // PostgreSQL stores each UTC date in its own row, so the row is also the
+        // historical record. Resetting the current row would race with other
+        // nodes and erase their spend for the new day. Only reset the fallback
+        // while this instance is actually degraded or configured without a DB.
+        if (string.IsNullOrWhiteSpace(_connectionString) || Volatile.Read(ref _degraded) != 0)
             _fallback.ResetDaily();
-        }
     }
 
     /// <inheritdoc />
@@ -409,14 +473,15 @@ RETURNING amount;
             conn.Open();
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-INSERT INTO optirouter_circuit_state (model_name, is_open, open_until)
-VALUES (@m, @open, @until)
+INSERT INTO optirouter_circuit_state (model_name, is_open, open_until, failure_count)
+VALUES (@m, @open, @until, @fc)
 ON CONFLICT (model_name) DO UPDATE
-SET is_open = EXCLUDED.is_open, open_until = EXCLUDED.open_until;
+SET is_open = EXCLUDED.is_open, open_until = EXCLUDED.open_until, failure_count = EXCLUDED.failure_count;
 ";
             cmd.Parameters.AddWithValue("m", modelName);
             cmd.Parameters.AddWithValue("open", state == CircuitState.Open);
             cmd.Parameters.AddWithValue("until", cooldownUntil);
+            cmd.Parameters.AddWithValue("fc", failureCount);
             cmd.ExecuteNonQuery();
             MarkRecovered();
         }
@@ -437,7 +502,7 @@ SET is_open = EXCLUDED.is_open, open_until = EXCLUDED.open_until;
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT model_name, is_open, open_until FROM optirouter_circuit_state;";
+            cmd.CommandText = "SELECT model_name, is_open, open_until, failure_count FROM optirouter_circuit_state;";
             using var reader = cmd.ExecuteReader();
             var dict = new Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)>(StringComparer.OrdinalIgnoreCase);
 
@@ -446,7 +511,8 @@ SET is_open = EXCLUDED.is_open, open_until = EXCLUDED.open_until;
                 string model = reader.GetString(0);
                 bool isOpen = reader.GetBoolean(1);
                 DateTime cooldown = reader.IsDBNull(2) ? DateTime.MinValue : reader.GetDateTime(2);
-                dict[model] = (isOpen ? CircuitState.Open : CircuitState.Closed, isOpen ? 5 : 0, cooldown);
+                int failureCount = reader.GetInt32(3);
+                dict[model] = (isOpen ? CircuitState.Open : CircuitState.Closed, failureCount, cooldown);
             }
             MarkRecovered();
             return dict;

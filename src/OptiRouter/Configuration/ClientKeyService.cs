@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using Microsoft.Extensions.Logging;
+using System.Runtime.InteropServices;
 
 namespace OptiRouter.Configuration;
 
@@ -409,6 +410,7 @@ public sealed class ClientKeyService : IDisposable
             return false;
 
         item.DailySpendUsd = 0m;
+        item.DailyRequestCount = 0;
         item.DailySpendDateUtc = today;
         return true;
     }
@@ -463,6 +465,9 @@ public sealed class ClientKeyService : IDisposable
             else
                 File.Move(temporaryPath, fullPath);
 
+            // 收紧文件权限：仅所有者可读写（0600），防止同机其他用户读取 KeyHash/KeyPrefix。
+            SetOwnerOnlyPermissions(fullPath);
+
             _cachedKeys = keys;
             _lastFileWriteTimeUtc = File.Exists(fullPath) ? File.GetLastWriteTimeUtc(fullPath) : DateTime.MinValue;
             // 整文件已写入：任何挂起的花费随之落盘，清去抖脏标志（覆盖所有 SaveKeysToFile 调用点）。
@@ -484,6 +489,28 @@ public sealed class ClientKeyService : IDisposable
     }
 
     private readonly record struct QpsWindow(long StartUnixSecond, int Count);
+
+    /// <summary>
+    /// 设置文件权限为仅所有者可读写（Linux: chmod 600，Windows: 仅限当前用户 ACL）。
+    /// 静默失败：文件已写入，权限设置失败不回滚写入（best-effort 纵深防御）。
+    /// </summary>
+    private static void SetOwnerOnlyPermissions(string path)
+    {
+        try
+        {
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux) || RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                // chmod 0600：仅所有者读写，组与其他无权限
+                System.IO.File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+            // Windows：File.Replace/Move 继承父目录 ACL，通常已是当前用户私有。
+            // 如需更严格限制，可在此处设置显式 ACL（当前实现跳过，依赖 NTFS 默认继承）。
+        }
+        catch
+        {
+            // best-effort：权限设置失败不阻断正常写入流程。
+        }
+    }
 }
 
 public enum ClientKeyAuthorizationStatus

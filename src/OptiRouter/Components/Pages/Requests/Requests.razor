@@ -9,11 +9,18 @@
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
             <span>实时请求流 (Live Request Stream)</span>
-            <span class="tag tag-success" style="font-size: 0.75rem;">● 实时抓取</span>
+            @if (MetricsLoading)
+            {
+                <span class="tag tag-info" style="font-size: 0.75rem;">加载中...</span>
+            }
+            else
+            {
+                <span class="tag tag-success" style="font-size: 0.75rem;">● 实时抓取</span>
+            }
         </div>
-        @if (!string.IsNullOrEmpty(LoadError))
+        @if (!string.IsNullOrEmpty(MetricsError))
         {
-            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @LoadError</div>
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @MetricsError</div>
         }
         <div class="table-wrap">
             <table class="log-table">
@@ -61,6 +68,10 @@
     <!-- 审计日志 -->
     <div class="glass-card">
         <div class="card-label">历史请求审计日志 (点击任意行查看 Debugger Trace 详情)</div>
+        @if (!string.IsNullOrEmpty(AuditError))
+        {
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @AuditError</div>
+        }
         <div class="log-controls">
             <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" style="width: 140px;" />
             <select @bind="LogFilterTier">
@@ -84,7 +95,7 @@
                 <option value="50">每页 50 条</option>
                 <option value="100">每页 100 条</option>
             </select>
-            <button class="btn-primary" @onclick="LoadLogs">🔍 组合筛选</button>
+            <button class="btn-primary" @onclick="ApplyLogFilters">🔍 组合筛选</button>
         </div>
         <div class="table-wrap">
             <table class="log-table">
@@ -241,6 +252,7 @@
 
 @code {
     private ApiService.DashboardMetrics? Metrics;
+    private bool MetricsLoading = true;
     private List<ApiService.AuditItem> AuditItems = new();
     private int AuditTotal = 0;
     private string LogFilterModel = "";
@@ -251,17 +263,23 @@
     private string LogFilterStatus = "";
     private long LogFilterMinLatency = 0;
     private ApiService.AuditItem? SelectedLogItem;
+    private int _selectLogVersion;
 
     private PeriodicTimer? _timer;
     private CancellationTokenSource _cts = new();
 
     private async Task SelectLogItem(ApiService.AuditItem item)
     {
+        int version = ++_selectLogVersion;
         SelectedLogItem = item;
         if (!string.IsNullOrEmpty(item.RequestId))
         {
             var detail = await Api.GetAuditDetailAsync(item.RequestId);
-            if (detail != null) SelectedLogItem = detail;
+            // 版本号检查：连点不同行时旧响应不覆盖新选中行
+            if (detail != null && version == _selectLogVersion)
+            {
+                SelectedLogItem = detail;
+            }
         }
     }
 
@@ -272,15 +290,22 @@
             var page = await Api.GetAuditLogAsync(LogLimit, LogOffset, LogFilterModel, LogFilterTier, LogFilterStatus, LogFilterMinLatency > 0 ? LogFilterMinLatency : null);
             AuditItems = page.Items;
             AuditTotal = page.TotalCount;
-            LoadError = null;
+            AuditError = null;
         }
         catch (Exception ex)
         {
-            LoadError = "请求日志加载失败：" + ex.Message;
+            AuditError = "请求日志加载失败：" + ex.Message;
         }
     }
 
-    private string? LoadError;
+    private string? AuditError;
+    private string? MetricsError;
+
+    private async Task ApplyLogFilters()
+    {
+        LogOffset = 0;
+        await LoadLogs();
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -310,12 +335,13 @@
         try
         {
             Metrics = await Api.GetMetricsAsync();
-            LoadError = null;
+            MetricsError = null;
+            MetricsLoading = false;
         }
         catch (Exception ex)
         {
-            // 轮询失败保留上一次数据，仅更新错误提示（与 LoadLogs 共用横幅）
-            LoadError = "实时指标刷新失败：" + ex.Message;
+            // 轮询失败保留上一次数据，仅更新指标错误提示。
+            MetricsError = "实时指标刷新失败：" + ex.Message;
         }
     }
 

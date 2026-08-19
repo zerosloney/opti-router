@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -36,6 +37,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly OptiRouter.Compression.IPromptPruner _promptPruner;
     private readonly OptiRouter.Mcp.McpToolOrchestrator? _mcpToolOrchestrator;
     private readonly OptiRouter.Compliance.IContentModerator? _contentModerator;
+    private readonly IHttpContextAccessor? _httpContextAccessor;
     private bool _disposed;
 
     /// <summary>
@@ -58,7 +60,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         IStreamingComplianceFilter? complianceFilter = null,
         OptiRouter.Compression.IPromptPruner? promptPruner = null,
         OptiRouter.Mcp.McpToolOrchestrator? mcpToolOrchestrator = null,
-        OptiRouter.Compliance.IContentModerator? contentModerator = null)
+        OptiRouter.Compliance.IContentModerator? contentModerator = null,
+        IHttpContextAccessor? httpContextAccessor = null)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
@@ -88,6 +91,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _promptPruner = promptPruner ?? new OptiRouter.Compression.AdaptivePromptPruner();
         _mcpToolOrchestrator = mcpToolOrchestrator;
         _contentModerator = contentModerator;
+        _httpContextAccessor = httpContextAccessor;
         _logger = logger;
     }
 
@@ -105,6 +109,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
+        sessionId = ScopeSessionId(sessionId);
 
         var options = _options.CurrentValue;
         var failedInThisRequest = new HashSet<string>(StringComparer.Ordinal);
@@ -132,33 +137,19 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         // 响应缓存（仅非流式）：在 PII 脱敏**前**用原始请求算键，避免不同 PII 脱敏后占位符相同串扰。
         // 命中即短路返回（不经路由/上游），不记上游成本，仅记一条 cache-hit 审计。
-        string? cacheKey = options.Routing.EnableResponseCache && !request.Stream
-            ? ResponseCacheKey.Compute(request)
+        // 内容审核开启时完全禁用两类缓存，避免缓存响应绕过当前审核策略。
+        string securityPartition = BuildSecurityPartition(sessionId);
+        string? cacheKey = options.Routing.EnableResponseCache
+            && !request.Stream
+            && !options.Routing.EnableContentModeration
+            ? BuildPartitionedCacheKey(securityPartition, ResponseCacheKey.Compute(request))
             : null;
 
         // regenerate 负反馈键：与响应缓存同源（规范化请求 SHA256），必须在 PII 脱敏前基于原始请求计算
         // （脱敏占位符相同的不同请求会串扰键）。
         string? feedbackKey = options.Routing.EnableRegenerateFeedback
-            ? cacheKey ?? ResponseCacheKey.Compute(request)
+            ? BuildPartitionedCacheKey(securityPartition, ResponseCacheKey.Compute(request))
             : null;
-
-        if (cacheKey is not null && _responseCache.TryGet(cacheKey, out var cached) && cached is not null)
-        {
-            // 缓存命中也要消费 regenerate 信号：用户对同一请求重发 = 对上次答案不满意。
-            // 若此处短路返回而不消费，regenerate 请求会拿到相同缓存答案且上次模型不受惩罚，信号被缓存完全屏蔽。
-            if (feedbackKey is not null
-                && _regenerateTracker.TryConsumeRegenerate(
-                    feedbackKey, TimeSpan.FromSeconds(options.Routing.RegenerateFeedbackWindowSeconds), out string previousModel))
-            {
-                // 缓存命中路径无 RouterDecision（未路由），只更新 Thompson 状态，bandit 无特征不更新。
-                _recorder.RecordQualityOutcome(previousModel, options.Routing.RegeneratePenaltyReward);
-                _logger.LogInformation(
-                    "Regenerate feedback (cache hit): penalizing previous model {Model} with reward {Reward:0.00}",
-                    previousModel, options.Routing.RegeneratePenaltyReward);
-            }
-            _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap);
-            return cached;
-        }
 
         bool regeneratePenaltyApplied = false;
 
@@ -210,21 +201,43 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
         }
 
+        // 精确缓存查询必须位于 PII / Persona / 压缩 / 输入审核之后。
+        // cacheKey 仍使用审核前的原始请求计算，避免不同 PII 值因脱敏占位符相同而串扰。
+        if (cacheKey is not null && _responseCache.TryGet(cacheKey, out var cached) && cached is not null)
+        {
+            // 缓存命中也要消费 regenerate 信号：用户对同一请求重发 = 对上次答案不满意。
+            // 若此处短路返回而不消费，regenerate 请求会拿到相同缓存答案且上次模型不受惩罚，信号被缓存完全屏蔽。
+            if (feedbackKey is not null
+                && _regenerateTracker.TryConsumeRegenerate(
+                    feedbackKey, TimeSpan.FromSeconds(options.Routing.RegenerateFeedbackWindowSeconds), out string previousModel))
+            {
+                // 缓存命中路径无 RouterDecision（未路由），只更新 Thompson 状态，bandit 无特征不更新。
+                _recorder.RecordQualityOutcome(previousModel, options.Routing.RegeneratePenaltyReward);
+                _logger.LogInformation(
+                    "Regenerate feedback (cache hit): penalizing previous model {Model} with reward {Reward:0.00}",
+                    previousModel, options.Routing.RegeneratePenaltyReward);
+            }
+            _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap);
+            return cached;
+        }
+
         // 深度语义向量响应缓存 (Semantic Cache) 尝试相似度匹配。
         // 必须在 PII 脱敏 / Persona 锚定 / 提示词压缩等所有请求改写**之后**执行：
         // TryGet 与成功路径的 Store 使用同一改写后的 prompt 作键，否则脱敏占位符/压缩文本
         // 与原文不同键必然 miss（启用 PII 脱敏时语义缓存整体失效）。
         // 命中返回的缓存响应是上游基于占位符生成的原始文本（未还原），须用当前请求 piiMap
         // 还原——不同用户相同结构请求命中同一缓存项时，各自还原出自己的 PII，不泄漏明文。
-        if (options.Routing.EnableSemanticCache && !request.Stream)
+        if (CanUseSemanticCache(options.Routing, request, piiMap) && !request.Stream)
         {
             string? promptText = GetLastUserPrompt(request);
             if (!string.IsNullOrWhiteSpace(promptText))
             {
-                var (semHit, semCached, semSim, matchedPrompt) = await _semanticCache.TryGetAsync(
+                string semanticPartition = BuildSemanticPartition(request, securityPartition);
+                var (semHit, semCached, semSim, _) = await _semanticCache.TryGetAsync(
                     promptText,
                     options.Routing.SemanticCacheSimilarityThreshold,
-                    ct).ConfigureAwait(false);
+                    ct,
+                    partitionKey: semanticPartition).ConfigureAwait(false);
 
                 if (semHit && semCached is not null)
                 {
@@ -244,7 +257,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         ? new RawChatResponse(piiMap.Restore(semCached.Body), semCached.Usage, semCached.Metadata)
                         : semCached;
                     _recorder.RecordAudit(null, "semantic-cache", 0, null, 0m, 0, sessionId, $"semantic-cache-hit (sim={semSim:F3})", true, null, false, ModelTier.Cheap);
-                    _logger.LogInformation("Semantic Response Cache HIT! Similarity: {Sim:F3}, Matched Prompt: {Prompt}", semSim, matchedPrompt);
+                    _logger.LogInformation("Semantic Response Cache HIT: similarity={Similarity:F3}", semSim);
                     return semResponse;
                 }
             }
@@ -478,15 +491,20 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     var finalResponse = ProcessResponse(response, piiMap);
                     if (cacheKey is not null)
                         _responseCache.Set(cacheKey, finalResponse, TimeSpan.FromSeconds(options.Routing.ResponseCacheTtlSeconds));
-                    if (options.Routing.EnableSemanticCache && !request.Stream)
+                    if (CanUseSemanticCache(options.Routing, request, piiMap) && !request.Stream)
                     {
                         string? promptText = GetLastUserPrompt(request);
                         if (!string.IsNullOrWhiteSpace(promptText))
                         {
+                            string semanticPartition = BuildSemanticPartition(request, securityPartition);
                             // 存储未还原的原始响应（含 PII 占位符）：命中时由当前请求 piiMap 还原，
                             // 保证不同用户相同结构请求共享缓存项时各自得到自己的 PII 值。
                             await _semanticCache.StoreAsync(
-                                promptText, response, TimeSpan.FromMinutes(options.Routing.SemanticCacheTtlMinutes), ct).ConfigureAwait(false);
+                                promptText,
+                                response,
+                                TimeSpan.FromMinutes(options.Routing.SemanticCacheTtlMinutes),
+                                ct,
+                                partitionKey: semanticPartition).ConfigureAwait(false);
                         }
                     }
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
@@ -587,6 +605,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
+        sessionId = ScopeSessionId(sessionId);
 
         var options = _options.CurrentValue;
         var failedInThisRequest = new HashSet<string>(StringComparer.Ordinal);
@@ -619,8 +638,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         // PII 脱敏（与非流式 SendAsync 对称）：流式路径同样必须在上游发送前替换敏感数据，
         // 并在每个 yield 行上反向还原，否则原始 PII 直达上游、占位符泄露给客户端。
         // regenerate 负反馈键：必须在脱敏前基于原始请求计算（脱敏占位符相同的不同请求会串扰键）。
+        string securityPartition = BuildSecurityPartition(sessionId);
         string? feedbackKey = options.Routing.EnableRegenerateFeedback
-            ? ResponseCacheKey.Compute(request)
+            ? BuildPartitionedCacheKey(securityPartition, ResponseCacheKey.Compute(request))
             : null;
         bool regeneratePenaltyApplied = false;
 
@@ -722,7 +742,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     sessionId, failedInThisRequest, attemptedModels, effectiveCt).WithCancellation(effectiveCt))
                 {
                     producedAnyChunk = true;
-                    yield return RestorePii(line, piiMap);
+                    var restored = ProcessCompliance(RestorePii(line, piiMap), complianceBuffer, options.Routing);
+                    totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(restored.Data ?? "");
+                    if (totalBytesTransferred > maxResponseBytes)
+                    {
+                        throw new ResponseSizeLimitExceededException(maxResponseBytes,
+                            $"Response size limit exceeded ({maxResponseBytes} bytes).");
+                    }
+                    yield return restored;
                 }
 
                 if (producedAnyChunk)
@@ -958,7 +985,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
                     probeResolved = true;
-                        attemptSw.Stop();
+                    attemptSw.Stop();
                     _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
                         cost,
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier,
@@ -1084,6 +1111,127 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Builds a cache security partition without ever including a bearer secret.
+    /// Tenant requests use the immutable key id attached by the authentication middleware;
+    /// authenticated dashboard requests use the shared admin principal; all remaining proxy
+    /// requests use the shared global principal. Session affinity is scoped within that principal.
+    /// </summary>
+    private string BuildSecurityPartition(string? sessionId)
+    {
+        var context = _httpContextAccessor?.HttpContext;
+        string principal;
+
+        if (context?.Items[typeof(ClientKeyAuthorizationResult)] is ClientKeyAuthorizationResult authorization
+            && authorization.IsAuthorized
+            && !string.IsNullOrWhiteSpace(authorization.KeyId))
+        {
+            principal = $"client:{authorization.KeyId}";
+        }
+        else if (context?.User.Identity?.IsAuthenticated == true)
+        {
+            principal = "admin";
+        }
+        else
+        {
+            // A request reaching ProxyOrchestrator without a tenant identity is the global proxy key
+            // path (or an internal/test invocation). Never use the bearer value itself as a partition.
+            principal = "global";
+        }
+
+        string session = sessionId ?? string.Empty;
+        return $"principal={principal.Length}:{principal};session={session.Length}:{session}";
+    }
+
+    /// <summary>
+    /// Scopes a client-controlled session ID to the authorized tenant key without changing the
+    /// global proxy-key or internal no-context behavior. Length-prefix both components so a key
+    /// ID and raw session cannot produce an ambiguous composite value.
+    /// </summary>
+    private string? ScopeSessionId(string? sessionId)
+    {
+        if (string.IsNullOrEmpty(sessionId))
+            return sessionId;
+
+        var context = _httpContextAccessor?.HttpContext;
+        if (context?.Items[typeof(ClientKeyAuthorizationResult)] is ClientKeyAuthorizationResult authorization
+            && authorization.IsAuthorized
+            && !string.IsNullOrWhiteSpace(authorization.KeyId))
+        {
+            string keyId = authorization.KeyId;
+            return $"client={keyId.Length}:{keyId};session={sessionId.Length}:{sessionId}";
+        }
+
+        return sessionId;
+    }
+
+    private static string BuildPartitionedCacheKey(string securityPartition, string requestKey) =>
+        $"{securityPartition}|request={requestKey}";
+
+    /// <summary>
+    /// Semantic matching is intentionally conservative: moderation must always see the request and
+    /// response, sensitive PII must not be shared by similarity, and tool conversations are
+    /// context-sensitive even when their latest user text is identical.
+    /// </summary>
+    private static bool CanUseSemanticCache(RoutingOptions routing, ChatRequest request, PiiMap? piiMap) =>
+        routing.EnableSemanticCache
+        && !routing.EnableContentModeration
+        && piiMap?.HasSensitiveData != true
+        && !ContainsToolContext(request);
+
+    private static bool ContainsToolContext(ChatRequest request)
+    {
+        if (ContainsToolExtension(request.ExtensionData))
+            return true;
+
+        foreach (var message in request.Messages ?? [])
+        {
+            if (string.Equals(message.Role, "tool", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(message.Role, "function", StringComparison.OrdinalIgnoreCase)
+                || ContainsToolExtension(message.ExtensionData))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsToolExtension(IDictionary<string, System.Text.Json.JsonElement>? extensionData)
+    {
+        if (extensionData is null)
+            return false;
+
+        return extensionData.Keys.Any(key =>
+            key.Equals("tools", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("tool_choice", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("tool_calls", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("tool_call_id", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("function_call", StringComparison.OrdinalIgnoreCase)
+            || key.Equals("functions", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Adds the complete request context to the semantic partition while removing only the text
+    /// used for similarity matching. Model parameters, system/history messages and tool metadata
+    /// therefore remain part of the partition.
+    /// </summary>
+    private static string BuildSemanticPartition(ChatRequest request, string securityPartition)
+    {
+        var messages = request.Messages?.ToList() ?? [];
+        for (int i = messages.Count - 1; i >= 0; i--)
+        {
+            if (string.Equals(messages[i].Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                messages[i] = messages[i] with { Content = null };
+                break;
+            }
+        }
+
+        var contextRequest = request with { Messages = messages };
+        return BuildPartitionedCacheKey(securityPartition, ResponseCacheKey.Compute(contextRequest));
     }
 
     /// <summary>

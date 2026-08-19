@@ -282,6 +282,11 @@ public class M2EndpointTests
         Assert.Equal(HttpStatusCode.TooManyRequests, resp2.StatusCode);
         var body2 = await resp2.Content.ReadAsStringAsync();
         Assert.Contains("Too many concurrent requests", body2);
+        Assert.Equal("application/json", resp2.Content.Headers.ContentType?.MediaType);
+        using var errorDocument = JsonDocument.Parse(body2);
+        var error = errorDocument.RootElement.GetProperty("error");
+        Assert.Equal("rate_limit_error", error.GetProperty("type").GetString());
+        Assert.Equal("CONCURRENCY_LIMIT_EXCEEDED", error.GetProperty("code").GetString());
 
         // 3. Clean up: complete the blocked first request so it can exit safely
         tcs.SetResult(new RawChatResponse("{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}", null));

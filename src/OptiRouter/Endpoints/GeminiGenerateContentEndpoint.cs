@@ -91,7 +91,7 @@ public static class GeminiGenerateContentEndpoint
 
         if (stream)
         {
-            return await StreamAsync(orchestrator, request, sessionId, ct).ConfigureAwait(false);
+            return await StreamAsync(orchestrator, request, sessionId, httpContext, ct).ConfigureAwait(false);
         }
 
         try
@@ -102,7 +102,9 @@ public static class GeminiGenerateContentEndpoint
         }
         catch (BudgetExhaustedException)
         {
-            httpContext.Response.Headers["Retry-After"] = "3600";
+            // 日预算在 UTC 午夜重置，Retry-After 设为到午夜的剩余秒数。
+            int retryAfterSeconds = Math.Max(1, (int)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalSeconds);
+            httpContext.Response.Headers["Retry-After"] = retryAfterSeconds.ToString();
             return GeminiError(StatusCodes.Status429TooManyRequests, "RESOURCE_EXHAUSTED", "budget exhausted");
         }
         catch (OptiRouter.Compliance.ComplianceViolationException ex)
@@ -118,9 +120,17 @@ public static class GeminiGenerateContentEndpoint
         {
             return GeminiError((int)ex.StatusCode, "UNAVAILABLE", $"Upstream request rejected (status {(int)ex.StatusCode}).");
         }
+        catch (Exception ex)
+        {
+            // 非流式路径 catch-all：未预见异常兜底，返回 Gemini 兼容 500 错误信封。
+            // 未预见异常不外发 ex.Message（可能含内部细节），细节进服务端日志。
+            ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
+            return GeminiError(StatusCodes.Status500InternalServerError, "INTERNAL", ProtocolErrorHelper.InternalErrorMessage);
+        }
     }
 
-    private static async Task<IResult> StreamAsync(ProxyOrchestrator orchestrator, ChatRequest request, string? sessionId, CancellationToken ct)
+    private static async Task<IResult> StreamAsync(ProxyOrchestrator orchestrator, ChatRequest request, string? sessionId,
+        HttpContext httpContext, CancellationToken ct)
     {
         IAsyncEnumerator<RawStreamLine>? enumerator = null;
         try
@@ -164,9 +174,16 @@ public static class GeminiGenerateContentEndpoint
                 {
                     await WriteStreamErrorAsync(stream, StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", "all model candidates failed", ct).ConfigureAwait(false);
                 }
+                catch (OptiRouter.Compliance.ComplianceViolationException ex)
+                {
+                    await WriteStreamErrorAsync(stream, StatusCodes.Status400BadRequest, "INVALID_ARGUMENT", ex.Message, ct).ConfigureAwait(false);
+                }
                 catch (Exception ex)
                 {
-                    await WriteStreamErrorAsync(stream, StatusCodes.Status500InternalServerError, "INTERNAL", ex.Message, ct).ConfigureAwait(false);
+                    // 未预见异常不外发 ex.Message，细节进服务端日志。
+                    ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
+                    await WriteStreamErrorAsync(stream, StatusCodes.Status500InternalServerError, "INTERNAL",
+                        ProtocolErrorHelper.InternalErrorMessage, ct).ConfigureAwait(false);
                 }
                 finally
                 {
@@ -196,6 +213,32 @@ public static class GeminiGenerateContentEndpoint
                 await enumerator.DisposeAsync().ConfigureAwait(false);
             return Results.Stream(
                 stream => WriteStreamErrorAsync(stream, StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", "all model candidates failed", ct),
+                "text/event-stream");
+        }
+        catch (OptiRouter.Compliance.ComplianceViolationException ex)
+        {
+            if (enumerator is not null)
+                await enumerator.DisposeAsync().ConfigureAwait(false);
+            return Results.Stream(
+                stream => WriteStreamErrorAsync(stream, StatusCodes.Status400BadRequest, "INVALID_ARGUMENT", ex.Message, ct),
+                "text/event-stream");
+        }
+        catch (Exception ex)
+        {
+            // 流式首 MoveNextAsync 期间的未预见异常兜底：返回 SSE 错误流而非逃逸为框架 500。
+            if (enumerator is not null)
+                await enumerator.DisposeAsync().ConfigureAwait(false);
+            int code = ex is OperationCanceledException
+                ? StatusCodes.Status504GatewayTimeout
+                : StatusCodes.Status500InternalServerError;
+            string status = ex is OperationCanceledException ? "DEADLINE_EXCEEDED" : "INTERNAL";
+            string message = status == "INTERNAL"
+                ? ProtocolErrorHelper.InternalErrorMessage  // 未预见异常不外发 ex.Message，细节进服务端日志。
+                : ex.Message;
+            if (status == "INTERNAL")
+                ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
+            return Results.Stream(
+                stream => WriteStreamErrorAsync(stream, code, status, message, ct),
                 "text/event-stream");
         }
     }

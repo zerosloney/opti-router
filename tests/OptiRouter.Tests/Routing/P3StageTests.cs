@@ -69,6 +69,38 @@ public class P3StageTests
     }
 
     [Fact]
+    public async Task OfflineEvalRunner_CancellationStopsRemainingCases()
+    {
+        var dataset = new List<EvalTestCase>
+        {
+            new("first", "q1", "a"),
+            new("second", "q2", "a")
+        };
+        var firstCallStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int calls = 0;
+        using var cts = new CancellationTokenSource();
+        Func<ChatRequest, CancellationToken, Task<RawChatResponse>> modelRunner = async (request, ct) =>
+        {
+            Interlocked.Increment(ref calls);
+            firstCallStarted.TrySetResult(true);
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            throw new InvalidOperationException("Cancellation test should not return a response.");
+        };
+
+        var run = OfflineEvalRunner.RunBatchEvalAsync(
+            "cancelled",
+            dataset,
+            modelRunner,
+            ct: cts.Token);
+
+        await firstCallStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run);
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
     public void OfflineEvalRunner_Compare_ReportsPairedDeltas()
     {
         var testCase = new EvalTestCase("same-id", "q", "a");

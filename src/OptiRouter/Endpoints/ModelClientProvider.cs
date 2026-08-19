@@ -8,8 +8,9 @@ namespace OptiRouter.Endpoints;
 /// 生产环境 <see cref="IModelClientProvider"/> 实现，按模型名缓存客户端实例，支持端点配置热更新。
 /// <para>
 /// 热更新：订阅 <see cref="IOptionsMonitor{TOptions}"/> 的 OnChange。配置 reload 后逐项比对 Models——
-/// 连接相关字段（BaseUrl/ApiKey/TimeoutSeconds）有变化、或模型被移出配置的，退役其缓存客户端并按新配置重建；
-/// 其余字段（Tier/价格/MaxContextTokens/Enabled 等）变化不触发重建，它们经路由引擎每请求读取CurrentValue直接生效。
+/// 客户端构造或请求相关字段（BaseUrl/ApiKey/TimeoutSeconds/UpstreamModelId/Protocol/MaxRetries）
+/// 有变化、或模型被移出配置的，退役其缓存客户端并按新配置重建；Name 改名由缓存移除/新增逻辑处理；
+/// 其余字段（Tier/价格/MaxContextTokens/Enabled/能力等）变化不触发重建，它们经路由引擎每请求读取 CurrentValue 直接生效。
 /// </para>
 /// <para>
 /// 退役的客户端不立即释放（避免打断在途请求）：保留至退役宽限期（默认 2 分钟，覆盖默认单请求超时）
@@ -149,14 +150,15 @@ public sealed class ModelClientProvider : IModelClientProvider, IDisposable
 
             var toRetire = new List<CachedClient>();
 
-            // 连接相关字段变化（或旧配置中不存在该模型）→ 退役旧客户端，下次 GetClient 按新配置重建。
+            // 客户端构造或请求相关字段变化（或旧配置中不存在该模型）→ 退役旧客户端，
+            // 下次 GetClient 按新配置重建。Name 改名由下方缓存移除/新增逻辑处理。
             foreach (var newModel in newModels)
             {
                 if (!_cache.TryGetValue(newModel.Name, out var cached)) continue;
 
                 var oldModel = oldModels.FirstOrDefault(
                     m => string.Equals(m.Name, newModel.Name, StringComparison.Ordinal));
-                if (oldModel is null || ConnectionConfigChanged(oldModel, newModel))
+                if (oldModel is null || ClientConfigChanged(oldModel, newModel))
                 {
                     _cache.Remove(newModel.Name);
                     toRetire.Add(cached);
@@ -186,10 +188,13 @@ public sealed class ModelClientProvider : IModelClientProvider, IDisposable
         }
     }
 
-    private static bool ConnectionConfigChanged(ModelEndpointOptions old, ModelEndpointOptions next) =>
+    private static bool ClientConfigChanged(ModelEndpointOptions old, ModelEndpointOptions next) =>
         !string.Equals(old.BaseUrl, next.BaseUrl, StringComparison.Ordinal)
         || !string.Equals(old.ApiKey, next.ApiKey, StringComparison.Ordinal)
-        || old.TimeoutSeconds != next.TimeoutSeconds;
+        || old.TimeoutSeconds != next.TimeoutSeconds
+        || !string.Equals(old.UpstreamModelId, next.UpstreamModelId, StringComparison.Ordinal)
+        || old.Protocol != next.Protocol
+        || old.MaxRetries != next.MaxRetries;
 
     private void SweepRetired_NoLock()
     {

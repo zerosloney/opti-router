@@ -62,13 +62,45 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
     }
 
     /// <inheritdoc />
+    public void RecordAtomic(DateTime utcDate, decimal dailyDelta, decimal totalDelta, string? sessionId, decimal? sessionDelta)
+    {
+        if (_db is null)
+        {
+            _fallback.RecordAtomic(utcDate, dailyDelta, totalDelta, sessionId, sessionDelta);
+            return;
+        }
+
+        // MULTI/EXEC 单事务写入日/总/会话账户，避免部分失败导致账户漂移。
+        var tx = _db.CreateTransaction();
+        _ = tx.StringIncrementAsync($"{_prefix}daily:{utcDate:yyyy-MM-dd}", ToMills(dailyDelta));
+        if (totalDelta != 0m)
+            _ = tx.StringIncrementAsync($"{_prefix}total", ToMills(totalDelta));
+        if (!string.IsNullOrEmpty(sessionId) && sessionDelta.HasValue)
+        {
+            string sessionKey = $"{_prefix}session:{sessionId}";
+            _ = tx.StringIncrementAsync(sessionKey, ToMills(sessionDelta.Value));
+            _ = tx.KeyExpireAsync(sessionKey, TimeSpan.FromDays(1));
+        }
+
+        if (!tx.Execute())
+        {
+            // 事务整体未执行（如连接级失败），按接口默认语义顺序写入。
+            AddDaily(utcDate, dailyDelta);
+            AddTotal(totalDelta);
+            if (!string.IsNullOrEmpty(sessionId) && sessionDelta.HasValue)
+                AddSession(sessionId, sessionDelta.Value);
+        }
+    }
+
+    /// <inheritdoc />
     public decimal AddDaily(DateTime utcDate, decimal delta)
     {
         if (_db is null) return _fallback.AddDaily(utcDate, delta);
 
         string key = $"{_prefix}daily:{utcDate:yyyy-MM-dd}";
-        double result = _db.StringIncrement(key, (double)delta);
-        return (decimal)result;
+        // 用整数毫分（1/1000 USD）避免 INCRBYFLOAT 的 double 精度漂移。
+        long result = _db.StringIncrement(key, ToMills(delta));
+        return (decimal)result / 1000m;
     }
 
     /// <inheritdoc />
@@ -77,8 +109,8 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
         if (_db is null) return _fallback.AddTotal(delta);
 
         string key = $"{_prefix}total";
-        double result = _db.StringIncrement(key, (double)delta);
-        return (decimal)result;
+        long result = _db.StringIncrement(key, ToMills(delta));
+        return (decimal)result / 1000m;
     }
 
     /// <inheritdoc />
@@ -88,7 +120,7 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
 
         string key = $"{_prefix}total";
         var val = _db.StringGet(key);
-        return val.HasValue && double.TryParse(val.ToString(), out double d) ? (decimal)d : 0m;
+        return val.HasValue && long.TryParse(val.ToString(), out long mills) ? (decimal)mills / 1000m : 0m;
     }
 
     /// <inheritdoc />
@@ -104,9 +136,9 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
         if (_db is null || string.IsNullOrWhiteSpace(sessionId)) return _fallback.AddSession(sessionId, delta);
 
         string key = $"{_prefix}session:{sessionId}";
-        double result = _db.StringIncrement(key, (double)delta);
+        long result = _db.StringIncrement(key, ToMills(delta));
         _db.KeyExpire(key, TimeSpan.FromDays(1));
-        return (decimal)result;
+        return (decimal)result / 1000m;
     }
 
     /// <inheritdoc />
@@ -116,7 +148,7 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
 
         string key = $"{_prefix}daily:{utcDate:yyyy-MM-dd}";
         var val = _db.StringGet(key);
-        return val.HasValue && double.TryParse(val.ToString(), out double d) ? (decimal)d : 0m;
+        return val.HasValue && long.TryParse(val.ToString(), out long mills) ? (decimal)mills / 1000m : 0m;
     }
 
     /// <inheritdoc />
@@ -148,15 +180,18 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
 
         string key = $"{_prefix}session:{sessionId}";
         var val = _db.StringGet(key);
-        return val.HasValue && double.TryParse(val.ToString(), out double d) ? (decimal)d : 0m;
+        return val.HasValue && long.TryParse(val.ToString(), out long mills) ? (decimal)mills / 1000m : 0m;
     }
 
     /// <inheritdoc />
     public void ResetDaily()
     {
         if (_db is null) { _fallback.ResetDaily(); return; }
-        string key = $"{_prefix}daily:{DateTime.UtcNow.Date:yyyy-MM-dd}";
-        _db.KeyDelete(key);
+
+        // Redis stores each UTC date under its own key. The key is also the
+        // historical record, so deleting today's key on one node would erase
+        // spend already recorded by other nodes. A connected Redis store needs
+        // no reset; date-key rotation is handled by AddDaily/GetDaily.
     }
 
     /// <inheritdoc />
@@ -242,4 +277,7 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
         _redis?.Dispose();
         _fallback.Dispose();
     }
+
+    /// <summary>将 decimal（美元）转为 long（毫分），四舍五入避免截断损失。</summary>
+    private static long ToMills(decimal usd) => (long)Math.Round(usd * 1000m, MidpointRounding.ToEven);
 }

@@ -150,7 +150,9 @@ public class FailoverGlobalTimeoutTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
         var body = await response.Content.ReadAsStringAsync(cts.Token);
         using var doc = JsonDocument.Parse(body);
-        Assert.Equal("All model candidates failed", doc.RootElement.GetProperty("title").GetString());
+        var error = doc.RootElement.GetProperty("error");
+        Assert.Equal("ALL_CANDIDATES_FAILED", error.GetProperty("code").GetString());
+        Assert.Equal("all_candidates_failed", error.GetProperty("type").GetString());
     }
 
     [Fact]

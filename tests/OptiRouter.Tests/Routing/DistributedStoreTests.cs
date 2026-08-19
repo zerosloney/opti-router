@@ -1,3 +1,6 @@
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using StackExchange.Redis;
 using OptiRouter.Configuration;
 using OptiRouter.Routing;
 using Xunit;
@@ -42,6 +45,75 @@ public class DistributedStoreTests
     }
 
     [Fact]
+    public void PostgresCostLedgerStore_ResetDaily_WhenConnected_DoesNotClearDatePartition()
+    {
+        var fallback = new InMemoryCostLedgerStore();
+        var today = DateTime.UtcNow;
+        fallback.AddDaily(today, 2.5m);
+
+        var store = Uninitialized<PostgresCostLedgerStore>();
+        SetField(store, "_connectionString", "configured");
+        SetField(store, "_fallback", fallback);
+        SetField(store, "_degraded", 0);
+
+        using (store)
+        {
+            store.ResetDaily();
+            Assert.Equal(2.5m, fallback.GetDaily(today));
+        }
+    }
+
+    [Fact]
+    public void PostgresCostLedgerStore_ResetDaily_WhenDegraded_ClearsFallback()
+    {
+        var fallback = new InMemoryCostLedgerStore();
+        var today = DateTime.UtcNow;
+        fallback.AddDaily(today, 2.5m);
+
+        var store = Uninitialized<PostgresCostLedgerStore>();
+        SetField(store, "_connectionString", "configured");
+        SetField(store, "_fallback", fallback);
+        SetField(store, "_degraded", 1);
+
+        using (store)
+        {
+            store.ResetDaily();
+            Assert.Equal(0m, fallback.GetDaily(today));
+        }
+    }
+
+    [Fact]
+    public void RedisCostLedgerStore_ResetDaily_WhenConnected_DoesNotDeleteDateKey()
+    {
+        var fallback = new InMemoryCostLedgerStore();
+        var today = DateTime.UtcNow;
+        fallback.AddDaily(today, 3.5m);
+
+        var store = Uninitialized<RedisCostLedgerStore>();
+        SetField(store, "_db", DispatchProxy.Create<IDatabase, ThrowOnInvocationProxy>());
+        SetField(store, "_fallback", fallback);
+
+        using (store)
+        {
+            store.ResetDaily();
+            Assert.Equal(3.5m, fallback.GetDaily(today));
+        }
+    }
+
+    [Fact]
+    public void RedisCostLedgerStore_ResetDaily_WhenDisconnected_ClearsFallback()
+    {
+        var fallback = new InMemoryCostLedgerStore();
+        var today = DateTime.UtcNow;
+        fallback.AddDaily(today, 3.5m);
+
+        using var store = new RedisCostLedgerStore(connectionString: null, fallback: fallback);
+        store.ResetDaily();
+
+        Assert.Equal(0m, fallback.GetDaily(today));
+    }
+
+    [Fact]
     public void PostgresRequestAuditStore_WhenNoConnection_FallsBackToInMemory()
     {
         using var store = new PostgresRequestAuditStore(connectionString: null);
@@ -78,5 +150,21 @@ public class DistributedStoreTests
         Assert.Equal("http://localhost:4317", options.OtlpEndpoint);
         Assert.Equal("grpc", options.OtlpProtocol);
         Assert.Equal("OptiRouter", options.OtlpServiceName);
+    }
+
+    private static T Uninitialized<T>() where T : class
+        => (T)RuntimeHelpers.GetUninitializedObject(typeof(T));
+
+    private static void SetField<T>(T instance, string name, object? value)
+    {
+        FieldInfo field = typeof(T).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+            ?? throw new MissingFieldException(typeof(T).FullName, name);
+        field.SetValue(instance, value);
+    }
+
+    private class ThrowOnInvocationProxy : DispatchProxy
+    {
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+            => throw new InvalidOperationException("Connected Redis ResetDaily must not invoke Redis commands");
     }
 }

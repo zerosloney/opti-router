@@ -37,6 +37,102 @@ public class RouterOptionsValidatorTests
         Assert.True(result.Succeeded);
     }
 
+    [Theory]
+    [InlineData("SQLITE")]
+    [InlineData("pOsTgReS")]
+    [InlineData("rEdIs")]
+    [InlineData("iNmEmOrY")]
+    public void SupportedStoreProvider_ShouldReturnSuccess(string provider)
+    {
+        var options = CreateValidOptions();
+        options.Budget.StoreProvider = provider;
+        options.Budget.StorePath = string.Equals(provider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+            ? "data/test-budget.db"
+            : "";
+        options.Budget.PostgresConnectionString = "Host=localhost;Database=optirouter";
+        options.Budget.RedisConnectionString = "localhost:6379";
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public void UnsupportedStoreProvider_ShouldReturnFailure()
+    {
+        var options = CreateValidOptions();
+        options.Budget.StoreProvider = "MongoDb";
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("StoreProvider", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void PostgresWithoutConnectionString_ShouldReturnFailure(string? connectionString)
+    {
+        var options = CreateValidOptions();
+        options.Budget.StoreProvider = "Postgres";
+        options.Budget.StorePath = "";
+        options.Budget.PostgresConnectionString = connectionString;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("PostgresConnectionString", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void RedisWithoutConnectionString_ShouldReturnFailure(string? connectionString)
+    {
+        var options = CreateValidOptions();
+        options.Budget.StoreProvider = "Redis";
+        options.Budget.StorePath = "";
+        options.Budget.RedisConnectionString = connectionString;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("RedisConnectionString", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void PersistentSqliteWithoutStorePath_ShouldReturnFailure(string? storePath)
+    {
+        var options = CreateValidOptions();
+        options.Budget.StoreProvider = "Sqlite";
+        options.Budget.UsePersistentStore = true;
+        options.Budget.StorePath = storePath!;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("StorePath", result.FailureMessage);
+    }
+
+    [Fact]
+    public void NonPersistentSqliteWithoutStorePath_ShouldReturnSuccess()
+    {
+        var options = CreateValidOptions();
+        options.Budget.StoreProvider = "Sqlite";
+        options.Budget.UsePersistentStore = false;
+        options.Budget.StorePath = "";
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
     [Fact]
     public void EmptyModels_ShouldReturnFailure()
     {

@@ -155,18 +155,6 @@ public sealed class McpToolOrchestrator
             var toolCalls = ExtractToolCalls(currentResponse.Body);
             if (toolCalls.Count == 0) break;
 
-            // 该响应即将被本轮重放结果取代：真实花费立即入账（含入口首轮）。
-            // 多轮工具调用的中间请求此前全部漏计，导致含工具请求的日/会话预算系统性低估；
-            // 最终返回的响应由调用方（ProxyOrchestrator）计费，此处不重复入账。
-            if (_recorder is not null && currentResponse.Usage is not null)
-            {
-                decimal supersededCost = OptiRouter.Endpoints.CostCalculator.Compute(currentResponse.Usage, candidate);
-                if (supersededCost > 0m)
-                {
-                    _recorder.RecordCost(supersededCost, sessionId);
-                }
-            }
-
             // 无进展检测：模型重复请求完全相同的 tool_calls（名称+参数签名）说明工具结果没能推动它前进，
             // 继续重放只会烧满剩余轮次的 token 与延迟——检测到重复签名即终止循环返回当前响应。
             string roundSignature = string.Join("|", toolCalls.Select(c => $"{c.Name}:{c.Arguments.GetRawText()}"));
@@ -214,7 +202,20 @@ public sealed class McpToolOrchestrator
             var replayRequest = currentRequest with { Messages = messages };
             _logger.LogInformation("MCP tool round {Round}: executed {Count} tool(s), replaying to {Model}",
                 round + 1, toolCalls.Count, candidate.Name);
-            currentResponse = await client.CompleteRawAsync(replayRequest, ct).ConfigureAwait(false);
+            var replayedResponse = await client.CompleteRawAsync(replayRequest, ct).ConfigureAwait(false);
+
+            // 只有重放成功并返回新响应后，当前响应才确定被取代；解析失败、重复签名、
+            // 工具执行失败或其它终止路径均不在这里计费。最终响应由外层调用方计费。
+            if (_recorder is not null && currentResponse.Usage is not null)
+            {
+                decimal supersededCost = OptiRouter.Endpoints.CostCalculator.Compute(currentResponse.Usage, candidate);
+                if (supersededCost > 0m)
+                {
+                    _recorder.RecordCost(supersededCost, sessionId);
+                }
+            }
+
+            currentResponse = replayedResponse;
             currentRequest = replayRequest;
         }
 

@@ -2,37 +2,79 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Http;
 using OptiRouter.Configuration;
 
 namespace OptiRouter.Components.Services;
 
 /// <summary>
-/// Dashboard API 客户端（Blazor Server 用 ?key= 查询参数鉴权，与现有 JS 版一致）。
+/// Dashboard API 客户端（Blazor Server 管理端认证通过登录会话 Cookie）。
 /// </summary>
 public class ApiService
 {
     private readonly HttpClient _http;
+    private readonly NavigationManager _nav;
     private readonly Microsoft.Extensions.Logging.ILogger? _logger;
+    private readonly IHttpContextAccessor? _httpContextAccessor;
+    // ApiService 是 Scoped（每 circuit 一份实例），Cookie 缓存在实例上即按管理员会话隔离。
+    // 管理会话 Cookie 在预渲染/circuit 建立阶段可从 HttpContext 读到；交互阶段 HttpContext 为 null，
+    // 回退用构造时捕获的值。
+    private readonly string? _capturedCookie;
+    private bool _redirected;
 
-    public ApiService(HttpClient http, NavigationManager nav, IHttpContextAccessor? httpContextAccessor,
+    public ApiService(HttpClient http, NavigationManager nav,
+        IHttpContextAccessor? httpContextAccessor = null,
         Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         _http = http;
+        _nav = nav;
         _logger = logger;
+        _httpContextAccessor = httpContextAccessor;
         // Set base address so relative paths work inside the Blazor circuit.
         if (_http.BaseAddress == null)
             _http.BaseAddress = new Uri(nav.BaseUri);
 
-        // 管理端鉴权走登录会话 Cookie。Blazor Server 的 HttpClient 在服务端 circuit 内执行，
-        // 不会自动携带浏览器 cookie——从 circuit 初始请求的 HttpContext 读取并附加到请求头。
-        var cookieHeader = httpContextAccessor?.HttpContext?.Request.Headers.Cookie.ToString();
-        if (!string.IsNullOrEmpty(cookieHeader))
-        {
-            _http.DefaultRequestHeaders.Add("Cookie", cookieHeader);
-        }
+        _capturedCookie = httpContextAccessor?.HttpContext?.Request.Headers.Cookie.ToString();
     }
 
     private static string Url(string path) => path;
+
+    /// <summary>
+    /// 统一请求出口：注入当前 circuit 的管理会话 Cookie；401（会话过期/Cookie 丢失）时每 circuit
+    /// 最多跳转登录页一次。不能用 DelegatingHandler 实现——HttpClientFactory 的 handler 管道
+    /// 跨 circuit 缓存共享，其实例字段会造成多管理员会话间 Cookie/跳转状态串扰。
+    /// </summary>
+    private async Task<HttpResponseMessage> SendAsync(
+        HttpMethod method, string url, object? jsonBody = null, CancellationToken cancellationToken = default)
+    {
+        using var request = new HttpRequestMessage(method, url);
+
+        string? cookie = _httpContextAccessor?.HttpContext?.Request.Headers.Cookie.ToString();
+        if (string.IsNullOrEmpty(cookie))
+            cookie = _capturedCookie; // circuit 交互阶段 HttpContext 不可用，回退捕获值。
+        if (!string.IsNullOrEmpty(cookie))
+            request.Headers.TryAddWithoutValidation("Cookie", cookie);
+
+        if (jsonBody is not null)
+            request.Content = JsonContent.Create(jsonBody);
+
+        var response = await _http.SendAsync(request, cancellationToken);
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized && !_redirected)
+        {
+            // 会话过期后并发请求可能同时拿到 401，每 circuit 只整页跳转一次。
+            _redirected = true;
+            _nav.NavigateTo("/login", forceLoad: true);
+        }
+        return response;
+    }
+
+    private async Task<T?> GetFromJsonAsync<T>(string url, CancellationToken cancellationToken = default)
+        where T : class
+    {
+        using var resp = await SendAsync(HttpMethod.Get, url, cancellationToken: cancellationToken);
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadFromJsonAsync<T>(cancellationToken);
+    }
 
     /// <summary>
     /// 从非 2xx 响应提取后端可读错误（Dashboard/Models API 的 {"error":"..."} 信封）；
@@ -61,20 +103,20 @@ public class ApiService
     // ── Dashboard ──────────────────────────────────────────────────
 
     public Task<DashboardMetrics?> GetMetricsAsync()
-        => _http.GetFromJsonAsync<DashboardMetrics>(Url("/api/dashboard/metrics"));
+        => GetFromJsonAsync<DashboardMetrics>(Url("/api/dashboard/metrics"));
 
     public Task<WindowSummary?> GetWindowSummaryAsync(string window)
-        => _http.GetFromJsonAsync<WindowSummary>(Url($"/api/dashboard/metrics/summary?window={Uri.EscapeDataString(window)}"));
+        => GetFromJsonAsync<WindowSummary>(Url($"/api/dashboard/metrics/summary?window={Uri.EscapeDataString(window)}"));
 
     public async Task<List<DailySpend>> GetTrendsAsync(int days = 7)
     {
-        var result = await _http.GetFromJsonAsync<List<DailySpend>>(Url($"/api/dashboard/trends?days={days}"));
+        var result = await GetFromJsonAsync<List<DailySpend>>(Url($"/api/dashboard/trends?days={days}"));
         return result ?? new List<DailySpend>();
     }
 
     public async Task<List<LearningStateDto>> GetLearningAsync()
     {
-        var result = await _http.GetFromJsonAsync<List<LearningStateDto>>(Url("/api/dashboard/learning"));
+        var result = await GetFromJsonAsync<List<LearningStateDto>>(Url("/api/dashboard/learning"));
         return result ?? new List<LearningStateDto>();
     }
 
@@ -90,7 +132,7 @@ public class ApiService
         if (minLatency.HasValue && minLatency.Value > 0)
             url += $"&minLatency={minLatency.Value}";
 
-        var result = await _http.GetFromJsonAsync<AuditPage>(Url(url));
+        var result = await GetFromJsonAsync<AuditPage>(Url(url));
         return result ?? new AuditPage(new List<AuditItem>(), 0);
     }
 
@@ -98,7 +140,7 @@ public class ApiService
     {
         try
         {
-            return await _http.GetFromJsonAsync<AuditItem>(Url($"/api/dashboard/requests/detail?id={Uri.EscapeDataString(id)}"));
+            return await GetFromJsonAsync<AuditItem>(Url($"/api/dashboard/requests/detail?id={Uri.EscapeDataString(id)}"));
         }
         catch (Exception ex)
         {
@@ -113,7 +155,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/sandbox/route"), new { prompt });
+            using var resp = await SendAsync(HttpMethod.Post,Url("/api/dashboard/sandbox/route"), new { prompt });
             if (resp.IsSuccessStatusCode)
                 return (await resp.Content.ReadFromJsonAsync<SandboxResult>(), null);
             return (null, await ReadErrorAsync(resp));
@@ -125,15 +167,24 @@ public class ApiService
     }
 
     /// <summary>运行回归评测（可传自定义题库；空则后端回落内置题库）。返回 (报告, 失败原因)。</summary>
-    public async Task<(EvalReportDto? Report, string? Error)> RunEvalBenchmarkAsync(List<EvalCaseDto>? cases)
+    public async Task<(EvalReportDto? Report, string? Error)> RunEvalBenchmarkAsync(
+        List<EvalCaseDto>? cases,
+        CancellationToken cancellationToken = default)
     {
         try
         {
-            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/eval/run"), new EvalRunRequestDto(cases));
+            using var resp = await SendAsync(HttpMethod.Post,
+                Url("/api/dashboard/eval/run"),
+                new EvalRunRequestDto(cases),
+                cancellationToken);
             if (resp.IsSuccessStatusCode)
-                return (await resp.Content.ReadFromJsonAsync<EvalReportDto>(), null);
-            string body = await resp.Content.ReadAsStringAsync();
+                return (await resp.Content.ReadFromJsonAsync<EvalReportDto>(cancellationToken), null);
+            string body = await resp.Content.ReadAsStringAsync(cancellationToken);
             return (null, body);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -145,7 +196,7 @@ public class ApiService
     {
         try
         {
-            var result = await _http.GetFromJsonAsync<List<EvalReportDto>>(Url("/api/dashboard/eval/batches"));
+            var result = await GetFromJsonAsync<List<EvalReportDto>>(Url("/api/dashboard/eval/batches"));
             return result ?? new List<EvalReportDto>();
         }
         catch (Exception ex)
@@ -160,7 +211,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/eval/compare"), new { baselineBatchId, candidateBatchId });
+            using var resp = await SendAsync(HttpMethod.Post,Url("/api/dashboard/eval/compare"), new { baselineBatchId, candidateBatchId });
             if (resp.IsSuccessStatusCode)
                 return (await resp.Content.ReadFromJsonAsync<PairedEvalDto>(), null);
             string body = await resp.Content.ReadAsStringAsync();
@@ -176,7 +227,7 @@ public class ApiService
     {
         try
         {
-            var page = await _http.GetFromJsonAsync<QuotaPageDto>(Url("/api/dashboard/state/quota"));
+            var page = await GetFromJsonAsync<QuotaPageDto>(Url("/api/dashboard/state/quota"));
             return page?.Items ?? new List<QuotaStateDto>();
         }
         catch (Exception ex)
@@ -190,7 +241,7 @@ public class ApiService
     {
         try
         {
-            return await _http.GetFromJsonAsync<AffinityPageDto>(Url("/api/dashboard/state/cache-affinity"))
+            return await GetFromJsonAsync<AffinityPageDto>(Url("/api/dashboard/state/cache-affinity"))
                    ?? new AffinityPageDto(0, new List<AffinityStateDto>());
         }
         catch (Exception ex)
@@ -204,7 +255,7 @@ public class ApiService
     {
         try
         {
-            return await _http.GetFromJsonAsync<ResponseCacheStatsDto>(Url("/api/dashboard/state/response-cache"));
+            return await GetFromJsonAsync<ResponseCacheStatsDto>(Url("/api/dashboard/state/response-cache"));
         }
         catch (Exception ex)
         {
@@ -217,7 +268,7 @@ public class ApiService
     {
         try
         {
-            return await _http.GetFromJsonAsync<SemanticRoutesDto>(Url("/api/dashboard/semantic-routes"));
+            return await GetFromJsonAsync<SemanticRoutesDto>(Url("/api/dashboard/semantic-routes"));
         }
         catch (Exception ex)
         {
@@ -226,40 +277,50 @@ public class ApiService
         }
     }
 
-    /// <summary>整表替换语义路由规则（空列表 = 清空）。返回 (是否成功, 失败原因)。</summary>
-    public async Task<(bool Ok, string? Error)> UpdateSemanticRoutesAsync(List<SemanticRouteUpsertDto>? routes)
+    /// <summary>
+    /// 整表替换语义路由规则（空列表 = 清空）。
+    /// 返回 (是否成功, 失败原因, 是否版本冲突, 保存后的新版本号)。
+    /// </summary>
+    public async Task<(bool Ok, string? Error, bool Conflict, string? Version)> UpdateSemanticRoutesAsync(
+        List<SemanticRouteUpsertDto>? routes, string? expectedVersion)
     {
         try
         {
-            using var resp = await _http.PutAsJsonAsync(Url("/api/dashboard/semantic-routes"), new UpdateSemanticRoutesRequestDto(routes));
+            using var resp = await SendAsync(HttpMethod.Put, Url("/api/dashboard/semantic-routes"),
+                new UpdateSemanticRoutesRequestDto(routes, expectedVersion));
             if (resp.IsSuccessStatusCode)
-                return (true, null);
-            string body = await resp.Content.ReadAsStringAsync();
-            return (false, body);
+            {
+                var result = await resp.Content.ReadFromJsonAsync<SemanticRoutesSaveResponse>();
+                return (true, null, false, result?.Version);
+            }
+            return (false, await ReadErrorAsync(resp), resp.StatusCode == System.Net.HttpStatusCode.Conflict, null);
         }
         catch (Exception ex)
         {
-            return (false, ex.Message);
+            return (false, ex.Message, false, null);
         }
     }
 
     public Task<SystemConfigDto?> GetSystemConfigAsync()
-        => _http.GetFromJsonAsync<SystemConfigDto>(Url("/api/dashboard/config"));
+        => GetFromJsonAsync<SystemConfigDto>(Url("/api/dashboard/config"));
 
     /// <summary>三档路由预设（预设名 → 配置项 → 值），供配置页一键填充。</summary>
     public async Task<Dictionary<string, Dictionary<string, JsonElement>>?> GetPresetsAsync()
     {
-        return await _http.GetFromJsonAsync<Dictionary<string, Dictionary<string, JsonElement>>>(Url("/api/dashboard/config/presets"));
+        return await GetFromJsonAsync<Dictionary<string, Dictionary<string, JsonElement>>>(Url("/api/dashboard/config/presets"));
     }
 
     /// <summary>返回 (是否成功, 失败原因)。400 校验错误时 Error 含 RouterOptionsValidator 的具体消息。</summary>
-    public async Task<(bool Ok, string? Error)> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
+    public async Task<(bool Ok, string? Error, string? Version)> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
     {
-        using var resp = await _http.PutAsJsonAsync(Url("/api/dashboard/config"), req);
+        using var resp = await SendAsync(HttpMethod.Put,Url("/api/dashboard/config"), req);
         if (resp.IsSuccessStatusCode)
-            return (true, null);
+        {
+            var result = await resp.Content.ReadFromJsonAsync<UpdateSystemConfigResponse>();
+            return (true, null, result?.Version);
+        }
         string body = await resp.Content.ReadAsStringAsync();
-        return (false, body);
+        return (false, body, null);
     }
 
     /// <summary>手动覆盖模型断路器状态。返回 (是否成功, 失败原因)。</summary>
@@ -267,7 +328,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.PostAsJsonAsync(Url($"/api/dashboard/circuits/{Uri.EscapeDataString(modelName)}/override"), new { targetState });
+            using var resp = await SendAsync(HttpMethod.Post,Url($"/api/dashboard/circuits/{Uri.EscapeDataString(modelName)}/override"), new { targetState });
             if (resp.IsSuccessStatusCode)
                 return (true, null);
             return (false, await ReadErrorAsync(resp));
@@ -280,7 +341,7 @@ public class ApiService
 
     public async Task<List<ClientKeyDto>> GetClientKeysAsync()
     {
-        var result = await _http.GetFromJsonAsync<List<ClientKeyDto>>(Url("/api/dashboard/keys"));
+        var result = await GetFromJsonAsync<List<ClientKeyDto>>(Url("/api/dashboard/keys"));
         return result ?? new List<ClientKeyDto>();
     }
 
@@ -289,7 +350,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.PostAsJsonAsync(Url("/api/dashboard/keys"), new { tenantName, dailyBudgetUsd, maxQps });
+            using var resp = await SendAsync(HttpMethod.Post,Url("/api/dashboard/keys"), new { tenantName, dailyBudgetUsd, maxQps });
             if (resp.IsSuccessStatusCode)
                 return (await resp.Content.ReadFromJsonAsync<CreatedClientKeyDto>(), null);
             return (null, await ReadErrorAsync(resp));
@@ -304,7 +365,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.PutAsJsonAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"), new { enabled, dailyBudgetUsd, maxQps });
+            using var resp = await SendAsync(HttpMethod.Put,Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"), new { enabled, dailyBudgetUsd, maxQps });
             if (resp.IsSuccessStatusCode)
                 return (true, null);
             return (false, await ReadErrorAsync(resp));
@@ -319,7 +380,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.DeleteAsync(Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"));
+            using var resp = await SendAsync(HttpMethod.Delete,Url($"/api/dashboard/keys/{Uri.EscapeDataString(key)}"));
             if (resp.IsSuccessStatusCode)
                 return (true, null);
             return (false, await ReadErrorAsync(resp));
@@ -334,7 +395,7 @@ public class ApiService
 
     public async Task<List<ModelDto>> GetModelsAsync()
     {
-        var result = await _http.GetFromJsonAsync<List<ModelDto>>(Url("/api/models"));
+        var result = await GetFromJsonAsync<List<ModelDto>>(Url("/api/models"));
         return result ?? new List<ModelDto>();
     }
 
@@ -342,7 +403,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.PostAsJsonAsync(Url("/api/models"), req);
+            using var resp = await SendAsync(HttpMethod.Post,Url("/api/models"), req);
             if (resp.IsSuccessStatusCode)
                 return (true, null);
             return (false, await ReadErrorAsync(resp));
@@ -357,7 +418,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.PutAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"), req);
+            using var resp = await SendAsync(HttpMethod.Put,Url($"/api/models?name={Uri.EscapeDataString(name)}"), req);
             if (resp.IsSuccessStatusCode)
                 return (true, null);
             return (false, await ReadErrorAsync(resp));
@@ -372,7 +433,7 @@ public class ApiService
     {
         try
         {
-            using var resp = await _http.DeleteAsync(Url($"/api/models/{Uri.EscapeDataString(name)}"));
+            using var resp = await SendAsync(HttpMethod.Delete,Url($"/api/models?name={Uri.EscapeDataString(name)}"));
             if (resp.IsSuccessStatusCode)
                 return (true, null);
             return (false, await ReadErrorAsync(resp));
@@ -385,7 +446,7 @@ public class ApiService
 
     public async Task<ModelTestResultDto?> TestModelConnectionAsync(string name)
     {
-        using var resp = await _http.PostAsJsonAsync(Url($"/api/models/{Uri.EscapeDataString(name)}/test"), new { });
+        using var resp = await SendAsync(HttpMethod.Post,Url($"/api/models/test?name={Uri.EscapeDataString(name)}"), new { });
         if (resp.IsSuccessStatusCode)
             return await resp.Content.ReadFromJsonAsync<ModelTestResultDto>();
         return new ModelTestResultDto(false, 0, "HTTP Request Failed", null);
@@ -723,18 +784,24 @@ public class ApiService
         int MaxEntries,
         double HitRatePercent);
 
-    /// <summary>语义路由规则集：Enabled/阈值为当前配置只读快照，修改走配置台。</summary>
-    public record SemanticRoutesDto(bool Enabled, double SimilarityThreshold, List<SemanticRouteDto> Routes = null!);
+    /// <summary>语义路由规则集：Version 为配置文档当前版本（保存时回传做乐观并发）。Enabled/阈值为当前配置只读快照。</summary>
+    public record SemanticRoutesDto(bool Enabled, double SimilarityThreshold, List<SemanticRouteDto> Routes = null!,
+        string? Version = null);
 
     public record SemanticRouteDto(string Name, List<string> Phrases, string TargetTier);
 
-    public record UpdateSemanticRoutesRequestDto(List<SemanticRouteUpsertDto>? Routes);
+    public record UpdateSemanticRoutesRequestDto(List<SemanticRouteUpsertDto>? Routes, string? ExpectedVersion = null);
+
+    private sealed record SemanticRoutesSaveResponse(string? Version);
 
     public record SemanticRouteUpsertDto(string? Name, List<string>? Phrases, string? TargetTier);
 
     public record SystemConfigDto(
+        string Version,
         RoutingConfigDto Routing,
         BudgetConfigDto Budget);
+
+    private sealed record UpdateSystemConfigResponse(string Version);
 
     /// <summary>
     /// 配置读取 DTO。属性式（与后端 GET 字段一一对应；新增字段给默认值保持向后兼容）。
@@ -788,7 +855,7 @@ public class ApiService
         public bool EnableJsonAstAutoRepair { get; init; } = true;
         // ⑥ 观测
         public bool EnableDistributedTracing { get; init; }
-        public bool AuditStoreRequestContent { get; init; } = true;
+        public bool AuditStoreRequestContent { get; init; } = false;
     }
 
     public record BudgetConfigDto(
@@ -798,6 +865,8 @@ public class ApiService
     /// <summary>配置更新请求。null = 不修改；属性式与后端 DTO 对齐。</summary>
     public sealed record UpdateSystemConfigRequest
     {
+        public string? ExpectedVersion { get; init; }
+
         // ① 基础路由
         public bool? EnableRuleClassifier { get; init; }
         public bool? EnableSemanticRouter { get; init; }

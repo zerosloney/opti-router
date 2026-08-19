@@ -37,6 +37,11 @@ public class FusionRouterTests
         public string? CascadeUpgradeSelfVerifyPrompt { get; set; }
         public bool EnableByzantineConsensus { get; set; }
         public double ByzantineOutlierThreshold { get; set; } = 0.65;
+        public bool EnablePiiAnonymization { get; set; }
+        public bool EnableStreamingComplianceFilter { get; set; }
+        public string[] StreamingSensitiveKeywords { get; set; } = [];
+        public OptiRouter.Compliance.ComplianceAction StreamingComplianceAction { get; set; } = OptiRouter.Compliance.ComplianceAction.Block;
+        public long MaxResponseStreamBytes { get; set; } = 20 * 1024 * 1024;
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -99,6 +104,11 @@ public class FusionRouterTests
                     opt.Routing.FusionRouterPanelTemperature = FusionRouterPanelTemperature;
                     opt.Routing.FusionRouterMinComplexity = FusionRouterMinComplexity;
                     opt.Routing.FusionRouterAnalystPrompt = FusionRouterAnalystPrompt;
+                    opt.Routing.EnablePiiAnonymization = EnablePiiAnonymization;
+                    opt.Routing.EnableStreamingComplianceFilter = EnableStreamingComplianceFilter;
+                    opt.Routing.StreamingSensitiveKeywords = StreamingSensitiveKeywords.ToList();
+                    opt.Routing.StreamingComplianceAction = StreamingComplianceAction;
+                    opt.Routing.MaxResponseStreamBytes = MaxResponseStreamBytes;
                     if (CascadeUpgradeSelfVerifyPrompt is not null)
                         opt.Routing.CascadeUpgradeSelfVerifyPrompt = CascadeUpgradeSelfVerifyPrompt;
                     opt.Routing.EnableByzantineConsensus = EnableByzantineConsensus;
@@ -137,6 +147,18 @@ public class FusionRouterTests
             new ChatUsage { PromptTokens = prompt, CompletionTokens = completion, TotalTokens = prompt + completion });
     }
 
+    private static RawChatResponse MakeResponseWithoutUsage(string model, string content = "ok")
+    {
+        return new RawChatResponse(
+            JsonSerializer.Serialize(new
+            {
+                id = "x",
+                model,
+                choices = new[] { new { index = 0, message = new { role = "assistant", content }, finish_reason = "stop" } }
+            }),
+            null);
+    }
+
     /// <summary>
     /// 构造 analyst 响应（Body 内嵌结构化 JSON）。
     /// </summary>
@@ -151,6 +173,18 @@ public class FusionRouterTests
                 usage = new { prompt_tokens = prompt, completion_tokens = completion, total_tokens = prompt + completion }
             }),
             new ChatUsage { PromptTokens = prompt, CompletionTokens = completion, TotalTokens = prompt + completion });
+    }
+
+    private static RawChatResponse MakeAnalystResponseWithoutUsage(string model, string analysisJson)
+    {
+        return new RawChatResponse(
+            JsonSerializer.Serialize(new
+            {
+                id = "x",
+                model,
+                choices = new[] { new { index = 0, message = new { role = "assistant", content = analysisJson }, finish_reason = "stop" } }
+            }),
+            null);
     }
 
     /// <summary>
@@ -702,6 +736,158 @@ public class FusionRouterTests
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.False(outerCalled, "流式不应触发融合路由");
+    }
+
+    [Fact]
+    public async Task FusionRouter_Streaming_RestoresPiiBeforeYield()
+    {
+        const string email = "alice@example.com";
+        using var factory = new FusionRouterFactory { EnablePiiAnonymization = true };
+        int secondaryCalls = 0;
+
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeAnalystResponse("model-a", 1, 1, AnalystJson)),
+            streamRawFunc: (req, ct) => StreamLinesAsync(new[]
+            {
+                "{\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"[PII_EMAIL_1]\"}}]}",
+                "[DONE]"
+            }));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) =>
+            {
+                Interlocked.Increment(ref secondaryCalls);
+                return Task.FromResult(MakeResponse("model-b", 1, 1, "secondary"));
+            });
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) =>
+            {
+                Interlocked.Increment(ref secondaryCalls);
+                return Task.FromResult(MakeResponse("model-c", 1, 1, "secondary"));
+            });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        var request = new ChatRequest
+        {
+            Model = "auto",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", $"send {email}") },
+            Stream = true
+        };
+
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(request), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(secondaryCalls >= 1, "Expected the streaming Fusion path to run secondary panels.");
+        Assert.Contains(email, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("[PII_EMAIL_1]", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FusionRouter_Streaming_NoUsage_EstimatesSecondaryAnchorAnalystCosts()
+    {
+        using var factory = new FusionRouterFactory();
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeAnalystResponseWithoutUsage("model-a", AnalystJson)),
+            streamRawFunc: (req, ct) => StreamLinesAsync(new[]
+            {
+                "{\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"anchor\"}}]}",
+                "[DONE]"
+            }));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponseWithoutUsage("model-b", "secondary-b")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponseWithoutUsage("model-c", "secondary-c")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await Task.Delay(300);
+
+        var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+        var records = auditStore.GetRecent(20)
+            .Where(r => r.RoutingReason == "fusion-stream-anchor"
+                || r.RoutingReason.Contains("fusion-stream: secondary", StringComparison.Ordinal)
+                || r.RoutingReason.Contains("fusion-stream: analyst", StringComparison.Ordinal))
+            .ToList();
+        Assert.Equal(4, records.Count);
+
+        int estimatedTokens = TokenEstimator.Estimate(BuildRequest(stream: true));
+        decimal expectedCost = estimatedTokens / 1_000_000m;
+        Assert.All(records, record =>
+        {
+            Assert.True(record.IsEstimated);
+            Assert.Equal(estimatedTokens, record.EstimatedInputTokens);
+            Assert.Equal(expectedCost, record.Cost);
+        });
+
+        var (_, total) = factory.Services.GetRequiredService<CostLedger>().GetSpend();
+        Assert.Equal(4 * expectedCost, total);
+    }
+
+    [Fact]
+    public async Task FusionRouter_Streaming_ComplianceBlockStopsFusionChunk()
+    {
+        using var factory = new FusionRouterFactory
+        {
+            EnableStreamingComplianceFilter = true,
+            StreamingSensitiveKeywords = ["blocked"]
+        };
+        const string safeLine = "{\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"safe\"}}]}";
+        const string blockedLine = "{\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"blocked\"}}]}";
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            streamRawFunc: (req, ct) => StreamLinesAsync(new[] { safeLine, blockedLine, "[DONE]" }));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("safe", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"content\":\"blocked\"", body, StringComparison.Ordinal);
+        Assert.Contains("CONTENT_MODERATED", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("INTERNAL_ERROR", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FusionRouter_Streaming_EnforcesCumulativeResponseSizeLimit()
+    {
+        const string firstLine = "{}";
+        const string secondLine = "{}";
+        using var factory = new FusionRouterFactory
+        {
+            MaxResponseStreamBytes = firstLine.Length + secondLine.Length - 1
+        };
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            streamRawFunc: (req, ct) => StreamLinesAsync(new[] { firstLine, secondLine, "[DONE]" }));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("RESPONSE_TOO_LARGE", body, StringComparison.Ordinal);
+        Assert.Contains("Response size limit exceeded", body, StringComparison.Ordinal);
     }
 
     [Fact]

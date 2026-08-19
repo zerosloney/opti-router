@@ -1,7 +1,23 @@
 <Router AppAssembly="@typeof(App).Assembly">
     <Found Context="routeData">
-        <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
-        <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+        <ErrorBoundary>
+            <ChildContent>
+                <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+                <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+            </ChildContent>
+            <ErrorContent>
+                <PageTitle>错误 — OptiRouter</PageTitle>
+                <LayoutView Layout="@typeof(MainLayout)">
+                    <div style="padding: 3rem; text-align: center; color: var(--text-secondary);">
+                        <h1 style="font-size: 3rem; margin-bottom: 1rem;">页面渲染异常</h1>
+                        @* 异常详情可能含内部信息（路径/连接串片段），不展示到页面；排查走服务端日志。 *@
+                        <p style="margin-bottom: 1.5rem;">发生未处理的异常，请查看服务端日志。</p>
+                        <p style="margin-bottom: 2rem; color: var(--text-muted); font-size: 0.9rem;">请刷新页面重试，或检查 API 连接是否正常。</p>
+                        <a href="/" style="color: var(--accent); text-decoration: underline;">返回首页</a>
+                    </div>
+                </LayoutView>
+            </ErrorContent>
+        </ErrorBoundary>
     </Found>
     <NotFound>
         <PageTitle>404 — Not Found</PageTitle>

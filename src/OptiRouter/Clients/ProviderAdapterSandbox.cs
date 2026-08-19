@@ -95,10 +95,7 @@ public sealed class ProviderAdapterSandbox : IProviderAdapterSandbox
                 : $"{baseUrl}/v1/models";
 
             using var request = new HttpRequestMessage(HttpMethod.Get, probeUrl);
-            if (!string.IsNullOrWhiteSpace(endpoint.ApiKey))
-            {
-                request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", endpoint.ApiKey);
-            }
+            ModelClientFactory.ConfigureAuthentication(endpoint, request.Headers);
 
             using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             sw.Stop();
@@ -162,4 +159,5 @@ public sealed class ProviderAdapterSandbox : IProviderAdapterSandbox
                 Capabilities: capabilities);
         }
     }
+
 }

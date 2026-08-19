@@ -164,10 +164,13 @@ public static class DashboardHandler
         // 6. Golden Dataset Offline Regression Runner API
         //    经 ProxyOrchestrator.SendAsync 走完整真实管线（路由→上游→计费→审计），
         //    取代旧桩实现（伪造固定回复，评测结果无意义）。Cases 为空时回落内置题库。
+        //    注意：评测请求消耗真实生产日预算（最多 50 用例 × 真实计费），可能挤占正常业务配额。
         endpoints.MapPost("/api/dashboard/eval/run", async (
+            HttpContext httpContext,
             ProxyOrchestrator orchestrator,
             IMemoryCache cache,
-            EvalRunRequest? req) =>
+            EvalRunRequest? req,
+            CancellationToken requestAborted) =>
         {
             var dataset = BuildEvalDataset(req?.Cases);
             if (dataset.Count == 0)
@@ -179,8 +182,10 @@ public static class DashboardHandler
                 $"eval-batch-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
                 dataset,
                 // SendAsync 带可选 sessionId 参数，方法组无法直接转换为二元委托，显式适配。
-                (request, token) => orchestrator.SendAsync(request, token));
+                (request, token) => orchestrator.SendAsync(request, token),
+                ct: requestAborted);
 
+            httpContext.Response.Headers["X-Eval-Consumes-Budget"] = "true";
             RecordEvalBatch(cache, report);
             return Results.Ok(report);
         });
@@ -258,7 +263,7 @@ public static class DashboardHandler
 
         // 10c. Semantic Routes Management APIs——语义路由此前是唯一只能手改配置文件的路由策略。
         //     SemanticRouterPolicy 每请求从 context.Options 读取路由表，reload 后立即热生效。
-        endpoints.MapGet("/api/dashboard/semantic-routes", (IOptionsMonitor<RouterOptions> options) =>
+        endpoints.MapGet("/api/dashboard/semantic-routes", (IOptionsMonitor<RouterOptions> options, AppConfigDbStore store) =>
         {
             var opt = options.CurrentValue.Routing;
             var routes = (opt.SemanticRoutes ?? new List<SemanticRouteOptions>())
@@ -268,7 +273,9 @@ public static class DashboardHandler
             {
                 enabled = opt.EnableSemanticRouter,
                 similarityThreshold = opt.SemanticSimilarityThreshold,
-                routes
+                routes,
+                // 保存时作为 ExpectedVersion 回传，防止并发编辑静默覆盖。
+                version = store.LoadRoutingBudgetSnapshot().Version
             });
         });
 
@@ -277,13 +284,18 @@ public static class DashboardHandler
             AppConfigDbStore store,
             UpdateSemanticRoutesRequest req) =>
         {
+            if (string.IsNullOrWhiteSpace(req.ExpectedVersion))
+            {
+                return Results.BadRequest(new { error = "ExpectedVersion is required. Reload the semantic routes before saving." });
+            }
+
             var (routes, error) = BuildSemanticRoutes(req.Routes);
             if (error is not null)
             {
                 return Results.BadRequest(new { error });
             }
 
-            PersistRoutingDocuments((IConfigurationRoot)config, store, root =>
+            if (!TryPersistRoutingDocuments((IConfigurationRoot)config, store, req.ExpectedVersion, root =>
             {
                 var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
                 var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
@@ -303,17 +315,26 @@ public static class DashboardHandler
                     });
                 }
                 routing["SemanticRoutes"] = array;
-            });
+            }, out var newVersion))
+            {
+                return Results.Conflict(new { error = "Configuration changed concurrently; retry the semantic route update." });
+            }
 
-            return Results.Ok(new { message = $"Semantic routes persisted ({routes.Count} rules) and hot-applied via reload." });
+            return Results.Ok(new
+            {
+                message = $"Semantic routes persisted ({routes.Count} rules) and hot-applied via reload.",
+                version = newVersion
+            });
         });
 
         // 7. GET System Config API（读 IOptionsMonitor.CurrentValue，反映 reload 后的真值）
-        endpoints.MapGet("/api/dashboard/config", (IOptionsMonitor<RouterOptions> options) =>
+        endpoints.MapGet("/api/dashboard/config", (IOptionsMonitor<RouterOptions> options, AppConfigDbStore store) =>
         {
             var opt = options.CurrentValue;
+            var snapshot = store.LoadRoutingBudgetSnapshot();
             return Results.Ok(new
             {
+                snapshot.Version,
                 Routing = new
                 {
                     Preset = opt.Routing.Preset,
@@ -386,6 +407,11 @@ public static class DashboardHandler
             IOptionsMonitor<RouterOptions> optionsMonitor,
             UpdateSystemConfigRequest req) =>
         {
+            if (string.IsNullOrWhiteSpace(req.ExpectedVersion))
+            {
+                return Results.BadRequest(new { error = "ExpectedVersion is required. Reload the configuration before saving." });
+            }
+
             // 落库前把变更应用到"当前配置的克隆"并复用启动校验器（RouterOptionsValidator）：
             // 坏配置一旦落库，reload 会被 IOptionsMonitor 静默拒绝（表面保存成功、实际未生效），
             // 更糟的是重启时 ValidateOnStart 直接失败导致进程起不来。
@@ -405,7 +431,7 @@ public static class DashboardHandler
                 return Results.BadRequest(new { error = string.Join("; ", validation.Failures) });
             }
 
-            PersistRoutingDocuments((IConfigurationRoot)config, store, root =>
+            if (!TryPersistRoutingDocuments((IConfigurationRoot)config, store, req.ExpectedVersion, root =>
             {
                 var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
                 var routing = (optiRouter["Routing"] as JsonObject) ?? (JsonObject)(optiRouter["Routing"] = new JsonObject());
@@ -470,9 +496,20 @@ public static class DashboardHandler
                 {
                     budget["EnforceOnExhausted"] = behavior.ToString();
                 }
-            });
+            }, out string version))
+            {
+                return Results.Conflict(new
+                {
+                    error = "Configuration changed since it was loaded. Reload before saving.",
+                    currentVersion = version
+                });
+            }
 
-            return Results.Ok(new { message = "System configuration persisted to the SQLite config database and hot-applied via reload." });
+            return Results.Ok(new
+            {
+                message = "System configuration persisted to the SQLite config database and hot-applied via reload.",
+                version
+            });
         });
 
         // 9. Circuit Breaker Override API
@@ -620,6 +657,8 @@ public static class DashboardHandler
     /// </summary>
     public sealed record UpdateSystemConfigRequest
     {
+        public string? ExpectedVersion { get; init; }
+
         // ① 基础路由
         public bool? EnableRuleClassifier { get; init; }
         public bool? EnableSemanticRouter { get; init; }
@@ -760,7 +799,7 @@ public static class DashboardHandler
 
     public record EvalCompareRequest(string BaselineBatchId, string CandidateBatchId);
 
-    public record UpdateSemanticRoutesRequest(List<SemanticRouteUpsertRequest>? Routes);
+    public record UpdateSemanticRoutesRequest(List<SemanticRouteUpsertRequest>? Routes, string? ExpectedVersion = null);
 
     public record SemanticRouteUpsertRequest(string? Name, List<string>? Phrases, string? TargetTier);
 
@@ -874,40 +913,62 @@ public static class DashboardHandler
     /// 把路由/预算配置变更持久化到 SQLite 配置库并触发热重载。
     /// 变更以"当前 DB 文档 + 请求字段"合并后整体写回（与旧 appsettings.json 落盘语义一致）。
     /// </summary>
-    private static void PersistRoutingDocuments(
+    private static bool TryPersistRoutingDocuments(
         IConfigurationRoot configRoot,
         AppConfigDbStore store,
-        Action<JsonObject> mutate)
+        string? expectedVersion,
+        Action<JsonObject> mutate,
+        out string version)
     {
-        static JsonObject LoadDoc(AppConfigDbStore store, string scope)
+        static JsonObject LoadDoc(string? json)
         {
-            string? json = store.LoadDocument(scope);
             return string.IsNullOrWhiteSpace(json)
                 ? new JsonObject()
                 : (JsonNode.Parse(json) as JsonObject ?? new JsonObject());
         }
 
-        var root = new JsonObject
+        for (int attempt = 0; attempt < 3; attempt++)
         {
-            ["OptiRouter"] = new JsonObject
+            var snapshot = store.LoadRoutingBudgetSnapshot();
+            if (expectedVersion is not null
+                && !string.Equals(expectedVersion, snapshot.Version, StringComparison.Ordinal))
             {
-                ["Routing"] = LoadDoc(store, AppConfigDbStore.RoutingScope),
-                ["Budget"] = LoadDoc(store, AppConfigDbStore.BudgetScope)
+                version = snapshot.Version;
+                return false;
             }
-        };
 
-        mutate(root);
+            var root = new JsonObject
+            {
+                ["OptiRouter"] = new JsonObject
+                {
+                    ["Routing"] = LoadDoc(snapshot.RoutingJson),
+                    ["Budget"] = LoadDoc(snapshot.BudgetJson)
+                }
+            };
 
-        var optiRouter = root["OptiRouter"] as JsonObject;
-        if (optiRouter is null)
-            return;
-        if (optiRouter["Routing"] is JsonObject routing)
-            store.SaveDocument(AppConfigDbStore.RoutingScope, routing.ToJsonString());
-        if (optiRouter["Budget"] is JsonObject budget)
-            store.SaveDocument(AppConfigDbStore.BudgetScope, budget.ToJsonString());
+            mutate(root);
 
-        // Reload 同步扇出 IOptionsMonitor 回调（RouterEngine/ModelClientProvider 等热生效）。
-        configRoot.Reload();
+            var optiRouter = root["OptiRouter"] as JsonObject;
+            string routingJson = (optiRouter?["Routing"] as JsonObject ?? new JsonObject()).ToJsonString();
+            string budgetJson = (optiRouter?["Budget"] as JsonObject ?? new JsonObject()).ToJsonString();
+            if (!store.TrySaveRoutingBudgetDocuments(
+                    snapshot.Version,
+                    routingJson,
+                    budgetJson,
+                    out version))
+            {
+                if (expectedVersion is not null)
+                    return false;
+                continue;
+            }
+
+            // Reload 同步扇出 IOptionsMonitor 回调（RouterEngine/ModelClientProvider 等热生效）。
+            configRoot.Reload();
+            return true;
+        }
+
+        version = store.LoadRoutingBudgetSnapshot().Version;
+        return false;
     }
 
     private static readonly string[] ValidWindows = { "1h", "7h", "24h", "7d", "15d", "30d", "all" };

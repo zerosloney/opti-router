@@ -309,4 +309,38 @@ public sealed class NativeProtocolClientTests
         Assert.IsType<AnthropicModelClient>(anthropic);
         Assert.IsType<GeminiModelClient>(gemini);
     }
+
+    [Fact]
+    public void ModelClientFactory_ConfiguresProtocolSpecificAuthenticationHeaders()
+    {
+        var factory = new ModelClientFactory();
+        using var http = new HttpClient();
+
+        factory.Create(CreateEndpoint(ProviderProtocol.Anthropic, "claude-3-5-sonnet"), http);
+        Assert.Null(http.DefaultRequestHeaders.Authorization);
+        Assert.Equal("sk-test", http.DefaultRequestHeaders.GetValues("x-api-key").Single());
+        Assert.Equal("2023-06-01", http.DefaultRequestHeaders.GetValues("anthropic-version").Single());
+        Assert.False(http.DefaultRequestHeaders.Contains("x-goog-api-key"));
+
+        factory.Create(CreateEndpoint(ProviderProtocol.Gemini, "gemini-1.5-pro"), http);
+        Assert.Null(http.DefaultRequestHeaders.Authorization);
+        Assert.False(http.DefaultRequestHeaders.Contains("x-api-key"));
+        Assert.False(http.DefaultRequestHeaders.Contains("anthropic-version"));
+        Assert.Equal("sk-test", http.DefaultRequestHeaders.GetValues("x-goog-api-key").Single());
+
+        factory.Create(CreateEndpoint(ProviderProtocol.OpenAI, "gpt-4o"), http);
+        Assert.Equal("Bearer", http.DefaultRequestHeaders.Authorization?.Scheme);
+        Assert.Equal("sk-test", http.DefaultRequestHeaders.Authorization?.Parameter);
+        Assert.False(http.DefaultRequestHeaders.Contains("x-api-key"));
+        Assert.False(http.DefaultRequestHeaders.Contains("x-goog-api-key"));
+        Assert.False(http.DefaultRequestHeaders.Contains("anthropic-version"));
+
+        var emptyKey = CreateEndpoint(ProviderProtocol.Anthropic, "claude-3-5-sonnet");
+        emptyKey.ApiKey = "  ";
+        factory.Create(emptyKey, http);
+        Assert.Null(http.DefaultRequestHeaders.Authorization);
+        Assert.False(http.DefaultRequestHeaders.Contains("x-api-key"));
+        Assert.False(http.DefaultRequestHeaders.Contains("x-goog-api-key"));
+        Assert.False(http.DefaultRequestHeaders.Contains("anthropic-version"));
+    }
 }

@@ -94,4 +94,51 @@ public class SemanticResponseCacheTests
         Assert.True(similarity >= 0.60);
         Assert.Equal(prompt1, matchedPrompt);
     }
+
+    [Fact]
+    public async Task SemanticResponseCache_DifferentPartitions_DoNotMatch()
+    {
+        var cache = new SemanticResponseCache(maxEntries: 100);
+        string prompt = "同一个提示词不应跨安全分区命中";
+        var response = new RawChatResponse("{\"content\":\"partition-a\"}", null);
+
+        await cache.StoreAsync(prompt, response, TimeSpan.FromMinutes(30), partitionKey: "partition-a");
+
+        var (hit, cached, _, matchedPrompt) = await cache.TryGetAsync(
+            prompt,
+            similarityThreshold: 0.99f,
+            partitionKey: "partition-b");
+
+        Assert.False(hit);
+        Assert.Null(cached);
+        Assert.Null(matchedPrompt);
+    }
+
+    [Fact]
+    public async Task SemanticResponseCache_SamePromptInDifferentPartitions_ReturnsOwnResponse()
+    {
+        var cache = new SemanticResponseCache(maxEntries: 100);
+        string prompt = "同一个提示词在不同分区应保存独立响应";
+        var responseA = new RawChatResponse("{\"content\":\"partition-a\"}", null);
+        var responseB = new RawChatResponse("{\"content\":\"partition-b\"}", null);
+
+        await cache.StoreAsync(prompt, responseA, TimeSpan.FromMinutes(30), partitionKey: "partition-a");
+        await cache.StoreAsync(prompt, responseB, TimeSpan.FromMinutes(30), partitionKey: "partition-b");
+
+        var (hitA, cachedA, _, matchedA) = await cache.TryGetAsync(
+            prompt,
+            similarityThreshold: 0.99f,
+            partitionKey: "partition-a");
+        var (hitB, cachedB, _, matchedB) = await cache.TryGetAsync(
+            prompt,
+            similarityThreshold: 0.99f,
+            partitionKey: "partition-b");
+
+        Assert.True(hitA);
+        Assert.True(hitB);
+        Assert.Equal(responseA.Body, cachedA?.Body);
+        Assert.Equal(responseB.Body, cachedB?.Body);
+        Assert.Equal(prompt, matchedA);
+        Assert.Equal(prompt, matchedB);
+    }
 }

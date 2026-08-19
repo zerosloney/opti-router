@@ -388,7 +388,11 @@ public class ReviewFixTests
         var response = await client.GetAsync("/benchmarks");
 
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
-        Assert.Equal("/login", response.Headers.Location?.ToString());
+        // [Authorize] 会保留 ReturnUrl 以便登录后跳回原页面，验证 LocalPath 与 ReturnUrl 而非整串比较
+        var location = response.Headers.Location;
+        Assert.NotNull(location);
+        Assert.Equal("/login", location.LocalPath);
+        Assert.Equal("?ReturnUrl=%2Fbenchmarks", location.Query);
     }
 
     [Fact]
@@ -402,6 +406,68 @@ public class ReviewFixTests
         var response = await client.GetAsync("/benchmarks");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task BlazorHub_Negotiate_RequiresAuthenticatedSession()
+    {
+        var factory = CreateFactory(opt => opt.Models.Add(CreateEndpoint("model-a")));
+        factory.AdminApiKey = "test-admin-key";
+        using var client = factory.CreateClient(
+            new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
+            {
+                AllowAutoRedirect = false
+            });
+
+        using var response = await client.PostAsync(
+            "/_blazor/negotiate?negotiateVersion=1",
+            content: null);
+
+        Assert.NotEqual(HttpStatusCode.OK, response.StatusCode);
+        Assert.True(
+            response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Redirect,
+            $"Expected an authorization challenge, got {(int)response.StatusCode} {response.StatusCode}.");
+    }
+
+    [Fact]
+    public async Task BlazorHub_Negotiate_AllowsAuthenticatedCookieSession()
+    {
+        const string adminKey = "test-admin-key";
+        var factory = CreateFactory(opt => opt.Models.Add(CreateEndpoint("model-a")));
+        factory.AdminApiKey = adminKey;
+        using var client = factory.CreateClient(
+            new Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactoryClientOptions
+            {
+                AllowAutoRedirect = false
+            });
+
+        var loginPage = await client.GetStringAsync("/login");
+        const string tokenMarker = "name=\"__RequestVerificationToken\" type=\"hidden\" value=\"";
+        int tokenStart = loginPage.IndexOf(tokenMarker, StringComparison.Ordinal) + tokenMarker.Length;
+        Assert.True(tokenStart >= tokenMarker.Length, "Login page did not contain an antiforgery token.");
+        int tokenEnd = loginPage.IndexOf('"', tokenStart);
+        Assert.True(tokenEnd > tokenStart, "Login page contained an invalid antiforgery token.");
+
+        using var loginResponse = await client.PostAsync(
+            "/login",
+            new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["AdminKey"] = adminKey,
+                ["__RequestVerificationToken"] = loginPage[tokenStart..tokenEnd]
+            }));
+
+        Assert.Equal(HttpStatusCode.Redirect, loginResponse.StatusCode);
+        string cookie = loginResponse.Headers.GetValues("Set-Cookie")
+            .Single(value => value.StartsWith("OptiRouter.Admin=", StringComparison.Ordinal))
+            .Split(';', 2)[0];
+
+        using var negotiateRequest = new HttpRequestMessage(
+            HttpMethod.Post,
+            "/_blazor/negotiate?negotiateVersion=1");
+        negotiateRequest.Headers.TryAddWithoutValidation("Cookie", cookie);
+        using var negotiateResponse = await client.SendAsync(negotiateRequest);
+
+        Assert.Equal(HttpStatusCode.OK, negotiateResponse.StatusCode);
     }
 
     #endregion

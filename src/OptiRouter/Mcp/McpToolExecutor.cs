@@ -175,7 +175,7 @@ public sealed class McpToolExecutor : IMcpToolExecutor
             request.Headers.TryAddWithoutValidation(SessionHeader, sessionId);
         }
 
-        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             int statusCode = (int)response.StatusCode;
