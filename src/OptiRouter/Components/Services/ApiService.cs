@@ -730,7 +730,8 @@ public class ApiService
         string Family = "",
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
-        bool IsLocalOrPrivate = false);
+        bool IsLocalOrPrivate = false,
+        string Id = "");
 
     public record CreateModelRequest(
         string Name,
@@ -748,7 +749,8 @@ public class ApiService
         string? Family = null,
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
-        bool? IsLocalOrPrivate = null);
+        bool? IsLocalOrPrivate = null,
+        string? Id = null);
 
     public record UpdateModelRequest(
         string? BaseUrl,
@@ -765,7 +767,8 @@ public class ApiService
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null,
-        List<string>? Tags = null);
+        List<string>? Tags = null,
+        string? Id = null);
 
     public record ModelTestResultDto(
         bool Success,

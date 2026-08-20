@@ -37,6 +37,10 @@
                             <tr>
                                 <td>
                                     <strong>@m.Name</strong>
+                                    @if (!string.IsNullOrEmpty(m.Id) && !string.Equals(m.Id, m.Name, StringComparison.Ordinal))
+                                    {
+                                        <div class="text-secondary" style="font-size: 0.68rem; margin-top: 2px;" title="实际发往上游的模型 id（路由名与上游 id 不同）">↊ @m.Id</div>
+                                    }
                                     @if (m.IsLocalOrPrivate)
                                     {
                                         <span class="tag tag-success" style="font-size: 0.7rem; margin-left: 4px;" title="本地/私有部署节点">🏠</span>
@@ -204,7 +208,11 @@
             <div class="form-grid">
                 <div class="form-field full">
                     <label for="nm-name">名称 *</label>
-                    <input type="text" id="nm-name" @bind="Form.Name" placeholder="如 gpt-4o / deepseek-chat" disabled="@IsEditing" />
+                    <input type="text" id="nm-name" @bind="Form.Name" placeholder="路由名，需唯一，如 gpt-4o / deepseek-chat" disabled="@IsEditing" />
+                </div>
+                <div class="form-field full">
+                    <label for="nm-id">上游模型 Id（可选）</label>
+                    <input type="text" id="nm-id" @bind="Form.Id" placeholder="留空 = 与名称相同；同一模型多账号 Key：名称用不同路由名，此处填上游真实模型 id" />
                 </div>
                 <div class="form-field full">
                     <label for="nm-baseurl">BaseUrl *</label>
@@ -485,6 +493,7 @@
         Form = new ModelForm
         {
             Name = m.Name,
+            Id = m.Id ?? "",
             BaseUrl = m.BaseUrl,
             ApiKey = "",
             Tier = m.Tier,
@@ -609,7 +618,8 @@
                     Form.CachedInputPricePerMillion,
                     Form.CacheWritePricePerMillion,
                     Form.DeployTypeStr == "local",
-                    ParseTags(Form.Tags));
+                    ParseTags(Form.Tags),
+                    Id: Form.Id.Trim());
 
                 var (ok, error) = await Api.UpdateModelAsync(EditingName!, req);
                 if (ok)
@@ -640,7 +650,8 @@
                     string.IsNullOrWhiteSpace(Form.Family) ? null : Form.Family.Trim(),
                     Form.CachedInputPricePerMillion,
                     Form.CacheWritePricePerMillion,
-                    Form.DeployTypeStr == "local");
+                    Form.DeployTypeStr == "local",
+                    Id: Form.Id.Trim());
 
                 var (ok, error) = await Api.CreateModelAsync(req);
                 if (ok)
@@ -735,6 +746,8 @@
     private class ModelForm
     {
         public string Name { get; set; } = "";
+        // 上游真实模型 id：留空回退 Name。同一模型多账号/多供应商时，路由名不同、此 id 相同。
+        public string Id { get; set; } = "";
         public string BaseUrl { get; set; } = "";
         public string? ApiKey { get; set; }
         public string Tier { get; set; } = "Medium";

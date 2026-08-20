@@ -152,11 +152,12 @@ public class ModelsConfigHandlerTests
         Assert.Equal(0, model2.GetProperty("tags").GetArrayLength());
     }
 
-    private static async Task CreateModelAsync(HttpClient client, string name, string apiKey)
+    private static async Task CreateModelAsync(HttpClient client, string name, string apiKey, string? id = null)
     {
         string body = JsonSerializer.Serialize(new
         {
             name,
+            id,
             baseUrl = "https://example.com",
             apiKey,
             tier = "Medium",
@@ -166,6 +167,38 @@ public class ModelsConfigHandlerTests
         using var resp = await client.PostAsync("/api/models",
             new StringContent(body, Encoding.UTF8, "application/json"));
         Assert.True(resp.IsSuccessStatusCode, await resp.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task CreateModel_SameUpstreamIdDifferentRoutingNames_SupportsMultiKeyAccounts()
+    {
+        // 同一供应商多账号场景：路由名必须唯一，但上游模型 id 可相同——两个账号各自独立熔断/预算。
+        using var factory = new ModelsFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        const string upstreamId = "deepseek-v4-flash";
+        string acc1 = "multi-key-a-" + Guid.NewGuid().ToString("N")[..8];
+        string acc2 = "multi-key-b-" + Guid.NewGuid().ToString("N")[..8];
+        await CreateModelAsync(client, acc1, "sk-account-1", id: upstreamId);
+        await CreateModelAsync(client, acc2, "sk-account-2", id: upstreamId);
+
+        // 路由名重复仍被拒绝（配置 id 不豁免唯一性），错误信息引导多账号用法。
+        string dup = JsonSerializer.Serialize(new { name = acc1, id = upstreamId, baseUrl = "https://example.com", apiKey = "k" });
+        using var dupResp = await client.PostAsync("/api/models", new StringContent(dup, Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Conflict, dupResp.StatusCode);
+        Assert.Contains("upstream model id", await dupResp.Content.ReadAsStringAsync());
+
+        // 列表回读：两个账号条目均存在，上游 id 一致。
+        using var listResp = await client.GetAsync("/api/models");
+        Assert.Equal(HttpStatusCode.OK, listResp.StatusCode);
+        using var document = JsonDocument.Parse(await listResp.Content.ReadAsStringAsync());
+        var names = document.RootElement.EnumerateArray()
+            .Where(m => m.GetProperty("id").GetString() == upstreamId)
+            .Select(m => m.GetProperty("name").GetString())
+            .ToHashSet();
+        Assert.Contains(acc1, names);
+        Assert.Contains(acc2, names);
     }
 
     [Fact]

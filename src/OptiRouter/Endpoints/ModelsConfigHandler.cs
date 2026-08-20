@@ -115,7 +115,7 @@ public static class ModelsConfigHandler
             if (string.IsNullOrWhiteSpace(model.Name))
                 return Results.BadRequest(new { error = "Model name is required when id is absent" });
             if (existing.Any(m => string.Equals(m.Name, model.Name, StringComparison.Ordinal)))
-                return Results.Conflict(new { error = $"Model '{model.Name}' already exists" });
+                return Results.Conflict(new { error = $"Model '{model.Name}' already exists. Use a different routing name and set 'id' to the upstream model id to add another account/key of the same model" });
 
             try
             {
