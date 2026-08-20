@@ -398,6 +398,9 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (model.MaxContextTokens <= 0)
             return $"模型 {model.Name} 的 MaxContextTokens 必须大于 0。";
 
+        if (model.Weight < 0)
+            return $"模型 {model.Name} 的 Weight 必须大于等于 0。";
+
         if (model.TimeoutSeconds <= 0)
             return $"模型 {model.Name} 的 TimeoutSeconds 必须大于 0。";
 

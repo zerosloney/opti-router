@@ -100,6 +100,12 @@ public sealed class ModelEndpointOptions
     public int MaxRetries { get; set; } = 0;
 
     /// <summary>
+    /// 负载均衡权重（默认 1.0）。为 0 时退出负载均衡（Failover/熔断 仍可触发）。
+    /// 公式：LoadBalancePolicy 中 weight × MaxContextTokens × KalmanPenaltyFactor。
+    /// </summary>
+    public double Weight { get; set; } = 1.0;
+
+    /// <summary>
     /// 是否启用该模型。
     /// </summary>
     public bool Enabled { get; set; } = true;

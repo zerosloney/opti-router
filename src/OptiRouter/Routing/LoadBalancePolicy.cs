@@ -90,7 +90,7 @@ public sealed class LoadBalancePolicy : IRouterPolicy
             foreach (var m in remaining)
             {
                 double kalmanPenalty = kalmanTracker?.GetEstimate(m.Name).PenaltyWeightFactor ?? 1.0;
-                total += Math.Max(m.MaxContextTokens, 1) * kalmanPenalty;
+                total += Math.Max(m.MaxContextTokens, 1) * Math.Max(m.Weight, 0) * kalmanPenalty;
             }
 
             double pick = rng.NextDouble() * total;
@@ -99,7 +99,7 @@ public sealed class LoadBalancePolicy : IRouterPolicy
             for (int i = 0; i < remaining.Count; i++)
             {
                 double kalmanPenalty = kalmanTracker?.GetEstimate(remaining[i].Name).PenaltyWeightFactor ?? 1.0;
-                acc += Math.Max(remaining[i].MaxContextTokens, 1) * kalmanPenalty;
+                acc += Math.Max(remaining[i].MaxContextTokens, 1) * Math.Max(remaining[i].Weight, 0) * kalmanPenalty;
                 if (pick < acc)
                 {
                     chosenIdx = i;

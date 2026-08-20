@@ -268,6 +268,10 @@
                     <input type="number" id="nm-ctx" @bind="Form.MaxContextTokens" min="1" />
                 </div>
                 <div class="form-field">
+                    <label for="nm-weight">负载权重（默认 1.0，0=退出负载均衡）</label>
+                    <input type="number" id="nm-weight" @bind="Form.Weight" min="0" step="0.1" placeholder="默认 1.0" />
+                </div>
+                <div class="form-field">
                     <label for="nm-timeout">超时（秒）</label>
                     <input type="number" id="nm-timeout" @bind="Form.TimeoutSeconds" min="1" />
                 </div>
@@ -502,6 +506,7 @@
             MaxContextTokens = m.MaxContextTokens,
             TimeoutSeconds = m.TimeoutSeconds,
             MaxRetries = m.MaxRetries,
+            Weight = m.Weight,
             EnabledStr = m.Enabled.ToString().ToLower(),
             DeployTypeStr = m.IsLocalOrPrivate ? "local" : "public",
             InputPricePerMillion = m.InputPricePerMillion,
@@ -619,7 +624,8 @@
                     Form.CacheWritePricePerMillion,
                     Form.DeployTypeStr == "local",
                     ParseTags(Form.Tags),
-                    Id: Form.Id.Trim());
+                    Form.Id.Trim(),
+                    Form.Weight);
 
                 var (ok, error) = await Api.UpdateModelAsync(EditingName!, req);
                 if (ok)
@@ -651,7 +657,8 @@
                     Form.CachedInputPricePerMillion,
                     Form.CacheWritePricePerMillion,
                     Form.DeployTypeStr == "local",
-                    Id: Form.Id.Trim());
+                    Form.Id.Trim(),
+                    Form.Weight);
 
                 var (ok, error) = await Api.CreateModelAsync(req);
                 if (ok)
@@ -756,6 +763,7 @@
         public int MaxContextTokens { get; set; } = 8192;
         public int TimeoutSeconds { get; set; } = 120;
         public int MaxRetries { get; set; } = 0;
+        public double Weight { get; set; } = 1.0;
         // 部署类型：public=公有云，local=本地/私有（与列表 ☁️/🏠 徽标对应）。
         public string DeployTypeStr { get; set; } = "public";
         public string EnabledStr { get; set; } = "true";

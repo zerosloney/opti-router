@@ -100,6 +100,7 @@ public static class ModelsConfigHandler
                 CacheWriteInputPricePerMillion = req.CacheWriteInputPricePerMillion is >= 0 ? req.CacheWriteInputPricePerMillion : null,
                 TimeoutSeconds = (req.TimeoutSeconds is > 0) ? req.TimeoutSeconds.Value : 120,
                 MaxRetries = (req.MaxRetries is >= 0) ? req.MaxRetries.Value : 0,
+                Weight = req.Weight is > 0 ? req.Weight : 1.0,
                 Enabled = req.Enabled ?? true,
                 IsLocalOrPrivate = req.IsLocalOrPrivate ?? false
             };
@@ -197,6 +198,7 @@ public static class ModelsConfigHandler
         if (req.MaxContextTokens is > 0) model.MaxContextTokens = req.MaxContextTokens.Value;
         if (req.TimeoutSeconds is > 0) model.TimeoutSeconds = req.TimeoutSeconds.Value;
         if (req.MaxRetries is >= 0) model.MaxRetries = req.MaxRetries.Value;
+        if (req.Weight is not null && req.Weight >= 0) model.Weight = req.Weight.Value;
         if (req.Enabled is not null) model.Enabled = req.Enabled.Value;
         if (req.IsLocalOrPrivate is not null) model.IsLocalOrPrivate = req.IsLocalOrPrivate.Value;
         if (req.Provider is not null) model.Provider = req.Provider.Trim();
@@ -305,7 +307,8 @@ public static class ModelsConfigHandler
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null,
-        List<string>? Tags = null);
+        List<string>? Tags = null,
+        double? Weight = null);
 
     private record CreateModelRequest(
         string? Name,
@@ -324,5 +327,6 @@ public static class ModelsConfigHandler
         string? Id = null,
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
-        bool? IsLocalOrPrivate = null);
+        bool? IsLocalOrPrivate = null,
+        double Weight = 1.0);
 }
