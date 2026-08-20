@@ -148,7 +148,7 @@ curl http://localhost:5000/health
 | `SessionBudgetUsd` | 会话预算（美元），null 表示不限 | `null` |
 | `EnforceOnExhausted` | 耗尽行为：`Degrade` 降级 / `Reject` 拒绝 | `Degrade` |
 | `StoreProvider` | 持久化存储提供者：`Sqlite`（默认）/ `MariaDb` / `Postgres` / `Redis` / `InMemory`；服务器型 DB 供多实例共享全局账本 | `Sqlite` |
-| `MariaDbConnectionString` | MariaDB 连接串，`StoreProvider=MariaDb` 时必填（表名 `optirouter_` 前缀） | `Server=...;Database=...` |
+| `MariaDbConnectionString` | 可选覆盖，缺省回退全局 `OptiRouter:ConfigDbConnectionString`（同一数据库只配一处连接）；两者皆空且 `StoreProvider=MariaDb` 时启动校验失败 | *回退全局* |
 | `UsePersistentStore` | 是否持久化成本账本（跨重启保留）；服务器型提供者（MariaDb/Postgres/Redis）忽略此开关 | `true` |
 | `StorePath` | SQLite 账本文件路径，仅 `StoreProvider=Sqlite` 且 `UsePersistentStore=true` 时生效 | `data/optirouter-budget.db` |
 | `SessionEvictionHours` | 会话账户淘汰年龄（小时）；超过此时间无活动的会话自动清理，防止内存泄漏 | `24` |
@@ -454,14 +454,14 @@ curl -H "Authorization: Bearer <AdminApiKey>" \
 docker build -t optirouter .
 
 # 运行（存储走 MariaDB：配置库 + 租户 Key + 成本账本 + 审计 + 学习状态，
-# 多实例共享同一库即为全局口径；首启 DB 为空时按 appsettings/环境变量播种一次）
+# 连接只在 OptiRouter__ConfigDbConnectionString 一处配置，多实例共享同一库即为全局口径；
+# 首启 DB 为空时按 appsettings/环境变量播种一次）
 docker run -d --name optirouter \
   -p 5000:5000 \
   -e OptiRouter__ProxyApiKey="your-proxy-api-key" \
   -e OptiRouter__AdminApiKey="your-admin-api-key" \
   -e OptiRouter__ConfigDbConnectionString="Server=mariadb;Port=3306;Database=optirouter;User ID=optirouter;Password=..." \
   -e OptiRouter__Budget__StoreProvider="MariaDb" \
-  -e OptiRouter__Budget__MariaDbConnectionString="Server=mariadb;Port=3306;Database=optirouter;User ID=optirouter;Password=..." \
   optirouter
 
 # 或最小化运行（不配 DB 时回退 SQLite 文件，挂载 /app/data 卷持久化）

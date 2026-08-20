@@ -69,6 +69,16 @@ builder.Services.AddOptions<RouterOptions>()
     // Name 留空且配置了 Id 的模型在此归一化为 "{供应商}/{Id}"（冲突时追加序号），
     // 后续 Validate 与所有消费方（路由/客户端/显示）看到的都是最终路由名。
     .PostConfigure(options => ModelNameNormalizer.Normalize(options.Models))
+    // Budget 的 MariaDB 连接缺省回退全局 OptiRouter:ConfigDbConnectionString——
+    // 同一数据库只需配置一处连接（Budget.MariaDbConnectionString 仅作独立库覆盖用）。
+    .PostConfigure(options =>
+    {
+        if (string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(options.Budget.MariaDbConnectionString))
+        {
+            options.Budget.MariaDbConnectionString = builder.Configuration["OptiRouter:ConfigDbConnectionString"];
+        }
+    })
     // 应用路由预设（Preset）填充未显式配置的 Routing 项。
     // IServiceProvider 作为 TDep 解析到根容器，再取 IConfiguration 与 ILogger。
     .PostConfigure<IServiceProvider>((options, sp) =>

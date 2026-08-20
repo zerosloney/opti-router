@@ -45,7 +45,9 @@ public sealed class BudgetOptions
     public string StoreProvider { get; set; } = "Sqlite";
 
     /// <summary>
-    /// MariaDB/MySQL 连接字符串。当 <see cref="StoreProvider"/> 为 "MariaDb" 时必填。
+    /// MariaDB/MySQL 连接字符串，仅作独立库覆盖用；缺省（推荐）回退全局
+    /// <c>OptiRouter:ConfigDbConnectionString</c>（同一数据库只配置一处连接）。
+    /// 当 <see cref="StoreProvider"/> 为 "MariaDb" 且两者都为空时启动校验失败。
     /// </summary>
     public string? MariaDbConnectionString { get; set; } = null;
 
