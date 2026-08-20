@@ -54,7 +54,7 @@
   - **Golden Dataset 离线回归评测 (`OfflineEvalRunner`)**：自动化 Golden Question 题库 Jaccard 词重叠相似度、准确率、延迟与 Token 消耗回归报告。
   - **端云混合投机解码 (`HybridSpeculativeOrchestrator`)**：本地 1B/3B 端侧模型极速生成 Draft 草稿，云端强模型（Verifier）二次校验修补，兼顾高智力与低开支。
 - 🏎️ **0-阻塞高性能架构**：
-  - **ConcurrentQueue 异步批处理落盘**：请求完成 1 微秒入列，后台 SQLite 批量事务落盘，主数据平面 0 I/O 阻塞。
+  - **ConcurrentQueue 异步批处理落盘**：请求完成 1 微秒入列，后台批量事务落库（SQLite/MariaDB），主数据平面 0 I/O 阻塞。
   - **Monitor.TryEnter 非阻塞限流 Sweeper**：并发清理锁 0 阻断 HTTP 请求管道。
   - **MemoryCache SizeLimit 内存保护**：硬顶淘汰防范恶意 SessionId 膨胀攻击。
 
@@ -125,7 +125,7 @@ curl http://localhost:5000/health
 |------|------|------|
 | `Name` | 模型标识 | `gpt-4o` |
 | `BaseUrl` | 上游 API 基地址 | `https://api.openai.com/v1` |
-| `ApiKey` | 鉴权密钥。支持 `env:VAR_NAME` 语法从环境变量加载（变量缺失时该模型 key 为空并告警）。模型配置权威存储为 SQLite 配置库；通过 Dashboard 保存模型配置会写入配置库并热生效 | `sk-...` |
+| `ApiKey` | 鉴权密钥。支持 `env:VAR_NAME` 语法从环境变量加载（变量缺失时该模型 key 为空并告警）。模型配置权威存储为配置库（SQLite 或 MariaDB，见部署配置）；通过 Dashboard 保存模型配置会写入配置库并热生效 | `sk-...` |
 | `Tier` | 能力分档：`Strong` / `Medium` / `Cheap` | `Strong` |
 | `MaxContextTokens` | 最大上下文长度 | `128000` |
 | `InputPricePerMillion` | 输入价格（美元/百万 token） | `2.5` |
@@ -147,8 +147,10 @@ curl http://localhost:5000/health
 | `DailyBudgetUsd` | 日预算（美元） | `10.0` |
 | `SessionBudgetUsd` | 会话预算（美元），null 表示不限 | `null` |
 | `EnforceOnExhausted` | 耗尽行为：`Degrade` 降级 / `Reject` 拒绝 | `Degrade` |
-| `UsePersistentStore` | 是否持久化成本账本到 SQLite（跨重启保留） | `true` |
-| `StorePath` | SQLite 账本文件路径，仅 `UsePersistentStore=true` 时生效 | `data/optirouter-budget.db` |
+| `StoreProvider` | 持久化存储提供者：`Sqlite`（默认）/ `MariaDb` / `Postgres` / `Redis` / `InMemory`；服务器型 DB 供多实例共享全局账本 | `Sqlite` |
+| `MariaDbConnectionString` | MariaDB 连接串，`StoreProvider=MariaDb` 时必填（表名 `optirouter_` 前缀） | `Server=...;Database=...` |
+| `UsePersistentStore` | 是否持久化成本账本（跨重启保留）；服务器型提供者（MariaDb/Postgres/Redis）忽略此开关 | `true` |
+| `StorePath` | SQLite 账本文件路径，仅 `StoreProvider=Sqlite` 且 `UsePersistentStore=true` 时生效 | `data/optirouter-budget.db` |
 | `SessionEvictionHours` | 会话账户淘汰年龄（小时）；超过此时间无活动的会话自动清理，防止内存泄漏 | `24` |
 
 ### Routing（路由策略）
@@ -339,7 +341,7 @@ curl http://localhost:5000/health
 
 ## 管理控制台（Dashboard Console）
 
-Blazor Server 管理台（`/overview` `/requests` `/models` `/router` `/keys` `/benchmarks`），登录会话或 `AdminApiKey` Bearer 鉴权。配置类操作写入 SQLite 配置库并触发热重载，无需重启。
+Blazor Server 管理台（`/overview` `/requests` `/models` `/router` `/keys` `/benchmarks`），登录会话或 `AdminApiKey` Bearer 鉴权。配置类操作写入配置库（SQLite 或 MariaDB）并触发热重载，无需重启。
 
 | 能力 | 说明 |
 |------|------|
@@ -348,7 +350,7 @@ Blazor Server 管理台（`/overview` `/requests` `/models` `/router` `/keys` `/
 | 请求审计筛选/搜索/导出 | 审计日志支持按 Request/Trace ID 子串搜索与 UTC 时间范围过滤，可导出 CSV（`GET /api/dashboard/requests/export`，同筛选条件） |
 | 租户 Key 用量与导出 | Keys 页展示每个租户的今日消费、用量占比（≥80% 变红）、剩余预算与请求数；`GET /api/dashboard/keys/usage/export` 导出 CSV；删除 Key 需二次确认 |
 | 模型能力标签 | 模型弹窗编辑 `Tags`（`vision` / `tool-use` / `json-mode`，逗号分隔自动去重），列表显示标签芯片；配合路由页「能力过滤」开关按能力硬过滤候选 |
-| 评测批次持久化 | Golden Dataset 评测报告落 SQLite（保留最近 10 批），重启不丢失，A/B 对比跨重启可用 |
+| 评测批次持久化 | Golden Dataset 评测报告落配置库（保留最近 10 批），重启不丢失，A/B 对比跨重启可用 |
 | 学习状态管理 | Thompson / Contextual Bandit 状态可一键重置为初始先验（含持久化回落，需确认）或导出 CSV |
 | Fusion 编排参数 | 面板规模（数量/动态/最小/多样性）、Analyst/Outer 模型下拉、采样与预算（最大输出/温度/Panel 超时）、Analyst 提示词、竞速参数（并发数/Hedge 延迟）全部可在路由页编辑并热生效 |
 
@@ -445,20 +447,27 @@ curl -H "Authorization: Bearer <AdminApiKey>" \
 
 ### Docker（推荐容器化部署）
 
-多阶段构建（`sdk:8.0` 编译 → `aspnet:8.0` 运行），非 root 用户运行，内建 `HEALTHCHECK` 与 `/app/data` 数据卷。
+多阶段构建（`sdk:8.0` 编译 → `aspnet:8.0` 运行），非 root 用户运行，内建 `HEALTHCHECK`。
 
 ```bash
 # 构建镜像
 docker build -t optirouter .
 
-# 运行（SQLite 账本持久化到宿主目录，便于跨容器重建保留）
+# 运行（存储走 MariaDB：配置库 + 租户 Key + 成本账本 + 审计 + 学习状态，
+# 多实例共享同一库即为全局口径；首启 DB 为空时按 appsettings/环境变量播种一次）
 docker run -d --name optirouter \
   -p 5000:5000 \
-  -v optirouter-data:/app/data \
   -e OptiRouter__ProxyApiKey="your-proxy-api-key" \
   -e OptiRouter__AdminApiKey="your-admin-api-key" \
-  -e OptiRouter__Models__0__ApiKey="sk-..." \
+  -e OptiRouter__ConfigDbConnectionString="Server=mariadb;Port=3306;Database=optirouter;User ID=optirouter;Password=..." \
+  -e OptiRouter__Budget__StoreProvider="MariaDb" \
+  -e OptiRouter__Budget__MariaDbConnectionString="Server=mariadb;Port=3306;Database=optirouter;User ID=optirouter;Password=..." \
   optirouter
+
+# 或最小化运行（不配 DB 时回退 SQLite 文件，挂载 /app/data 卷持久化）
+# docker run -d --name optirouter -p 5000:5000 \
+#   -v optirouter-data:/app/data \
+#   -e OptiRouter__ProxyApiKey="..." -e OptiRouter__AdminApiKey="..." optirouter
 ```
 
 ## 许可证

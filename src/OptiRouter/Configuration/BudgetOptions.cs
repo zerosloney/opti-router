@@ -21,13 +21,13 @@ public sealed class BudgetOptions
     public BudgetExhaustionMode EnforceOnExhausted { get; set; } = BudgetExhaustionMode.Degrade;
 
     /// <summary>
-    /// 是否启用持久化成本账本（SQLite）。true 时使用 <see cref="StorePath"/> 指定的文件，
-    /// 跨进程重启保留日/会话花费。false 时使用内存实现，重启即丢失。
+    /// 是否启用持久化成本账本，跨进程重启保留日/会话花费。false 时使用内存实现，重启即丢失。
+    /// 服务器型提供者（MariaDb/Postgres/Redis）不受此开关影响，始终走对应 DB。
     /// </summary>
     public bool UsePersistentStore { get; set; } = true;
 
     /// <summary>
-    /// SQLite 账本文件路径。仅在 <see cref="UsePersistentStore"/> 为 true 时生效。
+    /// SQLite 账本文件路径。仅 StoreProvider=Sqlite 且 UsePersistentStore=true 时生效。
     /// 目录不存在会自动创建。
     /// </summary>
     public string StorePath { get; set; } = "data/optirouter-budget.db";

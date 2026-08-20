@@ -20,17 +20,21 @@ public sealed class MetricsEndpointAuthTests
         public bool EnableMetrics { get; set; } = true;
         public string MetricsEndpointPath { get; set; } = "/metrics";
 
+        // 封闭测试：配置库指向临时文件（空库），模型经 Configure<RouterOptions> 注入——
+        // 否则 models 权威来自配置库，会依赖运行环境遗留 DB 状态（src/data 或 bin/data）。
+        private readonly string _tempDbPath = Path.Combine(
+            Path.GetTempPath(), $"optirouter-metrics-test-{Guid.NewGuid():N}.db");
+
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseSetting("OptiRouter:ConfigDbPath", _tempDbPath);
+            builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+
             builder.ConfigureAppConfiguration((context, config) =>
             {
                 var inMemoryConfig = new Dictionary<string, string?>
                 {
                     ["OptiRouter:ProxyApiKey"] = "test-proxy-key",
-                    ["OptiRouter:Models:0:Name"] = "gpt-4o",
-                    ["OptiRouter:Models:0:BaseUrl"] = "https://api.openai.com/v1",
-                    ["OptiRouter:Models:0:ApiKey"] = "sk-test",
-                    ["OptiRouter:Models:0:Enabled"] = "true",
                     ["OptiRouter:Routing:EnableMetrics"] = EnableMetrics.ToString(),
                     ["OptiRouter:Routing:MetricsEndpointPath"] = MetricsEndpointPath
                 };
@@ -42,6 +46,33 @@ public sealed class MetricsEndpointAuthTests
 
                 config.AddInMemoryCollection(inMemoryConfig);
             });
+
+            builder.ConfigureServices(services =>
+            {
+                services.Configure<RouterOptions>(opt =>
+                {
+                    opt.Models.Clear();
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "gpt-4o",
+                        BaseUrl = "https://api.openai.com/v1",
+                        ApiKey = "sk-test",
+                        Tier = ModelTier.Medium,
+                        MaxContextTokens = 8192,
+                        Enabled = true
+                    });
+                    opt.Routing.EnableHealthProbe = false;
+                });
+            });
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing)
+            {
+                try { File.Delete(_tempDbPath); } catch { }
+            }
         }
     }
 
