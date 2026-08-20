@@ -206,6 +206,52 @@ public class ApiService
         }
     }
 
+    /// <summary>审计分析报告（时间窗全量聚合，供策略调优闭环）。fromUtc/toUtc 需为 UTC。</summary>
+    public async Task<AuditAnalysisDto?> GetAuditAnalysisAsync(DateTime fromUtc, DateTime toUtc)
+    {
+        try
+        {
+            string from = Uri.EscapeDataString(fromUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture));
+            string to = Uri.EscapeDataString(toUtc.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture));
+            return await GetFromJsonAsync<AuditAnalysisDto>(Url($"/api/dashboard/audit/analysis?from={from}&to={to}"));
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "GetAuditAnalysisAsync failed");
+            return null;
+        }
+    }
+
+    public sealed record AuditAnalysisDto(
+        DateTime FromUtc, DateTime ToUtc, int TotalRequests,
+        AuditAnalysisSummaryDto Summary,
+        List<AuditModelStatsDto> ByModel,
+        List<AuditTierStatsDto> ByTier,
+        AuditCascadeDto Cascade,
+        AuditFusionDto Fusion,
+        List<AuditReasonDto> ByReason,
+        List<AuditDayDto> DailyTrend);
+
+    public sealed record AuditAnalysisSummaryDto(
+        int Successes, int Failures, double SuccessRatePct, double TotalCostUsd,
+        long PromptTokens, long CompletionTokens, long CachedInputTokens,
+        double AvgLatencyMs, double P50LatencyMs, double P95LatencyMs, double P99LatencyMs, int LatencySamples);
+
+    public sealed record AuditModelStatsDto(
+        string Model, int Requests, int Failures, double SuccessRatePct, double CostUsd,
+        double AvgLatencyMs, double P95LatencyMs, long PromptTokens, long CompletionTokens);
+
+    public sealed record AuditTierStatsDto(
+        string Tier, int Requests, int Failures, double SuccessRatePct, double CostUsd, double CostSharePct);
+
+    public sealed record AuditCascadeDto(int Triggered, double TriggerRatePct, Dictionary<string, int> UpgradedFrom);
+
+    public sealed record AuditFusionDto(int FusionRequests, Dictionary<string, int> ByRole);
+
+    public sealed record AuditReasonDto(string Reason, int Requests, int Failures, double SuccessRatePct);
+
+    public sealed record AuditDayDto(string Day, int Requests, int Successes, double CostUsd);
+
     /// <summary>运行路由沙盒仿真。返回 (结果, 失败原因)；失败原因为空表示成功。</summary>
     public async Task<(SandboxResult? Result, string? Error)> RunSandboxRouteAsync(string prompt)
     {

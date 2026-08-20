@@ -1,6 +1,7 @@
 @page "/requests"
 @inject ApiService Api
 @inject IJSRuntime JS
+@inject Microsoft.Extensions.Logging.ILogger<Requests> Logger
 @implements IDisposable
 
 <PageTitle>OptiRouter - 请求追踪</PageTitle>
@@ -64,6 +65,114 @@
                 </tbody>
             </table>
         </div>
+    </div>
+
+    <!-- 审计分析：时间窗全量聚合报告（策略调优闭环） -->
+    <div class="glass-card">
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
+            <span>审计分析 (Audit Analysis)</span>
+            <div class="trend-controls" style="margin-top: 0;">
+                @foreach (var (key, text) in new[] { ("24h", "近24小时"), ("7d", "近7天"), ("30d", "近30天") })
+                {
+                    <button class="@(AnalysisWindowKey == key ? "active" : "")" @onclick="() => SetAnalysisWindowAsync(key)">@text</button>
+                }
+            </div>
+        </div>
+        @if (AnalysisLoading)
+        {
+            <div class="text-secondary" style="padding: 24px 0; text-align: center;">分析中...</div>
+        }
+        else if (Analysis == null || Analysis.TotalRequests == 0)
+        {
+            <div class="text-secondary" style="padding: 24px 0; text-align: center;">窗口内无审计数据</div>
+        }
+        else
+        {
+            var s = Analysis.Summary;
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0;">
+                <span class="tag tag-secondary">总请求 @Analysis.TotalRequests.ToString("N0")</span>
+                <span class="tag @(s.SuccessRatePct >= 95 ? "tag-success" : s.SuccessRatePct >= 80 ? "tag-info" : "tag-danger")">成功率 @s.SuccessRatePct.ToString("F1")%（失败 @s.Failures）</span>
+                <span class="tag tag-secondary">成本 $@s.TotalCostUsd.ToString("F4")</span>
+                <span class="tag tag-info">P50/P95/P99 @(s.P50LatencyMs.ToString("F0"))/@(s.P95LatencyMs.ToString("F0"))/@(s.P99LatencyMs.ToString("F0")) ms</span>
+                <span class="tag tag-secondary">Token 入/出 @(s.PromptTokens.ToString("N0"))/@(s.CompletionTokens.ToString("N0"))</span>
+                <span class="tag @(Analysis.Cascade.TriggerRatePct > 20 ? "tag-warning" : "tag-secondary")">级联触发 @Analysis.Cascade.TriggerRatePct.ToString("F1")%</span>
+                @if (Analysis.Fusion.FusionRequests > 0)
+                {
+                    <span class="tag tag-info">Fusion @Analysis.Fusion.FusionRequests 次</span>
+                }
+            </div>
+
+            <div class="chart-pair">
+                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 8px 0 0 0;">
+                    <div class="card-label">按日请求趋势</div>
+                    <div class="chart-container">
+                        <canvas id="analysis-trend-chart" @ref="AnalysisTrendCanvas" role="img" aria-label="按日请求趋势图"></canvas>
+                    </div>
+                </div>
+                <div class="glass-card" style="background: transparent; box-shadow: none; padding: 8px 0 0 0;">
+                    <div class="card-label">模型分布（请求量 · 成功率 · 成本）</div>
+                    <div style="position: relative; width: 100%; height: @(Math.Max(120, Math.Min(8, Analysis.ByModel.Count) * 30 + 16))px;">
+                        <canvas id="analysis-model-chart" @ref="AnalysisModelCanvas" role="img" aria-label="模型请求分布条形图"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-pair">
+                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 0;">
+                    <div class="card-label">分档 (Tier) 分布</div>
+                    <div class="table-wrap">
+                        <table class="log-table">
+                            <thead>
+                                <tr><th scope="col">Tier</th><th scope="col">请求</th><th scope="col">失败</th><th scope="col">成功率</th><th scope="col">成本</th><th scope="col">成本份额</th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var t in Analysis.ByTier)
+                                {
+                                    <tr>
+                                        <td><span class="tag tag-info">@t.Tier</span></td>
+                                        <td>@t.Requests.ToString("N0")</td>
+                                        <td class="@(t.Failures > 0 ? "text-danger" : "")">@t.Failures</td>
+                                        <td>@t.SuccessRatePct.ToString("F1")%</td>
+                                        <td style="color: var(--ok-text);">$@t.CostUsd.ToString("F4")</td>
+                                        <td>@t.CostSharePct.ToString("F1")%</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="glass-card" style="background: transparent; box-shadow: none; padding: 0;">
+                    <div class="card-label">路由原因 Top 5</div>
+                    <div class="table-wrap">
+                        <table class="log-table">
+                            <thead>
+                                <tr><th scope="col">原因</th><th scope="col">次数</th><th scope="col">成功率</th></tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var r in Analysis.ByReason.Take(5))
+                                {
+                                    <tr>
+                                        <td title="@r.Reason" style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">@Truncate(r.Reason, 40)</td>
+                                        <td>@r.Requests.ToString("N0")</td>
+                                        <td class="@(r.SuccessRatePct >= 80 ? "text-success" : "text-danger")">@r.SuccessRatePct.ToString("F1")%</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                    @if (Analysis.Cascade.UpgradedFrom.Count > 0)
+                    {
+                        <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px;">
+                            <span class="text-secondary" style="font-size: 0.78rem;">级联升级自：</span>
+                            @foreach (var kv in Analysis.Cascade.UpgradedFrom.Take(6))
+                            {
+                                <span class="tag tag-secondary">@kv.Key ×@kv.Value</span>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
     </div>
 
     <!-- 审计日志 -->
@@ -277,6 +386,13 @@
     private PeriodicTimer? _timer;
     private CancellationTokenSource _cts = new();
 
+    // ── 审计分析 ──
+    private ApiService.AuditAnalysisDto? Analysis;
+    private string AnalysisWindowKey = "7d";
+    private bool AnalysisLoading = true;
+    private ElementReference AnalysisTrendCanvas;
+    private ElementReference AnalysisModelCanvas;
+
     /// <summary>datetime-local 绑定值（Kind=Unspecified 的本地墙钟时间）转 UTC ISO 8601；空返回 null。</summary>
     private static string? ToUtcIso(DateTime? localDateTime)
         => localDateTime?.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture);
@@ -349,6 +465,69 @@
 
         _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
         _ = PollMetricsLoopAsync();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        // 首次渲染后 Canvas ref 才绑定，此时拉取并绘制分析图表。
+        if (firstRender)
+        {
+            await LoadAnalysisAsync();
+        }
+    }
+
+    private static (DateTime From, DateTime To) AnalysisWindow(string key)
+        => key switch
+        {
+            "24h" => (DateTime.UtcNow.AddDays(-1), DateTime.UtcNow),
+            "30d" => (DateTime.UtcNow.AddDays(-30), DateTime.UtcNow),
+            _ => (DateTime.UtcNow.AddDays(-7), DateTime.UtcNow),
+        };
+
+    private async Task SetAnalysisWindowAsync(string key)
+    {
+        if (AnalysisWindowKey == key) return;
+        AnalysisWindowKey = key;
+        await LoadAnalysisAsync();
+    }
+
+    private async Task LoadAnalysisAsync()
+    {
+        AnalysisLoading = true;
+        var (from, to) = AnalysisWindow(AnalysisWindowKey);
+        Analysis = await Api.GetAuditAnalysisAsync(from, to);
+        AnalysisLoading = false;
+        await InvokeAsync(StateHasChanged);
+        await RenderAnalysisChartsAsync();
+    }
+
+    private async Task RenderAnalysisChartsAsync()
+    {
+        if (Analysis is null || Analysis.TotalRequests == 0) return;
+        try
+        {
+            var trend = Analysis.DailyTrend
+                .Select(d => new { day = d.Day, requests = (double)d.Requests })
+                .ToArray();
+            if (trend.Length > 0)
+                await JS.InvokeVoidAsync("drawAnalysisTrendChart", AnalysisTrendCanvas, trend);
+
+            var bars = Analysis.ByModel.Take(8)
+                .Select(m => new
+                {
+                    label = m.Model,
+                    value = (double)m.Requests,
+                    text = $"{m.SuccessRatePct:F1}% · ${m.CostUsd:F4} · P95 {m.P95LatencyMs:F0}ms",
+                })
+                .ToArray();
+            if (bars.Length > 0)
+                await JS.InvokeVoidAsync("drawAnalysisBarChart", AnalysisModelCanvas, bars);
+        }
+        catch (Exception ex)
+        {
+            // Canvas 未绑定/JS 未就绪是常见场景，降级为 Debug 便于排查图表不渲染。
+            Logger.LogDebug(ex, "Requests RenderAnalysisCharts JS invoke failed");
+        }
     }
 
     private async Task PollMetricsLoopAsync()

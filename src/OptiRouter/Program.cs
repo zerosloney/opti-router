@@ -37,14 +37,16 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
 });
 
-// 配置存储：Routing/Budget/模型配置全部落 SQLite（默认 data/optirouter-config.db，路径由
-// OptiRouter:ConfigDbPath 覆盖）。页面写入经 AppConfigDbStore → IConfigurationRoot.Reload() 热生效。
+// 配置存储：Routing/Budget/模型配置全部落配置库（默认 SQLite data/optirouter-config.db，路径由
+// OptiRouter:ConfigDbPath 覆盖；配置 OptiRouter:ConfigDbConnectionString 后切到 MariaDB 后端）。
+// 页面写入经 AppConfigDbStore → IConfigurationRoot.Reload() 热生效。
 // 首启迁移：库为空时从 appsettings.json 的 Routing/Budget 段与遗留 models-config.json 导入一次，
-// 之后 DB 为唯一权威，appsettings.json 仅保留部署级设置（密钥/端口/限流/DB 路径）。
+// 之后 DB 为唯一权威，appsettings.json 仅保留部署级设置（密钥/端口/限流/DB 连接）。
 string configDbPath = builder.Configuration["OptiRouter:ConfigDbPath"]
     ?? Path.Combine(builder.Environment.ContentRootPath, "data", "optirouter-config.db");
-builder.Services.AddSingleton(sp => new AppConfigDbStore(configDbPath));
-builder.Configuration.Sources.Add(new DbAppConfigSource { DbPath = configDbPath });
+string? configDbConnectionString = builder.Configuration["OptiRouter:ConfigDbConnectionString"];
+builder.Services.AddSingleton(sp => new AppConfigDbStore(configDbPath, configDbConnectionString));
+builder.Configuration.Sources.Add(new DbAppConfigSource { DbPath = configDbPath, ConnectionString = configDbConnectionString });
 
 // Bind and validate RouterOptions on startup.
 builder.Services.AddMemoryCache(options =>
@@ -91,13 +93,18 @@ builder.Services.AddSingleton<IModelClientProvider>(sp => new ModelClientProvide
     sp.GetRequiredService<ModelClientFactory>(),
     sp.GetRequiredService<IOptionsMonitor<RouterOptions>>()));
 
-// 成本账本存储：支持 "Postgres" | "Redis" | "Sqlite" | "InMemory"。
-// 对于 K8s 多节点部署架构，配置 "Postgres" 或 "Redis" 即可实现跨节点全局成本计费与断路器共享。
+// 成本账本存储：支持 "MariaDb" | "Postgres" | "Redis" | "Sqlite" | "InMemory"。
+// 对于 K8s 多节点部署架构，配置 "MariaDb"、"Postgres" 或 "Redis" 即可实现跨节点全局成本计费与断路器共享。
 builder.Services.AddSingleton<ICostLedgerStore>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
     string provider = options.Budget.StoreProvider ?? "Sqlite";
 
+    if (string.Equals(provider, "MariaDb", StringComparison.OrdinalIgnoreCase))
+    {
+        return new MariaDbCostLedgerStore(options.Budget.MariaDbConnectionString,
+            logger: sp.GetService<ILogger<MariaDbCostLedgerStore>>());
+    }
     if (string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase))
     {
         return new PostgresCostLedgerStore(options.Budget.PostgresConnectionString,
@@ -122,12 +129,17 @@ builder.Services.AddSingleton<ICostLedgerStore>(sp =>
     return new SqliteCostLedgerStore(storePath);
 });
 
-// 请求审计存储：支持 "Postgres" | "Sqlite" | "InMemory"。
+// 请求审计存储：支持 "MariaDb" | "Postgres" | "Sqlite" | "InMemory"。
 builder.Services.AddSingleton<IRequestAuditStore>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
     string provider = options.Budget.StoreProvider ?? "Sqlite";
 
+    if (string.Equals(provider, "MariaDb", StringComparison.OrdinalIgnoreCase))
+    {
+        return new MariaDbRequestAuditStore(options.Budget.MariaDbConnectionString!,
+            sp.GetService<ILogger<MariaDbRequestAuditStore>>());
+    }
     if (string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase))
     {
         return new PostgresRequestAuditStore(options.Budget.PostgresConnectionString);
@@ -174,8 +186,12 @@ builder.Services.AddOpenTelemetry()
     });
 
 // t3: 注册成本账本、跨请求模型健康跟踪器（三态断路器）和路由引擎。
-// 注册 ClientKeyService
-builder.Services.AddSingleton<ClientKeyService>(sp => new ClientKeyService(Path.Combine(builder.Environment.ContentRootPath, "data", "client-keys.json"), sp.GetRequiredService<ILogger<ClientKeyService>>()));
+// 注册 ClientKeyService（租户 Key 与配额管理；配置 ConfigDbConnectionString 后持久化到 MariaDB，
+// 否则默认 client-keys.json 文件）
+builder.Services.AddSingleton<ClientKeyService>(sp => new ClientKeyService(
+    Path.Combine(builder.Environment.ContentRootPath, "data", "client-keys.json"),
+    sp.GetRequiredService<ILogger<ClientKeyService>>(),
+    mariaDbConnectionString: configDbConnectionString));
 
 builder.Services.AddSingleton<CostLedger>(sp =>
 {
@@ -204,6 +220,9 @@ builder.Services.AddSingleton<AlertEngine>(sp =>
 
 // 告警历史环形缓冲：告警出现/恢复事件进程内留痕，供 Dashboard 历史查询。
 builder.Services.AddSingleton<OptiRouter.Health.AlertHistory>();
+
+// 审计分析：时间窗全量聚合报告（总览/分模型/分档/级联/Fusion/路由原因/日趋势），供策略调优闭环。
+builder.Services.AddSingleton<AuditAnalysisService>();
 
 // Token 估算器：Tiktoken 模式用 SharpToken 真实 BPE 计数（内置词表、离线可用，异常自动回退分桶粗估）；
 // Bucket 模式用分桶加权粗估。编码名校验由 RouterOptionsValidator 在启动时完成。
@@ -241,12 +260,14 @@ builder.Services.AddSingleton<ISemanticVectorEngine>(sp =>
         highConfidenceThreshold: options.Routing.HybridHighConfidenceThreshold);
 });
 
-// Thompson 采样 + Contextual Bandit 状态持久化（共享同一 SQLite 文件）。
+// Thompson 采样 + Contextual Bandit 状态持久化（MariaDb 共享库；SQLite 与成本账本共享同一文件）。
 builder.Services.AddSingleton<IThompsonStateStore>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
     if (!options.Budget.UsePersistentStore)
         return NullLearningStateStore.Instance;
+    if (string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase))
+        return new MariaDbLearningStateStore(options.Budget.MariaDbConnectionString!);
     string storePath = options.Budget.StorePath;
     string? dir = Path.GetDirectoryName(storePath);
     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
@@ -257,7 +278,9 @@ builder.Services.AddSingleton<IThompsonStateStore>(sp =>
 builder.Services.AddSingleton<IBanditStateStore>(sp =>
 {
     var tsStore = sp.GetRequiredService<IThompsonStateStore>();
-    return tsStore is SqliteLearningStateStore sqlite ? sqlite : NullLearningStateStore.Instance;
+    return tsStore is SqliteLearningStateStore or MariaDbLearningStateStore
+        ? (IBanditStateStore)tsStore
+        : NullLearningStateStore.Instance;
 });
 
 builder.Services.AddSingleton<ThompsonStateStore>(sp =>

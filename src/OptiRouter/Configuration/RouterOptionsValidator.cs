@@ -61,12 +61,20 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         }
 
         if (!string.Equals(options.Budget.StoreProvider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.Budget.StoreProvider, "Postgres", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.Budget.StoreProvider, "Redis", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.Budget.StoreProvider, "InMemory", StringComparison.OrdinalIgnoreCase))
         {
             return ValidateOptionsResult.Fail(
-                "Budget.StoreProvider 必须是 'Sqlite'、'Postgres'、'Redis' 或 'InMemory'。");
+                "Budget.StoreProvider 必须是 'Sqlite'、'MariaDb'、'Postgres'、'Redis' 或 'InMemory'。");
+        }
+
+        if (string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase)
+            && string.IsNullOrWhiteSpace(options.Budget.MariaDbConnectionString))
+        {
+            return ValidateOptionsResult.Fail(
+                "Budget.MariaDbConnectionString 不能为空（当 StoreProvider 为 MariaDb 时）。");
         }
 
         if (string.Equals(options.Budget.StoreProvider, "Postgres", StringComparison.OrdinalIgnoreCase)

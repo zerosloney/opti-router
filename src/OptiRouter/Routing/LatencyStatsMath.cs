@@ -1,8 +1,7 @@
 namespace OptiRouter.Routing;
 
 /// <summary>
-/// 延迟统计数学工具：纯函数、无状态，供 InMemory / SQLite 审计存储复用，
-/// 与 <c>scripts/analyze_audit.py</c> 的 percentile 语义保持一致。
+/// 延迟统计数学工具：纯函数、无状态，供各审计存储（InMemory/SQLite/MariaDB）复用。
 /// </summary>
 public static class LatencyStatsMath
 {

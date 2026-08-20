@@ -39,6 +39,7 @@ public class RouterOptionsValidatorTests
 
     [Theory]
     [InlineData("SQLITE")]
+    [InlineData("mArIaDb")]
     [InlineData("pOsTgReS")]
     [InlineData("rEdIs")]
     [InlineData("iNmEmOrY")]
@@ -49,6 +50,7 @@ public class RouterOptionsValidatorTests
         options.Budget.StorePath = string.Equals(provider, "Sqlite", StringComparison.OrdinalIgnoreCase)
             ? "data/test-budget.db"
             : "";
+        options.Budget.MariaDbConnectionString = "Server=localhost;Database=test";
         options.Budget.PostgresConnectionString = "Host=localhost;Database=optirouter";
         options.Budget.RedisConnectionString = "localhost:6379";
 
@@ -67,6 +69,23 @@ public class RouterOptionsValidatorTests
 
         Assert.False(result.Succeeded);
         Assert.Contains("StoreProvider", result.FailureMessage);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void MariaDbWithoutConnectionString_ShouldReturnFailure(string? connectionString)
+    {
+        var options = CreateValidOptions();
+        options.Budget.StoreProvider = "MariaDb";
+        options.Budget.StorePath = "";
+        options.Budget.MariaDbConnectionString = connectionString;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("MariaDbConnectionString", result.FailureMessage);
     }
 
     [Theory]

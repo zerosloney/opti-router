@@ -8,7 +8,7 @@ using Microsoft.Data.Sqlite;
 namespace OptiRouter.Configuration;
 
 /// <summary>
-/// SQLite 应用配置存储：替代 appsettings.json 的 Routing/Budget 段与 models-config.json。
+/// 应用配置存储：替代 appsettings.json 的 Routing/Budget 段与 models-config.json。
 /// <list type="bullet">
 /// <item><c>routing</c> / <c>budget</c>：单文档（key=<c>document</c>，值为 JSON 文本）；</item>
 /// <item><c>model</c>：每模型一行（key=模型名或 Id，<c>ord</c> 保序，值为模型 JSON）。</item>
@@ -16,6 +16,11 @@ namespace OptiRouter.Configuration;
 /// 页面写入经 <see cref="ModelsConfigService"/>（模型）与 DashboardHandler（路由/预算）落到本存储，
 /// 随后触发 <see cref="Microsoft.Extensions.Configuration.IConfigurationRoot.Reload"/> 热生效。
 /// </summary>
+/// <remarks>
+/// 双后端门面：构造时传入 MariaDB 连接串（<c>OptiRouter:ConfigDbConnectionString</c>）则走
+/// <see cref="MariaDbAppConfigStore"/>（表名 optirouter_ 前缀）；否则走默认 SQLite 文件后端。
+/// 公共契约不变，消费方（Dashboard/ModelsConfigService/DbAppConfigProvider）无感切换。
+/// </remarks>
 public sealed class AppConfigDbStore : IDisposable
 {
     public const string RoutingScope = "routing";
@@ -23,7 +28,9 @@ public sealed class AppConfigDbStore : IDisposable
     public const string ModelScope = "model";
     private const string DocumentKey = "document";
 
-    private readonly SqliteConnection _connection;
+    // MariaDB 后端时保持 null（null! 以免全部 SQLite 代码路径逐处判空；公共方法均先委托 MariaDb 后端）。
+    private readonly SqliteConnection _connection = null!;
+    private readonly MariaDbAppConfigStore? _mariaDb;
     private readonly object _gate = new();
     private bool _disposed;
 
@@ -42,8 +49,27 @@ public sealed class AppConfigDbStore : IDisposable
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) }
     };
 
-    public AppConfigDbStore(string dbPath)
+    /// <summary>
+    /// 用 SQLite 文件路径构造（默认后端）。
+    /// </summary>
+    public AppConfigDbStore(string dbPath) : this(dbPath, mariaDbConnectionString: null)
     {
+    }
+
+    /// <summary>
+    /// 构造配置存储：传入 <paramref name="mariaDbConnectionString"/> 时使用 MariaDB 后端，
+    /// 否则使用 SQLite 文件后端。
+    /// </summary>
+    /// <param name="dbPath">SQLite 文件路径（仅 SQLite 后端使用）。</param>
+    /// <param name="mariaDbConnectionString">MariaDB 连接串（<c>OptiRouter:ConfigDbConnectionString</c>）。</param>
+    public AppConfigDbStore(string dbPath, string? mariaDbConnectionString)
+    {
+        if (!string.IsNullOrWhiteSpace(mariaDbConnectionString))
+        {
+            _mariaDb = new MariaDbAppConfigStore(mariaDbConnectionString);
+            return;
+        }
+
         ArgumentNullException.ThrowIfNull(dbPath);
         string fullPath = Path.GetFullPath(dbPath);
         string? dir = Path.GetDirectoryName(fullPath);
@@ -83,6 +109,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>追加一条配置变更记录；超过 200 条时淘汰最旧。</summary>
     public void AppendConfigChange(string actor, string summary)
     {
+        if (_mariaDb is not null) { _mariaDb.AppendConfigChange(actor, summary); return; }
         ArgumentException.ThrowIfNullOrWhiteSpace(actor);
         ArgumentNullException.ThrowIfNull(summary);
         lock (_gate)
@@ -106,6 +133,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>读取最近的配置变更记录（按时间倒序）。</summary>
     public IList<ConfigChangeEntry> LoadConfigChanges(int limit = 50)
     {
+        if (_mariaDb is not null) return _mariaDb.LoadConfigChanges(limit);
         if (limit <= 0) limit = 50;
         lock (_gate)
         {
@@ -125,6 +153,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>保存一份评测批次报告（JSON），并裁剪到最近 <paramref name="maxBatches"/> 批。</summary>
     public void SaveEvalBatch(string batchId, string timestamp, string reportJson, int maxBatches = 10)
     {
+        if (_mariaDb is not null) { _mariaDb.SaveEvalBatch(batchId, timestamp, reportJson, maxBatches); return; }
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
         ArgumentNullException.ThrowIfNull(reportJson);
         lock (_gate)
@@ -169,6 +198,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>读取全部已持久化的评测批次（batchId, 时间戳, 报告 JSON），按时间倒序。</summary>
     public IList<(string BatchId, string Timestamp, string ReportJson)> LoadEvalBatches()
     {
+        if (_mariaDb is not null) return _mariaDb.LoadEvalBatches();
         lock (_gate)
         {
             var result = new List<(string, string, string)>();
@@ -186,6 +216,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>是否存在任何已持久化配置（决定是否执行首启迁移）。</summary>
     public bool HasData()
     {
+        if (_mariaDb is not null) return _mariaDb.HasData();
         lock (_gate)
         {
             using var cmd = _connection.CreateCommand();
@@ -197,6 +228,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>读取单文档 scope（routing/budget）的 JSON 文本；不存在返回 null。</summary>
     public string? LoadDocument(string scope)
     {
+        if (_mariaDb is not null) return _mariaDb.LoadDocument(scope);
         lock (_gate)
         {
             using var cmd = _connection.CreateCommand();
@@ -210,6 +242,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>覆盖写入单文档 scope。原子（UPSERT）。</summary>
     public void SaveDocument(string scope, string json)
     {
+        if (_mariaDb is not null) { _mariaDb.SaveDocument(scope, json); return; }
         lock (_gate)
         {
             using var cmd = _connection.CreateCommand();
@@ -230,6 +263,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>原子读取路由/预算文档及其内容版本。</summary>
     public (string? RoutingJson, string? BudgetJson, string Version) LoadRoutingBudgetSnapshot()
     {
+        if (_mariaDb is not null) return _mariaDb.LoadRoutingBudgetSnapshot();
         lock (_gate)
         {
             string? routing = LoadDocumentNoLock(RoutingScope, transaction: null);
@@ -247,6 +281,7 @@ public sealed class AppConfigDbStore : IDisposable
         string budgetJson,
         out string version)
     {
+        if (_mariaDb is not null) return _mariaDb.TrySaveRoutingBudgetDocuments(expectedVersion, routingJson, budgetJson, out version);
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedVersion);
         ArgumentNullException.ThrowIfNull(routingJson);
         ArgumentNullException.ThrowIfNull(budgetJson);
@@ -310,6 +345,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>读取原始模型列表（不展开 env: 引用），按 ord 排序。</summary>
     public IList<ModelEndpointOptions> LoadModelsRaw()
     {
+        if (_mariaDb is not null) return _mariaDb.LoadModelsRaw();
         lock (_gate)
         {
             var list = new List<ModelEndpointOptions>();
@@ -339,6 +375,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>整体替换模型列表（给定顺序即 ord）。</summary>
     public void SaveModels(IEnumerable<ModelEndpointOptions> models)
     {
+        if (_mariaDb is not null) { _mariaDb.SaveModels(models); return; }
         ArgumentNullException.ThrowIfNull(models);
         lock (_gate)
         {
@@ -387,6 +424,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>新增或按名称/Id 更新单个模型；返回影响行数。</summary>
     public int UpsertModel(ModelEndpointOptions model)
     {
+        if (_mariaDb is not null) return _mariaDb.UpsertModel(model);
         ArgumentNullException.ThrowIfNull(model);
         lock (_gate)
         {
@@ -411,6 +449,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>按名称或 Id 删除模型；返回是否删除。</summary>
     public bool DeleteModel(string nameOrId)
     {
+        if (_mariaDb is not null) return _mariaDb.DeleteModel(nameOrId);
         lock (_gate)
         {
             using var cmd = _connection.CreateCommand();
@@ -428,6 +467,7 @@ public sealed class AppConfigDbStore : IDisposable
     /// <summary>读取给定模型的原始 ApiKey（用于保存时恢复 env: 字面量）。</summary>
     public string? GetRawApiKey(string nameOrId)
     {
+        if (_mariaDb is not null) return _mariaDb.GetRawApiKey(nameOrId);
         lock (_gate)
         {
             using var cmd = _connection.CreateCommand();
@@ -439,7 +479,7 @@ public sealed class AppConfigDbStore : IDisposable
     }
 
     /// <summary>模型行主键：Name 非空用 Name，否则 Id，否则用占位（防重复碰撞追加序号由归一化处理）。</summary>
-    private static string ModelKey(ModelEndpointOptions model, int ord)
+    internal static string ModelKey(ModelEndpointOptions model, int ord)
     {
         if (!string.IsNullOrWhiteSpace(model.Name))
             return model.Name;
@@ -452,7 +492,8 @@ public sealed class AppConfigDbStore : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _connection.Dispose();
+        _connection?.Dispose();
+        _mariaDb?.Dispose();
         GC.SuppressFinalize(this);
     }
 }

@@ -427,20 +427,19 @@ dotnet test OptiRouter.sln -c Release
 dotnet test OptiRouter.sln -c Release --filter "FullyQualifiedName~EndToEndSmokeTests"
 ```
 
-## 离线审计分析
+## 审计分析
 
-OptiRouter 把每条请求的成败、成本、延迟、命中分档、级联事件写进 SQLite 审计库（默认 `data/optirouter-budget.db` 的 `request_audit` 表）。`scripts/analyze_audit.py` 消费这些数据，产出 Markdown 报告，用于闭环路由策略调优的实证依据——验证规则分类误判率、各档实际成功率/成本分布、级联触发率。
+审计库（SQLite 或 MariaDB 后端，见 Budget.StoreProvider / ConfigDbConnectionString）按时间窗全量聚合，产出策略调优闭环的实证依据——各模型/分档实际成功率、成本分布、延迟分位（P50/P95/P99）、级联触发率、Fusion 角色分布、路由原因 Top N 与按日趋势。
 
-零外部依赖，仅 Python 标准库 `sqlite3`。只读 DB，不改数据。
+分析能力内置于服务（`AuditAnalysisService`），对所有存储后端（InMemory/SQLite/MariaDB/Postgres）通用，经管理 API 获取 JSON 报告：
 
 ```bash
-# 默认读 data/optirouter-budget.db，报告打到 stdout
-python scripts/analyze_audit.py
-
-# 指定 DB 与时间范围，写文件
-python scripts/analyze_audit.py --db /path/to/optirouter-budget.db \
-    --from 2026-07-01 --to 2026-08-07 --out report.md
+# 最近 24 小时窗口（from/to 为 UTC ISO 时间，需 AdminApiKey）
+curl -H "Authorization: Bearer <AdminApiKey>" \
+    "http://localhost:5080/api/dashboard/audit/analysis?from=2026-08-20T00:00:00Z&to=2026-08-21T00:00:00Z"
 ```
+
+报告结构：`summary`（总量/成功率/成本/Token/延迟分位）、`byModel`、`byTier`（含成本份额）、`cascade`（触发率 + 升级来源分布）、`fusion`、`byReason`（Top 20）、`dailyTrend`。
 
 ## 部署
 

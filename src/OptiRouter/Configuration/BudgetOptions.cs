@@ -39,10 +39,15 @@ public sealed class BudgetOptions
     public int SessionEvictionHours { get; set; } = 24;
 
     /// <summary>
-    /// 分布式持久化存储提供者："Sqlite" | "Postgres" | "Redis" | "InMemory"。默认 "Sqlite"。
-    /// 对于 Kubernetes 多节点无状态部署场景，可切换为 "Postgres" 或 "Redis" 共享全局账本。
+    /// 分布式持久化存储提供者："Sqlite" | "MariaDb" | "Postgres" | "Redis" | "InMemory"。默认 "Sqlite"。
+    /// 对于 Kubernetes 多节点无状态部署场景，可切换为 "MariaDb"、"Postgres" 或 "Redis" 共享全局账本。
     /// </summary>
     public string StoreProvider { get; set; } = "Sqlite";
+
+    /// <summary>
+    /// MariaDB/MySQL 连接字符串。当 <see cref="StoreProvider"/> 为 "MariaDb" 时必填。
+    /// </summary>
+    public string? MariaDbConnectionString { get; set; } = null;
 
     /// <summary>
     /// PostgreSQL 连接字符串。当 <see cref="StoreProvider"/> 为 "Postgres" 时必填。

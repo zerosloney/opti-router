@@ -432,7 +432,7 @@ public class RuleClassifierPolicyTests
         Assert.Equal("code-complex", result.ClassificationSignal);
         Assert.Equal(ModelTier.Strong, result.ClassificationTargetTier);
         Assert.Equal(RequestComplexity.Complex, result.RequestComplexity);
-        // Reason 保持 target=Tier(signal) 可解析格式（analyze_audit 依赖）。
+        // Reason 保持 target=Tier(signal) 可解析格式。
         Assert.Contains("target=Strong(code-complex)", result.Reason);
         // ReasonEvents 结构化事件存在。
         Assert.Contains(result.ReasonEvents, e => e.Policy == "rule-classifier"

@@ -180,6 +180,20 @@ public static class DashboardHandler
             await httpContext.Response.WriteAsync("\uFEFF" + sb.ToString(), httpContext.RequestAborted);
         });
 
+        // 4a-2. 审计分析：时间窗全量聚合报告（总览/分模型/分档/级联/Fusion/路由原因/日趋势）。
+        // 与列表接口的"最近 500 条活动缓冲"不同，本端点经 GetByTimeRange 分页拉取全窗口，供策略调优闭环。
+        endpoints.MapGet("/api/dashboard/audit/analysis", (AuditAnalysisService analyzer, string? from = null, string? to = null) =>
+        {
+            if (!TryParseUtcTimestamp(from, out DateTime fromUtc))
+                return Results.BadRequest(new { error = "from 必须是 ISO 8601 时间（如 2026-08-20T00:00:00Z）。" });
+            if (!TryParseUtcTimestamp(to, out DateTime toUtc))
+                return Results.BadRequest(new { error = "to 必须是 ISO 8601 时间（如 2026-08-21T00:00:00Z）。" });
+            if (fromUtc >= toUtc)
+                return Results.BadRequest(new { error = "from 必须早于 to。" });
+
+            return Results.Ok(analyzer.Analyze(fromUtc, toUtc));
+        });
+
         // 4b. Single Request Record Full Trace Detail
         endpoints.MapGet("/api/dashboard/requests/detail", (IRequestAuditStore auditStore, string id) =>
         {
@@ -736,6 +750,14 @@ public static class DashboardHandler
         key.MaxQps,
         key.Enabled,
         key.CreatedAt);
+
+    /// <summary>解析 UTC ISO 时间戳（审计分析端点参数）；空串返回 false。</summary>
+    private static bool TryParseUtcTimestamp(string? value, out DateTime utc)
+    {
+        utc = DateTime.MinValue;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        return DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out utc);
+    }
 
     /// <summary>
     /// 审计日志统一筛选：model/tier/status/minLatency 为原有语义；

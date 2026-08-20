@@ -4,26 +4,28 @@ using Microsoft.Extensions.Configuration;
 namespace OptiRouter.Configuration;
 
 /// <summary>
-/// 将 SQLite 应用配置库（routing/budget 文档 + 模型列表）映射为 IConfiguration 的
-/// "OptiRouter:Routing" / "OptiRouter:Budget" / "OptiRouter:Models" 节点。
+/// 将应用配置库（routing/budget 文档 + 模型列表，SQLite 或 MariaDB 后端）映射为
+/// IConfiguration 的 "OptiRouter:Routing" / "OptiRouter:Budget" / "OptiRouter:Models" 节点。
 /// 配置写入由 <see cref="AppConfigDbStore"/> 完成，随后 IConfigurationRoot.Reload()
 /// 重新触发本提供者的 <see cref="Load"/>，IOptionsMonitor 热生效。
 /// </summary>
 public sealed class DbAppConfigProvider : ConfigurationProvider
 {
     private readonly string _dbPath;
+    private readonly string? _connectionString;
 
-    public DbAppConfigProvider(string dbPath)
+    public DbAppConfigProvider(string dbPath, string? connectionString = null)
     {
         ArgumentNullException.ThrowIfNull(dbPath);
         _dbPath = dbPath;
+        _connectionString = connectionString;
     }
 
     public override void Load()
     {
         try
         {
-            using var store = new AppConfigDbStore(_dbPath);
+            using var store = new AppConfigDbStore(_dbPath, _connectionString);
             var data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
 
             AddDocument(store, AppConfigDbStore.RoutingScope, "OptiRouter:Routing", data);
@@ -109,8 +111,11 @@ public sealed class DbAppConfigSource : IConfigurationSource
     /// <summary>SQLite 配置库路径。</summary>
     public string DbPath { get; init; } = string.Empty;
 
+    /// <summary>MariaDB 连接串；非空时配置库走 MariaDB 后端（<c>OptiRouter:ConfigDbConnectionString</c>）。</summary>
+    public string? ConnectionString { get; init; }
+
     public IConfigurationProvider Build(IConfigurationBuilder builder)
     {
-        return new DbAppConfigProvider(DbPath);
+        return new DbAppConfigProvider(DbPath, ConnectionString);
     }
 }

@@ -5,32 +5,55 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using Microsoft.Extensions.Logging;
 using System.Runtime.InteropServices;
+using MySqlConnector;
 
 namespace OptiRouter.Configuration;
 
 /// <summary>
-/// 客户端 API Key 与多租户配额管理服务。持久化至 client-keys.json。
+/// 客户端 API Key 与多租户配额管理服务。默认持久化至 client-keys.json；
+/// 构造时传入 MariaDB 连接串（<c>OptiRouter:ConfigDbConnectionString</c>）
+/// 则切换为 MariaDB 后端（表 optirouter_client_keys，见 <see cref="MariaDbClientKeyStore"/>）。
 /// 密钥以 SHA256 哈希存储（KeyHash），明文仅在创建时返回一次；KeyId 为公开标识用于管理引用。
 /// </summary>
 /// <remarks>
 /// 花费持久化为去抖批量：<see cref="RecordSpend"/> 仅同步更新内存中的 <see cref="ClientKeyInfo.DailySpendUsd"/>
-/// （保证 <see cref="AuthorizeRequest"/> 的预算/QPS 管控即时生效），不再每请求同步 fsync 整个文件；
-/// 后台定时器按 <see cref="_flushInterval"/> 合并落盘。高 QPS 下数千笔花费合并为一次磁盘写。
+/// （保证 <see cref="AuthorizeRequest"/> 的预算/QPS 管控即时生效），不再每请求同步落盘/落库；
+/// 后台定时器按 <see cref="_flushInterval"/> 合并持久化。高 QPS 下数千笔花费合并为一次写。
 /// 进程崩溃最多丢失一个 flush 窗口内的花费记录（成本统计而非资金，可接受）。
-/// 需要即时落盘时调 <see cref="Flush"/>；DI 注册的单例实现 <see cref="IDisposable"/>，
+/// 需要即时持久化时调 <see cref="Flush"/>；DI 注册的单例实现 <see cref="IDisposable"/>，
 /// 容器关闭时自动 Dispose 触发最终 Flush。
+/// <para>
+/// DB 后端多实例语义：建/改/删为按行写，各实例互不覆盖；花费以相对增量提交并在库内累加；
+/// QPS 固定秒窗与日预算经库端行锁单条 UPDATE 原子判定（<b>全局口径</b>，预算/上限引用列值，
+/// 即时反映其他实例的管理端修改）；缓存按 30 秒周期重载（重载前先提交本实例增量），
+/// 实例间对 key 列表与全局花费最终一致。预算判定基于库内已提交花费，各实例 ≤3 秒
+/// flush 窗口内的未提交花费可能造成轻微超订（后付费记账固有）。MariaDB 不可达时
+/// 准入降级为进程内口径并按状态迁移记一次日志，恢复后自动回切。
+/// </para>
 /// </remarks>
 public sealed class ClientKeyService : IDisposable
 {
     /// <summary>默认花费落盘去抖间隔（高 QPS 合并写）。</summary>
     public static readonly TimeSpan DefaultFlushInterval = TimeSpan.FromSeconds(3);
 
+    // DB 模式缓存刷新间隔：超过后下次读取先重载（多实例可见其他实例的建/改/删 key，最终一致）。
+    private static readonly TimeSpan DbCacheRefreshInterval = TimeSpan.FromSeconds(30);
+
     private readonly string _filePath;
+    // MariaDB 后端；null = JSON 文件后端（null! 以免文件代码路径逐处判空，方法入口先委托 DB 后端）。
+    private readonly MariaDbClientKeyStore? _mariaDb = null!;
+    private readonly ILogger<ClientKeyService> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly object _gate = new();
     private readonly Dictionary<string, QpsWindow> _qpsWindows = new(StringComparer.Ordinal);
+    // DB 模式待提交的按 key 花费增量（本实例视角），flush 时以相对增量提交到库；
+    // 请求数不走增量——由全局准入语句在库端原子计数。
+    private readonly Dictionary<string, decimal> _pendingDeltas = new(StringComparer.Ordinal);
+    // 0 = DB 准入正常，1 = 已降级进程内口径。按状态迁移记日志，故障期间不逐请求刷屏。
+    private int _dbAuthDegraded;
     private List<ClientKeyInfo>? _cachedKeys;
     private DateTime _lastFileWriteTimeUtc = DateTime.MinValue;
+    private DateTime _lastDbLoadUtc = DateTime.MinValue;
     private readonly TimeSpan _flushInterval;
     private readonly ITimer? _flushTimer;
     private bool _spendDirty;
@@ -48,17 +71,28 @@ public sealed class ClientKeyService : IDisposable
         string? filePath,
         ILogger<ClientKeyService> logger,
         TimeProvider? timeProvider = null,
-        TimeSpan? flushInterval = null)
+        TimeSpan? flushInterval = null,
+        string? mariaDbConnectionString = null)
     {
         ArgumentNullException.ThrowIfNull(logger);
+        _logger = logger;
 
-        _filePath = string.IsNullOrWhiteSpace(filePath)
-            ? Path.Combine("data", "client-keys.json")
-            : filePath;
+        if (!string.IsNullOrWhiteSpace(mariaDbConnectionString))
+        {
+            _mariaDb = new MariaDbClientKeyStore(mariaDbConnectionString);
+            _filePath = string.Empty;
+        }
+        else
+        {
+            _filePath = string.IsNullOrWhiteSpace(filePath)
+                ? Path.Combine("data", "client-keys.json")
+                : filePath;
+        }
+
         _timeProvider = timeProvider ?? TimeProvider.System;
         _flushInterval = flushInterval ?? DefaultFlushInterval;
 
-        EnsureFileExists();
+        EnsureStorageReady();
 
         // 去抖落盘定时器：周期检查 _spendDirty，合并写一次。Zero/负值禁用定时器（仅供测试）。
         if (_flushInterval > TimeSpan.Zero)
@@ -71,10 +105,21 @@ public sealed class ClientKeyService : IDisposable
         }
     }
 
-    private void EnsureFileExists()
+    /// <summary>启动校验：文件后端确保文件存在且结构合法；DB 后端建表并加载校验缓存。</summary>
+    private void EnsureStorageReady()
     {
         lock (_gate)
         {
+            if (_mariaDb is not null)
+            {
+                var loaded = _mariaDb.Load();
+                foreach (var key in loaded)
+                    ValidatePersistedKey(key);
+                _cachedKeys = loaded;
+                _lastDbLoadUtc = _timeProvider.GetUtcNow().UtcDateTime;
+                return;
+            }
+
             string? dir = Path.GetDirectoryName(Path.GetFullPath(_filePath));
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
@@ -83,7 +128,7 @@ public sealed class ClientKeyService : IDisposable
             {
                 // New installations deliberately start empty. A plaintext default key must never
                 // be generated, logged, or written to disk.
-                SaveKeysToFile(new List<ClientKeyInfo>());
+                PersistKeys(new List<ClientKeyInfo>());
                 return;
             }
 
@@ -95,6 +140,25 @@ public sealed class ClientKeyService : IDisposable
 
     private List<ClientKeyInfo> GetCachedOrLoadKeysNoLock()
     {
+        // DB 后端：本进程为写者之一（多实例并发），缓存按 DbCacheRefreshInterval 周期性重载，
+        // 重载前先提交本实例挂起的增量，保证全局值不丢。
+        if (_mariaDb is not null)
+        {
+            if (_cachedKeys is not null
+                && _timeProvider.GetUtcNow().UtcDateTime - _lastDbLoadUtc < DbCacheRefreshInterval)
+            {
+                return _cachedKeys;
+            }
+
+            FlushPendingDeltasNoLock();
+            var dbLoaded = _mariaDb.Load();
+            foreach (var key in dbLoaded)
+                ValidatePersistedKey(key);
+            _cachedKeys = dbLoaded;
+            _lastDbLoadUtc = _timeProvider.GetUtcNow().UtcDateTime;
+            return _cachedKeys;
+        }
+
         if (File.Exists(_filePath))
         {
             var lastWrite = File.GetLastWriteTimeUtc(_filePath);
@@ -192,6 +256,17 @@ public sealed class ClientKeyService : IDisposable
             DateTime today = UtcToday();
             bool changed = RollDailySpend(matched, today);
             long currentWindow = _timeProvider.GetUtcNow().ToUnixTimeSeconds();
+
+            if (_mariaDb is not null)
+            {
+                // 记忆体预算快速拒绝（含本实例未提交增量），预算耗尽时省一次 DB 往返。
+                if (matched.DailyBudgetUsd > 0m && matched.DailySpendUsd >= matched.DailyBudgetUsd)
+                    return identity(ClientKeyAuthorizationStatus.BudgetExhausted, RetryAfterSecondsForDay(today));
+
+                return AuthorizeViaDbNoLock(matched, identity, today, currentWindow);
+            }
+
+            // 文件后端：进程内固定秒窗 QPS + 记忆体预算。
             if (!_qpsWindows.TryGetValue(matched.KeyId, out var window)
                 || window.StartUnixSecond != currentWindow)
             {
@@ -202,7 +277,7 @@ public sealed class ClientKeyService : IDisposable
             if (window.Count >= maxQps)
             {
                 if (changed)
-                    SaveKeysToFile(keys);
+                    PersistKeys(keys);
 
                 return identity(ClientKeyAuthorizationStatus.RateLimited, RetryAfterSecondsForWindow(currentWindow));
             }
@@ -210,7 +285,7 @@ public sealed class ClientKeyService : IDisposable
             if (matched.DailyBudgetUsd > 0m && matched.DailySpendUsd >= matched.DailyBudgetUsd)
             {
                 if (changed)
-                    SaveKeysToFile(keys);
+                    PersistKeys(keys);
 
                 return identity(ClientKeyAuthorizationStatus.BudgetExhausted, RetryAfterSecondsForDay(today));
             }
@@ -218,12 +293,80 @@ public sealed class ClientKeyService : IDisposable
             _qpsWindows[matched.KeyId] = window with { Count = window.Count + 1 };
             matched.DailyRequestCount++;
             if (changed)
-                SaveKeysToFile(keys);
+                PersistKeys(keys);
             else
                 _spendDirty = true; // 请求计数变化由去抖定时器合并落盘
 
             return identity(ClientKeyAuthorizationStatus.Authorized);
         }
+    }
+
+    /// <summary>
+    /// DB 后端全局准入：QPS 固定秒窗与日预算在 MariaDB 行锁下原子判定（多实例共享口径）。
+    /// MariaDB 不可达时降级为进程内口径（与文件模式同语义）并按状态迁移记一次日志，恢复后自动回切。
+    /// </summary>
+    private ClientKeyAuthorizationResult AuthorizeViaDbNoLock(
+        ClientKeyInfo matched,
+        Func<ClientKeyAuthorizationStatus, int, ClientKeyAuthorizationResult> identity,
+        DateTime today,
+        long currentWindow)
+    {
+        try
+        {
+            var admission = _mariaDb!.TryAdmit(matched.KeyId, today, currentWindow);
+            MarkAuthRecovered();
+            switch (admission)
+            {
+                case ClientKeyAdmission.Admitted:
+                    matched.DailyRequestCount++; // 本地近似值（UI/预算快速路径用），权威计数在库内
+                    return identity(ClientKeyAuthorizationStatus.Authorized, 0);
+
+                case ClientKeyAdmission.BudgetExhausted:
+                    return identity(ClientKeyAuthorizationStatus.BudgetExhausted, RetryAfterSecondsForDay(today));
+
+                case ClientKeyAdmission.RateLimited:
+                    return identity(ClientKeyAuthorizationStatus.RateLimited, RetryAfterSecondsForWindow(currentWindow));
+
+                case ClientKeyAdmission.Disabled:
+                    return identity(ClientKeyAuthorizationStatus.Disabled, 0);
+
+                default:
+                    return ClientKeyAuthorizationResult.Invalid; // 行已被其他实例删除，缓存刷新后即正确
+            }
+        }
+        catch (Exception ex) when (ex is MySqlException or IOException)
+        {
+            MarkAuthDegraded(ex);
+            // 降级：进程内固定秒窗 + 记忆体预算（含未提交增量）。
+            if (!_qpsWindows.TryGetValue(matched.KeyId, out var window)
+                || window.StartUnixSecond != currentWindow)
+            {
+                window = new QpsWindow(currentWindow, 0);
+            }
+
+            if (window.Count >= Math.Max(1, matched.MaxQps))
+                return identity(ClientKeyAuthorizationStatus.RateLimited, RetryAfterSecondsForWindow(currentWindow));
+
+            _qpsWindows[matched.KeyId] = window with { Count = window.Count + 1 };
+            matched.DailyRequestCount++;
+            return identity(ClientKeyAuthorizationStatus.Authorized, 0);
+        }
+    }
+
+    private void MarkAuthDegraded(Exception ex)
+    {
+        if (Interlocked.Exchange(ref _dbAuthDegraded, 1) == 0)
+        {
+            _logger.LogError(ex,
+                "Client key global admission degraded: MariaDB unreachable, falling back to per-process QPS/budget. " +
+                "Limits are per-node until MariaDB recovers");
+        }
+    }
+
+    private void MarkAuthRecovered()
+    {
+        if (Interlocked.Exchange(ref _dbAuthDegraded, 0) == 1)
+            _logger.LogWarning("Client key global admission recovered; QPS/budget limits are global again");
     }
 
     /// <summary>
@@ -247,22 +390,51 @@ public sealed class ClientKeyService : IDisposable
             RollDailySpend(item, today);
             item.DailySpendUsd += cost;
             item.DailySpendDateUtc ??= today;
-            _spendDirty = true;
+            if (_mariaDb is not null)
+                TrackSpendDelta(item.KeyId, cost);
+            else
+                _spendDirty = true;
         }
     }
 
     /// <summary>
-    /// 立即把挂起的花费同步落盘。供测试、手动持久化与优雅关闭使用。
+    /// 立即把挂起的花费同步落盘/落库。供测试、手动持久化与优雅关闭使用。
     /// 多次调用幂等；无脏数据时为 no-op。
     /// </summary>
     public void Flush()
     {
         lock (_gate)
         {
-            if (_disposed || !_spendDirty) return;
-            SaveKeysToFile(GetCachedOrLoadKeysNoLock());
+            if (_disposed) return;
+            if (_mariaDb is not null)
+            {
+                FlushPendingDeltasNoLock();
+                return;
+            }
+
+            if (!_spendDirty) return;
+            PersistKeys(GetCachedOrLoadKeysNoLock());
             _spendDirty = false;
         }
+    }
+
+    /// <summary>DB 后端：把本实例挂起的花费增量逐 key 提交到库；单 key 失败保留其余重试。</summary>
+    private void FlushPendingDeltasNoLock()
+    {
+        if (_pendingDeltas.Count == 0) return;
+
+        DateTime today = UtcToday();
+        foreach (var keyId in _pendingDeltas.Keys.ToList())
+        {
+            _mariaDb!.ApplySpendDelta(keyId, today, _pendingDeltas[keyId]);
+            _pendingDeltas.Remove(keyId);
+        }
+    }
+
+    private void TrackSpendDelta(string keyId, decimal spendDelta)
+    {
+        _pendingDeltas.TryGetValue(keyId, out decimal current);
+        _pendingDeltas[keyId] = current + spendDelta;
     }
 
     /// <summary>定时器回调：脏则合并落盘。异常吞掉以免后台任务死亡（下一周期重试）。</summary>
@@ -276,7 +448,7 @@ public sealed class ClientKeyService : IDisposable
     }
 
     /// <summary>
-    /// 释放定时器并尽力把挂起的花费最终落盘。DI 容器关闭单例时自动触发（优雅关闭即不丢账）。
+    /// 释放定时器并尽力把挂起的花费最终落盘/落库。DI 容器关闭单例时自动触发（优雅关闭即不丢账）。
     /// </summary>
     public void Dispose()
     {
@@ -287,17 +459,16 @@ public sealed class ClientKeyService : IDisposable
             if (_disposed) return;
             _disposed = true;
 
-            if (_spendDirty)
+            try
             {
-                try
-                {
-                    SaveKeysToFile(GetCachedOrLoadKeysNoLock());
-                    _spendDirty = false;
-                }
-                catch
-                {
-                    // 优雅关闭期间的最终落盘为 best-effort，失败不抛以免中断关闭。
-                }
+                if (_mariaDb is not null)
+                    FlushPendingDeltasNoLock();
+                else if (_spendDirty)
+                    PersistKeys(GetCachedOrLoadKeysNoLock());
+            }
+            catch
+            {
+                // 优雅关闭期间的最终落盘为 best-effort，失败不抛以免中断关闭。
             }
         }
     }
@@ -316,7 +487,10 @@ public sealed class ClientKeyService : IDisposable
             var keys = GetCachedOrLoadKeysNoLock();
             var (plaintext, info) = Build(tenantName.Trim(), dailyBudgetUsd, maxQps);
             keys.Add(info);
-            SaveKeysToFile(keys);
+            if (_mariaDb is not null)
+                _mariaDb.InsertKey(info); // 按行插入，不影响其他实例的行
+            else
+                PersistKeys(keys);
             return (plaintext, info);
         }
     }
@@ -333,7 +507,10 @@ public sealed class ClientKeyService : IDisposable
             if (dailyBudgetUsd.HasValue && dailyBudgetUsd.Value >= 0) item.DailyBudgetUsd = dailyBudgetUsd.Value;
             if (maxQps.HasValue && maxQps.Value > 0) item.MaxQps = maxQps.Value;
 
-            SaveKeysToFile(keys);
+            if (_mariaDb is not null)
+                _mariaDb.UpdateKeySettings(item); // 只写设置列，不触碰计数控（多实例安全）
+            else
+                PersistKeys(keys);
             return true;
         }
     }
@@ -346,8 +523,12 @@ public sealed class ClientKeyService : IDisposable
             int removed = keys.RemoveAll(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
             if (removed > 0)
             {
-                SaveKeysToFile(keys);
+                if (_mariaDb is not null)
+                    _mariaDb.DeleteKey(keyId); // 按行删除，不影响其他实例的行
+                else
+                    PersistKeys(keys);
                 _qpsWindows.Remove(keyId);
+                _pendingDeltas.Remove(keyId);
                 return true;
             }
 
@@ -432,7 +613,8 @@ public sealed class ClientKeyService : IDisposable
         return Math.Max(1, seconds >= int.MaxValue ? int.MaxValue : (int)Math.Ceiling(seconds));
     }
 
-    private void SaveKeysToFile(List<ClientKeyInfo> keys)
+    /// <summary>文件后端：持久化全部 Key（原子重写 + fsync 快照语义）。仅 JSON 文件模式调用。</summary>
+    private void PersistKeys(List<ClientKeyInfo> keys)
     {
         string json = JsonSerializer.Serialize(keys, JsonOpts);
         string fullPath = Path.GetFullPath(_filePath);
