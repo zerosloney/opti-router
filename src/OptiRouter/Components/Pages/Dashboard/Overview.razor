@@ -387,7 +387,7 @@
         await LoadWindowSummary();
         await LoadInternalState();
 
-        _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         _ = PollMetricsLoopAsync();
     }
 

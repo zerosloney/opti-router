@@ -10,7 +10,7 @@
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
             <span>路由引擎状态</span>
-            <span class="tag tag-info" style="font-size: 0.75rem;">● 实时</span>
+            <span class="tag tag-info" style="font-size: 0.75rem;">● 每 15 秒自动刷新</span>
         </div>
         @if (!string.IsNullOrEmpty(MetricsError))
         {
@@ -46,47 +46,25 @@
 
     <!-- 一键预设 -->
     <div class="glass-card">
-        <div class="preset-header">
-            <div class="preset-header-row">
-                <span>🚀 推荐配置预设</span>
-                @if (!string.IsNullOrEmpty(CurrentPresetName))
-                {
-                    <span class="tag tag-info">配置文件预设: @CurrentPresetName（只填充未显式配置的项）</span>
-                }
-                else
-                {
-                    <span class="tag tag-secondary">未使用配置文件预设</span>
-                }
-            </div>
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span>🚀 推荐配置预设</span>
             @if (PresetSummaries.Count > 0)
             {
                 @if (!string.IsNullOrEmpty(MatchedPresetName))
                 {
-                    <span class="tag tag-success" style="font-size: 0.82rem; padding: 0.3rem 0.8rem;">
-                        ✓ 当前配置匹配: @(PresetSummaries.FirstOrDefault(p => p.Name == MatchedPresetName)?.Title ?? MatchedPresetName)
-                    </span>
+                    <span class="tag tag-success">当前配置匹配: @(PresetSummaries.FirstOrDefault(p => p.Name == MatchedPresetName)?.Title ?? MatchedPresetName)</span>
                 }
                 else
                 {
-                    <span class="tag tag-secondary" style="font-size: 0.82rem; padding: 0.3rem 0.8rem;">
-                        自定义配置（不匹配任何预设）
-                    </span>
+                    <span class="tag">自定义配置（不匹配任何预设）</span>
                 }
             }
         </div>
         <div class="preset-grid">
             @foreach (var preset in PresetSummaries)
             {
-                var presetClass = preset.Name switch
-                {
-                    "cost-first" => "preset-card preset-card-cost",
-                    "balanced" => "preset-card preset-card-balanced",
-                    "quality-first" => "preset-card preset-card-quality",
-                    _ => "preset-card"
-                };
                 var isMatched = MatchedPresetName == preset.Name;
-
-                <div class="@presetClass @(isMatched ? "preset-card-matched" : "")">
+                <div class="preset-card @(isMatched ? "preset-card-matched" : "")">
                     <div class="preset-card-header">
                         <div>
                             <div class="preset-card-title">@preset.Name</div>
@@ -94,7 +72,7 @@
                         </div>
                         @if (isMatched)
                         {
-                            <span class="tag tag-success preset-card-matched-badge">✓ 匹配</span>
+                            <span class="tag tag-success" style="font-size: 0.7rem;">✓ 匹配</span>
                         }
                     </div>
                     <div class="preset-card-desc">@preset.Description</div>
@@ -104,7 +82,7 @@
                 </div>
             }
         </div>
-        <div class="meta-text" style="margin-top: 12px;">
+        <div class="meta-text" style="margin-top: 10px;">
             预设会把下述推荐值填入下方配置表单（可再微调），点「保存并热生效」才落盘——所见即所存。
         </div>
     </div>
@@ -1882,7 +1860,7 @@
         await LoadSemanticRoutes();
         await LoadConfigChanges();
 
-        _timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
         _ = PollMetricsLoopAsync();
     }
 
