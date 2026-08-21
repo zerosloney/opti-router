@@ -29,10 +29,12 @@ public sealed record CostLedgerSyncEvent(
 
 /// <summary>
 /// 主动弹性时序故障/波动跨节点同步事件。
+/// 时序桶由接收侧从 <see cref="Timestamp"/> 的 Minute（minute-of-hour，[0,60)）派生——
+/// PredictiveResilienceEngine 的分钟桶仅接受该区间。曾存在一个绝对分钟戳的 MinuteBucket
+/// 字段（unixSeconds/60，千万级），全仓库无消费者且语义与接收侧不兼容，已删除。
 /// </summary>
 public sealed record PredictiveResilienceSyncEvent(
     string SenderNodeId,
     string ModelName,
-    int MinuteBucket,
     bool IsFailure,
     DateTimeOffset Timestamp);

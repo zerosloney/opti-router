@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 
 namespace OptiRouter.Mesh;
 
@@ -6,11 +7,13 @@ namespace OptiRouter.Mesh;
 /// 基于 Redis pub/sub 的分布式状态网格实现 (Redis-backed Distributed State Mesh)。
 /// 多网关实例共享同一 Redis 时，事件经 JSON 序列化后广播到所有节点，
 /// 由 <see cref="DistributedMeshSynchronizer"/> 按 SenderNodeId 过滤回环。
-/// Redis 回调线程不执行用户 handler（会阻塞连接），投递到线程池异步执行。
+/// Redis 回调线程不执行用户 handler（会阻塞连接），投递到线程池异步执行；
+/// handler 异常被捕获并记错误日志——静默吞掉会造成本地与远端状态静默分歧且无从排查。
 /// </summary>
 public sealed class RedisDistributedStateMesh : IDistributedStateMesh
 {
     private readonly IRedisChannelBus _bus;
+    private readonly ILogger<RedisDistributedStateMesh>? _logger;
     private readonly object _lock = new();
     private readonly List<(string Channel, IDisposable Subscription)> _subscriptions = new();
     private long _publishedCount;
@@ -19,9 +22,11 @@ public sealed class RedisDistributedStateMesh : IDistributedStateMesh
     /// <inheritdoc />
     public string NodeId { get; }
 
-    public RedisDistributedStateMesh(IRedisChannelBus bus, string? nodeId = null)
+    public RedisDistributedStateMesh(IRedisChannelBus bus, string? nodeId = null,
+        ILogger<RedisDistributedStateMesh>? logger = null)
     {
         _bus = bus ?? throw new ArgumentNullException(nameof(bus));
+        _logger = logger;
         NodeId = string.IsNullOrWhiteSpace(nodeId)
             ? $"node-{Guid.NewGuid().ToString("N")[..8]}"
             : nodeId;
@@ -52,7 +57,21 @@ public sealed class RedisDistributedStateMesh : IDistributedStateMesh
                 {
                     Interlocked.Increment(ref _receivedCount);
                     // Redis 回调线程不能执行用户 handler（阻塞会拖垮连接），投递线程池。
-                    _ = Task.Run(() => onReceived(evt));
+                    // handler 异常必须可观测：记错误日志而非任其成为 UnobservedTaskException——
+                    // 否则本地状态（KV 前缀/卡尔曼/账本/弹性）与远端静默分歧且无从排查。
+                    _ = Task.Run(() =>
+                    {
+                        try
+                        {
+                            onReceived(evt);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger?.LogError(ex,
+                                "Mesh handler failed on channel {Channel} (node {NodeId}); local state may diverge from remote",
+                                channel, NodeId);
+                        }
+                    });
                 }
             }
             catch

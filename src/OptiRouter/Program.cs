@@ -379,7 +379,8 @@ builder.Services.AddSingleton<OptiRouter.Mesh.IDistributedStateMesh>(sp =>
         {
             return new OptiRouter.Mesh.RedisDistributedStateMesh(
                 new OptiRouter.Mesh.RedisChannelBus(options.Routing.MeshRedisConnectionString),
-                nodeId);
+                nodeId,
+                sp.GetService<ILogger<OptiRouter.Mesh.RedisDistributedStateMesh>>());
         }
         catch (Exception ex)
         {

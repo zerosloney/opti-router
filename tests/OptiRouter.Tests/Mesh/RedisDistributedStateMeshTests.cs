@@ -136,6 +136,36 @@ public sealed class RedisDistributedStateMeshTests
     }
 
     [Fact]
+    public async Task HandlerThrows_DoesNotBreakMesh_SubsequentEventsStillDelivered()
+    {
+        // 网格 handler 异常不能任其成为 UnobservedTaskException 静默吞掉——
+        // 须被捕获（记日志），且不得影响后续事件投递。
+        var bus = new FakeRedisChannelBus();
+        var nodeA = new RedisDistributedStateMesh(bus, "node-a");
+        var nodeB = new RedisDistributedStateMesh(bus, "node-b");
+
+        var deliverAfterFailure = new TaskCompletionSource<KvCachePrefixSyncEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
+        nodeB.Subscribe<KvCachePrefixSyncEvent>(ChannelKvCache, evt =>
+        {
+            if (evt.Tokens[0] == "boom")
+                throw new InvalidOperationException("handler explosion");
+            deliverAfterFailure.TrySetResult(evt);
+        });
+
+        // 第一条触发 handler 异常
+        await nodeA.PublishAsync(ChannelKvCache,
+            new KvCachePrefixSyncEvent("node-a", new[] { "boom", "b", "c" }, "m", DateTimeOffset.UtcNow));
+        // 第二条仍须正常送达（给异步异常留一点调度时间）
+        await Task.Delay(100);
+        await nodeA.PublishAsync(ChannelKvCache,
+            new KvCachePrefixSyncEvent("node-a", new[] { "ok", "y", "z" }, "m", DateTimeOffset.UtcNow));
+
+        var got = await deliverAfterFailure.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal("ok", got.Tokens[0]);
+        Assert.Equal(2, nodeB.GetStats().ReceivedEventsCount);
+    }
+
+    [Fact]
     public void GetStats_ReportsLocalCounters()
     {
         var bus = new FakeRedisChannelBus();

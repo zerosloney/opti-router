@@ -145,15 +145,14 @@ public sealed class DistributedMeshSynchronizer : IDisposable
     }
 
     /// <summary>
-    /// 广播本地主动弹性故障事件。
+    /// 广播本地主动弹性故障事件。时序桶由接收侧从事件 Timestamp 的 minute-of-hour 派生。
     /// </summary>
     public Task BroadcastResilienceOutcomeAsync(string modelName, bool isFailure, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(modelName))
             return Task.CompletedTask;
 
-        int minuteBucket = (int)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60);
-        var evt = new PredictiveResilienceSyncEvent(_mesh.NodeId, modelName, minuteBucket, isFailure, DateTimeOffset.UtcNow);
+        var evt = new PredictiveResilienceSyncEvent(_mesh.NodeId, modelName, isFailure, DateTimeOffset.UtcNow);
         return _mesh.PublishAsync(ChannelResilience, evt, ct);
     }
 

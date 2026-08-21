@@ -96,12 +96,11 @@ public class DistributedMeshSynchronizerTests
         using var sync1 = new DistributedMeshSynchronizer(sharedMesh, resilienceEngine: resilienceA);
         using var sync2 = new DistributedMeshSynchronizer(sharedMesh, resilienceEngine: resilienceB);
 
-        int minuteBucket = (int)(DateTimeOffset.UtcNow.ToUnixTimeSeconds() / 60);
-
         // Node 1 reports 6 consecutive failures on deepseek-r1
+        //（时序桶由接收侧从 Timestamp.Minute 派生，事件不携带桶字段）
         for (int i = 0; i < 6; i++)
         {
-            var evt = new PredictiveResilienceSyncEvent("node-1", "deepseek-r1", minuteBucket, true, DateTimeOffset.UtcNow);
+            var evt = new PredictiveResilienceSyncEvent("node-1", "deepseek-r1", true, DateTimeOffset.UtcNow);
             await sharedMesh.PublishAsync(DistributedMeshSynchronizer.ChannelResilience, evt);
         }
 
