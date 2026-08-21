@@ -71,35 +71,67 @@ internal static class BoundedResponseReader
     /// 逐行读取流（含 SSE 行），单行超过 <see cref="MaxStreamLineBytes"/> 立即中断。
     /// 行尾 \r\n 与 \n 均归一为不含 \r 的行。替代 StreamReader.ReadLineAsync 的无行长限制读取。
     /// </summary>
+    /// <param name="stream">待读取的响应流。</param>
+    /// <param name="idleTimeout">
+    /// 空闲超时：相邻读取间隔超过该值（无任何新字节）抛 TaskCanceledException(inner: TimeoutException)。
+    /// null 时不限。流式无总时长上限——持续推进的流可跑任意久。
+    /// </param>
+    /// <param name="cancellationToken">外部取消令牌（客户端断开等）。</param>
     public static async IAsyncEnumerable<string> ReadLinesAsync(
         Stream stream,
+        TimeSpan? idleTimeout = null,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stream);
 
         var buffer = new byte[8 * 1024];
         var line = new List<byte>(256);
-        while (true)
+        CancellationTokenSource? idleCts = null;
+        try
         {
-            int bytesRead = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-            if (bytesRead == 0) break;
-
-            for (int i = 0; i < bytesRead; i++)
+            while (true)
             {
-                if (buffer[i] == (byte)'\n')
+                int bytesRead;
+                if (idleTimeout is { } idle)
                 {
-                    yield return TakeLine(line);
+                    // 每轮读取前重置计时：有数据推进就续命，只有真死流才超时。
+                    CancellationToken readToken = ModelClientRetry.IdleReadToken(ref idleCts, idle, cancellationToken);
+                    try
+                    {
+                        bytesRead = await stream.ReadAsync(buffer, readToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (idleCts is not null && ModelClientRetry.IsIdleTimeout(idleCts, cancellationToken))
+                    {
+                        throw ModelClientRetry.IdleTimeoutException(idle);
+                    }
                 }
                 else
                 {
-                    line.Add(buffer[i]);
-                    if (line.Count > MaxStreamLineBytes)
+                    bytesRead = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                }
+                if (bytesRead == 0) break;
+
+                for (int i = 0; i < bytesRead; i++)
+                {
+                    if (buffer[i] == (byte)'\n')
                     {
-                        throw new ResponseSizeLimitExceededException(MaxStreamLineBytes,
-                            $"Upstream stream line exceeded {MaxStreamLineBytes} bytes; aborting to prevent OOM.");
+                        yield return TakeLine(line);
+                    }
+                    else
+                    {
+                        line.Add(buffer[i]);
+                        if (line.Count > MaxStreamLineBytes)
+                        {
+                            throw new ResponseSizeLimitExceededException(MaxStreamLineBytes,
+                                $"Upstream stream line exceeded {MaxStreamLineBytes} bytes; aborting to prevent OOM.");
+                        }
                     }
                 }
             }
+        }
+        finally
+        {
+            idleCts?.Dispose();
         }
 
         if (line.Count > 0)

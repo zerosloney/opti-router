@@ -66,31 +66,38 @@ public sealed class GeminiModelClient : IModelClient
         // 429 刻意上抛给编排层做配额记账与换源。
         int maxRetries = _endpoint.MaxRetries;
         int attempt = 0;
+        TimeSpan totalTimeout = ModelClientRetry.ResolveCallTimeout(_endpoint);
         while (true)
         {
             try
             {
-                using var content = new StringContent(
-                    GeminiTranslators.BuildRequestBody(request, _endpoint),
-                    Encoding.UTF8,
-                    "application/json");
-                content.Headers.ContentType!.CharSet = "utf-8";
+                var (status, body) = await ModelClientRetry.WithTotalTimeout(
+                    totalTimeout, cancellationToken, async token =>
+                    {
+                        using var content = new StringContent(
+                            GeminiTranslators.BuildRequestBody(request, _endpoint),
+                            Encoding.UTF8,
+                            "application/json");
+                        content.Headers.ContentType!.CharSet = "utf-8";
 
-                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, GenerateContentPath) { Content = content };
-                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, GenerateContentPath) { Content = content };
+                        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-                using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-                // 有界读取：响应体超过上限立即中断，防异常/恶意上游超大响应撑爆内存（与 OpenAI 客户端一致）
-                string body = await BoundedResponseReader.ReadBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
+                        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                        // 有界读取：响应体超过上限立即中断，防异常/恶意上游超大响应撑爆内存（与 OpenAI 客户端一致）
+                        string body = await BoundedResponseReader.ReadBodyAsync(response.Content, token).ConfigureAwait(false);
+                        return (response.StatusCode, body);
+                    }).ConfigureAwait(false);
+
+                if ((int)status is < 200 or > 299)
                 {
-                    if (ModelClientRetry.IsRetryable(response.StatusCode) && attempt < maxRetries)
+                    if (ModelClientRetry.IsRetryable(status) && attempt < maxRetries)
                     {
                         attempt++;
                         await ModelClientRetry.DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
                         continue;
                     }
-                    throw new ModelClientException(response.StatusCode, body);
+                    throw new ModelClientException(status, body);
                 }
 
                 string openAiJson = GeminiTranslators.ToOpenAiJson(body);
@@ -146,7 +153,9 @@ public sealed class GeminiModelClient : IModelClient
         // 限长行读取：单行超上限立即中断，替代无行长限制的 StreamReader.ReadLineAsync。
         bool doneSent = false;
         await foreach (string line in BoundedResponseReader.ReadLinesAsync(
-            response.Content.ReadAsStream(cancellationToken), cancellationToken).ConfigureAwait(false))
+                response.Content.ReadAsStream(cancellationToken),
+                idleTimeout: ModelClientRetry.ResolveCallTimeout(_endpoint),
+                cancellationToken: cancellationToken).ConfigureAwait(false))
         {
             if (!line.StartsWith("data: ", StringComparison.Ordinal)) continue;
             string data = line["data: ".Length..].Trim();
@@ -204,9 +213,10 @@ public sealed class GeminiModelClient : IModelClient
     private async Task<HttpResponseMessage> SendStreamRequestAsync(ChatRequest request, CancellationToken ct)
     {
         // 重试仅覆盖“拿到成功响应头”之前的阶段（与 OpenAI 客户端流式重试一致）；
-        // 响应体流一旦开始下发不再重试，避免重复输出。
+        // 响应体流一旦开始下发不再重试，避免重复输出。建连阶段按 TimeoutSeconds 施加总时长上限。
         int maxRetries = _endpoint.MaxRetries;
         int attempt = 0;
+        TimeSpan connectTimeout = ModelClientRetry.ResolveCallTimeout(_endpoint);
         while (true)
         {
             try
@@ -220,7 +230,9 @@ public sealed class GeminiModelClient : IModelClient
                 using var httpRequest = new HttpRequestMessage(HttpMethod.Post, StreamGenerateContentPath) { Content = content };
                 httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-                var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                var response = await ModelClientRetry.WithTotalTimeout(
+                    connectTimeout, ct,
+                    token => _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, token)).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
                     var statusCode = response.StatusCode;

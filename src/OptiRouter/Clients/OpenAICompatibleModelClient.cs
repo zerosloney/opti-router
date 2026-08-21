@@ -266,39 +266,44 @@ public sealed class OpenAICompatibleModelClient : IModelClient
 
         int maxRetries = _endpoint.MaxRetries;
         int attempt = 0;
+        TimeSpan totalTimeout = ModelClientRetry.ResolveCallTimeout(_endpoint);
 
         while (true)
         {
             try
             {
-                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
-                httpRequest.Content = new StringContent(json, Encoding.UTF8);
-                httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                var (status, responseBody, metadata) = await ModelClientRetry.WithTotalTimeout(
+                    totalTimeout, cancellationToken, async token =>
+                    {
+                        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
+                        httpRequest.Content = new StringContent(json, Encoding.UTF8);
+                        httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
-                var responseSw = System.Diagnostics.Stopwatch.StartNew();
-                using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-                responseSw.Stop();
-                var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
-                var responseBody = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
+                        var responseSw = System.Diagnostics.Stopwatch.StartNew();
+                        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false);
+                        responseSw.Stop();
+                        var metadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
+                        var responseBody = await ReadResponseBodyAsync(response.Content, token).ConfigureAwait(false);
+                        return (response.StatusCode, responseBody, metadata);
+                    }).ConfigureAwait(false);
 
-                if (!response.IsSuccessStatusCode)
+                if (!IsSuccessStatusCode(status))
                 {
-                    var exception = new ModelClientException(response.StatusCode, responseBody, metadata: metadata);
-                    if (IsRetryable(response.StatusCode) && attempt < maxRetries)
+                    if (ModelClientRetry.IsRetryable(status) && attempt < maxRetries)
                     {
                         attempt++;
-                        await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+                        await ModelClientRetry.DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
                         continue;
                     }
-                    throw exception;
+                    throw new ModelClientException(status, responseBody, metadata: metadata);
                 }
 
                 return new RawChatResponse(responseBody, TryExtractUsage(responseBody), metadata);
             }
-            catch (Exception ex) when (IsExceptionRetryable(ex) && attempt < maxRetries)
+            catch (Exception ex) when (ModelClientRetry.IsExceptionRetryable(ex) && attempt < maxRetries)
             {
                 attempt++;
-                await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+                await ModelClientRetry.DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -316,6 +321,8 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         System.Diagnostics.Stopwatch? responseSw = null;
         int maxRetries = _endpoint.MaxRetries;
         int attempt = 0;
+        // 建连（响应头）阶段 = 总时长上限；响应体阶段 = 空闲上限（同值复用 TimeoutSeconds 语义）。
+        TimeSpan callTimeout = ModelClientRetry.ResolveCallTimeout(_endpoint);
 
         while (true)
         {
@@ -326,7 +333,9 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 httpRequest.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
                 responseSw = System.Diagnostics.Stopwatch.StartNew();
-                response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                response = await ModelClientRetry.WithTotalTimeout(
+                    callTimeout, cancellationToken,
+                    token => _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, token)).ConfigureAwait(false);
                 responseMetadata = UpstreamResponseMetadataNormalizer.Normalize(response, responseSw.ElapsedMilliseconds);
 
                 if (!response.IsSuccessStatusCode)
@@ -362,6 +371,11 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 await DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
             }
         }
+
+        // 空闲超时：读到数据即重置计时；超过 callTimeout 无任何新字节 → 断流。
+        // 不设总时长上限——持续推进的长生成流不会被中途腰斩（TTFB 由 StreamFirstTokenTimeoutMs/建连超时约束）。
+        CancellationTokenSource? idleCts = null;
+        TimeSpan idleTimeout = callTimeout;
 
         try
         {
@@ -406,7 +420,17 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var result = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                ReadResult result;
+                try
+                {
+                    CancellationToken readToken = ModelClientRetry.IdleReadToken(ref idleCts, idleTimeout, cancellationToken);
+                    result = await reader.ReadAsync(readToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (idleCts is not null && ModelClientRetry.IsIdleTimeout(idleCts, cancellationToken))
+                {
+                    await reader.CompleteAsync().ConfigureAwait(false);
+                    throw ModelClientRetry.IdleTimeoutException(idleTimeout);
+                }
                 var buffer = result.Buffer;
 
                 // 在 buffer 中找换行符，逐行处理。
@@ -477,6 +501,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         }
         finally
         {
+            idleCts?.Dispose();
             response?.Dispose();
         }
     }
@@ -498,6 +523,9 @@ public sealed class OpenAICompatibleModelClient : IModelClient
 
     private static bool IsRetryable(System.Net.HttpStatusCode statusCode)
         => ModelClientRetry.IsRetryable(statusCode);
+
+    private static bool IsSuccessStatusCode(System.Net.HttpStatusCode statusCode)
+        => (int)statusCode is >= 200 and <= 299;
 
     private static bool IsExceptionRetryable(Exception ex)
         => ModelClientRetry.IsExceptionRetryable(ex);

@@ -40,8 +40,11 @@ public sealed class ModelClientFactory
         else
             httpClient.BaseAddress = new Uri(endpoint.BaseUrl);
 
-        // 配置超时。
-        httpClient.Timeout = TimeSpan.FromSeconds(endpoint.TimeoutSeconds > 0 ? endpoint.TimeoutSeconds : 120);
+        // 超时策略：共享 HttpClient 不设总时长上限（Infinite）——HttpClient.Timeout 会切断
+        // 超过阈值的整个流式读取过程，长生成流会被中途腰斩。总时长约束按调用形态施加：
+        // 非流式/流式建连阶段由 ModelClientRetry.WithTotalTimeout(TimeoutSeconds) 兜底；
+        // 流式响应体改为空闲超时（相邻 chunk 间隔 > TimeoutSeconds 才断流），推进中的流不设总上限。
+        httpClient.Timeout = Timeout.InfiniteTimeSpan;
 
         ConfigureAuthentication(endpoint, httpClient.DefaultRequestHeaders);
 
