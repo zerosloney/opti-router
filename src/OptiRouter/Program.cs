@@ -734,8 +734,10 @@ app.Use(async (context, next) =>
 app.UseStaticFiles();
 
 // 解析登录会话 Cookie（管理端可视化界面鉴权）。
+// UseAuthorization 延后到自定义鉴权中间件之后：Minimal Hosting 在管道最前完成路由匹配，
+// 未映射的 /v1/* 会落到兜底页 MapFallbackToPage（带 [Authorize]），若 UseAuthorization 先行
+// 会触发 Cookie Challenge（302 /login）而非代理协议要求的 401 JSON——API 客户端拿到登录页重定向。
 app.UseAuthentication();
-app.UseAuthorization();
 
 app.Use(async (context, next) =>
 {
@@ -972,6 +974,8 @@ static async Task WriteClientKeyProblemAsync(
 }
 
 // M2 阶段：分区最大并发数控制，防止单用户请求洪水打满线程池
+// （端点级授权——Blazor Hub RequireAuthorization / Razor 页 [Authorize]——在此之后评估。）
+app.UseAuthorization();
 app.Use(async (context, next) =>
 {
     if (!IsProxyPath(context.Request.Path))

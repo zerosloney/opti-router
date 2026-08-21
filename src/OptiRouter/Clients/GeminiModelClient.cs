@@ -151,6 +151,8 @@ public sealed class GeminiModelClient : IModelClient
 
         // Gemini 流式与 OpenAI 同为 data: {...} 行格式。
         // 限长行读取：单行超上限立即中断，替代无行长限制的 StreamReader.ReadLineAsync。
+        // 有状态翻译器：functionCall part 映射为 tool_calls（此前被跳过导致流式工具调用丢失）。
+        var lineTranslator = new GeminiTranslators.StreamLineTranslator();
         bool doneSent = false;
         await foreach (string line in BoundedResponseReader.ReadLinesAsync(
                 response.Content.ReadAsStream(cancellationToken),
@@ -161,17 +163,20 @@ public sealed class GeminiModelClient : IModelClient
             string data = line["data: ".Length..].Trim();
             if (string.IsNullOrEmpty(data)) continue;
 
-            string? translated = GeminiTranslators.TranslateStreamLine(data);
-            if (translated == "[DONE]")
+            foreach (string translated in lineTranslator.Translate(data))
             {
-                yield return new RawStreamLine("[DONE]", null, null);
-                doneSent = true;
-                break;
+                if (translated == "[DONE]")
+                {
+                    yield return new RawStreamLine("[DONE]", null, null);
+                    doneSent = true;
+                    break;
+                }
+                else if (translated is not null)
+                {
+                    yield return new RawStreamLine(translated, null, null);
+                }
             }
-            else if (translated is not null)
-            {
-                yield return new RawStreamLine(translated, null, null);
-            }
+            if (doneSent) break;
         }
 
         if (!doneSent)

@@ -388,11 +388,11 @@ public class ReviewFixTests
         var response = await client.GetAsync("/benchmarks");
 
         Assert.Equal(HttpStatusCode.Redirect, response.StatusCode);
-        // [Authorize] 会保留 ReturnUrl 以便登录后跳回原页面，验证 LocalPath 与 ReturnUrl 而非整串比较
+        // 重定向来自自定义鉴权中间件（"/login" 不带 ReturnUrl——登录页固定回 /overview，
+        // ReturnUrl 本就无人消费；UseAuthorization 延后后不再由 Cookie Challenge 产生带参重定向）。
         var location = response.Headers.Location;
         Assert.NotNull(location);
-        Assert.Equal("/login", location.LocalPath);
-        Assert.Equal("?ReturnUrl=%2Fbenchmarks", location.Query);
+        Assert.Equal("/login", location.ToString());
     }
 
     [Fact]

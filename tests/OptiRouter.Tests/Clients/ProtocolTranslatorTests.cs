@@ -175,6 +175,114 @@ public sealed class AnthropicTranslatorsTests
         Assert.Equal("[DONE]", AnthropicTranslators.TranslateStreamEvent("message_stop", """{"type":"message_stop"}"""));
         Assert.Null(AnthropicTranslators.TranslateStreamEvent("message_start", """{"type":"message_start"}"""));
     }
+
+    [Fact]
+    public void StreamEventTranslator_UpstreamToolUse_FullLifecycle()
+    {
+        // 上行方向：Anthropic SSE 的 tool_use 块（含参数分片）→ OpenAI tool_calls 增量。
+        // 此前 input_json_delta 被跳过，流式工具参数全部丢失。
+        var translator = new AnthropicTranslators.StreamEventTranslator();
+
+        // text 块的 start 不产生输出
+        Assert.Null(translator.Translate("content_block_start",
+            """{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"""));
+
+        // tool_use 块 start → tool_calls 首片（index 映射：块 1 → tool 0）
+        string? first = translator.Translate("content_block_start",
+            """{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"get_weather"}}""");
+        Assert.NotNull(first);
+        using (var doc = JsonDocument.Parse(first!))
+        {
+            var tc = doc.RootElement.GetProperty("choices")[0].GetProperty("delta").GetProperty("tool_calls")[0];
+            Assert.Equal(0, tc.GetProperty("index").GetInt32());
+            Assert.Equal("toolu_1", tc.GetProperty("id").GetString());
+            Assert.Equal("get_weather", tc.GetProperty("function").GetProperty("name").GetString());
+            Assert.Equal(string.Empty, tc.GetProperty("function").GetProperty("arguments").GetString());
+        }
+
+        // 参数分片逐段转发（两段拼成完整 JSON）
+        string? frag1 = translator.Translate("content_block_delta",
+            """{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\":"}}""");
+        Assert.NotNull(frag1);
+        Assert.Equal("{\"city\":", JsonDocument.Parse(frag1!).RootElement
+            .GetProperty("choices")[0].GetProperty("delta").GetProperty("tool_calls")[0]
+            .GetProperty("function").GetProperty("arguments").GetString());
+
+        string? frag2 = translator.Translate("content_block_delta",
+            """{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"Beijing\"}"}}""");
+        Assert.NotNull(frag2);
+
+        // text_delta 仍走静态路径
+        string? text = translator.Translate("content_block_delta",
+            """{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}""");
+        Assert.NotNull(text);
+        Assert.Equal("hi", JsonDocument.Parse(text!).RootElement
+            .GetProperty("choices")[0].GetProperty("delta").GetProperty("content").GetString());
+
+        // stop_reason=tool_use → finish_reason=tool_calls
+        string? finish = translator.Translate("message_delta",
+            """{"type":"message_delta","delta":{"stop_reason":"tool_use"}}""");
+        Assert.NotNull(finish);
+        Assert.Equal("tool_calls", JsonDocument.Parse(finish!).RootElement
+            .GetProperty("choices")[0].GetProperty("finish_reason").GetString());
+
+        Assert.Equal("[DONE]", translator.Translate("message_stop", """{"type":"message_stop"}"""));
+    }
+
+    [Fact]
+    public void FromAnthropicJson_AssistantTextAndToolUse_SingleMessage()
+    {
+        // text + tool_use 混合的 assistant 轮次 → 单条消息（content 与 tool_calls 同存），
+        // 不再拆成两条连续 assistant。
+        const string body = """
+            {"model":"claude-3-5-sonnet","max_tokens":100,
+            "messages":[
+              {"role":"user","content":"weather?"},
+              {"role":"assistant","content":[
+                {"type":"text","text":"Let me check."},
+                {"type":"tool_use","id":"toolu_1","name":"get_weather","input":{"city":"Beijing"}}
+              ]}
+            ]}
+            """;
+
+        var request = AnthropicTranslators.FromAnthropicJson(body);
+
+        Assert.Equal(2, request.Messages.Count);
+        var assistant = request.Messages[1];
+        Assert.Equal("assistant", assistant.Role);
+        Assert.NotNull(assistant.ExtensionData);
+        Assert.True(assistant.ExtensionData!.ContainsKey("tool_calls"));
+        using var contentDoc = JsonDocument.Parse(assistant.Content!.Value.GetRawText());
+        Assert.Equal("Let me check.", contentDoc.RootElement[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void AnthropicStreamTranslator_DownstreamToolCalls_FlushedAsToolUseBlocks()
+    {
+        // 下行方向：OpenAI 流式 tool_calls 分片 → 收尾输出完整 tool_use 块（Anthropic 客户端可执行工具）。
+        var translator = new AnthropicTranslators.AnthropicStreamTranslator("claude-3-5-sonnet");
+
+        translator.OnData("""{"choices":[{"index":0,"delta":{"role":"assistant","content":"查一下"}}]}""");
+        translator.OnData("""{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}""");
+        translator.OnData("""{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"Beijing\"}"}}]}}]}""");
+        translator.OnData("""{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}""");
+
+        var finalBlocks = translator.OnData("[DONE]");
+        string all = string.Join(string.Empty, finalBlocks);
+
+        Assert.Contains("\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"get_weather\"", all, StringComparison.Ordinal);
+        // partial_json 的完整参数值经解析断言——默认 JSON 编码器会把字符串内的引号转义为 \u0022
+        var deltaEvent = finalBlocks.First(b => b.Contains("input_json_delta", StringComparison.Ordinal));
+        int dataStart = deltaEvent.IndexOf("data: ", StringComparison.Ordinal) + "data: ".Length;
+        using var deltaDoc = JsonDocument.Parse(deltaEvent[dataStart..].Trim());
+        Assert.Equal("""{"city":"Beijing"}""",
+            deltaDoc.RootElement.GetProperty("delta").GetProperty("partial_json").GetString());
+        Assert.Contains("\"stop_reason\":\"tool_use\"", all, StringComparison.Ordinal);
+        // 工具块序号在文本块（index 0）之后
+        Assert.Contains("\"type\":\"content_block_start\",\"index\":1", all, StringComparison.Ordinal);
+        Assert.Contains("\"type\":\"content_block_stop\",\"index\":1", all, StringComparison.Ordinal);
+        Assert.Contains("message_stop", all, StringComparison.Ordinal);
+    }
 }
 
 public sealed class GeminiTranslatorsTests
@@ -243,5 +351,86 @@ public sealed class GeminiTranslatorsTests
         Assert.Equal("Hello ", deltaDoc.RootElement.GetProperty("choices")[0].GetProperty("delta").GetProperty("content").GetString());
 
         Assert.Equal("[DONE]", GeminiTranslators.TranslateStreamLine("""{"done":true}"""));
+    }
+
+    [Fact]
+    public void StreamLineTranslator_UpstreamFunctionCall_MapsToToolCalls()
+    {
+        // 上行方向：Gemini 流式 functionCall part → OpenAI tool_calls；此前被静默跳过。
+        var translator = new GeminiTranslators.StreamLineTranslator();
+
+        var lines = translator.Translate(
+            """{"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"Beijing"}}}],"role":"model"},"index":0}]}""");
+        Assert.Single(lines);
+        using (var doc = JsonDocument.Parse(lines[0]))
+        {
+            var tc = doc.RootElement.GetProperty("choices")[0].GetProperty("delta").GetProperty("tool_calls")[0];
+            Assert.Equal(0, tc.GetProperty("index").GetInt32());
+            Assert.Equal("call_0", tc.GetProperty("id").GetString());
+            Assert.Equal("get_weather", tc.GetProperty("function").GetProperty("name").GetString());
+            // arguments 是 JSON 编码字符串（OpenAI 契约），需二次解析
+            Assert.Equal("Beijing", JsonSerializer.Deserialize<JsonElement>(
+                tc.GetProperty("function").GetProperty("arguments").GetString()!)
+                .GetProperty("city").GetString());
+        }
+
+        // 终结：出现工具调用后 done 行前补 finish_reason=tool_calls
+        var done = translator.Translate("""{"done":true}""");
+        Assert.Equal(2, done.Count);
+        Assert.Equal("tool_calls", JsonDocument.Parse(done[0]).RootElement
+            .GetProperty("choices")[0].GetProperty("finish_reason").GetString());
+        Assert.Equal("[DONE]", done[1]);
+    }
+
+    [Fact]
+    public void StreamLineTranslator_UpstreamMixedParts_EmitsToolThenText()
+    {
+        var translator = new GeminiTranslators.StreamLineTranslator();
+        var lines = translator.Translate(
+            """{"candidates":[{"content":{"parts":[{"functionCall":{"name":"f","args":{}}},{"text":"hello"}],"role":"model"},"index":0}]}""");
+        Assert.Equal(2, lines.Count);
+        Assert.Contains("tool_calls", lines[0], StringComparison.Ordinal);
+        Assert.Contains("\"content\":\"hello\"", lines[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FromGeminiJson_ModelTextAndFunctionCall_SingleMessage()
+    {
+        const string body = """
+            {"contents":[
+              {"role":"user","parts":[{"text":"weather?"}]},
+              {"role":"model","parts":[{"text":"Let me check."},{"functionCall":{"name":"get_weather","args":{"city":"Beijing"}}}]}
+            ]}
+            """;
+
+        var request = GeminiTranslators.FromGeminiJson(body, "gemini-1.5-pro");
+
+        Assert.Equal(2, request.Messages.Count);
+        var assistant = request.Messages[1];
+        Assert.Equal("assistant", assistant.Role);
+        Assert.NotNull(assistant.ExtensionData);
+        Assert.True(assistant.ExtensionData!.ContainsKey("tool_calls"));
+        using var contentDoc = JsonDocument.Parse(assistant.Content!.Value.GetRawText());
+        Assert.Equal("Let me check.", contentDoc.RootElement[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void GeminiStreamTranslator_DownstreamToolCalls_FlushedAsFunctionCallParts()
+    {
+        // 下行方向：OpenAI 流式 tool_calls 分片 → 收尾输出完整 functionCall part（Gemini 客户端可执行工具）。
+        var translator = new GeminiTranslators.GeminiStreamTranslator("gemini-1.5-pro");
+
+        translator.OnData("""{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"type":"function","function":{"name":"get_weather","arguments":"{\"city\":"}}]}}]}""");
+        translator.OnData("""{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Beijing\"}"}}]}}]}""");
+        translator.OnData("""{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}""");
+
+        var blocks = translator.OnData("[DONE]");
+        string all = string.Join(string.Empty, blocks);
+
+        int idx = all.IndexOf("\"functionCall\"", StringComparison.Ordinal);
+        Assert.True(idx >= 0, "functionCall part missing");
+        Assert.Contains("\"name\":\"get_weather\"", all, StringComparison.Ordinal);
+        Assert.Contains("\"city\":\"Beijing\"", all, StringComparison.Ordinal);
+        Assert.Contains("finishReason", all, StringComparison.Ordinal);
     }
 }

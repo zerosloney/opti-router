@@ -294,6 +294,118 @@ public static class AnthropicTranslators
     }
 
     /// <summary>
+    /// 有状态流式事件翻译器（上游方向：Anthropic SSE → OpenAI data 行）。
+    /// 在静态 <see cref="TranslateStreamEvent"/> 基础上维护 tool_use 块状态：
+    /// content_block_start(tool_use) → tool_calls 首片（index/id/name）；input_json_delta →
+    /// function.arguments 增量（Anthropic 块索引含 text 块，须映射到 OpenAI tool_calls 序号）。
+    /// 每条流一个实例；此前 input_json_delta 被跳过导致流式工具参数全部丢失。
+    /// </summary>
+    public sealed class StreamEventTranslator
+    {
+        private readonly Dictionary<int, int> _toolIndexByBlock = new();
+
+        public string? Translate(string eventType, string dataJson)
+        {
+            switch (eventType)
+            {
+                case "content_block_start":
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(dataJson);
+                        var root = doc.RootElement;
+                        if (!root.TryGetProperty("index", out var idxEl)
+                            || !root.TryGetProperty("content_block", out var blockEl)
+                            || !blockEl.TryGetProperty("type", out var typeEl)
+                            || typeEl.GetString() != "tool_use")
+                        {
+                            return null; // text/ping 等块：无下游可见内容
+                        }
+
+                        int blockIndex = idxEl.GetInt32();
+                        int toolIndex = _toolIndexByBlock.Count;
+                        _toolIndexByBlock[blockIndex] = toolIndex;
+                        return JsonSerializer.Serialize(new
+                        {
+                            choices = new object[]
+                            {
+                                new
+                                {
+                                    index = 0,
+                                    delta = new
+                                    {
+                                        tool_calls = new object[]
+                                        {
+                                            new
+                                            {
+                                                index = toolIndex,
+                                                id = blockEl.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String
+                                                    ? idEl.GetString()
+                                                    : $"call_{toolIndex}",
+                                                type = "function",
+                                                function = new
+                                                {
+                                                    name = blockEl.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String
+                                                        ? nameEl.GetString()
+                                                        : string.Empty,
+                                                    arguments = string.Empty
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    catch (JsonException)
+                    {
+                        return null;
+                    }
+
+                case "content_block_delta":
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(dataJson);
+                        var root = doc.RootElement;
+                        if (root.TryGetProperty("index", out var idxEl)
+                            && root.TryGetProperty("delta", out var delta)
+                            && delta.TryGetProperty("type", out var dtEl) && dtEl.GetString() == "input_json_delta"
+                            && _toolIndexByBlock.TryGetValue(idxEl.GetInt32(), out int toolIndex)
+                            && delta.TryGetProperty("partial_json", out var pjEl) && pjEl.ValueKind == JsonValueKind.String)
+                        {
+                            string? fragment = pjEl.GetString();
+                            if (string.IsNullOrEmpty(fragment)) return null;
+                            return JsonSerializer.Serialize(new
+                            {
+                                choices = new object[]
+                                {
+                                    new
+                                    {
+                                        index = 0,
+                                        delta = new
+                                        {
+                                            tool_calls = new object[]
+                                            {
+                                                new { index = toolIndex, function = new { arguments = fragment } }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    catch (JsonException)
+                    {
+                        // 解析失败回落静态翻译（与原行为一致）
+                    }
+                    return TranslateStreamEvent(eventType, dataJson);
+
+                default:
+                    return TranslateStreamEvent(eventType, dataJson);
+            }
+        }
+    }
+
+    /// <summary>
     /// 把 Anthropic Messages API 请求体 JSON 翻译为 OpenAI 兼容 ChatRequest（下游入口方向）。
     /// system 拆分、tool_use/tool_result 块、image source（base64/url）与 tools/tool_choice/stop_sequences 均映射。
     /// </summary>
@@ -399,27 +511,32 @@ public static class AnthropicTranslators
                     }
                 }
 
-                if (contentBlocks.Count > 0 || toolCalls.Count == 0)
+                // text/image 与 tool_use 合并进单条 assistant 消息（OpenAI 契约：content 与
+                // tool_calls 可同存一条消息）；拆成两条连续 assistant 会破坏工具调用与前置文本的轮次归属。
+                if (isAssistant)
                 {
-                    messages.Add(new ChatMessage
+                    var assistantExt = new Dictionary<string, JsonElement>();
+                    if (toolCalls.Count > 0)
                     {
-                        Role = isAssistant ? "assistant" : "user",
-                        Content = contentBlocks.Count == 0
-                            ? JsonSerializer.SerializeToElement(string.Empty)
-                            : JsonSerializer.SerializeToElement(contentBlocks)
-                    });
-                }
-
-                if (toolCalls.Count > 0)
-                {
+                        assistantExt["tool_calls"] = JsonSerializer.SerializeToElement(toolCalls);
+                    }
                     messages.Add(new ChatMessage
                     {
                         Role = "assistant",
-                        Content = JsonSerializer.SerializeToElement(string.Empty),
-                        ExtensionData = new Dictionary<string, JsonElement>
-                        {
-                            ["tool_calls"] = JsonSerializer.SerializeToElement(toolCalls)
-                        }
+                        Content = contentBlocks.Count == 0
+                            ? JsonSerializer.SerializeToElement(string.Empty)
+                            : JsonSerializer.SerializeToElement(contentBlocks),
+                        ExtensionData = assistantExt.Count > 0 ? assistantExt : null
+                    });
+                }
+                else if (contentBlocks.Count > 0 || toolCalls.Count == 0)
+                {
+                    messages.Add(new ChatMessage
+                    {
+                        Role = "user",
+                        Content = contentBlocks.Count == 0
+                            ? JsonSerializer.SerializeToElement(string.Empty)
+                            : JsonSerializer.SerializeToElement(contentBlocks)
                     });
                 }
             }
@@ -599,6 +716,17 @@ public static class AnthropicTranslators
         private bool _blockClosed;
         private string _stopReason = "end_turn";
         private ChatUsage? _usage;
+        // 流式工具调用缓冲：OpenAI 以 index 分片下发（id/name 首片 + arguments 增量），
+        // Anthropic 侧在收尾时输出完整 tool_use 块（客户端执行工具本就需完整参数）。
+        private readonly List<ToolCallState> _toolCalls = new();
+        private readonly Dictionary<int, int> _toolSlotByOpenAiIndex = new();
+
+        private sealed class ToolCallState
+        {
+            public string Id = string.Empty;
+            public string Name = string.Empty;
+            public System.Text.StringBuilder Arguments = new();
+        }
 
         /// <param name="requestedModel">请求的模型名（chunk 未携带 model 时的回退值）。</param>
         public AnthropicStreamTranslator(string requestedModel)
@@ -615,6 +743,7 @@ public static class AnthropicTranslators
             {
                 EnsureStarted(blocks);
                 CloseBlock(blocks);
+                FlushToolBlocks(blocks);
                 blocks.Add(Event("message_delta", JsonSerializer.Serialize(new
                 {
                     type = "message_delta",
@@ -657,7 +786,7 @@ public static class AnthropicTranslators
                         && contentEl.ValueKind == JsonValueKind.String
                         && (contentEl.GetString() ?? string.Empty).Length > 0;
 
-                    if (hasContent || delta.TryGetProperty("role", out _))
+                    if (hasContent || delta.TryGetProperty("role", out _) || delta.TryGetProperty("tool_calls", out _))
                     {
                         EnsureStarted(blocks);
                     }
@@ -669,6 +798,43 @@ public static class AnthropicTranslators
                             index = 0,
                             delta = new { type = "text_delta", text = contentEl.GetString() }
                         })));
+                    }
+
+                    // OpenAI 工具调用分片 → 缓冲（id/name 首片 + arguments 增量），收尾时输出 tool_use 块。
+                    if (delta.TryGetProperty("tool_calls", out var toolCallsEl) && toolCallsEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var tc in toolCallsEl.EnumerateArray())
+                        {
+                            if (tc.ValueKind != JsonValueKind.Object
+                                || !tc.TryGetProperty("index", out var tcIdxEl)
+                                || tcIdxEl.ValueKind != JsonValueKind.Number)
+                            {
+                                continue;
+                            }
+                            int openAiIndex = tcIdxEl.GetInt32();
+                            if (!_toolSlotByOpenAiIndex.TryGetValue(openAiIndex, out int slot))
+                            {
+                                slot = _toolCalls.Count;
+                                _toolSlotByOpenAiIndex[openAiIndex] = slot;
+                                _toolCalls.Add(new ToolCallState());
+                            }
+                            var state = _toolCalls[slot];
+                            if (tc.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                            {
+                                state.Id = idEl.GetString() ?? state.Id;
+                            }
+                            if (tc.TryGetProperty("function", out var fnEl) && fnEl.ValueKind == JsonValueKind.Object)
+                            {
+                                if (fnEl.TryGetProperty("name", out var nmEl) && nmEl.ValueKind == JsonValueKind.String)
+                                {
+                                    state.Name = nmEl.GetString() ?? state.Name;
+                                }
+                                if (fnEl.TryGetProperty("arguments", out var arEl) && arEl.ValueKind == JsonValueKind.String)
+                                {
+                                    state.Arguments.Append(arEl.GetString());
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -726,6 +892,34 @@ public static class AnthropicTranslators
             if (!_started || _blockClosed) return;
             _blockClosed = true;
             blocks.Add(Event("content_block_stop", "{\"type\":\"content_block_stop\",\"index\":0}"));
+        }
+
+        /// <summary>文本块（index 0）闭合后，按序输出缓冲的 tool_use 块（index 从 1 起）。</summary>
+        private void FlushToolBlocks(List<string> blocks)
+        {
+            for (int n = 0; n < _toolCalls.Count; n++)
+            {
+                var state = _toolCalls[n];
+                int blockIndex = n + 1;
+                blocks.Add(Event("content_block_start", JsonSerializer.Serialize(new
+                {
+                    type = "content_block_start",
+                    index = blockIndex,
+                    content_block = new { type = "tool_use", id = state.Id, name = state.Name }
+                })));
+                string argsJson = state.Arguments.Length > 0 ? state.Arguments.ToString() : "{}";
+                blocks.Add(Event("content_block_delta", JsonSerializer.Serialize(new
+                {
+                    type = "content_block_delta",
+                    index = blockIndex,
+                    delta = new { type = "input_json_delta", partial_json = argsJson }
+                })));
+                blocks.Add(Event("content_block_stop", JsonSerializer.Serialize(new
+                {
+                    type = "content_block_stop",
+                    index = blockIndex
+                })));
+            }
         }
 
         private static string Event(string eventType, string dataJson)

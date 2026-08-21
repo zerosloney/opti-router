@@ -116,6 +116,20 @@ public sealed class MetricsEndpointAuthTests
     }
 
     [Fact]
+    public async Task UnmappedProxyPath_Unauthenticated_Returns401NotLoginRedirect()
+    {
+        // 未映射的 /v1/* 落到兜底页（带 [Authorize]）；UseAuthorization 必须晚于自定义代理鉴权中间件，
+        // 否则 API 客户端拿到 302 登录页重定向而非 401 协议错误。
+        using var factory = new MetricsWebApplicationFactory { EnableMetrics = false, AdminApiKey = "admin-key-123" };
+        using var client = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+
+        using var response = await client.GetAsync("/v1/not-a-real-endpoint");
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
     public async Task Metrics_WithoutApiKey_Returns200()
     {
         // Arrange

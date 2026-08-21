@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using OptiRouter.Configuration;
 
 namespace OptiRouter.Clients.Protocols;
@@ -266,6 +267,100 @@ public static class GeminiTranslators
     }
 
     /// <summary>
+    /// 有状态流式行翻译器（上游方向：Gemini SSE → OpenAI data 行）。
+    /// 在静态 <see cref="TranslateStreamLine"/> 基础上补齐工具调用：
+    /// functionCall part（Gemini 以完整对象一次性下发，无参数分片）→ tool_calls delta
+    /// （合成稳定 id/index）；流中出现过工具调用时，终结行补发 finish_reason=tool_calls
+    ///（此前 functionCall 被静默跳过，流式工具调用完全丢失）。
+    /// 每条流一个实例；一次最多返回两行（同一 chunk 同时含文本与 functionCall 时）。
+    /// </summary>
+    public sealed class StreamLineTranslator
+    {
+        private int _toolCallCount;
+
+        public IReadOnlyList<string> Translate(string dataJson)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(dataJson);
+                var root = doc.RootElement;
+
+                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("done", out var doneEl) && doneEl.ValueKind == JsonValueKind.True)
+                {
+                    if (_toolCallCount > 0)
+                    {
+                        return new[]
+                        {
+                            JsonSerializer.Serialize(new
+                            {
+                                choices = new object[] { new { index = 0, delta = new { }, finish_reason = "tool_calls" } }
+                            }),
+                            "[DONE]"
+                        };
+                    }
+                    return new[] { "[DONE]" };
+                }
+
+                if (root.TryGetProperty("candidates", out var candidates)
+                    && candidates.ValueKind == JsonValueKind.Array
+                    && candidates.GetArrayLength() > 0
+                    && candidates[0].TryGetProperty("content", out var content)
+                    && content.TryGetProperty("parts", out var parts)
+                    && parts.ValueKind == JsonValueKind.Array)
+                {
+                    var toolCalls = new List<object>();
+                    foreach (var part in parts.EnumerateArray())
+                    {
+                        if (part.ValueKind == JsonValueKind.Object
+                            && part.TryGetProperty("functionCall", out var fcEl) && fcEl.ValueKind == JsonValueKind.Object)
+                        {
+                            int index = _toolCallCount++;
+                            toolCalls.Add(new
+                            {
+                                index,
+                                id = $"call_{index}",
+                                type = "function",
+                                function = new
+                                {
+                                    name = fcEl.TryGetProperty("name", out var nEl) && nEl.ValueKind == JsonValueKind.String ? nEl.GetString() : string.Empty,
+                                    arguments = fcEl.TryGetProperty("args", out var aEl) && aEl.ValueKind == JsonValueKind.Object
+                                        ? aEl.GetRawText()
+                                        : "{}"
+                                }
+                            });
+                        }
+                    }
+
+                    if (toolCalls.Count > 0)
+                    {
+                        var lines = new List<string>
+                        {
+                            JsonSerializer.Serialize(new
+                            {
+                                choices = new object[] { new { index = 0, delta = new { tool_calls = toolCalls } } }
+                            })
+                        };
+                        // 同一 chunk 还带文本时补一行文本 delta（客户端按 delta 累积，先后顺序不影响内容）。
+                        string? textLine = TranslateStreamLine(dataJson);
+                        if (textLine is not null && textLine != "[DONE]")
+                        {
+                            lines.Add(textLine);
+                        }
+                        return lines;
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // 解析失败回落静态翻译（与原行为一致）
+            }
+
+            string? single = TranslateStreamLine(dataJson);
+            return single is null ? Array.Empty<string>() : new[] { single };
+        }
+    }
+
+    /// <summary>
     /// 把 Gemini generateContent 请求体 JSON 翻译为 OpenAI 兼容 ChatRequest（下游入口方向）。
     /// contents/parts、systemInstruction、functionCall/functionResponse 与 generationConfig 均映射。
     /// </summary>
@@ -367,27 +462,32 @@ public static class GeminiTranslators
                     }
                 }
 
-                if (textParts.Count > 0 || toolCalls.Count == 0)
+                // 文本与 functionCall 合并进单条 assistant 消息（OpenAI 契约：content 与
+                // tool_calls 可同存）；拆成两条连续 assistant 会破坏工具调用的轮次归属。
+                if (isModel)
                 {
-                    messages.Add(new ChatMessage
+                    var modelExt = new Dictionary<string, JsonElement>();
+                    if (toolCalls.Count > 0)
                     {
-                        Role = isModel ? "assistant" : "user",
-                        Content = textParts.Count == 0
-                            ? JsonSerializer.SerializeToElement(string.Empty)
-                            : JsonSerializer.SerializeToElement(textParts)
-                    });
-                }
-
-                if (toolCalls.Count > 0)
-                {
+                        modelExt["tool_calls"] = JsonSerializer.SerializeToElement(toolCalls);
+                    }
                     messages.Add(new ChatMessage
                     {
                         Role = "assistant",
-                        Content = JsonSerializer.SerializeToElement(string.Empty),
-                        ExtensionData = new Dictionary<string, JsonElement>
-                        {
-                            ["tool_calls"] = JsonSerializer.SerializeToElement(toolCalls)
-                        }
+                        Content = textParts.Count == 0
+                            ? JsonSerializer.SerializeToElement(string.Empty)
+                            : JsonSerializer.SerializeToElement(textParts),
+                        ExtensionData = modelExt.Count > 0 ? modelExt : null
+                    });
+                }
+                else if (textParts.Count > 0 || toolCalls.Count == 0)
+                {
+                    messages.Add(new ChatMessage
+                    {
+                        Role = "user",
+                        Content = textParts.Count == 0
+                            ? JsonSerializer.SerializeToElement(string.Empty)
+                            : JsonSerializer.SerializeToElement(textParts)
                     });
                 }
             }
@@ -566,6 +666,16 @@ public static class GeminiTranslators
         private string _model;
         private string _finishReason = "STOP";
         private ChatUsage? _usage;
+        // 流式工具调用缓冲：OpenAI 以 index 分片下发，Gemini 的 functionCall 需要完整
+        // args 对象——缓冲到收尾时输出完整 functionCall part（客户端执行工具本就需完整参数）。
+        private readonly List<ToolCallState> _toolCalls = new();
+        private readonly Dictionary<int, int> _toolSlotByOpenAiIndex = new();
+
+        private sealed class ToolCallState
+        {
+            public string Name = string.Empty;
+            public System.Text.StringBuilder Arguments = new();
+        }
 
         /// <param name="requestedModel">路径中的模型名（chunk 未携带 model 时的回退值）。</param>
         public GeminiStreamTranslator(string requestedModel)
@@ -577,8 +687,12 @@ public static class GeminiTranslators
         /// <summary>翻译一条 OpenAI data 行（JSON 或 [DONE]），返回 0..n 个 data 块（含空行分隔）。</summary>
         public IReadOnlyList<string> OnData(string data)
         {
+            var blocks = new List<string>();
             if (data == "[DONE]")
             {
+                // 缓冲的工具调用在终结块前输出（finishReason=STOP——Gemini 以 functionCall part
+                // 本身作为工具调用信号，无需专门 finishReason）。
+                FlushToolCalls(blocks);
                 var finalChunk = new
                 {
                     candidates = new object[]
@@ -593,10 +707,10 @@ public static class GeminiTranslators
                     },
                     modelVersion = _model.Length > 0 ? _model : _fallbackModel
                 };
-                return new[] { $"data: {JsonSerializer.Serialize(finalChunk)}\n\n" };
+                blocks.Add($"data: {JsonSerializer.Serialize(finalChunk)}\n\n");
+                return blocks;
             }
 
-            var blocks = new List<string>();
             try
             {
                 using var doc = JsonDocument.Parse(data);
@@ -623,24 +737,59 @@ public static class GeminiTranslators
                 }
 
                 var choice = choices[0];
-                if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object
-                    && delta.TryGetProperty("content", out var contentEl)
-                    && contentEl.ValueKind == JsonValueKind.String
-                    && (contentEl.GetString() ?? string.Empty).Length > 0)
+                if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object)
                 {
-                    var chunk = new
+                    if (delta.TryGetProperty("content", out var contentEl)
+                        && contentEl.ValueKind == JsonValueKind.String
+                        && (contentEl.GetString() ?? string.Empty).Length > 0)
                     {
-                        candidates = new object[]
+                        var chunk = new
                         {
-                            new
+                            candidates = new object[]
                             {
-                                content = new { parts = new object[] { new { text = contentEl.GetString() } }, role = "model" },
-                                index = 0
+                                new
+                                {
+                                    content = new { parts = new object[] { new { text = contentEl.GetString() } }, role = "model" },
+                                    index = 0
+                                }
+                            },
+                            modelVersion = _model.Length > 0 ? _model : _fallbackModel
+                        };
+                        blocks.Add($"data: {JsonSerializer.Serialize(chunk)}\n\n");
+                    }
+
+                    // OpenAI 工具调用分片 → 缓冲（name 首片 + arguments 增量），收尾时输出 functionCall part。
+                    if (delta.TryGetProperty("tool_calls", out var toolCallsEl) && toolCallsEl.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var tc in toolCallsEl.EnumerateArray())
+                        {
+                            if (tc.ValueKind != JsonValueKind.Object
+                                || !tc.TryGetProperty("index", out var tcIdxEl)
+                                || tcIdxEl.ValueKind != JsonValueKind.Number)
+                            {
+                                continue;
                             }
-                        },
-                        modelVersion = _model.Length > 0 ? _model : _fallbackModel
-                    };
-                    blocks.Add($"data: {JsonSerializer.Serialize(chunk)}\n\n");
+                            int openAiIndex = tcIdxEl.GetInt32();
+                            if (!_toolSlotByOpenAiIndex.TryGetValue(openAiIndex, out int slot))
+                            {
+                                slot = _toolCalls.Count;
+                                _toolSlotByOpenAiIndex[openAiIndex] = slot;
+                                _toolCalls.Add(new ToolCallState());
+                            }
+                            var state = _toolCalls[slot];
+                            if (tc.TryGetProperty("function", out var fnEl) && fnEl.ValueKind == JsonValueKind.Object)
+                            {
+                                if (fnEl.TryGetProperty("name", out var nmEl) && nmEl.ValueKind == JsonValueKind.String)
+                                {
+                                    state.Name = nmEl.GetString() ?? state.Name;
+                                }
+                                if (fnEl.TryGetProperty("arguments", out var arEl) && arEl.ValueKind == JsonValueKind.String)
+                                {
+                                    state.Arguments.Append(arEl.GetString());
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
@@ -659,6 +808,42 @@ public static class GeminiTranslators
             }
 
             return blocks;
+        }
+
+        /// <summary>流中途失败：输出 Gemini 错误块。</summary>
+        /// <summary>输出缓冲的工具调用：每个工具一个 functionCall part 的 chunk（args 为完整 JSON 对象）。</summary>
+        private void FlushToolCalls(List<string> blocks)
+        {
+            if (_toolCalls.Count == 0) return;
+
+            var parts = new List<object>();
+            foreach (var state in _toolCalls)
+            {
+                JsonObject args = new JsonObject();
+                string argsJson = state.Arguments.Length > 0 ? state.Arguments.ToString() : "{}";
+                try
+                {
+                    if (JsonNode.Parse(argsJson) is JsonObject parsed)
+                    {
+                        args = parsed;
+                    }
+                }
+                catch (JsonException)
+                {
+                    // 参数拼装非合法 JSON（上游异常截断）：回退空对象，保住工具调用名不丢。
+                }
+                parts.Add(new { functionCall = new { name = state.Name, args } });
+            }
+
+            var chunk = new
+            {
+                candidates = new object[]
+                {
+                    new { content = new { parts, role = "model" }, index = 0 }
+                },
+                modelVersion = _model.Length > 0 ? _model : _fallbackModel
+            };
+            blocks.Add($"data: {JsonSerializer.Serialize(chunk)}\n\n");
         }
 
         /// <summary>流中途失败：输出 Gemini 错误块。</summary>

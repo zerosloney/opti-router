@@ -148,6 +148,8 @@ public sealed class AnthropicModelClient : IModelClient
 
         // Anthropic SSE：event: <type> 与 data: <json> 交替出现，逐行翻译为 OpenAI data 行。
         // 限长行读取：单行超上限立即中断，替代无行长限制的 StreamReader.ReadLineAsync。
+        // 有状态翻译器：维护 tool_use 块映射，流式工具调用参数（input_json_delta）不再丢失。
+        var eventTranslator = new AnthropicTranslators.StreamEventTranslator();
         string? pendingEvent = null;
         bool doneSent = false;
         await foreach (string line in BoundedResponseReader.ReadLinesAsync(
@@ -164,7 +166,7 @@ public sealed class AnthropicModelClient : IModelClient
                 string data = line["data: ".Length..].Trim();
                 if (string.IsNullOrEmpty(data)) continue;
 
-                string? translated = AnthropicTranslators.TranslateStreamEvent(pendingEvent ?? string.Empty, data);
+                string? translated = eventTranslator.Translate(pendingEvent ?? string.Empty, data);
                 if (translated == "[DONE]")
                 {
                     yield return new RawStreamLine("[DONE]", null, null);
