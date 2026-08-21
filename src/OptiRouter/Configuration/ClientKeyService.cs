@@ -504,8 +504,9 @@ public sealed class ClientKeyService : IDisposable
             if (item is null) return false;
 
             if (enabled.HasValue) item.Enabled = enabled.Value;
-            if (dailyBudgetUsd.HasValue && dailyBudgetUsd.Value >= 0) item.DailyBudgetUsd = dailyBudgetUsd.Value;
-            if (maxQps.HasValue && maxQps.Value > 0) item.MaxQps = maxQps.Value;
+            // 与 CreateKey/Build 同口径：越界值钳到下界，而非静默忽略（创建/更新行为一致）。
+            if (dailyBudgetUsd.HasValue) item.DailyBudgetUsd = Math.Max(0, dailyBudgetUsd.Value);
+            if (maxQps.HasValue) item.MaxQps = Math.Max(1, maxQps.Value);
 
             if (_mariaDb is not null)
                 _mariaDb.UpdateKeySettings(item); // 只写设置列，不触碰计数控（多实例安全）

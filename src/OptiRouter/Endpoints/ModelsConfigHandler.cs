@@ -150,14 +150,16 @@ public static class ModelsConfigHandler
             => TestEndpointConnectivity(name, cfg, clientProvider));
 
         // 2b. GET single model ApiKey（管理员按需查看完整密钥；列表只下发遮蔽预览，避免批量泄露面）。
-        endpoints.MapGet("/api/models/{name}/apikey", (string name, ModelsConfigService cfg)
-            => RevealApiKey(name, cfg));
-        endpoints.MapGet("/api/models/apikey", (string name, ModelsConfigService cfg)
-            => RevealApiKey(name, cfg));
+        endpoints.MapGet("/api/models/{name}/apikey", (string name, ModelsConfigService cfg, HttpContext httpContext)
+            => RevealApiKey(name, cfg, httpContext));
+        endpoints.MapGet("/api/models/apikey", (string name, ModelsConfigService cfg, HttpContext httpContext)
+            => RevealApiKey(name, cfg, httpContext));
     }
 
-    private static IResult RevealApiKey(string name, ModelsConfigService cfg)
+    private static IResult RevealApiKey(string name, ModelsConfigService cfg, HttpContext httpContext)
     {
+        // 明文密钥响应禁止任何缓存（浏览器返回键/中间代理留存），仅本次会话可见。
+        httpContext.Response.Headers.CacheControl = "no-store";
         var models = cfg.LoadModels();
         var names = EffectiveNames(models);
         int idx = names.FindIndex(n => string.Equals(n, name, StringComparison.Ordinal));
@@ -266,8 +268,18 @@ public static class ModelsConfigHandler
             success = result.Healthy,
             latencyMs = (long)result.LatencyMs,
             message = result.Healthy ? "连接正常 (OK)" : "连接异常",
-            error = result.Error
+            error = SanitizeProbeError(result.Error)
         });
+    }
+
+    /// <summary>
+    /// 探活失败原因压平截断后回显管理台：上游异常整段堆栈/连接细节不透出。
+    /// </summary>
+    private static string? SanitizeProbeError(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error)) return error;
+        string flat = string.Join(' ', error.Split('\n')).Trim();
+        return flat.Length <= 300 ? flat : flat[..300] + "…";
     }
 
     /// <summary>

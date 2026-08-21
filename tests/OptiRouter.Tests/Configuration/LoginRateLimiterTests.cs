@@ -107,6 +107,27 @@ public class LoginRateLimiterTests
         Assert.False(limiter.IsLocked("   "));
     }
 
+    [Fact]
+    public void OverCapacity_LockedEntries_EvictedByEarliestExpiry()
+    {
+        // 伪造 IP 洪水：全部条目处于锁定期（清扫过期项无物可清）时，
+        // 硬上限仍必须生效——按最早到期强制淘汰，最早锁定的 IP 保护失效。
+        var clock = new MutableTimeProvider();
+        var limiter = new LoginRateLimiter(clock, maxFailures: 5, windowDuration: TimeSpan.FromMinutes(5), maxEntries: 2);
+
+        for (int ip = 1; ip <= 4; ip++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(30)); // 各 IP 锁定到期时刻错开
+            for (int i = 0; i < 5; i++)
+                limiter.RecordFailure($"10.0.0.{ip}");
+        }
+
+        Assert.Equal(2, limiter.TrackedIpCount);
+        Assert.False(limiter.IsLocked("10.0.0.1")); // 最早锁定，已被强制淘汰
+        Assert.False(limiter.IsLocked("10.0.0.2"));
+        Assert.True(limiter.IsLocked("10.0.0.4"));  // 最晚锁定，仍在保护
+    }
+
     private sealed class MutableTimeProvider : TimeProvider
     {
         private DateTimeOffset _now = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);

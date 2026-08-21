@@ -20,8 +20,7 @@ public class ApiService
     // 管理会话 Cookie 在预渲染/circuit 建立阶段可从 HttpContext 读到；交互阶段 HttpContext 为 null，
     // 回退用构造时捕获的值。
     private readonly string? _capturedCookie;
-    private bool _redirected;
-
+    private int _redirected;
     public ApiService(HttpClient http, NavigationManager nav,
         IHttpContextAccessor? httpContextAccessor = null,
         Microsoft.Extensions.Logging.ILogger? logger = null)
@@ -59,10 +58,10 @@ public class ApiService
             request.Content = JsonContent.Create(jsonBody);
 
         var response = await _http.SendAsync(request, cancellationToken);
-        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized && !_redirected)
+        if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+            && Interlocked.CompareExchange(ref _redirected, 1, 0) == 0)
         {
-            // 会话过期后并发请求可能同时拿到 401，每 circuit 只整页跳转一次。
-            _redirected = true;
+            // 会话过期后并发请求可能同时拿到 401，原子置位保证每 circuit 只整页跳转一次。
             _nav.NavigateTo("/login", forceLoad: true);
         }
         return response;
@@ -253,11 +252,11 @@ public class ApiService
     public sealed record AuditDayDto(string Day, int Requests, int Successes, double CostUsd);
 
     /// <summary>运行路由沙盒仿真。返回 (结果, 失败原因)；失败原因为空表示成功。</summary>
-    public async Task<(SandboxResult? Result, string? Error)> RunSandboxRouteAsync(string prompt)
+    public async Task<(SandboxResult? Result, string? Error)> RunSandboxRouteAsync(string prompt, CancellationToken cancellationToken = default)
     {
         try
         {
-            using var resp = await SendAsync(HttpMethod.Post,Url("/api/dashboard/sandbox/route"), new { prompt });
+            using var resp = await SendAsync(HttpMethod.Post,Url("/api/dashboard/sandbox/route"), new { prompt }, cancellationToken);
             if (resp.IsSuccessStatusCode)
                 return (await resp.Content.ReadFromJsonAsync<SandboxResult>(), null);
             return (null, await ReadErrorAsync(resp));
@@ -281,8 +280,7 @@ public class ApiService
                 cancellationToken);
             if (resp.IsSuccessStatusCode)
                 return (await resp.Content.ReadFromJsonAsync<EvalReportDto>(cancellationToken), null);
-            string body = await resp.Content.ReadAsStringAsync(cancellationToken);
-            return (null, body);
+            return (null, await ReadErrorAsync(resp));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -316,8 +314,7 @@ public class ApiService
             using var resp = await SendAsync(HttpMethod.Post,Url("/api/dashboard/eval/compare"), new { baselineBatchId, candidateBatchId });
             if (resp.IsSuccessStatusCode)
                 return (await resp.Content.ReadFromJsonAsync<PairedEvalDto>(), null);
-            string body = await resp.Content.ReadAsStringAsync();
-            return (null, body);
+            return (null, await ReadErrorAsync(resp));
         }
         catch (Exception ex)
         {
@@ -421,8 +418,7 @@ public class ApiService
             var result = await resp.Content.ReadFromJsonAsync<UpdateSystemConfigResponse>();
             return (true, null, result?.Version);
         }
-        string body = await resp.Content.ReadAsStringAsync();
-        return (false, body, null);
+        return (false, await ReadErrorAsync(resp), null);
     }
 
     /// <summary>手动覆盖模型断路器状态。返回 (是否成功, 失败原因)。</summary>
@@ -727,7 +723,7 @@ public class ApiService
         int Samples,
         DateTimeOffset LastUpdateUtc);
 
-    public record AuditPage(List<AuditItem> Items, int TotalCount);
+    public record AuditPage(List<AuditItem> Items, int TotalCount, bool BufferLimited = false);
 
     public record AuditItem(
         DateTime Timestamp,

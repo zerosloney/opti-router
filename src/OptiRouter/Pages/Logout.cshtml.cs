@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Mvc.RazorPages;
 
 namespace OptiRouter.Pages;
 
+[ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public class LogoutModel : PageModel
 {
     public async Task<IActionResult> OnPostAsync()

@@ -257,7 +257,7 @@
             </table>
         </div>
         <div class="pagination">
-            <span class="text-secondary">显示 @AuditItems.Count 条，共 @AuditTotal 条</span>
+            <span class="text-secondary">显示 @AuditItems.Count 条，共 @AuditTotal 条@(AuditBufferLimited ? "（已达最近 500 条缓冲上限，仅统计其中匹配）" : "")</span>
             <div>
                 <button disabled="@(LogOffset == 0)" @onclick="async () => { LogOffset = Math.Max(0, LogOffset - LogLimit); await LoadLogs(); }">上一页</button>
                 <button disabled="@(LogOffset + LogLimit >= AuditTotal)" @onclick="async () => { LogOffset += LogLimit; await LoadLogs(); }">下一页</button>
@@ -370,6 +370,7 @@
     private bool MetricsLoading = true;
     private List<ApiService.AuditItem> AuditItems = new();
     private int AuditTotal = 0;
+    private bool AuditBufferLimited = false;
     private string LogFilterModel = "";
     private int LogLimit = 50;
     private int LogOffset = 0;
@@ -428,6 +429,7 @@
                 ToUtcIso(LogFilterTo));
             AuditItems = page.Items;
             AuditTotal = page.TotalCount;
+            AuditBufferLimited = page.BufferLimited;
             AuditError = null;
         }
         catch (Exception ex)

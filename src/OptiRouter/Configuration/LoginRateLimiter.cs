@@ -11,8 +11,11 @@ namespace OptiRouter.Configuration;
 /// 锁定窗口内的后续失败不延长锁定、不计数（避免持续失败造成永久锁定）；窗口过期后重新计数。成功登录即清除该 IP 记录。
 /// </remarks>
 /// <remarks>
-/// 内存管理：字典上限 <c>MaxEntries</c>（默认 10000），超限时清扫所有已过期窗口。
-/// RecordFailure 每次检查是否需要清扫（O(n) 但仅在超限时触发），防止伪造 X-Forwarded-For 撑爆内存。
+/// 内存管理：字典上限 <c>MaxEntries</c>（默认 10000）。超限时先清扫已过期窗口，
+/// 仍超限则按"最早到期"强制淘汰（含锁定期未满条目）——伪造 X-Forwarded-For 的 IP 洪水
+/// 会制造大量锁定期条目，仅清扫过期项无法收敛，必须硬上限兜底。被强制淘汰 IP 的
+/// 锁定保护随之失效，容量保护优先于单 IP 锁定语义。
+/// RecordFailure 每次检查是否需要清扫（O(n log n) 但仅在超限时触发）。
 /// </remarks>
 public sealed class LoginRateLimiter
 {
@@ -71,8 +74,8 @@ public sealed class LoginRateLimiter
     }
 
     /// <summary>
-    /// 字典超限时清扫所有已过期窗口（含锁定期已过的）。
-    /// 用 Interlocked 防并发重复清扫。
+    /// 字典超限时的容量回收：先清扫已过期窗口（含锁定期已过的），仍超限则按最早到期
+    /// 强制淘汰。用 Interlocked 防并发重复回收。
     /// </summary>
     private void TryCleanup(DateTimeOffset now)
     {
@@ -89,6 +92,21 @@ public sealed class LoginRateLimiter
                     _windows.TryRemove(kv.Key, out _);
                 }
             }
+
+            // 仍超限：大量条目处于锁定期（伪造 IP 洪水的典型形态），按最早到期强制淘汰。
+            // 被淘汰 IP 的锁定保护失效——容量保护优先于单 IP 锁定语义。
+            if (_windows.Count > _maxEntries)
+            {
+                var evict = _windows
+                    .OrderBy(kv => kv.Value.LockedUntil > DateTimeOffset.MinValue
+                        ? kv.Value.LockedUntil
+                        : kv.Value.WindowStart + _windowDuration)
+                    .Take(_windows.Count - _maxEntries)
+                    .Select(kv => kv.Key)
+                    .ToList();
+                foreach (var key in evict)
+                    _windows.TryRemove(key, out _);
+            }
         }
         finally
         {
@@ -102,6 +120,9 @@ public sealed class LoginRateLimiter
         if (!string.IsNullOrEmpty(clientIp))
             _windows.TryRemove(clientIp, out _);
     }
+
+    /// <summary>当前跟踪的 IP 窗口数（诊断/测试用，验证容量回收）。</summary>
+    public int TrackedIpCount => _windows.Count;
 
     private FailureWindow NewWindow(DateTimeOffset start, int count) =>
         new(start, count, count >= _maxFailures ? start + _windowDuration : DateTimeOffset.MinValue);

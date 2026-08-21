@@ -33,7 +33,7 @@
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
                     <input type="text" placeholder="租户/部门名称 (如: 财务部 App)" @bind="NewTenantName" style="width: 240px;" />
                     <div style="display: flex; align-items: center; gap: 6px;">
-                        <span class="text-secondary" style="font-size: 0.85rem;">日预算 ($):</span>
+                        <span class="text-secondary" style="font-size: 0.85rem;">日预算 ($, 0=不限):</span>
                         <input type="number" step="10" min="0" @bind="NewTenantBudget" style="width: 100px; color: var(--success); font-weight: 600;" />
                     </div>
                     <div style="display: flex; align-items: center; gap: 6px;">

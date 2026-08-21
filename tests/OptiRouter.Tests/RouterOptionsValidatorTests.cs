@@ -264,6 +264,34 @@ public class RouterOptionsValidatorTests
     }
 
     [Theory]
+    [InlineData("http://169.254.169.254/v1")]          // AWS/GCP 云元数据（链路本地段）
+    [InlineData("http://169.254.170.2/v1")]            // ECS 元数据（同段）
+    [InlineData("http://metadata.google.internal/v1")] // GCP 元数据域名
+    public void CloudMetadataBaseUrl_ShouldFailForStartupAndModelWrite(string baseUrl)
+    {
+        var options = CreateValidOptions();
+        options.Models[0].BaseUrl = baseUrl;
+
+        var startupResult = CreateValidator().Validate(null, options);
+        var writeResult = RouterOptionsValidator.ValidateModel(options.Models[0]);
+
+        Assert.False(startupResult.Succeeded);
+        Assert.Contains("BaseUrl", startupResult.FailureMessage);
+        Assert.Contains("BaseUrl", writeResult);
+    }
+
+    [Theory]
+    [InlineData("http://localhost:11434/v1")] // 本地 Ollama
+    [InlineData("http://127.0.0.1:8000/v1")]
+    public void LocalLlmBaseUrl_IsAllowed(string baseUrl)
+    {
+        var options = CreateValidOptions();
+        options.Models[0].BaseUrl = baseUrl;
+
+        Assert.Null(RouterOptionsValidator.ValidateModel(options.Models[0]));
+    }
+
+    [Theory]
     [InlineData("http://api.example.com/v1")]
     [InlineData("https://api.example.com/v1")]
     public void ValidModelEndpointBoundaries_ShouldPassForStartupAndModelWrite(string baseUrl)

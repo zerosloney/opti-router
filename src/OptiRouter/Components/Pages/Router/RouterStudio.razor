@@ -1262,7 +1262,7 @@
         // ⑥ 观测
         public bool EnableDistributedTracing { get; set; }
         public bool AuditStoreRequestContent { get; set; } = false;
-        public int AuditRetentionHours { get; set; } = 168;
+        public int AuditRetentionHours { get; set; } = 0;
         public string AlertWebhookUrl { get; set; } = "";
         public int AlertWebhookIntervalSeconds { get; set; } = 30;
 
@@ -1717,7 +1717,7 @@
         SandboxError = null;
         try
         {
-            var (result, error) = await Api.RunSandboxRouteAsync(SandboxInputPrompt);
+            var (result, error) = await Api.RunSandboxRouteAsync(SandboxInputPrompt, _cts.Token);
             if (result != null)
             {
                 SandboxResultData = result;

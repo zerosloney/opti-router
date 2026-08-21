@@ -23,7 +23,7 @@ public sealed class RequestContentAuditTests
     public void AuditStoreRequestContent_DefaultsFalseAcrossRuntimeDtoUiAndReadme()
     {
         Assert.False(new RoutingOptions().AuditStoreRequestContent);
-        Assert.Equal(168, new RoutingOptions().AuditRetentionHours);
+        Assert.Equal(0, new RoutingOptions().AuditRetentionHours);
         Assert.False(new ApiService.RoutingConfigDto().AuditStoreRequestContent);
 
         string routerStudio = ReadRepositoryFile("RouterStudio.razor");
@@ -54,7 +54,7 @@ public sealed class RequestContentAuditTests
             configuration.GetSection("OptiRouter").Bind(options);
 
             Assert.True(options.Routing.AuditStoreRequestContent);
-            Assert.Equal(168, options.Routing.AuditRetentionHours);
+            Assert.Equal(0, options.Routing.AuditRetentionHours);
         }
         finally
         {

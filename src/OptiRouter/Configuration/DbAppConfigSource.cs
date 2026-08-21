@@ -44,11 +44,17 @@ public sealed class DbAppConfigProvider : ConfigurationProvider
         }
         catch (Exception ex)
         {
-            // 配置库损坏时以默认值继续，不阻断启动；但必须留下原因。
+            // 运行期 Reload 也会进这里（页面保存配置 → IConfigurationRoot.Reload）。
+            // DB 瞬时不可用时必须保留上一次成功加载的 Data：清空会让 IOptionsMonitor 立即
+            // 回落默认值、模型列表清空，并连带 OnChange → Retain(空) 清掉学习状态。
+            // 仅首次加载（尚无旧数据）才以空字典继续，不阻断启动。
             Console.Error.WriteLine(
                 $"[DbAppConfigProvider] config db '{_dbPath}' failed to load: {ex.Message}. " +
-                "Continuing with default config; routing/model values from the database are unavailable.");
-            Data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+                (Data.Count > 0
+                    ? "Keeping previously loaded config values."
+                    : "Continuing with default config; routing/model values from the database are unavailable."));
+            if (Data.Count == 0)
+                Data = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         }
     }
 

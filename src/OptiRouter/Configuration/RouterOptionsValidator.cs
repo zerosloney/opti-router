@@ -379,6 +379,23 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
     }
 
     /// <summary>
+    /// SSRF 防线：网关会携带 ApiKey 真实请求 BaseUrl，云元数据端点与链路本地网段
+    /// （169.254.0.0/16、IPv6 link-local）禁止作为上游。本地 LLM（localhost/127.0.0.1）不受影响。
+    /// </summary>
+    private static bool IsBlockedUpstreamHost(Uri uri)
+    {
+        string host = uri.Host.ToLowerInvariant();
+        if (host is "metadata.google.internal" or "metadata.goog")
+            return true;
+        if (!System.Net.IPAddress.TryParse(host, out var ip))
+            return false;
+        if (ip.IsIPv6LinkLocal)
+            return true;
+        byte[] bytes = ip.GetAddressBytes();
+        return bytes.Length == 4 && bytes[0] == 169 && bytes[1] == 254;
+    }
+
+    /// <summary>
     /// 校验单个模型端点的数值边界（价格非负、MaxContextTokens>0）。
     /// 供启动校验与 Dashboard 写入复用，确保两条路径一致。
     /// </summary>
@@ -390,6 +407,10 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             || (baseUri.Scheme != Uri.UriSchemeHttp && baseUri.Scheme != Uri.UriSchemeHttps))
         {
             return $"模型 {model.Name} 的 BaseUrl 必须是绝对 HTTP/HTTPS URI。";
+        }
+        if (IsBlockedUpstreamHost(baseUri))
+        {
+            return $"模型 {model.Name} 的 BaseUrl 指向云元数据/链路本地地址，禁止配置。";
         }
 
         if (model.InputPricePerMillion < 0)

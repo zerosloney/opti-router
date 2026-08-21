@@ -137,6 +137,10 @@ public static class DashboardHandler
         // 4. Request Audit Log API with Multi-Filter Support
         endpoints.MapGet("/api/dashboard/requests", (IRequestAuditStore auditStore, int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null) =>
         {
+            if (IsInvertedTimeRange(from, to))
+                return Results.BadRequest(new { error = "'from' must be earlier than 'to'." });
+            if (!IsKnownAuditStatus(status))
+                return Results.BadRequest(new { error = "Unknown status filter; expected success|error|200|429|500." });
             if (limit <= 0) limit = 50;
             if (limit > 200) limit = 200;
             if (offset < 0) offset = 0;
@@ -147,12 +151,21 @@ public static class DashboardHandler
             var totalCount = filtered.Count();
             var pageItems = filtered.Skip(offset).Take(limit).ToList();
 
-            return Results.Json(new { items = pageItems, totalCount });
+            // 列表基于最近 500 条活动缓冲过滤：命中缓冲上限时 totalCount 只是下界，前端需提示。
+            bool bufferLimited = recent.Count >= 500;
+            return Results.Json(new { items = pageItems, totalCount, bufferLimited });
         });
 
         // 4a. Audit Log CSV Export（与列表接口同一套筛选；作用域同为最近 500 条活动缓冲）
         endpoints.MapGet("/api/dashboard/requests/export", async (HttpContext httpContext, IRequestAuditStore auditStore, string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null) =>
         {
+            // 与列表端点同一套入口校验；本 lambda 直接写响应体，BadRequest 手写。
+            if (IsInvertedTimeRange(from, to) || !IsKnownAuditStatus(status))
+            {
+                httpContext.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await httpContext.Response.WriteAsJsonAsync(new { error = "Invalid export filter: 'from' must be earlier than 'to'; status must be success|error|200|429|500." });
+                return;
+            }
             var rows = ApplyAuditFilters(auditStore.GetRecent(500).AsEnumerable(), model, tier, status, minLatency, q, from, to).ToList();
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("timestamp_utc,request_id,trace_id,model,tier,success,prompt_tokens,completion_tokens,cached_input_tokens,cache_write_input_tokens,cost_usd,latency_ms,ttft_ms,streaming,error_message");
@@ -603,7 +616,7 @@ public static class DashboardHandler
                 // ⑥ 观测
                 if (req.EnableDistributedTracing is not null) routing["EnableDistributedTracing"] = req.EnableDistributedTracing.Value;
                 if (req.AuditStoreRequestContent is not null) routing["AuditStoreRequestContent"] = req.AuditStoreRequestContent.Value;
-                if (req.AuditRetentionHours is >= 1) routing["AuditRetentionHours"] = req.AuditRetentionHours.Value;
+                if (req.AuditRetentionHours is >= 0) routing["AuditRetentionHours"] = req.AuditRetentionHours.Value;
                 if (req.AlertWebhookUrl is not null) routing["AlertWebhookUrl"] = req.AlertWebhookUrl.Trim();
                 if (req.AlertWebhookIntervalSeconds is >= 5) routing["AlertWebhookIntervalSeconds"] = req.AlertWebhookIntervalSeconds.Value;
 
@@ -757,6 +770,21 @@ public static class DashboardHandler
         utc = DateTime.MinValue;
         if (string.IsNullOrWhiteSpace(value)) return false;
         return DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal, out utc);
+    }
+
+    /// <summary>from/to 同时可解析且 from &gt;= to 时视为反选时间范围（与 analysis 端点口径一致）。</summary>
+    private static bool IsInvertedTimeRange(string? from, string? to) =>
+        DateTime.TryParse(from, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var fromUtc)
+        && DateTime.TryParse(to, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var toUtc)
+        && fromUtc >= toUtc;
+
+    /// <summary>status 为空或属于识别集合（success/error/200/429/500）才放行；未知值 400 而非静默忽略过滤。</summary>
+    private static bool IsKnownAuditStatus(string? status)
+    {
+        if (string.IsNullOrWhiteSpace(status)) return true;
+        return status.Equals("success", StringComparison.OrdinalIgnoreCase)
+            || status.Equals("error", StringComparison.OrdinalIgnoreCase)
+            || status is "200" or "429" or "500";
     }
 
     /// <summary>

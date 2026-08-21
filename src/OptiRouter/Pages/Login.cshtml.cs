@@ -7,6 +7,8 @@ using OptiRouter.Configuration;
 
 namespace OptiRouter.Pages;
 
+// 登录页含密钥输入与失败状态，禁止任何缓存（后退键/共享终端可回看认证态页面）。
+[ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public class LoginModel : PageModel
 {
     private readonly IConfiguration _config;

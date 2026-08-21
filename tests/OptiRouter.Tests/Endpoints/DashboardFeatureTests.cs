@@ -204,6 +204,34 @@ public class DashboardFeatureTests
     }
 
     [Fact]
+    public async Task ConfigPut_AuditRetentionHoursZero_PersistsPermanentRetention()
+    {
+        // 0 = 永久保留是合法值（validator 允许 >= 0），持久化与应用两侧都必须接受，
+        // 防止"运行时生效、重启回跳"的半生效状态回归。
+        using var factory = new FeatureFactory();
+        using var client = CreateClient(factory);
+        string version = await GetVersionAsync(client);
+
+        using var content = new StringContent(
+            JsonSerializer.Serialize(new { ExpectedVersion = version, AuditRetentionHours = 0 }),
+            Encoding.UTF8,
+            "application/json");
+        using var putResponse = await client.PutAsync("/api/dashboard/config", content);
+        Assert.Equal(HttpStatusCode.OK, putResponse.StatusCode);
+
+        using var getResponse = await client.GetAsync("/api/dashboard/config");
+        getResponse.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await getResponse.Content.ReadAsStringAsync());
+        Assert.Equal(0, doc.RootElement.GetProperty("routing").GetProperty("auditRetentionHours").GetInt32());
+
+        // 变更历史必须记录该 diff（此前持久化条件 >= 1 会静默跳过 0）。
+        using var historyResponse = await client.GetAsync("/api/dashboard/config/history");
+        historyResponse.EnsureSuccessStatusCode();
+        using var history = JsonDocument.Parse(await historyResponse.Content.ReadAsStringAsync());
+        Assert.Contains("Routing:AuditRetentionHours", history.RootElement[0].GetProperty("changes").GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ConfigHistory_EmptyWhenNoChanges()
     {
         using var factory = new FeatureFactory();
