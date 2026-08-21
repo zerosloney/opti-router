@@ -39,10 +39,12 @@ public sealed class BudgetOptions
     public int SessionEvictionHours { get; set; } = 24;
 
     /// <summary>
-    /// 分布式持久化存储提供者："Sqlite" | "MariaDb" | "Postgres" | "Redis" | "InMemory"。默认 "Sqlite"。
-    /// 对于 Kubernetes 多节点无状态部署场景，可切换为 "MariaDb"、"Postgres" 或 "Redis" 共享全局账本。
+    /// 分布式持久化存储提供者，默认 <c>Auto</c>：配置了 <c>OptiRouter:ConfigDbConnectionString</c>
+    /// 即用 MariaDb，否则回退 SQLite 文件——只需配置连接串一处即可全量切换。
+    /// 显式指定 <c>Sqlite</c> / <c>MariaDb</c> / <c>Postgres</c> / <c>Redis</c> / <c>InMemory</c>
+    /// 可覆盖自动推断；服务器型 DB 供多实例共享全局账本。
     /// </summary>
-    public string StoreProvider { get; set; } = "Sqlite";
+    public string StoreProvider { get; set; } = "Auto";
 
     /// <summary>
     /// MariaDB/MySQL 连接字符串，仅作独立库覆盖用；缺省（推荐）回退全局

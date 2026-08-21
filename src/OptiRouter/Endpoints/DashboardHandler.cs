@@ -623,7 +623,7 @@ public static class DashboardHandler
 
             return Results.Ok(new
             {
-                message = "System configuration persisted to the SQLite config database and hot-applied via reload.",
+                message = "System configuration persisted to the config database and hot-applied via reload.",
                 version
             });
         });
@@ -1127,7 +1127,7 @@ public static class DashboardHandler
     }
 
     /// <summary>
-    /// 把路由/预算配置变更持久化到 SQLite 配置库并触发热重载。
+    /// 把路由/预算配置变更持久化到配置库并触发热重载。
     /// 变更以"当前 DB 文档 + 请求字段"合并后整体写回（与旧 appsettings.json 落盘语义一致）。
     /// 写入成功后计算新旧文档 key 级 diff 并记入配置变更审计（config_change_history）。
     /// </summary>

@@ -8,8 +8,7 @@
       "applicationUrl": "http://localhost:5157",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
-        "OptiRouter__ConfigDbConnectionString": "Server=127.0.0.1;Port=3306;Database=test;User ID=root;Password=dc123456;Connection Timeout=15;Default Command Timeout=30",
-        "OptiRouter__Budget__StoreProvider": "MariaDb"
+        "OptiRouter__ConfigDbConnectionString": "Server=127.0.0.1;Port=3306;Database=test;User ID=root;Password=dc123456;Connection Timeout=15;Default Command Timeout=30"
       }
     },
     "https": {
@@ -19,8 +18,7 @@
       "applicationUrl": "https://localhost:7159;http://localhost:5157",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
-        "OptiRouter__ConfigDbConnectionString": "Server=127.0.0.1;Port=3306;Database=test;User ID=root;Password=dc123456;Connection Timeout=15;Default Command Timeout=30",
-        "OptiRouter__Budget__StoreProvider": "MariaDb"
+        "OptiRouter__ConfigDbConnectionString": "Server=127.0.0.1;Port=3306;Database=test;User ID=root;Password=dc123456;Connection Timeout=15;Default Command Timeout=30"
       }
     }
   }

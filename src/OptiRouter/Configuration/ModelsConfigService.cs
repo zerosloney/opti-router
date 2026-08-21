@@ -6,7 +6,7 @@ namespace OptiRouter.Configuration;
 
 /// <summary>
 /// 模型配置的读写与热更新服务。
-/// 负责从 SQLite 配置库（<see cref="AppConfigDbStore"/>）加载模型列表，支持 Dashboard 写入，
+/// 负责从配置库（<see cref="AppConfigDbStore"/>）加载模型列表，支持 Dashboard 写入，
 /// 并在写入后触发 <see cref="IConfigurationRoot.Reload()"/> 通知所有 IOptionsMonitor 实现。
 /// </summary>
 public sealed class ModelsConfigService

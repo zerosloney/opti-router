@@ -8,7 +8,7 @@
     <!-- Banner -->
     <div class="alert-banner alert-info">
         <span class="indicator pulse"></span>
-        <span>模型配置页。增删改与连通性探活即时写入 SQLite 配置库并热生效。</span>
+        <span>模型配置页。增删改与连通性探活即时写入配置库并热生效。</span>
     </div>
 
     <div class="glass-card">
@@ -645,7 +645,7 @@
                     Form.Name.Trim(), Form.BaseUrl.Trim().TrimEnd('/'),
                     string.IsNullOrWhiteSpace(Form.ApiKey) ? null : Form.ApiKey,
                     Form.Tier,
-                    Form.MaxContextTokens > 0 ? Form.MaxContextTokens : 8192,
+                    Form.MaxContextTokens > 0 ? Form.MaxContextTokens : 200000,
                     Form.TimeoutSeconds > 0 ? Form.TimeoutSeconds : 120,
                     Math.Max(0, Form.MaxRetries),
                     bool.Parse(Form.EnabledStr),
@@ -760,7 +760,7 @@
         public string Tier { get; set; } = "Medium";
         public string Provider { get; set; } = "";
         public string Family { get; set; } = "";
-        public int MaxContextTokens { get; set; } = 8192;
+        public int MaxContextTokens { get; set; } = 200000;
         public int TimeoutSeconds { get; set; } = 120;
         public int MaxRetries { get; set; } = 0;
         public double Weight { get; set; } = 1.0;
