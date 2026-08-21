@@ -46,33 +46,65 @@
 
     <!-- 一键预设 -->
     <div class="glass-card">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span>🚀 推荐配置预设</span>
-            @if (!string.IsNullOrEmpty(CurrentPresetName))
+        <div class="preset-header">
+            <div class="preset-header-row">
+                <span>🚀 推荐配置预设</span>
+                @if (!string.IsNullOrEmpty(CurrentPresetName))
+                {
+                    <span class="tag tag-info">配置文件预设: @CurrentPresetName（只填充未显式配置的项）</span>
+                }
+                else
+                {
+                    <span class="tag tag-secondary">未使用配置文件预设</span>
+                }
+            </div>
+            @if (PresetSummaries.Count > 0)
             {
-                <span class="tag tag-info">配置文件预设: @CurrentPresetName（只填充未显式配置的项）</span>
-            }
-            else
-            {
-                <span class="tag tag-secondary">未使用配置文件预设</span>
+                @if (!string.IsNullOrEmpty(MatchedPresetName))
+                {
+                    <span class="tag tag-success" style="font-size: 0.82rem; padding: 0.3rem 0.8rem;">
+                        ✓ 当前配置匹配: @(PresetSummaries.FirstOrDefault(p => p.Name == MatchedPresetName)?.Title ?? MatchedPresetName)
+                    </span>
+                }
+                else
+                {
+                    <span class="tag tag-secondary" style="font-size: 0.82rem; padding: 0.3rem 0.8rem;">
+                        自定义配置（不匹配任何预设）
+                    </span>
+                }
             }
         </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 10px;">
+        <div class="preset-grid">
             @foreach (var preset in PresetSummaries)
             {
-                <div class="sub-card" style="display: flex; flex-direction: column; gap: 8px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <strong style="font-size: 0.92rem;">@preset.Name</strong>
-                        <span class="tag tag-secondary" style="font-size: 0.7rem;">@preset.Title</span>
+                var presetClass = preset.Name switch
+                {
+                    "cost-first" => "preset-card preset-card-cost",
+                    "balanced" => "preset-card preset-card-balanced",
+                    "quality-first" => "preset-card preset-card-quality",
+                    _ => "preset-card"
+                };
+                var isMatched = MatchedPresetName == preset.Name;
+
+                <div class="@presetClass @(isMatched ? "preset-card-matched" : "")">
+                    <div class="preset-card-header">
+                        <div>
+                            <div class="preset-card-title">@preset.Name</div>
+                            <div class="preset-card-subtitle">@preset.Title</div>
+                        </div>
+                        @if (isMatched)
+                        {
+                            <span class="tag tag-success preset-card-matched-badge">✓ 匹配</span>
+                        }
                     </div>
-                    <div class="meta-text" style="font-size: 0.74rem;">@preset.Description</div>
-                    <button class="btn-ghost btn-sm" @onclick="() => ApplyPresetToForm(preset.Name)" disabled="@(SelectedPresetName == preset.Name)">
+                    <div class="preset-card-desc">@preset.Description</div>
+                    <button class="btn-ghost btn-sm preset-card-btn" @onclick="() => ApplyPresetToForm(preset.Name)" disabled="@(SelectedPresetName == preset.Name)">
                         @(SelectedPresetName == preset.Name ? "✓ 已填充到表单" : "填充到表单")
                     </button>
                 </div>
             }
         </div>
-        <div class="meta-text" style="margin-top: 8px;">
+        <div class="meta-text" style="margin-top: 12px;">
             预设会把下述推荐值填入下方配置表单（可再微调），点「保存并热生效」才落盘——所见即所存。
         </div>
     </div>
@@ -456,9 +488,9 @@
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnablePersonaDriftProtection)) ? "dirty-field" : "")">
                         <div class="item-text">
                             <span class="item-title">Persona 漂移保护</span>
-                            <span class="item-desc">多轮会话自动注入人设锚点，防止模型换档后性格/格式突变。默认开。</span>
+                            <span class="item-desc">多轮会话自动注入人设锚点，防止模型换档后性格/格式突变。默认关（会改变请求原文，影响上游缓存前缀）。</span>
                         </div>
-                        <label class="toggle-switch" title="多轮会话自动注入人设锚点。默认开。">
+                        <label class="toggle-switch" title="多轮会话自动注入人设锚点。默认关。">
                             <input type="checkbox" @bind="Cfg.EnablePersonaDriftProtection" />
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
@@ -650,11 +682,11 @@
                     <div class="config-item @(IsDirty(nameof(ConfigForm.AuditRetentionHours)) ? "dirty-field" : "")">
                         <div class="item-text">
                             <span class="item-title">审计保留时长</span>
-                            <span class="item-desc">审计记录保留小时数（默认 168 = 7 天），后台周期淘汰过期记录防止无界增长。必须 ≥ 1。</span>
+                            <span class="item-desc">审计记录保留小时数（默认 168 = 7 天），后台周期淘汰过期记录防止无界增长。0 = 永久保留。</span>
                         </div>
                         <div class="config-row">
                             <span class="config-row-label">保留 (小时):</span>
-                            <input type="number" step="24" min="1" @bind="Cfg.AuditRetentionHours" class="form-control" style="width: 80px;" />
+                            <input type="number" step="24" min="0" @bind="Cfg.AuditRetentionHours" class="form-control" style="width: 80px;" />
                         </div>
                     </div>
                 </div>
@@ -1267,6 +1299,8 @@
     private bool ConfigStatusOk = true;
     private string? CurrentPresetName;
     private string? SelectedPresetName;
+    /// <summary>当前配置（表单值）完全匹配的预设名；null = 自定义配置。按值推导而非记录，微调任一预设键后自然降级为自定义。</summary>
+    private string? MatchedPresetName;
     private List<ApiService.PresetSummaryDto> PresetSummaries = new();
 
     /// <summary>与最近一次保存/加载值的差异字段数（逐字段反射比较）。</summary>
@@ -1336,6 +1370,7 @@
                     _ => "默认档 Strong + Fusion 多模型融合 + 拜占庭共识 + 级联升级 30%——尽量答好。"
                 },
                 kv.Value)).ToList();
+            RecomputeMatchedPreset();
         }
         catch (Exception ex)
         {
@@ -1343,6 +1378,45 @@
             ConfigStatusMsg = "✗ 路由预设加载失败：" + ex.Message;
         }
     }
+
+    /// <summary>
+    /// 推导当前表单值完全匹配哪个预设（预设全部键值一致才算匹配）。
+    /// 用于回显"上次应用并保存的是哪个模板"——按值推导而非持久化记录预设名，
+    /// 用户微调过任何预设键后自然降级为自定义，不会显示失真的预设名。
+    /// </summary>
+    private void RecomputeMatchedPreset()
+    {
+        if (PresetSummaries.Count == 0) return;
+        foreach (var preset in PresetSummaries)
+        {
+            if (preset.Values.All(kv => PresetKeyMatches(kv.Key, kv.Value)))
+            {
+                MatchedPresetName = preset.Name;
+                return;
+            }
+        }
+        MatchedPresetName = null;
+    }
+
+    private bool PresetKeyMatches(string key, JsonElement value) => (key, value.ValueKind) switch
+    {
+        ("EnableThompsonSampling", JsonValueKind.True) => Cfg.EnableThompsonSampling,
+        ("EnableThompsonSampling", JsonValueKind.False) => !Cfg.EnableThompsonSampling,
+        ("EnableLatencyAware", JsonValueKind.True) => Cfg.EnableLatencyAware,
+        ("EnableLatencyAware", JsonValueKind.False) => !Cfg.EnableLatencyAware,
+        ("ExplorationEpsilon", JsonValueKind.Number) => Math.Abs(Cfg.ExplorationEpsilon - value.GetDouble()) < 1e-9,
+        ("EnableResponseCache", JsonValueKind.True) => Cfg.EnableResponseCache,
+        ("EnableResponseCache", JsonValueKind.False) => !Cfg.EnableResponseCache,
+        ("EnableCascadeUpgrade", JsonValueKind.True) => Cfg.EnableCascadeUpgrade,
+        ("EnableCascadeUpgrade", JsonValueKind.False) => !Cfg.EnableCascadeUpgrade,
+        ("CascadeUpgradeSampleRate", JsonValueKind.Number) => Math.Abs(Cfg.CascadeUpgradeSampleRate - value.GetDouble()) < 1e-9,
+        ("EnableFusionRouter", JsonValueKind.True) => Cfg.EnableFusionRouter,
+        ("EnableFusionRouter", JsonValueKind.False) => !Cfg.EnableFusionRouter,
+        ("EnableByzantineConsensus", JsonValueKind.True) => Cfg.EnableByzantineConsensus,
+        ("EnableByzantineConsensus", JsonValueKind.False) => !Cfg.EnableByzantineConsensus,
+        ("DefaultTier", JsonValueKind.String) => string.Equals(Cfg.DefaultTier, value.GetString(), StringComparison.OrdinalIgnoreCase),
+        _ => false,
+    };
 
     /// <summary>把预设值填入表单（不落盘，用户可在保存前继续微调）。</summary>
     private void ApplyPresetToForm(string presetName)
@@ -1385,6 +1459,7 @@
             }
         }
         SelectedPresetName = presetName;
+        RecomputeMatchedPreset();
         ConfigStatusOk = true;
         ConfigStatusMsg = $"✓ 预设「{presetName}」已填充到表单（{DirtyCount} 项待保存变更），可继续微调后保存。";
     }
@@ -1396,6 +1471,7 @@
             Cfg = _baseline.Clone();
         }
         SelectedPresetName = null;
+        RecomputeMatchedPreset();
         ConfigStatusMsg = "";
     }
 

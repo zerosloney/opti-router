@@ -37,6 +37,8 @@ internal sealed class SmokeWebApplicationFactory : WebApplicationFactory<Program
             Path.Combine(Path.GetTempPath(), "optirouter-config-test-" + Guid.NewGuid().ToString("N") + ".db"));
         // 测试用内存账本，避免写真实 SQLite 文件。
         builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+        // 集成测试宿主监听随机端口，与常驻服务无冲突；关闭单实例守卫避免被跨进程锁误杀。
+        builder.UseSetting("OptiRouter:EnableSingleInstanceGuard", "false");
         builder.ConfigureServices(services =>
         {
             // 不覆盖 IModelClientProvider，让 Program.cs 中注册的真实 ModelClientProvider 生效，

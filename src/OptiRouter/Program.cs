@@ -674,11 +674,17 @@ var app = builder.Build();
 
 // 单实例守卫：已有其他进程在运行时干净退出（详见 SingleInstanceGuard）。
 // 同进程多 host（集成测试）放行；锁句柄保持到进程结束。
-var (proceed, singleInstanceLock) = OptiRouter.SingleInstanceGuard.TryAcquire(
-    message => app.Logger.LogWarning(message));
-if (!proceed)
+// 默认关闭（集成测试有十余个独立 WebApplicationFactory 宿主，监听随机端口与常驻服务无冲突，
+// 却会被跨进程锁误杀致 dotnet test 中止）；生产部署在 appsettings.Production.json 显式开启。
+if (app.Configuration.GetValue("OptiRouter:EnableSingleInstanceGuard", false))
 {
-    Environment.Exit(0);
+    var (proceed, singleInstanceLock) = OptiRouter.SingleInstanceGuard.TryAcquire(
+        message => app.Logger.LogWarning(message));
+    if (!proceed)
+    {
+        Environment.Exit(0);
+    }
+    _ = singleInstanceLock; // 锁句柄保持到进程结束（防 GC/析构释放；进程退出自动释放）
 }
 
 // 首启迁移：配置库为空时从 appsettings.json 的 Routing/Budget 段与遗留 models-config.json 导入一次。

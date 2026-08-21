@@ -157,6 +157,8 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
         // 测试用临时配置库：路由/预算/模型配置隔离在各自测试实例，不污染真实 data/optirouter-config.db。
         builder.UseSetting("OptiRouter:ConfigDbPath",
             Path.Combine(Path.GetTempPath(), "optirouter-config-test-" + Guid.NewGuid().ToString("N") + ".db"));
+        // 集成测试宿主监听随机端口，与常驻服务无冲突；关闭单实例守卫避免被跨进程锁误杀。
+        builder.UseSetting("OptiRouter:EnableSingleInstanceGuard", "false");
         // 测试用内存账本，避免写真实 SQLite 文件与跨测试状态残留。
         builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
         builder.ConfigureServices(services =>
