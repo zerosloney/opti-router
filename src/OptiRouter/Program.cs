@@ -714,6 +714,21 @@ routerOptionsMonitor.OnChange(options =>
     banditStoreForReload.Retain(options.Models.Select(m => m.Name));
 });
 
+// 安全基线响应头：nosniff 防 MIME 嗅探；X-Frame-Options/CSP frame-ancestors 防管理台被 iframe
+// 嵌入的点击劫持。放在静态文件之前，静态资源响应同样覆盖。
+// HSTS 仅生产启用（HTTP 请求浏览器本就忽略该头，本地 HTTP 部署无影响）。
+if (builder.Environment.IsProduction())
+{
+    app.UseHsts();
+}
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.XContentTypeOptions = "nosniff";
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+    context.Response.Headers.ContentSecurityPolicy = "frame-ancestors 'none'";
+    await next(context).ConfigureAwait(false);
+});
+
 // Serve the Blazor boot script and the dashboard's CSS/JavaScript before the
 // authentication middleware. Framework asset requests cannot carry the admin key.
 app.UseStaticFiles();
@@ -854,10 +869,37 @@ app.Use(async (context, next) =>
     else if (isAdminPath)
     {
         bool sessionAuthenticated = context.User.Identity?.IsAuthenticated == true;
-        bool bearerAuthenticated = AdminKeyVerifier.IsValid(adminKey, ExtractBearerToken(context));
+        string? presentedToken = sessionAuthenticated ? null : ExtractBearerToken(context);
+
+        // Bearer 爆破防护：管理 API 直连 Bearer 的失败尝试与 /login 登录页共享同一 IP 锁定窗口
+        //（限流器只覆盖 /v1/*，此前这里完全无阻）。仅在实际出示了 token 时参与——
+        // 匿名页面/无凭证 API 请求不计数，避免误伤正常浏览；已登录 Cookie 会话不受影响。
+        if (presentedToken is not null)
+        {
+            var loginRateLimiter = context.RequestServices.GetRequiredService<LoginRateLimiter>();
+            bool trustProxy = context.RequestServices.GetRequiredService<IConfiguration>()
+                .GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false;
+            string throttleKey = LoginRateLimiter.ResolveClientIp(context, trustProxy);
+            if (loginRateLimiter.IsLocked(throttleKey))
+            {
+                await ProtocolErrorHelper.WriteProxyErrorAsync(
+                    context, StatusCodes.Status401Unauthorized, "Unauthorized", "INVALID_API_KEY").ConfigureAwait(false);
+                return;
+            }
+        }
+
+        bool bearerAuthenticated = presentedToken is not null && AdminKeyVerifier.IsValid(adminKey, presentedToken);
 
         if (!sessionAuthenticated && !bearerAuthenticated)
         {
+            if (presentedToken is not null)
+            {
+                // 校验失败计入锁定窗口（与登录页同语义：窗口内累计 5 次失败即锁 5 分钟）。
+                var loginRateLimiter = context.RequestServices.GetRequiredService<LoginRateLimiter>();
+                bool trustProxy = context.RequestServices.GetRequiredService<IConfiguration>()
+                    .GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false;
+                loginRateLimiter.RecordFailure(LoginRateLimiter.ResolveClientIp(context, trustProxy));
+            }
             // 页面（HTML）场景：浏览器重定向到登录页；API 场景：直接 401。
             // openapi.json（/dashboard/api-docs）按 API 处理返回 401，便于工具链识别。
             bool isPageRequest = !context.Request.Path.StartsWithSegments("/api")

@@ -19,6 +19,7 @@ public sealed class MetricsEndpointAuthTests
         public string? MetricsApiKey { get; set; } = null;
         public bool EnableMetrics { get; set; } = true;
         public string MetricsEndpointPath { get; set; } = "/metrics";
+        public string? AdminApiKey { get; set; }
 
         // 封闭测试：配置库指向临时文件（空库），模型经 Configure<RouterOptions> 注入——
         // 否则 models 权威来自配置库，会依赖运行环境遗留 DB 状态（src/data 或 bin/data）。
@@ -42,6 +43,10 @@ public sealed class MetricsEndpointAuthTests
                 if (MetricsApiKey is not null)
                 {
                     inMemoryConfig["OptiRouter:Routing:MetricsApiKey"] = MetricsApiKey;
+                }
+                if (AdminApiKey is not null)
+                {
+                    inMemoryConfig["OptiRouter:AdminApiKey"] = AdminApiKey;
                 }
 
                 config.AddInMemoryCollection(inMemoryConfig);
@@ -74,6 +79,40 @@ public sealed class MetricsEndpointAuthTests
                 try { File.Delete(_tempDbPath); } catch { }
             }
         }
+    }
+
+    [Fact]
+    public async Task AdminApi_BearerBruteForce_LocksIp_EvenValidKeyRejected()
+    {
+        // 管理 API 直连 Bearer 的失败尝试与 /login 共享 IP 锁定窗口（此前完全无阻）。
+        using var factory = new MetricsWebApplicationFactory
+        {
+            MetricsApiKey = null,
+            EnableMetrics = true,
+            AdminApiKey = "admin-key-123"
+        };
+        using var client = factory.CreateClient();
+
+        // 5 次无效 Bearer（默认阈值）→ IP 进入锁定窗口
+        for (int i = 0; i < 5; i++)
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, "/api/dashboard/config");
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", $"wrong-key-{i}");
+            using var resp = await client.SendAsync(req);
+            Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        // 锁定期间正确 Key 也被拒（与 /login 同语义：IsLocked 先于校验）
+        using var validReq = new HttpRequestMessage(HttpMethod.Get, "/api/dashboard/config");
+        validReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", "admin-key-123");
+        using var validResp = await client.SendAsync(validReq);
+        Assert.Equal(HttpStatusCode.Unauthorized, validResp.StatusCode);
+
+        // 匿名页面请求（无 Bearer）不计数、不受锁定影响：仍正常 302 到登录页
+        using var pageClient = factory.CreateClient(
+            new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
+        using var pageResp = await pageClient.GetAsync("/dashboard");
+        Assert.Equal(HttpStatusCode.Redirect, pageResp.StatusCode);
     }
 
     [Fact]

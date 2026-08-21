@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Microsoft.AspNetCore.Http;
 
 namespace OptiRouter.Configuration;
 
@@ -123,6 +124,21 @@ public sealed class LoginRateLimiter
 
     /// <summary>当前跟踪的 IP 窗口数（诊断/测试用，验证容量回收）。</summary>
     public int TrackedIpCount => _windows.Count;
+
+    /// <summary>
+    /// 客户端 IP 解析（与代理限流分区同一优先级）：CF-Connecting-IP &gt; X-Forwarded-For 首段
+    /// （仅 <c>TrustProxyHeaders=true</c> 时信任，防客户端伪造头绕过锁定）&gt; RemoteIpAddress。
+    /// 登录页与管理 API 的 Bearer 爆破防护共用本解析与同一限流器实例，锁定窗口按 IP 聚合。
+    /// </summary>
+    public static string ResolveClientIp(HttpContext context, bool trustProxyHeaders)
+    {
+        var headers = context.Request.Headers;
+        if (trustProxyHeaders && headers.TryGetValue("CF-Connecting-IP", out var cfIp) && !string.IsNullOrEmpty(cfIp))
+            return cfIp.ToString();
+        if (trustProxyHeaders && headers.TryGetValue("X-Forwarded-For", out var xff) && !string.IsNullOrEmpty(xff))
+            return xff.ToString().Split(',')[0].Trim();
+        return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    }
 
     private FailureWindow NewWindow(DateTimeOffset start, int count) =>
         new(start, count, count >= _maxFailures ? start + _windowDuration : DateTimeOffset.MinValue);

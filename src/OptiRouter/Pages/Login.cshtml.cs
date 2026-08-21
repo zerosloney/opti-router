@@ -28,7 +28,7 @@ public class LoginModel : PageModel
     public async Task<IActionResult> OnPostAsync()
     {
         bool trustProxy = _config.GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false;
-        string clientIp = ResolveClientIp(HttpContext, trustProxy);
+        string clientIp = LoginRateLimiter.ResolveClientIp(HttpContext, trustProxy);
 
         // 失败限流：同一 IP 短时间内失败过多即临时锁定，防字典爆破。
         if (_rateLimiter.IsLocked(clientIp))
@@ -57,16 +57,5 @@ public class LoginModel : PageModel
             new AuthenticationProperties { IsPersistent = true });
 
         return Redirect("/overview");
-    }
-
-    // 客户端 IP 解析，与 Program.ResolvePartitionKey 的 IP 分支保持一致（TrustProxyHeaders 控制）。
-    private static string ResolveClientIp(HttpContext context, bool trustProxyHeaders)
-    {
-        var headers = context.Request.Headers;
-        if (trustProxyHeaders && headers.TryGetValue("CF-Connecting-IP", out var cfIp) && !string.IsNullOrEmpty(cfIp))
-            return cfIp.ToString();
-        if (trustProxyHeaders && headers.TryGetValue("X-Forwarded-For", out var xff) && !string.IsNullOrEmpty(xff))
-            return xff.ToString().Split(',')[0].Trim();
-        return context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     }
 }

@@ -134,7 +134,7 @@ curl http://localhost:5000/health
 | `OutputPricePerMillion` | 输出价格（美元/百万 token） | `10.0` |
 | `Provider` | 可选 provider 标识（自由字符串），仅用于 Fusion 软多样性；空表示未知 | `openai` |
 | `Family` | 可选模型家族标识（自由字符串），仅用于 Fusion 软多样性；空表示未知 | `gpt-4o` |
-| `TimeoutSeconds` | 单次请求超时秒数 | `120` |
+| `TimeoutSeconds` | 单次调用超时秒数。非流式=总时长上限；流式=响应头阶段总时长上限 + 相邻 chunk 空闲上限（持续推进的流不设总时长上限，不会被中途切断） | `120` |
 | `MaxRetries` | 失败后最大重试次数 | `0` |
 | `Enabled` | 是否启用该模型 | `true` |
 | `IsLocalOrPrivate` | 标识该端点是否为本地/私有化节点（用于数据不出域隔离） | `false` |
@@ -165,7 +165,7 @@ curl http://localhost:5000/health
 | `EnableDataSovereignty` | 是否启用数据不出域隔离屏障（强制仅路由至本地/私有节点）。**默认关闭，合规部署建议启用** | `false` |
 | `EnableJsonAstAutoRepair` | 是否启用 JSON AST 自动化修补服务（剥离代码围栏、修复逗号、截断补全） | `true` |
 | `EnableDistributedTracing` | 是否启用 W3C 分布式链路追踪（生成 TraceId/SpanId，映射 ActivitySource） | `true` |
-| `EnablePersonaDriftProtection` | 是否启用多轮对话人设一致性防护（静态人设锚点提示词） | `true` |
+| `EnablePersonaDriftProtection` | 是否启用多轮对话人设一致性防护（静态人设锚点提示词）。**默认关闭** | `false` |
 | `LongInputThresholdTokens` | 超长输入阈值，超过则过滤短上下文模型 | `32000` |
 | `DefaultTier` | 规则分类未命中时的默认分档 | `Medium` |
 | `TokenEstimation` | token 估算模式：`Tiktoken` 真实 BPE 精确计数 / `Bucket` 分桶粗估 | `Tiktoken` |
@@ -227,6 +227,8 @@ curl http://localhost:5000/health
 | `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
 | `MetricsApiKey` | `/metrics` 端点鉴权密钥（Bearer Token）。非空时要求 `Authorization: Bearer <key>`；null 保持无鉴权 | `null` |
 | `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（默认关闭；管理员可显式设为 `true` 以 opt-in。升级注意：该默认值由早前版本的 `true` 改为 `false`，依赖请求内容留存的部署需显式开启） | `false` |
+| `AuditRetentionHours` | 审计记录保留小时数。`0` = 永久保留（默认，后台不淘汰）；正数按窗口周期淘汰过期记录，防止审计表无界增长 | `0` |
+| `StreamFirstTokenTimeoutMs` | 流式首 token（TTFB）超时毫秒数。`0` 表示不限制，仅依赖客户端层超时兜底 | `0` |
 
 ### 推荐配置预设 (Presets)
 
@@ -468,6 +470,14 @@ docker run -d --name optirouter \
 #   -v optirouter-data:/app/data \
 #   -e OptiRouter__ProxyApiKey="..." -e OptiRouter__AdminApiKey="..." optirouter
 ```
+
+## 运维备忘
+
+- **日志**：服务日志直写 `logs/service.log`（进程生命周期内不轮转）。长期运行请定期清理或接入系统级轮转，例如 Windows 计划任务执行 `PowerShell (Get-Item logs\service.log).Length -gt 100MB { Move-Item ... }`，或 Linux `logrotate`。
+- **配置库备份**：配置库（MariaDB `optirouter_*` 表 / SQLite `data/optirouter-config.db`）是路由、预算、模型与租户 Key 的唯一权威，建议纳入例行备份：
+  - MariaDB：`mysqldump -h127.0.0.1 -uroot -p test optirouter_app_config optirouter_client_keys > optirouter-config-backup.sql`
+  - SQLite：直接复制 `data/optirouter-config.db`（服务停止时，或用 `.backup` 语义的工具）
+- **安全加固**（公网部署前）：设置强随机 `AdminApiKey`；`TrustProxyHeaders=true` 仅在可信反代之后开启；`OptiRouter:Routing:MetricsApiKey` 建议配置以免 `/metrics` 裸露；管理 API 的 Bearer 失败尝试与登录页共享同一 IP 锁定窗口（5 次失败锁 5 分钟）。
 
 ## 许可证
 
