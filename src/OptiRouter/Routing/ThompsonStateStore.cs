@@ -175,18 +175,23 @@ public sealed class ThompsonStateStore
         double r = Math.Clamp(reward, 0.0, 1.0);
         var stats = GetOrAdd(modelName);
 
+        // 锁内更新并快照：锁外直接读 stats.Alpha/Beta 持久化会与并发 RecordOutcome 竞态，
+        // 可能写回中间态（与 ContextualBanditState 的锁内 Clone 同口径）。
+        double alphaSnapshot, betaSnapshot;
         lock (stats.Lock)
         {
             stats.Alpha = stats.Alpha * factor + r;
             stats.Beta = stats.Beta * factor + (1.0 - r);
             stats.N++;
             stats.LastUpdateUtc = _timeProvider.GetUtcNow();
+            alphaSnapshot = stats.Alpha;
+            betaSnapshot = stats.Beta;
         }
 
         if (_persistence is null) return;
         try
         {
-            _persistence.Save(modelName, stats.Alpha, stats.Beta);
+            _persistence.Save(modelName, alphaSnapshot, betaSnapshot);
         }
         catch (Exception ex)
         {

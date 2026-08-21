@@ -343,4 +343,60 @@ public sealed class NativeProtocolClientTests
         Assert.False(http.DefaultRequestHeaders.Contains("x-goog-api-key"));
         Assert.False(http.DefaultRequestHeaders.Contains("anthropic-version"));
     }
+
+    [Theory]
+    [InlineData(ProviderProtocol.Anthropic)]
+    [InlineData(ProviderProtocol.Gemini)]
+    public async Task NativeClients_RetryTransientFailures_PerMaxRetries(ProviderProtocol protocol)
+    {
+        // 首次 500（可重试）→ 第二次成功：MaxRetries>=1 时原生协议客户端必须重试而非直接失败
+        //（此前 MaxRetries 仅对 OpenAI 客户端生效，原生协议静默无重试）。
+        var handler = new SequenceHandler(call => call == 0
+            ? new HttpResponseMessage(HttpStatusCode.InternalServerError)
+            {
+                Content = new StringContent("{\"error\":\"transient\"}")
+            }
+            : new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(protocol == ProviderProtocol.Anthropic
+                    ? """{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}"""
+                    : """{"candidates":[{"content":{"parts":[{"text":"ok"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}""")
+            });
+        var endpoint = CreateEndpoint(protocol, "native-retry");
+        endpoint.MaxRetries = 1;
+        var client = new ModelClientFactory().Create(endpoint, new HttpClient(handler) { BaseAddress = new Uri("http://localhost/") });
+
+        var response = await client.CompleteRawAsync(CreateRequest("ping"), CancellationToken.None);
+
+        Assert.Equal(2, handler.Calls);
+        Assert.Contains("ok", response.Body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NativeClients_MaxRetriesZero_DoesNotRetry()
+    {
+        var handler = new SequenceHandler(_ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+        {
+            Content = new StringContent("{\"error\":\"boom\"}")
+        });
+        var endpoint = CreateEndpoint(ProviderProtocol.Anthropic, "native-noretry");
+        endpoint.MaxRetries = 0;
+        var client = new ModelClientFactory().Create(endpoint, new HttpClient(handler) { BaseAddress = new Uri("http://localhost/") });
+
+        await Assert.ThrowsAsync<ModelClientException>(
+            () => client.CompleteRawAsync(CreateRequest("ping"), CancellationToken.None));
+        Assert.Equal(1, handler.Calls);
+    }
+
+    /// <summary>按调用序号返回响应的桩 handler，记录调用次数。</summary>
+    private sealed class SequenceHandler(Func<int, HttpResponseMessage> respond) : HttpMessageHandler
+    {
+        public int Calls;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            int call = Calls++;
+            return Task.FromResult(respond(call));
+        }
+    }
 }

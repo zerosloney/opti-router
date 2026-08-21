@@ -58,26 +58,47 @@ public sealed class AnthropicModelClient : IModelClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        using var content = new StringContent(
-            AnthropicTranslators.BuildRequestBody(request, _endpoint),
-            Encoding.UTF8,
-            "application/json");
-        content.Headers.ContentType!.CharSet = "utf-8";
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, MessagesPath) { Content = content };
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-
-        using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        // 有界读取：响应体超过上限立即中断，防异常/恶意上游超大响应撑爆内存（与 OpenAI 客户端一致）
-        string body = await BoundedResponseReader.ReadBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        // 与 OpenAI 客户端一致的重试语义：可重试状态码（408/5xx）与瞬时网络/超时异常按 MaxRetries 退避重试，
+        // 429 刻意上抛给编排层做配额记账与换源。
+        int maxRetries = _endpoint.MaxRetries;
+        int attempt = 0;
+        while (true)
         {
-            throw new ModelClientException(response.StatusCode, body);
-        }
+            try
+            {
+                using var content = new StringContent(
+                    AnthropicTranslators.BuildRequestBody(request, _endpoint),
+                    Encoding.UTF8,
+                    "application/json");
+                content.Headers.ContentType!.CharSet = "utf-8";
 
-        string openAiJson = AnthropicTranslators.ToOpenAiJson(body);
-        var usage = ExtractUsage(openAiJson);
-        return new RawChatResponse(openAiJson, usage);
+                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, MessagesPath) { Content = content };
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+                using var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+                // 有界读取：响应体超过上限立即中断，防异常/恶意上游超大响应撑爆内存（与 OpenAI 客户端一致）
+                string body = await BoundedResponseReader.ReadBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (ModelClientRetry.IsRetryable(response.StatusCode) && attempt < maxRetries)
+                    {
+                        attempt++;
+                        await ModelClientRetry.DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+                    throw new ModelClientException(response.StatusCode, body);
+                }
+
+                string openAiJson = AnthropicTranslators.ToOpenAiJson(body);
+                var usage = ExtractUsage(openAiJson);
+                return new RawChatResponse(openAiJson, usage);
+            }
+            catch (Exception ex) when (ModelClientRetry.IsExceptionRetryable(ex) && attempt < maxRetries)
+            {
+                attempt++;
+                await ModelClientRetry.DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
+            }
+        }
     }
 
     /// <inheritdoc />
@@ -187,23 +208,45 @@ public sealed class AnthropicModelClient : IModelClient
     /// </summary>
     private async Task<HttpResponseMessage> SendStreamRequestAsync(ChatRequest request, CancellationToken ct)
     {
-        using var content = new StringContent(
-            AnthropicTranslators.BuildRequestBody(request, _endpoint),
-            Encoding.UTF8,
-            "application/json");
-        content.Headers.ContentType!.CharSet = "utf-8";
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, MessagesPath) { Content = content };
-        httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-
-        var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        // 重试仅覆盖“拿到成功响应头”之前的阶段（与 OpenAI 客户端流式重试一致）；
+        // 响应体流一旦开始下发不再重试，避免重复输出。
+        int maxRetries = _endpoint.MaxRetries;
+        int attempt = 0;
+        while (true)
         {
-            string errorBody = await BoundedResponseReader.ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
-            response.Dispose();
-            throw new ModelClientException(response.StatusCode, errorBody);
+            try
+            {
+                using var content = new StringContent(
+                    AnthropicTranslators.BuildRequestBody(request, _endpoint),
+                    Encoding.UTF8,
+                    "application/json");
+                content.Headers.ContentType!.CharSet = "utf-8";
+
+                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, MessagesPath) { Content = content };
+                httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+                var response = await _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var statusCode = response.StatusCode;
+                    string errorBody = await BoundedResponseReader.ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
+                    response.Dispose();
+                    if (ModelClientRetry.IsRetryable(statusCode) && attempt < maxRetries)
+                    {
+                        attempt++;
+                        await ModelClientRetry.DelayWithJitterAsync(attempt, ct).ConfigureAwait(false);
+                        continue;
+                    }
+                    throw new ModelClientException(statusCode, errorBody);
+                }
+                return response;
+            }
+            catch (Exception ex) when (ModelClientRetry.IsExceptionRetryable(ex) && attempt < maxRetries)
+            {
+                attempt++;
+                await ModelClientRetry.DelayWithJitterAsync(attempt, ct).ConfigureAwait(false);
+            }
         }
-        return response;
     }
 
     /// <summary>

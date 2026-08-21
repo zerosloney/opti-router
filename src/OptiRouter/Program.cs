@@ -548,7 +548,8 @@ builder.Services.AddHostedService<MetricsGaugeUpdaterService>();
 
 // 告警 Webhook 推送：周期检查 AlertEngine 活跃告警，新增推送 alert、恢复推送 resolved，
 // 转换事件同步记入 AlertHistory；未配置 AlertWebhookUrl 时仅记录历史，URL 配置后热生效。
-builder.Services.AddHttpClient();
+// 10s 超时：webhook 目标无响应时不能让单条推送阻塞默认 100s、告警队列积压。
+builder.Services.AddHttpClient("alert-webhook", client => client.Timeout = TimeSpan.FromSeconds(10));
 builder.Services.AddHostedService<OptiRouter.Health.AlertWebhookNotifier>(sp =>
     new OptiRouter.Health.AlertWebhookNotifier(
         () => sp.GetRequiredService<AlertEngine>().Check(),

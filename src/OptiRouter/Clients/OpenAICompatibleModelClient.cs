@@ -497,26 +497,10 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     }
 
     private static bool IsRetryable(System.Net.HttpStatusCode statusCode)
-    {
-        int code = (int)statusCode;
-        // 429 is intentionally surfaced to request-level orchestration so quota
-        // state is updated and another candidate can be selected immediately.
-        return code is 408 or >= 500 and <= 599;
-    }
+        => ModelClientRetry.IsRetryable(statusCode);
 
     private static bool IsExceptionRetryable(Exception ex)
-    {
-        // HttpRequestException（DNS/连接/RST 等网络错）→ 重试。
-        if (ex is HttpRequestException)
-            return true;
-
-        // HttpClient 超时抛 TaskCanceledException/OperationCanceledException，InnerException 为 TimeoutException。
-        // 此为客户端内部超时（瞬时），应重试；外部 cancellationToken 主动取消（无 TimeoutException inner）不重试。
-        if (ex is OperationCanceledException)
-            return ex.InnerException is TimeoutException;
-
-        return false;
-    }
+        => ModelClientRetry.IsExceptionRetryable(ex);
 
     /// <summary>
     /// 在完整物化前读取有限大小的 UTF-8 响应体（共享实现，见 <see cref="BoundedResponseReader"/>）。
@@ -525,12 +509,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         => BoundedResponseReader.ReadBodyAsync(content, cancellationToken);
 
     private static async Task DelayWithJitterAsync(int attempt, CancellationToken cancellationToken)
-    {
-        // Exponential backoff: base = 2^attempt * 100 ms
-        int baseDelayMs = (int)Math.Pow(2, attempt) * 100;
-        int jitterMs = Random.Shared.Next(0, 100);
-        await Task.Delay(baseDelayMs + jitterMs, cancellationToken).ConfigureAwait(false);
-    }
+        => await ModelClientRetry.DelayWithJitterAsync(attempt, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// 从 OpenAI 兼容 JSON 中提取 token 用量（usage.prompt_tokens 等）。

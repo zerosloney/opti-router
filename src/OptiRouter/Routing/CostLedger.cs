@@ -52,9 +52,12 @@ public class CostLedger
     /// <param name="sessionId">可选会话 ID。null 或空时仅记日预算。</param>
     public void Record(decimal cost, string? sessionId = null)
     {
-        ResetDailyIfNewDay();
+        // 午夜边界：单次捕获 now，日切判定与记账同一时刻——两次读 UtcNow 之间跨日会把
+        // 成本记到新日期而旧日累计未被归档清零。
+        DateTime now = DateTime.UtcNow;
+        ResetDailyIfNewDay(now);
         _store.RecordAtomic(
-            DateTime.UtcNow, cost, cost,
+            now, cost, cost,
             sessionId, string.IsNullOrEmpty(sessionId) ? null : cost);
 
         if (!string.IsNullOrEmpty(sessionId))
@@ -126,9 +129,9 @@ public class CostLedger
         }
     }
 
-    private void ResetDailyIfNewDay()
+    private void ResetDailyIfNewDay(DateTime? now = null)
     {
-        DateTime today = DateTime.UtcNow.Date;
+        DateTime today = (now ?? DateTime.UtcNow).Date;
         // Fast path: same day, no lock needed.
         if (today == _lastDailyDate) return;
 

@@ -284,7 +284,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             if (decision.Candidates.Count == 0)
             {
                 if (decision.BudgetExhausted)
+                {
+                    // 预算耗尽拒绝也要留审计痕：请求未到上游、不走正常落账路径，
+                    // 不记则租户被拒事件在 Requests/Dashboard 完全不可见。
+                    _recorder.RecordAudit(null, "budget-guard", decision.EstimatedInputTokens, null, 0m, 0, sessionId,
+                        decision.Reason, false, "budget exhausted", false, routedTier);
                     throw new BudgetExhaustedException(decision.Reason);
+                }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
             }
 
@@ -735,7 +741,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             if (decision.Candidates.Count == 0)
             {
                 if (decision.BudgetExhausted)
+                {
+                    // 预算耗尽拒绝也要留审计痕：请求未到上游、不走正常落账路径，
+                    // 不记则租户被拒事件在 Requests/Dashboard 完全不可见。
+                    _recorder.RecordAudit(null, "budget-guard", decision.EstimatedInputTokens, null, 0m, 0, sessionId,
+                        decision.Reason, false, "budget exhausted", false, routedTier);
                     throw new BudgetExhaustedException(decision.Reason);
+                }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
             }
 
