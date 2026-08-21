@@ -152,6 +152,43 @@ public class DistributedStoreTests
         Assert.Equal("OptiRouter", options.OtlpServiceName);
     }
 
+    [Fact]
+    public void RedisCostLedgerStore_RuntimeConnectionFailure_PermanentlyDegradesToMemory()
+    {
+        var fallback = new InMemoryCostLedgerStore();
+        var store = Uninitialized<RedisCostLedgerStore>();
+        var zombie = DispatchProxy.Create<IDatabase, ZombieConnectionProxy>();
+        SetField(store, "_db", zombie);
+        SetField(store, "_fallback", fallback);
+
+        using (store)
+        {
+            // 僵尸连接首次触达：不抛异常、账转入内存，且永久降级（后续调用不再触达 Redis）。
+            Assert.Equal(1.25m, store.AddTotal(1.25m));
+            Assert.Equal(1.25m, fallback.GetTotal());
+            Assert.Equal(1.25m, store.GetTotal());
+            Assert.Equal(1, ((ZombieConnectionProxy)zombie).Calls);
+        }
+    }
+
+    [Fact]
+    public void RedisCostLedgerStore_RecordAtomic_RuntimeConnectionFailure_FallsBackAllAccounts()
+    {
+        var fallback = new InMemoryCostLedgerStore();
+        var store = Uninitialized<RedisCostLedgerStore>();
+        SetField(store, "_db", DispatchProxy.Create<IDatabase, ZombieConnectionProxy>());
+        SetField(store, "_fallback", fallback);
+        var today = DateTime.UtcNow;
+
+        using (store)
+        {
+            store.RecordAtomic(today, 0.5m, 0.5m, "s1", 0.5m);
+            Assert.Equal(0.5m, fallback.GetTotal());
+            Assert.Equal(0.5m, fallback.GetDaily(today));
+            Assert.Equal(0.5m, fallback.GetSession("s1"));
+        }
+    }
+
     private static T Uninitialized<T>() where T : class
         => (T)RuntimeHelpers.GetUninitializedObject(typeof(T));
 
@@ -160,6 +197,18 @@ public class DistributedStoreTests
         FieldInfo field = typeof(T).GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
             ?? throw new MissingFieldException(typeof(T).FullName, name);
         field.SetValue(instance, value);
+    }
+
+    /// <summary>模拟僵尸连接：任何 Redis 调用抛连接故障异常。</summary>
+    private class ZombieConnectionProxy : DispatchProxy
+    {
+        public int Calls;
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            Calls++;
+            throw new RedisConnectionException(ConnectionFailureType.SocketFailure, "simulated zombie connection");
+        }
     }
 
     private class ThrowOnInvocationProxy : DispatchProxy
