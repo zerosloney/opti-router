@@ -66,10 +66,13 @@ public sealed class ModelHealthProbeService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            int interval = Math.Max(10, options.Routing.HealthProbeIntervalSeconds);
+            // intentional-simple: 探活周期独立于指标/延迟聚合周期，固定 5 秒。
+            // 探活是轻量 HEAD/简答请求，5 秒可及时摘除坏模型，避免真实流量撞熔断。
+            // 若需调整，直接改此常量；不要复用 HealthProbeIntervalSeconds，否则会影响 MetricsGaugeUpdater/LatencyStatsAggregator。
+            const int ProbeIntervalSeconds = 5;
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(interval), stoppingToken).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(ProbeIntervalSeconds), stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
