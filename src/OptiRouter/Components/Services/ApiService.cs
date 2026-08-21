@@ -1012,7 +1012,7 @@ public class ApiService
         // ⑥ 观测
         public bool EnableDistributedTracing { get; init; }
         public bool AuditStoreRequestContent { get; init; } = false;
-        public int AuditRetentionHours { get; init; } = 168;
+        public int AuditRetentionHours { get; init; } = 0;
         public string AlertWebhookUrl { get; init; } = "";
         public int AlertWebhookIntervalSeconds { get; init; } = 30;
     }

@@ -992,7 +992,7 @@ public static class DashboardHandler
         // ⑥ 观测
         if (req.EnableDistributedTracing is not null) routing.EnableDistributedTracing = req.EnableDistributedTracing.Value;
         if (req.AuditStoreRequestContent is not null) routing.AuditStoreRequestContent = req.AuditStoreRequestContent.Value;
-        if (req.AuditRetentionHours is >= 1) routing.AuditRetentionHours = req.AuditRetentionHours.Value;
+        if (req.AuditRetentionHours is >= 0) routing.AuditRetentionHours = req.AuditRetentionHours.Value;
         // Webhook URL：请求非 null 即写入（空串 = 禁用推送，仅保留 Dashboard/历史展示）。
         if (req.AlertWebhookUrl is not null) routing.AlertWebhookUrl = req.AlertWebhookUrl.Trim();
         if (req.AlertWebhookIntervalSeconds is >= 5) routing.AlertWebhookIntervalSeconds = req.AlertWebhookIntervalSeconds.Value;

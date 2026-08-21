@@ -617,10 +617,10 @@ public sealed class RoutingOptions
 
     /// <summary>
     /// 审计记录保留时长（小时）。超出后由后台 AuditRetentionService 周期淘汰，
-    /// 防止 request_audit 无界增长。默认 168（7 天）。0 表示永久保留（不淘汰）；
+    /// 防止 request_audit 无界增长。默认 0（永久保留，不淘汰）；正数按窗口淘汰。
     /// 负数无语义，由 RouterOptionsValidator 强制（必须 &gt;= 0）。
     /// </summary>
-    public int AuditRetentionHours { get; set; } = 168;
+    public int AuditRetentionHours { get; set; } = 0;
 
     /// <summary>
     /// 是否在审计记录中存储请求内容明文（<c>request_content</c> 字段，用于 Dashboard 展示）。

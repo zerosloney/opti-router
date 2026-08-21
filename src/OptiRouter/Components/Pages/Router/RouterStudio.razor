@@ -660,7 +660,7 @@
                     <div class="config-item @(IsDirty(nameof(ConfigForm.AuditRetentionHours)) ? "dirty-field" : "")">
                         <div class="item-text">
                             <span class="item-title">审计保留时长</span>
-                            <span class="item-desc">审计记录保留小时数（默认 168 = 7 天），后台周期淘汰过期记录防止无界增长。0 = 永久保留。</span>
+                            <span class="item-desc">审计记录保留小时数（默认 0 = 永久保留），后台周期淘汰过期记录防止无界增长。正数按窗口淘汰。</span>
                         </div>
                         <div class="config-row">
                             <span class="config-row-label">保留 (小时):</span>

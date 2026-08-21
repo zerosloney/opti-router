@@ -160,7 +160,7 @@
         </div>
         @if (WindowData != null)
         {
-            @if (WindowKey != "all" && WindowData.WindowHours > WindowData.RetentionHours)
+            @if (WindowKey != "all" && WindowData.WindowHours > WindowData.RetentionHours && WindowData.RetentionHours > 0)
             {
                 <div class="alert-banner alert-warning" style="margin: 10px 0; padding: 8px 12px; font-size: 0.85rem;">
                     ⚠ 当前窗口 (@WindowData.WindowHours h) 超出审计保留期 (@WindowData.RetentionHours h)，更早数据已被淘汰，仅显示保留期内数据。
