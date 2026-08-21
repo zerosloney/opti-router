@@ -77,7 +77,7 @@ internal sealed class MockModelClient : IModelClient
         => throw new NotImplementedException("Legacy StreamAsync not used; use StreamRawAsync.");
 
     /// <inheritdoc />
-    public Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default)
+    public Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default, TimeSpan? timeout = null)
         => Task.FromResult(new ModelHealthResult(true, 0));
 }
 
@@ -1020,6 +1020,167 @@ public class ChatCompletionsEndpointTests
             .GetSnapshot("model-a")!.IsExhausted(DateTimeOffset.UtcNow));
     }
 
+    [Fact]
+    public async Task Post_NonStreaming_RequestRejection400_FallsBack_RecordsAuditAndBanditPenalty_WithoutCircuit()
+    {
+        // P0-3 回归：请求语义类 4xx（400）此前既不审计也不进 bandit，直接穿透 400，
+        // 路由器对同类失败反复踩坑。现在：审计留痕 + bandit 惩罚 + 不熔断 + 降级下一候选。
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Models.Add(endpointB);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+            opt.Routing.EnableFailover = true;
+            opt.Routing.FailoverFailureThreshold = 1;
+        });
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, (_, _) =>
+            throw new ModelClientException(HttpStatusCode.BadRequest, "invalid tool message"));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, (_, _) =>
+            Task.FromResult(new RawChatResponse(
+                "{\"model\":\"model-b\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"From B\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":3,\"total_tokens\":8}}",
+                new ChatUsage { PromptTokens = 5, CompletionTokens = 3, TotalTokens = 8 })));
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        // 降级成功：客户端拿到 200 + model-b 的回答
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("model-b", doc.RootElement.GetProperty("model").GetString());
+
+        // 不熔断：400 是请求语义问题，模型对其他请求仍可用
+        var health = factory.Services.GetRequiredService<ModelHealthTracker>();
+        Assert.Equal(CircuitState.Closed, health.GetState("model-a"));
+        Assert.False(health.GetCircuitsSnapshot().TryGetValue("model-a", out var circuit) && circuit.FailureCount > 0);
+
+        // bandit 惩罚生效
+        Assert.True(factory.Services.GetRequiredService<ThompsonStateStore>().GetOrAdd("model-a").Beta > 1.0);
+
+        // 审计留痕：model-a 失败行（upstream-status-400）+ model-b 成功行
+        var audits = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(10);
+        Assert.Contains(audits, r => r.Model == "model-a" && !r.Success && r.ErrorMessage == "upstream-status-400");
+        Assert.Contains(audits, r => r.Model == "model-b" && r.Success);
+    }
+
+    [Fact]
+    public async Task Post_NonStreaming_RequestRejection400_NoOtherCandidate_Propagates400_AndRecordsAudit()
+    {
+        // 单候选 400：保持透传语义（客户端收到原始状态码），但审计必须留痕。
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+            opt.Routing.EnableFailover = true;
+        });
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, (_, _) =>
+            throw new ModelClientException(HttpStatusCode.BadRequest, "invalid tool message"));
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(JsonSerializer.Serialize(BuildRequest("auto")), Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal("UPSTREAM_REJECTION", doc.RootElement.GetProperty("error").GetProperty("code").GetString());
+
+        var audits = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(10);
+        Assert.Contains(audits, r => r.Model == "model-a" && !r.Success && r.ErrorMessage == "upstream-status-400");
+    }
+
+    [Fact]
+    public async Task Post_NoSessionHeader_DerivesStableConversationSession()
+    {
+        // P2-7 回归：agent 客户端（如 omp）不发 X-Session-Id，会话维度（亲和/预算/审计）全空转。
+        // 现从首条 user 消息派生稳定指纹：同会话不同轮次 → 同 session；全局 key 不做租户包装。
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+        });
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, (_, _) =>
+            Task.FromResult(new RawChatResponse(
+                "{\"model\":\"model-a\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":1,\"total_tokens\":6}}",
+                new ChatUsage { PromptTokens = 5, CompletionTokens = 1, TotalTokens = 6 })));
+
+        using var client = factory.CreateClient();
+        async Task SendAsync(IEnumerable<ChatMessage> messages)
+        {
+            var request = new ChatRequest { Model = "auto", Messages = messages.ToList() };
+            using var content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+            using var response = await client.PostAsync("/v1/chat/completions", content);
+            await response.Content.ReadAsStringAsync();
+        }
+
+        // 同一会话：首条 user 相同，第二轮追加新消息
+        await SendAsync([ChatMessage.FromText("user", "first task begins"), ChatMessage.FromText("assistant", "ack")]);
+        await SendAsync([ChatMessage.FromText("user", "first task begins"), ChatMessage.FromText("assistant", "ack"), ChatMessage.FromText("user", "next turn")]);
+        // 不同会话：首条 user 不同
+        await SendAsync([ChatMessage.FromText("user", "second task starts here")]);
+
+        var audits = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(10);
+        var sessions = audits.Where(r => r.Model == "model-a").Select(r => r.SessionId).ToList();
+        Assert.Equal(3, sessions.Count);
+        Assert.All(sessions, sid => Assert.StartsWith("conv-", sid));
+        // 三个请求只产生两个会话指纹：first-task 两轮相同，second-task 独立
+        Assert.Equal(2, sessions.Distinct().Count());
+        var firstTaskSession = sessions.GroupBy(sid => sid).Single(g => g.Count() == 2).Key;
+    }
+
+    [Fact]
+    public async Task Post_Streaming_RequestRejection400_FallsBackToNextCandidate()
+    {
+        // 流式路径的 P0-3 对称实现：首 chunk 前 400 → 降级下一候选，不熔断，bandit 惩罚。
+        using var factory = new TestWebApplicationFactory();
+        var endpointA = CreateEndpoint("model-a");
+        var endpointB = CreateEndpoint("model-b");
+        factory.ConfigureTestServicesAction = services => services.Configure<RouterOptions>(opt =>
+        {
+            opt.Models.Clear();
+            opt.Models.Add(endpointA);
+            opt.Models.Add(endpointB);
+            opt.Routing.EnableRuleClassifier = false;
+            opt.Routing.EnableTokenEstimator = false;
+            opt.Routing.EnableBudgetGuard = false;
+            opt.Routing.EnableFailover = true;
+            opt.Routing.FailoverFailureThreshold = 1;
+        });
+        factory.MockClients["model-a"] = new MockModelClient(endpointA, streamRawFunc: (_, ct) =>
+            CreateFailingStream(ct, HttpStatusCode.BadRequest, "invalid tool message"));
+        factory.MockClients["model-b"] = new MockModelClient(endpointB, streamRawFunc: (_, ct) =>
+            CreateStreamChunks("fallback", ct));
+
+        using var client = factory.CreateClient();
+        using var content = new StringContent(
+            JsonSerializer.Serialize(BuildRequest("auto", stream: true)), Encoding.UTF8, "application/json");
+        using var response = await client.PostAsync("/v1/chat/completions", content);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var health = factory.Services.GetRequiredService<ModelHealthTracker>();
+        Assert.Equal(CircuitState.Closed, health.GetState("model-a"));
+        Assert.True(factory.Services.GetRequiredService<ThompsonStateStore>().GetOrAdd("model-a").Beta > 1.0);
+        var audits = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(10);
+        Assert.Contains(audits, r => r.Model == "model-a" && !r.Success && r.ErrorMessage == "upstream-status-400");
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.TooManyRequests, false)]
     [InlineData(HttpStatusCode.ServiceUnavailable, true)]
@@ -1125,7 +1286,7 @@ public class ChatCompletionsEndpointTests
     }
 
     [Fact]
-    public async Task Post_NonStreaming_Upstream4xx_ReturnsSameStatusWithoutFailoverOrResponseBody()
+    public async Task Post_NonStreaming_Upstream4xx_FallsBackToNextCandidateWithoutCircuitOrBodyLeak()
     {
         // Arrange
         using var factory = new TestWebApplicationFactory();
@@ -1163,19 +1324,13 @@ public class ChatCompletionsEndpointTests
         // Act
         var response = await client.PostAsync("/v1/chat/completions", content);
 
-        // Assert
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
-        Assert.Equal(0, fallbackAttempts);
-        var body = await response.Content.ReadAsStringAsync();
-        Assert.DoesNotContain("sensitive upstream body", body);
-        using (var document = JsonDocument.Parse(body))
-        {
-            var error = document.RootElement.GetProperty("error");
-            Assert.Equal("application/json", response.Content.Headers.ContentType?.MediaType);
-            Assert.Equal("upstream_error", error.GetProperty("type").GetString());
-            Assert.Equal("UPSTREAM_REJECTION", error.GetProperty("code").GetString());
-        }
+        // Assert：P0-3 新契约——请求语义类 4xx 有其他候选时降级（上游校验阶段拒绝、无生成费用），
+        // 客户端拿到 200；上游敏感错误体不泄漏；模型不熔断（对其他请求仍可用）。
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, fallbackAttempts);
         Assert.False(factory.Services.GetRequiredService<ModelHealthTracker>().IsCoolingDown("model-a"));
+        var audits = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(10);
+        Assert.Contains(audits, r => r.Model == "model-a" && !r.Success && r.ErrorMessage == "upstream-status-422");
     }
 
     [Fact]
@@ -1761,7 +1916,7 @@ public class ChatCompletionsEndpointTests
     }
 
     [Fact]
-    public async Task Post_Streaming_Upstream4xxBeforeFirstChunk_ReturnsSameStatusWithoutFailoverOrResponseBody()
+    public async Task Post_Streaming_Upstream4xxBeforeFirstChunk_FallsBackToNextCandidateWithoutCircuitOrBodyLeak()
     {
         // Arrange
         using var factory = new TestWebApplicationFactory();
@@ -1798,9 +1953,9 @@ public class ChatCompletionsEndpointTests
         // Act
         var response = await client.PostAsync("/v1/chat/completions", content);
 
-        // Assert
-        Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
-        Assert.Equal(0, fallbackAttempts);
+        // Assert：P0-3 新契约——流式首 chunk 前 4xx 同样降级下一候选，敏感体不泄漏，不熔断。
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(1, fallbackAttempts);
         Assert.DoesNotContain("sensitive upstream body", await response.Content.ReadAsStringAsync());
         Assert.False(factory.Services.GetRequiredService<ModelHealthTracker>().IsCoolingDown("model-a"));
     }

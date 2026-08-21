@@ -216,7 +216,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     }
 
     /// <inheritdoc />
-    public async Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default)
+    public async Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default, TimeSpan? timeout = null)
     {
         var probeRequest = new ChatRequest
         {
@@ -230,7 +230,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(5));
+            cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(5));
 
             await CompleteAsync(probeRequest, cts.Token).ConfigureAwait(false);
             sw.Stop();
@@ -247,11 +247,13 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             sw.Stop();
             return new ModelHealthResult(false, (int)sw.Elapsed.TotalMilliseconds, ex.Message, ex.StatusCode, ex.Metadata);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             sw.Stop();
             return new ModelHealthResult(false, (int)sw.Elapsed.TotalMilliseconds, ex.Message);
         }
+        // 外部取消（cancellationToken 已取消）：异常向上传播，由探活服务识别为关停信号，
+        // 不计失败——曾在此被转成 Healthy=false，导致关停噪声熔断健康模型。
     }
 
     /// <inheritdoc />

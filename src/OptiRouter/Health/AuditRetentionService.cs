@@ -59,6 +59,10 @@ public sealed class AuditRetentionService : BackgroundService
             try
             {
                 options = _options.CurrentValue;
+                // 0 = 永久保留：跳过淘汰（AddHours 负大值还会溢出 DateTime 范围）。
+                if (options.Routing.AuditRetentionHours <= 0)
+                    continue;
+
                 DateTime cutoff = DateTime.UtcNow.AddHours(-options.Routing.AuditRetentionHours);
                 int evicted = _auditStore.EvictBefore(cutoff);
 

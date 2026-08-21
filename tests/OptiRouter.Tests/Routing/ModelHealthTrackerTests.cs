@@ -327,4 +327,58 @@ public class ModelHealthTrackerTests
         tracker.RecordSuccess("m1", requiredSuccesses: 3);
         Assert.Equal(CircuitState.HalfOpen, tracker.GetState("m1"));
     }
+
+    [Fact]
+    public void HasRecentSuccess_AfterRecordSuccess_TrueWithinWindow_FalseAfterExpiry()
+    {
+        var now = new DateTime(2026, 8, 21, 10, 0, 0, DateTimeKind.Utc);
+        var tracker = new ModelHealthTracker(() => now);
+
+        // 未知模型：无记录
+        Assert.False(tracker.HasRecentSuccess("m1", TimeSpan.FromMinutes(5)));
+
+        tracker.RecordFailure("m1", threshold: 3, cooldownSeconds: 60); // 创建条目
+        tracker.RecordSuccess("m1");
+        Assert.True(tracker.HasRecentSuccess("m1", TimeSpan.FromMinutes(5)));
+
+        now = now.AddMinutes(6);
+        Assert.False(tracker.HasRecentSuccess("m1", TimeSpan.FromMinutes(5)));
+    }
+
+    [Fact]
+    public void HasRecentSuccess_UnknownModelOrNonPositiveWindow_ReturnsFalse()
+    {
+        var tracker = new ModelHealthTracker();
+        tracker.RecordSuccess("m1"); // 未知模型的成功也必须记录时间戳
+
+        Assert.True(tracker.HasRecentSuccess("m1", TimeSpan.FromMinutes(5)));
+        Assert.False(tracker.HasRecentSuccess("unknown", TimeSpan.FromMinutes(5)));
+        Assert.False(tracker.HasRecentSuccess("m1", TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void PruneExcept_RemovesStaleModels_AndResetsPersistedState()
+    {
+        var tracker = new ModelHealthTracker();
+        var store = new CaptureCircuitStore();
+        var trackerWithStore = new ModelHealthTracker(store);
+        trackerWithStore.RecordFailure("model-a", threshold: 1, cooldownSeconds: 60);
+        trackerWithStore.RecordFailure("model-removed", threshold: 1, cooldownSeconds: 60);
+
+        trackerWithStore.PruneExcept(new HashSet<string>(["model-a", "model-b"], StringComparer.Ordinal));
+
+        Assert.Equal(CircuitState.Closed, trackerWithStore.GetState("model-removed"));
+        Assert.Equal(CircuitState.Open, trackerWithStore.GetState("model-a"));
+        // 持久层：残留模型被重置为闭合零值
+        Assert.Contains(store.Saved, kv => kv.Key == "model-removed" && kv.Value.State == CircuitState.Closed && kv.Value.FailureCount == 0);
+        Assert.DoesNotContain(store.Saved, kv => kv.Key == "model-a" && kv.Value.State == CircuitState.Closed);
+    }
+
+    private sealed class CaptureCircuitStore : ICircuitStateStore
+    {
+        public List<KeyValuePair<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)>> Saved { get; } = new();
+        public void SaveCircuitState(string modelName, CircuitState state, int failureCount, DateTime cooldownUntil)
+            => Saved.Add(new(modelName, (state, failureCount, cooldownUntil)));
+        public Dictionary<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)> LoadCircuitStates() => new();
+    }
 }

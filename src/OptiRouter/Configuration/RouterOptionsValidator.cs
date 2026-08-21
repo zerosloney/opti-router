@@ -60,14 +60,15 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.LongInputThresholdTokens 必须大于 0。");
         }
 
-        if (!string.Equals(options.Budget.StoreProvider, "Sqlite", StringComparison.OrdinalIgnoreCase)
+        if (!string.Equals(options.Budget.StoreProvider, "Auto", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(options.Budget.StoreProvider, "Sqlite", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.Budget.StoreProvider, "Postgres", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.Budget.StoreProvider, "Redis", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(options.Budget.StoreProvider, "InMemory", StringComparison.OrdinalIgnoreCase))
         {
             return ValidateOptionsResult.Fail(
-                "Budget.StoreProvider 必须是 'Sqlite'、'MariaDb'、'Postgres'、'Redis' 或 'InMemory'。");
+                "Budget.StoreProvider 必须是 'Auto'、'Sqlite'、'MariaDb'、'Postgres'、'Redis' 或 'InMemory'。");
         }
 
         if (string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase)
@@ -335,10 +336,10 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Routing.ThompsonLatencyNormalizeRefTokens < 0)
             return ValidateOptionsResult.Fail("Routing.ThompsonLatencyNormalizeRefTokens 不能为负数。");
 
-        // 审计保留时长校验：<=0 会让后台服务每次循环淘汰全部审计（AlertEngine 失去数据源）。
-        if (options.Routing.AuditRetentionHours < 1)
+        // 审计保留时长校验：0 = 永久保留（AuditRetentionService 跳过淘汰），负数无语义。
+        if (options.Routing.AuditRetentionHours < 0)
         {
-            return ValidateOptionsResult.Fail("Routing.AuditRetentionHours 必须 >= 1。");
+            return ValidateOptionsResult.Fail("Routing.AuditRetentionHours 必须 >= 0（0 表示永久保留）。");
         }
 
         // Tags 软校验：未识别的 tag 仅 warning，不阻断启动。

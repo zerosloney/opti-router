@@ -46,6 +46,7 @@ public sealed class ModelHealthTracker
         public DateTime CoolDownUntil;
         public int ActiveProbes;
         public int HalfOpenSuccesses;
+        public DateTime LastSuccessUtc;
     }
 
     private readonly object _lock = new();
@@ -107,6 +108,54 @@ public sealed class ModelHealthTracker
 
             TransitionIfExpired(modelName, info);
             return info.State;
+        }
+    }
+
+    /// <summary>
+    /// 模型在窗口内是否有成功记录（真实流量或探活）。
+    /// 供主动探活跳过活跃模型：真实流量已背书健康，探活只会重复计费并引入误判。
+    /// </summary>
+    /// <param name="modelName">模型名。</param>
+    /// <param name="window">新鲜窗口；非正数视为无窗口（恒 false）。</param>
+    public bool HasRecentSuccess(string modelName, TimeSpan window)
+    {
+        if (string.IsNullOrEmpty(modelName) || window <= TimeSpan.Zero) return false;
+
+        lock (_lock)
+        {
+            return _circuits.TryGetValue(modelName, out var info)
+                && info.LastSuccessUtc != default
+                && _nowProvider() - info.LastSuccessUtc <= window;
+        }
+    }
+
+    /// <summary>
+    /// 移除不在活跃模型名单内的熔断条目（模型被移出配置后的残留），
+    /// 并把持久层对应行重置为闭合零值——<see cref="ICircuitStateStore"/> 无删除 API，
+    /// 零值行不影响任何决策（GetState 未知模型即 Closed）。
+    /// </summary>
+    /// <param name="activeModelNames">当前配置的活跃模型名集合（Ordinal 比较）。</param>
+    public void PruneExcept(ISet<string> activeModelNames)
+    {
+        ArgumentNullException.ThrowIfNull(activeModelNames);
+
+        List<string>? stale = null;
+        lock (_lock)
+        {
+            foreach (var name in _circuits.Keys)
+            {
+                if (!activeModelNames.Contains(name))
+                    (stale ??= new List<string>()).Add(name);
+            }
+            if (stale is null)
+                return;
+            foreach (var name in stale)
+                _circuits.Remove(name);
+        }
+
+        foreach (var name in stale)
+        {
+            _store?.SaveCircuitState(name, CircuitState.Closed, 0, default);
         }
     }
 
@@ -253,8 +302,13 @@ public sealed class ModelHealthTracker
         lock (_lock)
         {
             if (!_circuits.TryGetValue(modelName, out var info))
+            {
+                // 未知模型的成功也记录时间戳（探活新鲜窗口依赖它），熔断状态保持默认 Closed。
+                _circuits[modelName] = new CircuitInfo { LastSuccessUtc = _nowProvider() };
                 return;
+            }
 
+            info.LastSuccessUtc = _nowProvider();
             TransitionIfExpired(modelName, info);
 
             if (releaseProbe && info.ActiveProbes > 0)

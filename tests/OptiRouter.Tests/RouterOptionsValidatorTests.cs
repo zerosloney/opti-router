@@ -38,6 +38,7 @@ public class RouterOptionsValidatorTests
     }
 
     [Theory]
+    [InlineData("AUTO")]
     [InlineData("SQLITE")]
     [InlineData("mArIaDb")]
     [InlineData("pOsTgReS")]
@@ -658,6 +659,32 @@ public class RouterOptionsValidatorTests
     {
         public static readonly NullDisposable Instance = new();
         public void Dispose() { }
+    }
+
+    [Theory]
+    [InlineData(0)]             // 0 = 永久保留（AuditRetentionService 跳过淘汰）
+    [InlineData(1)]
+    [InlineData(int.MaxValue)]
+    public void AuditRetentionHours_NonNegative_ShouldReturnSuccess(int hours)
+    {
+        var options = CreateValidOptions();
+        options.Routing.AuditRetentionHours = hours;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.True(result.Succeeded);
+    }
+
+    [Fact]
+    public void AuditRetentionHours_Negative_ShouldReturnFailure()
+    {
+        var options = CreateValidOptions();
+        options.Routing.AuditRetentionHours = -1;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("AuditRetentionHours", result.FailureMessage);
     }
 
     private static RouterOptions CreateValidOptions()

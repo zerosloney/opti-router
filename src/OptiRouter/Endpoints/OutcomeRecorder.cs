@@ -33,6 +33,7 @@ public sealed class OutcomeRecorder
     private readonly TimeProvider _timeProvider;
     private readonly ClientKeyService? _clientKeyService;
     private readonly IHttpContextAccessor? _httpContextAccessor;
+    private readonly CalibratingTokenEstimator? _calibratingEstimator;
 
     public OutcomeRecorder(
         IRequestAuditStore auditStore,
@@ -48,6 +49,7 @@ public sealed class OutcomeRecorder
         ContextualBanditState? banditStore = null,
         ClientKeyService? clientKeyService = null,
         IHttpContextAccessor? httpContextAccessor = null,
+        CalibratingTokenEstimator? calibratingEstimator = null,
         KalmanLatencyTracker? kalmanTracker = null,
         KvCachePrefixTrie? kvCacheTrie = null,
         PredictiveResilienceEngine? resilienceEngine = null,
@@ -66,6 +68,7 @@ public sealed class OutcomeRecorder
         _banditStore = banditStore;
         _clientKeyService = clientKeyService;
         _httpContextAccessor = httpContextAccessor;
+        _calibratingEstimator = calibratingEstimator;
         _kalmanTracker = kalmanTracker;
         _kvCacheTrie = kvCacheTrie;
         _resilienceEngine = resilienceEngine;
@@ -104,6 +107,15 @@ public sealed class OutcomeRecorder
     {
         try
         {
+            // requestId 未显式传入时回退当前 HTTP 上下文（入口中间件已把 X-Request-Id 或
+            // 生成的 GUID 放入 Items["RequestId"]）——与下方 TraceScope 的 ambient 语义对齐，
+            // 一次性覆盖 ProxyOrchestrator/FusionRouter/RaceOrchestrator 等全部调用点。
+            requestId ??= _httpContextAccessor?.HttpContext?.Items["RequestId"] as string;
+
+            // 估算校准：成功请求用上游精确 usage 回填 EMA 比率，修正分桶估算的系统性偏低。
+            if (usage is { PromptTokens: >= 200 } && estimatedTokens > 0)
+                _calibratingEstimator?.Observe(estimatedTokens, usage.PromptTokens);
+
             _auditStore.Append(new RequestAuditRecord(
                 Timestamp: DateTime.UtcNow,
                 RequestId: requestId,

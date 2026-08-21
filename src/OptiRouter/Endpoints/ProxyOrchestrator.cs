@@ -109,6 +109,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
+        // 会话兜底：无 X-Session-Id 时从对话内容派生（须在 PII/压缩改写之前）。
+        sessionId ??= DeriveConversationSession(request);
         sessionId = ScopeSessionId(sessionId);
 
         var options = _options.CurrentValue;
@@ -526,6 +528,27 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _logger.LogWarning("Model {Name} quota exhausted (status {Status}), trying next candidate",
                         candidate.Name, 429);
                 }
+                catch (ModelClientException ex) when (IsRequestRejection(ex))
+                {
+                    attemptSw.Stop();
+                    lastModelName = candidate.Name;
+                    lastStatusCode = (int)ex.StatusCode;
+                    lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
+                    // 请求语义类拒绝（400/422/413...）：上游校验阶段即拒绝，未产生生成费用，
+                    // 降级尝试其余候选成本≈0。不熔断（模型对其他请求仍可用），但必须进审计
+                    // 与 bandit——此前此类失败对学习回路完全不可见（审计零记录、路由反复踩坑）。
+                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
+                    outcomeReported = true;
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
+                        lastErrorMessage, false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    _healthTracker.ReleaseProbe(candidate.Name);
+                    bool rejectHasOther = HasOtherCandidate(decision, candidate.Name, failedInThisRequest);
+                    _logger.LogWarning("Model {Name} rejected request (status {Status}){Action}",
+                        candidate.Name, ex.StatusCode, rejectHasOther ? ", trying next candidate" : ", propagating to client");
+                    if (!rejectHasOther)
+                        throw; // 无候选可降级：保持透传语义，原始状态码到达客户端
+                }
                 catch (ModelClientException ex) when (IsRetryable(ex) || (IsCredentialError(ex) && HasOtherCandidate(decision, candidate.Name, failedInThisRequest)))
                 {
                     attemptSw.Stop();
@@ -605,6 +628,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
+        // 会话兜底：无 X-Session-Id 时从对话内容派生（须在 PII/压缩改写之前）。
+        sessionId ??= DeriveConversationSession(request);
         sessionId = ScopeSessionId(sessionId);
 
         var options = _options.CurrentValue;
@@ -830,6 +855,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         lastStatusCode = 429;
                         lastErrorMessage = "quota-exhausted";
                     }
+                    catch (ModelClientException ex) when (IsRequestRejection(ex))
+                    {
+                        preStreamFailure = ex;
+                        lastModelName = candidate.Name;
+                        lastStatusCode = (int)ex.StatusCode;
+                        lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
+                    }
                     catch (ModelClientException ex) when (IsRetryable(ex) || (IsCredentialError(ex) && HasOtherCandidate(decision, candidate.Name, failedInThisRequest)))
                     {
                         preStreamFailure = ex;
@@ -867,12 +899,23 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         attemptSw.Stop();
                         bool quotaLimited = preStreamFailure is ModelClientException
                         { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+                        // 请求语义类拒绝（400/422/413...）：与配额/可重试并列的第三类——
+                        // 不熔断（模型对其他请求仍可用），但进审计与 bandit；无候选可降级时透传。
+                        bool requestRejection = !quotaLimited
+                            && preStreamFailure is ModelClientException rejectionEx
+                            && IsRequestRejection(rejectionEx);
                         bool tripped = false;
                         double? preStreamReward = null;
                         if (quotaLimited)
                         {
                             var quotaError = (ModelClientException)preStreamFailure;
                             _recorder.RecordQuota(candidate.Name, quotaError.Metadata, rateLimited: true);
+                            _healthTracker.ReleaseProbe(candidate.Name);
+                        }
+                        else if (requestRejection)
+                        {
+                            preStreamReward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+                            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                             _healthTracker.ReleaseProbe(candidate.Name);
                         }
                         else
@@ -900,6 +943,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         if (isGlobalTimeout)
                         {
                             throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
+                        }
+                        if (requestRejection && !HasOtherCandidate(decision, candidate.Name, failedInThisRequest))
+                        {
+                            // 无候选可降级：透传原始 4xx 给客户端（端点包装为 UPSTREAM_REJECTION）。
+                            throw preStreamFailure;
                         }
                         continue;
                     }
@@ -1063,13 +1111,25 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
     /// <summary>
     /// 凭证/权限类上游错误（401/403）：该模型连接配置的问题，与请求内容无关——
-    /// 换一候选可能成功（如某 key 失效而其余模型健康）。其余不可重试 4xx（422/400 等
-    /// 请求语义错误）换模型大概率同样失败，保持透传语义让原始状态码到达客户端。
+    /// 换一候选可能成功（如某 key 失效而其余模型健康）。
+    /// 其余 4xx 为请求语义拒绝，由 <see cref="IsRequestRejection"/> 独立分支处理：
+    /// 有其他候选时降级（上游校验阶段拒绝、无生成费用），无候选时透传原始状态码。
     /// </summary>
     private static bool IsCredentialError(ModelClientException exception)
     {
         int statusCode = (int)exception.StatusCode;
         return statusCode is 401 or 403;
+    }
+
+    /// <summary>
+    /// 请求语义类上游拒绝（400/413/422 等）：上游在校验阶段即拒绝，未产生生成费用。
+    /// 与 429（配额独立分支）、401/403（凭证）、408/5xx（可重试）互斥。
+    /// </summary>
+    private static bool IsRequestRejection(ModelClientException exception)
+    {
+        int statusCode = (int)exception.StatusCode;
+        return statusCode is >= 400 and <= 499
+            and not 401 and not 403 and not 408 and not 429;
     }
 
     /// <summary>
@@ -1146,10 +1206,42 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     }
 
     /// <summary>
-    /// Scopes a client-controlled session ID to the authorized tenant key without changing the
-    /// global proxy-key or internal no-context behavior. Length-prefix both components so a key
-    /// ID and raw session cannot produce an ambiguous composite value.
+    /// 会话兜底：客户端未发 <c>X-Session-Id</c> 时，从对话内容派生稳定会话指纹——
+    /// 取首条 user 消息文本的 SHA256 前 16 hex（跳过 system：部分 agent 每轮向 system 注入动态时间戳）。
+    /// 同一会话各轮次共享首条 user 消息 → 指纹稳定；新任务首条 user 变化 → 自然区分。
+    /// <para>
+    /// 背景：agent 客户端（如 omp）普遍不带会话头，会话亲和、会话预算、审计会话维度全部空转
+    /// （session_spend 0 行）。派生须在 PII/压缩等改写之前，且基于首条消息——裁剪只动历史尾部。
+    /// </para>
     /// </summary>
+    private static string? DeriveConversationSession(ChatRequest request)
+    {
+        if (request.Messages is null || request.Messages.Count == 0)
+            return null;
+
+        string? anchor = null;
+        foreach (var message in request.Messages)
+        {
+            if (string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                string text = message.GetText();
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    anchor = text;
+                    break;
+                }
+            }
+        }
+
+        // 无 user 消息（如纯 system 预热请求）：退回首条非空消息文本。
+        anchor ??= request.Messages.FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.GetText()))?.GetText();
+        if (string.IsNullOrEmpty(anchor))
+            return null;
+
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(anchor));
+        return "conv-" + Convert.ToHexString(hash)[..16].ToLowerInvariant();
+    }
+
     private string? ScopeSessionId(string? sessionId)
     {
         if (string.IsNullOrEmpty(sessionId))

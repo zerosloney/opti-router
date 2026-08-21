@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Options;
 using OptiRouter.Clients;
@@ -32,13 +33,19 @@ SQLitePCL.Batteries_V2.Init();
 
 var builder = WebApplication.CreateBuilder(args);
 
+// 日志落地：移除默认 console/EventLog provider（EventLog 在关停时有 disposed 竞态刷屏），
+// 改用自研文件 Provider 直写 logs/service.log——每行带时间戳（内置 SimpleConsoleFormatter
+// 为 internal 且不经 DI options，TimestampFormat 配置路径无法生效，曾致 8.5 万行日志无时间戳）。
+builder.Logging.ClearProviders();
+builder.Logging.AddProvider(new OptiRouter.Logging.TimestampedFileLoggerProvider(
+    Path.Combine(builder.Environment.ContentRootPath, "logs", "service.log")));
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
 });
 
-// 配置存储：Routing/Budget/模型配置全部落配置库（默认 SQLite data/optirouter-config.db，路径由
-// OptiRouter:ConfigDbPath 覆盖；配置 OptiRouter:ConfigDbConnectionString 后切到 MariaDB 后端）。
+// 配置存储：Routing/Budget/模型配置全部落配置库（StoreProvider 默认 Auto：有 ConfigDbConnectionString 即 MariaDB，否则 SQLite）。
+// SQLite 后端可由 ConfigDbPath 指定文件路径（默认 data/optirouter-config.db）。
 // 页面写入经 AppConfigDbStore → IConfigurationRoot.Reload() 热生效。
 // 首启迁移：库为空时从 appsettings.json 的 Routing/Budget 段与遗留 models-config.json 导入一次，
 // 之后 DB 为唯一权威，appsettings.json 仅保留部署级设置（密钥/端口/限流/DB 连接）。
@@ -71,12 +78,22 @@ builder.Services.AddOptions<RouterOptions>()
     .PostConfigure(options => ModelNameNormalizer.Normalize(options.Models))
     // Budget 的 MariaDB 连接缺省回退全局 OptiRouter:ConfigDbConnectionString——
     // 同一数据库只需配置一处连接（Budget.MariaDbConnectionString 仅作独立库覆盖用）。
+    // StoreProvider 默认 Auto：配置了全局连接即 MariaDb，否则回退 SQLite（显式指定可覆盖），
+    // 配置里因此不再需要出现 Budget:StoreProvider 开关。
     .PostConfigure(options =>
     {
+        string? globalConnection = builder.Configuration["OptiRouter:ConfigDbConnectionString"];
+        if (string.Equals(options.Budget.StoreProvider, "Auto", StringComparison.OrdinalIgnoreCase))
+        {
+            options.Budget.StoreProvider = string.IsNullOrWhiteSpace(globalConnection)
+                ? "Sqlite"
+                : "MariaDb";
+        }
+
         if (string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase)
             && string.IsNullOrWhiteSpace(options.Budget.MariaDbConnectionString))
         {
-            options.Budget.MariaDbConnectionString = builder.Configuration["OptiRouter:ConfigDbConnectionString"];
+            options.Budget.MariaDbConnectionString = globalConnection;
         }
     })
     // 应用路由预设（Preset）填充未显式配置的 Routing 项。
@@ -101,7 +118,8 @@ builder.Services.AddSingleton<ModelClientFactory>(sp =>
 // 旧客户端保留一段宽限期后释放，不打断在途请求。
 builder.Services.AddSingleton<IModelClientProvider>(sp => new ModelClientProvider(
     sp.GetRequiredService<ModelClientFactory>(),
-    sp.GetRequiredService<IOptionsMonitor<RouterOptions>>()));
+    sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
+    healthTracker: sp.GetRequiredService<ModelHealthTracker>()));
 
 // 成本账本存储：支持 "MariaDb" | "Postgres" | "Redis" | "Sqlite" | "InMemory"。
 // 对于 K8s 多节点部署架构，配置 "MariaDb"、"Postgres" 或 "Redis" 即可实现跨节点全局成本计费与断路器共享。
@@ -236,14 +254,17 @@ builder.Services.AddSingleton<AuditAnalysisService>();
 
 // Token 估算器：Tiktoken 模式用 SharpToken 真实 BPE 计数（内置词表、离线可用，异常自动回退分桶粗估）；
 // Bucket 模式用分桶加权粗估。编码名校验由 RouterOptionsValidator 在启动时完成。
-builder.Services.AddSingleton<ITokenEstimator>(sp =>
+// 统一经 CalibratingTokenEstimator 包装：用上游真实 usage 的 EMA 比率校正系统性偏差
+// （分桶对 agent 负载实测偏低 ~34%），RouterEngine/压缩器等所有消费方自动获得校准值。
+builder.Services.AddSingleton<CalibratingTokenEstimator>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    if (options.Routing.TokenEstimation == TokenEstimationMode.Bucket)
-        return new BucketTokenEstimator();
-
-    return new TiktokenTokenEstimator(options.Routing.TiktokenEncoding);
+    ITokenEstimator inner = options.Routing.TokenEstimation == TokenEstimationMode.Bucket
+        ? new BucketTokenEstimator()
+        : new TiktokenTokenEstimator(options.Routing.TiktokenEncoding);
+    return new CalibratingTokenEstimator(inner);
 });
+builder.Services.AddSingleton<ITokenEstimator>(sp => sp.GetRequiredService<CalibratingTokenEstimator>());
 
 builder.Services.AddSingleton<ISemanticVectorEngine>(sp =>
 {
@@ -270,7 +291,7 @@ builder.Services.AddSingleton<ISemanticVectorEngine>(sp =>
         highConfidenceThreshold: options.Routing.HybridHighConfidenceThreshold);
 });
 
-// Thompson 采样 + Contextual Bandit 状态持久化（MariaDb 共享库；SQLite 与成本账本共享同一文件）。
+// Thompson 采样 + Contextual Bandit 状态持久化（MariaDB/SQLite 双后端，与成本账本共享连接）。
 builder.Services.AddSingleton<IThompsonStateStore>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
@@ -484,6 +505,7 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
     banditStore: sp.GetRequiredService<ContextualBanditState>(),
     clientKeyService: sp.GetRequiredService<ClientKeyService>(),
     httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>(),
+    calibratingEstimator: sp.GetRequiredService<CalibratingTokenEstimator>(),
     kalmanTracker: sp.GetRequiredService<KalmanLatencyTracker>(),
     kvCacheTrie: sp.GetRequiredService<KvCachePrefixTrie>(),
     resilienceEngine: sp.GetRequiredService<PredictiveResilienceEngine>(),
@@ -500,7 +522,7 @@ builder.Services.AddSingleton<ProxyOrchestrator>();
 // 后台 MetricsGaugeUpdaterService 周期刷新花费/断路器 gauge。
 builder.Services.AddSingleton<OptiRouter.Metrics.RouterMetrics>();
 
-// 模型配置服务（SQLite 配置库，Dashboard 读写，IConfigurationRoot.Reload() 热生效）。
+// 模型配置服务（配置库，Dashboard 读写，IConfigurationRoot.Reload() 热生效）。
 builder.Services.AddSingleton<ModelsConfigService>(sp =>
 {
     var store = sp.GetRequiredService<AppConfigDbStore>();
@@ -649,6 +671,15 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+// 单实例守卫：已有其他进程在运行时干净退出（详见 SingleInstanceGuard）。
+// 同进程多 host（集成测试）放行；锁句柄保持到进程结束。
+var (proceed, singleInstanceLock) = OptiRouter.SingleInstanceGuard.TryAcquire(
+    message => app.Logger.LogWarning(message));
+if (!proceed)
+{
+    Environment.Exit(0);
+}
 
 // 首启迁移：配置库为空时从 appsettings.json 的 Routing/Budget 段与遗留 models-config.json 导入一次。
 // 之后 DB 为唯一权威；Reload 让配置提供者读到迁移值（ValidateOnStart 前完成）。
@@ -975,9 +1006,16 @@ if (enableMetrics)
 // 生产环境 HTTPS 检查。
 if (builder.Environment.IsProduction())
 {
-    string? urls = app.Configuration["ASPNETCORE_URLS"];
+    // 读实际生效的绑定地址（urls 配置键或 ASPNETCORE_URLS，前者优先级更高——此前只查环境变量，
+    // 生产经 appsettings.Production.json 配置 urls 时告警必然误报）。
+    string? urls = app.Configuration["urls"] ?? app.Configuration["ASPNETCORE_URLS"];
     bool hasHttps = urls is not null && urls.Contains("https://", StringComparison.OrdinalIgnoreCase);
-    if (!hasHttps)
+    bool loopbackOnly = urls is not null && urls
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .All(u => u.Contains("localhost", StringComparison.OrdinalIgnoreCase)
+                  || u.Contains("127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                  || u.Contains("[::1]", StringComparison.OrdinalIgnoreCase));
+    if (!hasHttps && !loopbackOnly)
     {
         app.Logger.LogWarning(
             "Production environment without HTTPS. ProxyApiKey will transit in plaintext. " +
@@ -1083,7 +1121,7 @@ public partial class Program
 
     /// <summary>
     /// 首启迁移：配置库无数据时，把 appsettings.json 的 Routing/Budget 段与遗留 models-config.json
-    /// 的模型列表导入 SQLite。之后 DB 为唯一权威，不再读取文件配置。
+    /// 的模型列表导入数据库。之后 DB 为唯一权威，不再读取文件配置。
     /// </summary>
     internal static void SeedConfigFromLegacySources(
         AppConfigDbStore store,

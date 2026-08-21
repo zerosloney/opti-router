@@ -156,7 +156,7 @@ public sealed class AnthropicModelClient : IModelClient
     }
 
     /// <inheritdoc />
-    public async Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default)
+    public async Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default, TimeSpan? timeout = null)
     {
         var probeRequest = new ChatRequest
         {
@@ -170,7 +170,7 @@ public sealed class AnthropicModelClient : IModelClient
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(TimeSpan.FromSeconds(5));
+            cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(5));
             await CompleteAsync(probeRequest, cts.Token).ConfigureAwait(false);
             sw.Stop();
             return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds);

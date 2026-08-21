@@ -43,7 +43,7 @@ internal sealed class M2MockModelClient : IModelClient
     public IAsyncEnumerable<Clients.ChatStreamChunk> StreamAsync(ChatRequest request, CancellationToken cancellationToken = default)
         => throw new NotImplementedException();
 
-    public Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default)
+    public Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default, TimeSpan? timeout = null)
         => Task.FromResult(new ModelHealthResult(true, 0));
 }
 

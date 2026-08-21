@@ -35,6 +35,63 @@ public class OutcomeRecorderTests
         public IDisposable? OnChange(Action<RouterOptions, string?> listener) => null;
     }
 
+    [Fact]
+    public void RecordAudit_NullRequestId_FallsBackToHttpContextItemId()
+    {
+        // 回归：ProxyOrchestrator/FusionRouter 等全部调用点首参传 null，审计表 request_id 恒为空。
+        // 回退链与 TraceScope ambient 语义对齐：入口中间件把 X-Request-Id 或生成 GUID 放入 Items["RequestId"]。
+        using var auditStore = new InMemoryRequestAuditStore();
+        var httpContext = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        httpContext.Items["RequestId"] = "req-abc-123";
+        var recorder = CreateAuditRecorder(auditStore, new Microsoft.AspNetCore.Http.HttpContextAccessor { HttpContext = httpContext });
+
+        recorder.RecordAudit(null, "model-a", 10, null, 0m, 5, null, "test", true, null, false, ModelTier.Medium);
+
+        Assert.Equal("req-abc-123", Assert.Single(auditStore.GetRecent(10)).RequestId);
+    }
+
+    [Fact]
+    public void RecordAudit_ExplicitRequestId_NotOverriddenByHttpContext()
+    {
+        using var auditStore = new InMemoryRequestAuditStore();
+        var httpContext = new Microsoft.AspNetCore.Http.DefaultHttpContext();
+        httpContext.Items["RequestId"] = "ambient-id";
+        var recorder = CreateAuditRecorder(auditStore, new Microsoft.AspNetCore.Http.HttpContextAccessor { HttpContext = httpContext });
+
+        recorder.RecordAudit("explicit-id", "model-a", 10, null, 0m, 5, null, "test", true, null, false, ModelTier.Medium);
+
+        Assert.Equal("explicit-id", Assert.Single(auditStore.GetRecent(10)).RequestId);
+    }
+
+    [Fact]
+    public void RecordAudit_NoHttpContext_LeavesRequestIdNull()
+    {
+        using var auditStore = new InMemoryRequestAuditStore();
+        var recorder = CreateAuditRecorder(auditStore, accessor: null);
+
+        recorder.RecordAudit(null, "model-a", 10, null, 0m, 5, null, "test", true, null, false, ModelTier.Medium);
+
+        Assert.Null(Assert.Single(auditStore.GetRecent(10)).RequestId);
+    }
+
+    private static OutcomeRecorder CreateAuditRecorder(
+        InMemoryRequestAuditStore? auditStore = null,
+        Microsoft.AspNetCore.Http.IHttpContextAccessor? accessor = null)
+    {
+        var options = new RouterOptions { Routing = new RoutingOptions() };
+        return new OutcomeRecorder(
+            auditStore: auditStore ?? new InMemoryRequestAuditStore(),
+            metrics: null!,
+            ledger: new CostLedger(),
+            options: new FakeRouterOptionsMonitor(options),
+            affinityCache: new MemoryCache(new MemoryCacheOptions()),
+            tsStore: new ThompsonStateStore(),
+            promptAffinityStore: null!,
+            quotaStore: null!,
+            logger: NullLogger<OutcomeRecorder>.Instance,
+            httpContextAccessor: accessor);
+    }
+
     [Theory]
     [InlineData(0.0, 0, 0.5, 0.0)]   // cost=0 时跳过归一化，返回原 reward
     [InlineData(1.0, 0, 0.5, 1.0)]   // cost>0 但 tokens=0 回退绝对花费口径

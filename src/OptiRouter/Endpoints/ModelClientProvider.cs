@@ -26,6 +26,7 @@ public sealed class ModelClientProvider : IModelClientProvider, IDisposable
 
     private readonly ModelClientFactory _factory;
     private readonly Func<HttpMessageHandler, HttpClient> _httpClientFactory;
+    private readonly Routing.ModelHealthTracker? _healthTracker;
     private readonly TimeSpan _retirementGrace;
     private readonly object _gate = new();
     private readonly SocketsHttpHandler _sharedHandler = new()
@@ -62,20 +63,32 @@ public sealed class ModelClientProvider : IModelClientProvider, IDisposable
     /// <param name="optionsMonitor">配置监视器，用于订阅 OnChange 实现端点配置热更新。</param>
     /// <param name="retirementGrace">退役客户端的释放宽限期，null 用 <see cref="DefaultRetirementGrace"/>。</param>
     /// <param name="httpClientFactory">HttpClient 创建钩子（测试接缝），null 用共享 handler 创建。</param>
+    /// <param name="healthTracker">可选熔断跟踪器，用于启动/配置变更时清理已删模型的熔断残留。</param>
     public ModelClientProvider(
         ModelClientFactory factory,
         IOptionsMonitor<RouterOptions> optionsMonitor,
         TimeSpan? retirementGrace = null,
-        Func<HttpMessageHandler, HttpClient>? httpClientFactory = null)
+        Func<HttpMessageHandler, HttpClient>? httpClientFactory = null,
+        Routing.ModelHealthTracker? healthTracker = null)
     {
         ArgumentNullException.ThrowIfNull(factory);
         ArgumentNullException.ThrowIfNull(optionsMonitor);
 
         _factory = factory;
+        _healthTracker = healthTracker;
         _retirementGrace = retirementGrace ?? DefaultRetirementGrace;
         _httpClientFactory = httpClientFactory ?? (static handler => new HttpClient(handler, disposeHandler: false));
         _lastModels = optionsMonitor.CurrentValue.Models.ToList();
         _changeSubscription = optionsMonitor.OnChange(OnOptionsChanged);
+        // 启动即清理：移出配置的模型在熔断表/持久层留下残留（如已删除的 *-003）。
+        PruneStaleCircuits(_lastModels);
+    }
+
+    /// <summary>清理不在当前配置中的熔断残留（启动与配置变更各一次）。</summary>
+    private void PruneStaleCircuits(IReadOnlyList<ModelEndpointOptions> models)
+    {
+        if (_healthTracker is null || models.Count == 0) return;
+        _healthTracker.PruneExcept(new HashSet<string>(models.Select(m => m.Name), StringComparer.Ordinal));
     }
 
     /// <inheritdoc />
@@ -184,6 +197,7 @@ public sealed class ModelClientProvider : IModelClientProvider, IDisposable
                 _retired.Add(new RetiredGroup { RetiredAt = DateTimeOffset.UtcNow, Clients = toRetire });
             }
 
+            PruneStaleCircuits(newModels);
             SweepRetired_NoLock();
         }
     }

@@ -142,9 +142,12 @@ public sealed class AdaptivePromptPruner : IPromptPruner
                 }
 
                 // 剪枝后文本未变化时保留原消息引用，避免无谓重建。
+                // 重建必须用 `with` 只替换 Content：FromText 会丢弃 ExtensionData
+                // （tool_calls / tool_call_id / reasoning_content 等），
+                // 破坏工具调用配对，严格校验的上游（如 stepfun）直接 400。
                 newMessages.Add(prunedText.Equals(rawText, StringComparison.Ordinal)
                     ? msg
-                    : ChatMessage.FromText(msg.Role, prunedText));
+                    : msg with { Content = System.Text.Json.JsonSerializer.SerializeToElement(prunedText) });
             }
         }
 

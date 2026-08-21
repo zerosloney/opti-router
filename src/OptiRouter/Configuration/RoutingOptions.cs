@@ -172,6 +172,20 @@ public sealed class RoutingOptions
     public int HealthProbeIntervalSeconds { get; set; } = 60;
 
     /// <summary>
+    /// 单次探活的基准超时秒数。默认 10。有延迟统计的模型按平均 TTFT 自适应放宽
+    /// （TTFT×1.5 + 2s，上限 60s），避免慢首 token 模型（如 TTFT 40s+）被探活误判超时熔断。
+    /// 最小 5（低于 5 按 5 计）。
+    /// </summary>
+    public int HealthProbeTimeoutSeconds { get; set; } = 10;
+
+    /// <summary>
+    /// 近期成功流量的新鲜窗口秒数。真实请求或探活成功距今不足该窗口的模型跳过主动探活：
+    /// 活跃模型由真实流量背书健康，探活只会重复计费并引入误判（探活 401/超时熔断健康模型）。
+    /// 默认 300。0 = 不跳过（始终探活）。
+    /// </summary>
+    public int HealthProbeFreshSuccessSkipSeconds { get; set; } = 300;
+
+    /// <summary>
     /// 是否启用向量空间语义路由器。
     /// </summary>
     public bool EnableSemanticRouter { get; set; } = true;
@@ -502,9 +516,12 @@ public sealed class RoutingOptions
     public bool EnableDistributedTracing { get; set; } = true;
 
     /// <summary>
-    /// 是否启用多轮对话人设一致性防护（Persona Drift Protection）。默认 true。
+    /// 是否启用多轮对话人设一致性防护（Persona Drift Protection）。默认 false。
+    /// 会话兜底派生（DeriveConversationSession）上线后所有请求都有会话 ID，
+    /// 该开关若默认 true 会向 system 消息注入人设提示、改变请求原文（破坏上游 prompt cache
+    /// 前缀与既有请求语义）——改为显式开启。
     /// </summary>
-    public bool EnablePersonaDriftProtection { get; set; } = true;
+    public bool EnablePersonaDriftProtection { get; set; } = false;
 
     /// <summary>
     /// 是否启用多维能力评估路由。
@@ -600,7 +617,8 @@ public sealed class RoutingOptions
 
     /// <summary>
     /// 审计记录保留时长（小时）。超出后由后台 AuditRetentionService 周期淘汰，
-    /// 防止 request_audit 无界增长。默认 168（7 天）。必须 &gt;= 1，由 RouterOptionsValidator 强制。
+    /// 防止 request_audit 无界增长。默认 168（7 天）。0 表示永久保留（不淘汰）；
+    /// 负数无语义，由 RouterOptionsValidator 强制（必须 &gt;= 0）。
     /// </summary>
     public int AuditRetentionHours { get; set; } = 168;
 

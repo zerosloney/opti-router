@@ -208,7 +208,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
             => throw new NotImplementedException();
         public IAsyncEnumerable<Clients.ChatStreamChunk> StreamAsync(ChatRequest r, CancellationToken c = default)
             => throw new NotImplementedException();
-        public Task<ModelHealthResult> ProbeAsync(CancellationToken c = default)
+        public Task<ModelHealthResult> ProbeAsync(CancellationToken c = default, TimeSpan? timeout = null)
             => Task.FromResult(new ModelHealthResult(true, 0));
     }
 

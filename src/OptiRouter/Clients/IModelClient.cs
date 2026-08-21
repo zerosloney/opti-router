@@ -36,8 +36,9 @@ public interface IModelClient
     /// 失败时返回 false 且不抛异常。
     /// </summary>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <param name="timeout">探测超时；null 用客户端默认（5s）。探活服务按模型平均 TTFT 自适应放宽，避免慢首 token 模型被误判超时。</param>
     /// <returns>健康结果。</returns>
-    Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default);
+    Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default, TimeSpan? timeout = null);
 
     /// <summary>
     /// 非流式调用，返回原始响应字符串（透明透传，保留上游全部字段）。
