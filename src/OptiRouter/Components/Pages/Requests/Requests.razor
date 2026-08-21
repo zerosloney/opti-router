@@ -463,7 +463,7 @@
         await LoadMetrics();
         await LoadLogs();
 
-        _timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
         _ = PollMetricsLoopAsync();
     }
 

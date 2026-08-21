@@ -131,7 +131,7 @@
     <div class="glass-card">
         <div class="card-header-row">
             <div class="card-label" style="margin: 0;">模型健康状态</div>
-            <span class="tag tag-info" style="font-size: 0.75rem;">● 每 15 秒自动刷新</span>
+            <span class="tag tag-info" style="font-size: 0.75rem;">● 每 60 秒自动刷新</span>
         </div>
         @if (!string.IsNullOrEmpty(HealthError))
         {
@@ -362,7 +362,7 @@
         await LoadModels();
         await LoadModelHealth();
 
-        _healthTimer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        _healthTimer = new PeriodicTimer(TimeSpan.FromSeconds(60));
         _ = PollHealthLoopAsync();
     }
 

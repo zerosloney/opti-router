@@ -10,7 +10,7 @@
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
             <span>路由引擎状态</span>
-            <span class="tag tag-info" style="font-size: 0.75rem;">● 每 15 秒自动刷新</span>
+            <span class="tag tag-info" style="font-size: 0.75rem;">● 每 60 秒自动刷新</span>
         </div>
         @if (!string.IsNullOrEmpty(MetricsError))
         {
@@ -1860,7 +1860,7 @@
         await LoadSemanticRoutes();
         await LoadConfigChanges();
 
-        _timer = new PeriodicTimer(TimeSpan.FromSeconds(15));
+        _timer = new PeriodicTimer(TimeSpan.FromSeconds(60));
         _ = PollMetricsLoopAsync();
     }
 
