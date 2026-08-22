@@ -118,6 +118,56 @@ public sealed class ModelHealthProbeServiceTests
         Assert.Equal(CircuitState.Closed, health.GetState(endpoint.Name));
     }
 
+    [Fact]
+    public async Task ProbeFailure_WhileCircuitOpen_DoesNotExtendCooldown()
+    {
+        // 熔断自愈回归：Open 态后台探活失败不应刷新冷却期，否则模型永远到不了 HalfOpen。
+        // 验证冷却中探活失败被跳过，冷却自然到期后转为 HalfOpen（而非继续 Open）。
+        var endpoint = new ModelEndpointOptions { Name = "model-a", Enabled = true };
+        var failingResult = new ModelHealthResult(
+            Healthy: false,
+            LatencyMs: 10,
+            Error: "service-unavailable",
+            StatusCode: HttpStatusCode.ServiceUnavailable,
+            Metadata: null);
+        var options = new RouterOptions();
+        options.Models.Add(endpoint);
+        options.Routing.FailoverFailureThreshold = 1;
+        options.Routing.FailoverCooldownSeconds = 60;
+
+        // 假时钟：闭包装可变时间变量
+        DateTime fakeNow = DateTime.UtcNow;
+        var health = new ModelHealthTracker(() => fakeNow);
+
+        var service = new ModelHealthProbeService(
+            new ProbeProvider(new ProbeClient(endpoint, failingResult)),
+            health,
+            new UpstreamQuotaStateStore(),
+            new FakeRouterOptionsMonitor(options),
+            NullLogger<ModelHealthProbeService>.Instance);
+
+        MethodInfo method = typeof(ModelHealthProbeService).GetMethod(
+            "ProbeAllAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        // T0: RecordFailure 一次让模型 Open（冷却至 T0+60）
+        bool tripped = health.RecordFailure(endpoint.Name, threshold: 1, cooldownSeconds: 60, releaseProbe: false);
+        Assert.True(tripped);
+        Assert.Equal(CircuitState.Open, health.GetState(endpoint.Name));
+
+        // T0+30: 探活失败（冷却中）→ 应被跳过，不刷新冷却
+        fakeNow = fakeNow.AddSeconds(30);
+        await (Task)method.Invoke(service, [CancellationToken.None])!;
+        Assert.Equal(CircuitState.Open, health.GetState(endpoint.Name));
+
+        // T0+61: 冷却原定到期时刻 → 应为 HalfOpen（证明第 2 步未续期）
+        fakeNow = fakeNow.AddSeconds(31);
+        Assert.Equal(CircuitState.HalfOpen, health.GetState(endpoint.Name));
+
+        // HalfOpen 下探活失败 → 应重新 Open（标准半开失败语义）
+        await (Task)method.Invoke(service, [CancellationToken.None])!;
+        Assert.Equal(CircuitState.Open, health.GetState(endpoint.Name));
+    }
+
     private sealed class CancellingProbeClient(ModelEndpointOptions endpoint) : IModelClient
     {
         public ModelEndpointOptions Endpoint => endpoint;

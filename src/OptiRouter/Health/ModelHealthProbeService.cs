@@ -131,6 +131,14 @@ public sealed class ModelHealthProbeService : BackgroundService
                             endpoint.Name, 429);
                         continue;
                     }
+                    // 熔断打开期间探活失败持续上报会无限续期冷却，模型永远到不了半开。
+                    // 冷却中跳过失败上报，让冷却自然到期。
+                    if (_healthTracker.IsCoolingDown(endpoint.Name))
+                    {
+                        if (_logger.IsEnabled(LogLevel.Debug))
+                            _logger.LogDebug("Health probe failed while circuit open (cooldown not extended): {Name}", endpoint.Name);
+                        continue;
+                    }
                     bool tripped = _healthTracker.RecordFailure(endpoint.Name, threshold, cooldown, releaseProbe: false);
                     _logger.LogWarning("Health probe FAILED: {Name} ({Reason}){Tripped}",
                         endpoint.Name, result.Error ?? "unknown", tripped ? " (circuit tripped)" : "");
@@ -144,6 +152,14 @@ public sealed class ModelHealthProbeService : BackgroundService
             }
             catch (Exception ex)
             {
+                // 熔断打开期间探活异常持续上报会无限续期冷却，模型永远到不了半开。
+                // 冷却中跳过失败上报，让冷却自然到期。
+                if (_healthTracker.IsCoolingDown(endpoint.Name))
+                {
+                    if (_logger.IsEnabled(LogLevel.Debug))
+                        _logger.LogDebug(ex, "Health probe failed while circuit open (cooldown not extended): {Name}", endpoint.Name);
+                    continue;
+                }
                 bool tripped = _healthTracker.RecordFailure(endpoint.Name, threshold, cooldown, releaseProbe: false);
                 _logger.LogWarning(ex, "Health probe threw for {Name}{Tripped}",
                     endpoint.Name, tripped ? " (circuit tripped)" : "");
