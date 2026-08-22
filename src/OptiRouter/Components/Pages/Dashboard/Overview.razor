@@ -395,11 +395,16 @@
         _ = PollMetricsLoopAsync();
     }
 
+    private bool _chartDrawn;
+
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        // 首次渲染后 ChartCanvas 才绑定；OnInitializedAsync 阶段 ref 仍为默认，无法绘制。
-        if (firstRender)
+        // 首次渲染时 Canvas 才绑定，但 OnInitializedAsync 的加载往往尚未完成（Trends 为空）。
+        // 数据就绪后的重渲染必须补画，否则图表空白、只能靠点击天数按钮才显示；
+        // 何时出现"数据先于首渲染就绪"是竞态（本地快加载画得出、慢加载画不出）。
+        if (!_chartDrawn && Trends.Any())
         {
+            _chartDrawn = true;
             await RenderChart();
         }
     }
