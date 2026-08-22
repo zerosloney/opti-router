@@ -473,7 +473,7 @@ docker run -d --name optirouter \
 
 ## 运维备忘
 
-- **日志**：服务日志直写 `logs/service.log`（进程生命周期内不轮转）。长期运行请定期清理或接入系统级轮转，例如 Windows 计划任务执行 `PowerShell (Get-Item logs\service.log).Length -gt 100MB { Move-Item ... }`，或 Linux `logrotate`。
+- **日志**：Serilog 滚动文件 `logs/service-yyyyMMdd.log`——按天分文件、单文件 50MB 上限、自动保留最近 14 个（约 700MB 封顶后淘汰最旧），无需人工清理。启动早期的控制台输出（Serilog 初始化前）重定向在 `logs/boot.log`（`start-local.cmd`）。
 - **配置库备份**：配置库（MariaDB `optirouter_*` 表 / SQLite `data/optirouter-config.db`）是路由、预算、模型与租户 Key 的唯一权威，建议纳入例行备份：
   - MariaDB：`mysqldump -h127.0.0.1 -uroot -p test optirouter_app_config optirouter_client_keys > optirouter-config-backup.sql`
   - SQLite：直接复制 `data/optirouter-config.db`（服务停止时，或用 `.backup` 语义的工具）

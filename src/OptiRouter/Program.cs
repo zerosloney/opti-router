@@ -27,18 +27,32 @@ using Prometheus;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using OpenTelemetry.Exporter;
+using Serilog;
+using Serilog.Extensions.Logging;
 
 // 初始化 SQLitePCLRaw 原生库（使用 bundle_e_sqlite3）。必须在使用 Microsoft.Data.Sqlite 前调用一次。
 SQLitePCL.Batteries_V2.Init();
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 日志落地：移除默认 console/EventLog provider（EventLog 在关停时有 disposed 竞态刷屏），
-// 改用自研文件 Provider 直写 logs/service.log——每行带时间戳（内置 SimpleConsoleFormatter
-// 为 internal 且不经 DI options，TimestampFormat 配置路径无法生效，曾致 8.5 万行日志无时间戳）。
+// 日志落地：Serilog 滚动文件（按天分文件 + 单文件 50MB 上限，自动保留最近 14 个，
+// 上限约 700MB 后自动淘汰最旧）。替代原自研 TimestampedFileLoggerProvider——
+// 其进程生命周期内不轮转，service.log 无限增长；EventLog provider 的关停
+// disposed 竞态刷屏问题由 ClearProviders 一并移除。
+// SerilogLoggerProvider 以标准 ILoggerProvider 经 DI 接入（UseSerilog/AddSerilog(IServiceCollection)
+// 会替换 ILoggerFactory，DI 注册的其他 provider 如测试日志捕获器将收不到消息）。
 builder.Logging.ClearProviders();
-builder.Logging.AddProvider(new OptiRouter.Logging.TimestampedFileLoggerProvider(
-    Path.Combine(builder.Environment.ContentRootPath, "logs", "service.log")));
+var serilogLogger = new LoggerConfiguration()
+    .WriteTo.File(
+        Path.Combine(builder.Environment.ContentRootPath, "logs", "service-.log"),
+        outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff}] {Level:l4}: {SourceContext}[{EventId}] {Message:lj}{NewLine}{Exception}",
+        rollingInterval: RollingInterval.Day,
+        rollOnFileSizeLimit: true,
+        fileSizeLimitBytes: 50L * 1024 * 1024,
+        retainedFileCountLimit: 14,
+        flushToDiskInterval: TimeSpan.FromSeconds(2))
+    .CreateLogger();
+builder.Services.AddSingleton<ILoggerProvider>(_ => new SerilogLoggerProvider(serilogLogger, dispose: true));
 builder.WebHost.ConfigureKestrel(options =>
 {
     options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
