@@ -116,6 +116,7 @@
                                 </td>
                                 <td style="display: flex; gap: 4px;">
                                     <button class="btn-ghost btn-sm" @onclick="() => ProbeConnection(m.Name)" title="测试端点 API 连通性与延迟">⚡ 探活</button>
+                                    <button class="btn-ghost btn-sm" @onclick="() => OpenCopyModal(m)" title="复制此模型配置——同供应商多模型只需改名称与模型 ID，key/BaseUrl/计价等全部带入">⧉ 复制</button>
                                     <button class="btn-primary btn-sm" @onclick="() => OpenEditModal(m)">编辑</button>
                                     <button class="btn-danger btn-sm" @onclick="() => Delete(m.Name)">删除</button>
                                 </td>
@@ -190,8 +191,8 @@
 {
     <div class="drawer-backdrop" @onclick="CloseModal">
         <div class="model-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true"
-             aria-label="@(IsEditing ? $"编辑模型 {EditingName}" : "添加模型")">
-            <div class="key-modal-title">@(IsEditing ? $"编辑模型 — {EditingName}" : "添加模型")</div>
+             aria-label="@(IsEditing ? $"编辑模型 {EditingName}" : CopySourceName is null ? "添加模型" : $"复制模型，源自 {CopySourceName}")">
+            <div class="key-modal-title">@(IsEditing ? $"编辑模型 — {EditingName}" : CopySourceName is null ? "添加模型" : $"复制模型 — 源自 {CopySourceName}")</div>
 
             @if (!IsEditing)
             {
@@ -208,7 +209,7 @@
             <div class="form-grid">
                 <div class="form-field full">
                     <label for="nm-name">名称 *</label>
-                    <input type="text" id="nm-name" @bind="Form.Name" placeholder="路由名，需唯一，如 gpt-4o / deepseek-chat" disabled="@IsEditing" />
+                    <input type="text" id="nm-name" @bind="Form.Name" placeholder="@(CopySourceName is null ? "路由名，需唯一，如 gpt-4o / deepseek-chat" : "必填：新模型的路由名（其余字段已自源模型复制）")" disabled="@IsEditing" />
                 </div>
                 <div class="form-field full">
                     <label for="nm-id">上游模型 Id（可选）</label>
@@ -348,6 +349,8 @@
     private bool ShowModal;
     private bool IsEditing;
     private string? EditingName;
+    // 复制模式：非编辑（走创建路径），但表单预填源模型全部字段，标题提示来源。
+    private string? CopySourceName;
     private bool IsSaving;
     private ModelForm Form = new();
     // 弹窗内 ApiKey 默认明文（用户要求）；可切回密文。
@@ -484,9 +487,47 @@
     {
         IsEditing = false;
         EditingName = null;
+        CopySourceName = null;
         Form = new ModelForm();
         ShowModalApiKey = true;
         ErrorMsg = null;
+        ShowModal = true;
+    }
+
+    /// <summary>
+    /// 复制模型：同供应商多模型（key/BaseUrl/计价/超时一致）只需改名称与上游模型 ID。
+    /// 名称与 ID 留空强制填写；ApiKey 经 reveal 接口取回预填（列表 DTO 只含遮蔽预览）。
+    /// </summary>
+    private async Task OpenCopyModal(ApiService.ModelDto m)
+    {
+        var (key, revealError) = await Api.RevealModelApiKeyAsync(m.Name);
+        IsEditing = false;
+        EditingName = null;
+        CopySourceName = m.Name;
+        Form = new ModelForm
+        {
+            Name = "",
+            Id = "",
+            BaseUrl = m.BaseUrl,
+            ApiKey = key ?? "",
+            Tier = m.Tier,
+            Provider = m.Provider ?? "",
+            Family = m.Family ?? "",
+            MaxContextTokens = m.MaxContextTokens,
+            TimeoutSeconds = m.TimeoutSeconds,
+            MaxRetries = m.MaxRetries,
+            Weight = m.Weight,
+            EnabledStr = m.Enabled.ToString().ToLower(),
+            DeployTypeStr = m.IsLocalOrPrivate ? "local" : "public",
+            InputPricePerMillion = m.InputPricePerMillion,
+            OutputPricePerMillion = m.OutputPricePerMillion,
+            CachedInputPricePerMillion = m.CachedInputPricePerMillion,
+            CacheWritePricePerMillion = m.CacheWriteInputPricePerMillion,
+            Tags = m.Tags is { Count: > 0 } ? string.Join(", ", m.Tags) : ""
+        };
+        ShowModalApiKey = true;
+        // key 取不回时仍打开弹窗（其余字段已带入），提示手工粘贴。
+        ErrorMsg = key is null ? $"获取源模型 ApiKey 失败，请手动填写：{revealError ?? "未知错误"}" : null;
         ShowModal = true;
     }
 
@@ -494,6 +535,7 @@
     {
         IsEditing = true;
         EditingName = m.Name;
+        CopySourceName = null;
         Form = new ModelForm
         {
             Name = m.Name,
