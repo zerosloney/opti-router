@@ -18,7 +18,7 @@ namespace OptiRouter.Tests.Endpoints;
 /// </summary>
 public class DashboardFeatureTests
 {
-    private sealed class FeatureFactory : WebApplicationFactory<Program>
+    private sealed class FeatureFactory(bool enableResponseCache = false) : WebApplicationFactory<Program>
     {
         public const string Key = "feature-test-key";
 
@@ -36,6 +36,8 @@ public class DashboardFeatureTests
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:ConfigDbPath", Path.Combine(_tempRoot, "optirouter-config.db"));
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+            if (enableResponseCache)
+                builder.UseSetting("OptiRouter:Routing:EnableResponseCache", "true");
             builder.ConfigureServices(services =>
             {
                 services.Configure<RouterOptions>(opt =>
@@ -202,6 +204,33 @@ public class DashboardFeatureTests
         Assert.Equal(1, root.GetArrayLength());
         Assert.Equal(DateTime.UtcNow.ToString("yyyy-MM-dd"), root[0].GetProperty("date").GetString());
         Assert.Equal(0.75m, root[0].GetProperty("amount").GetDecimal());
+    }
+
+    [Fact]
+    public async Task ResponseCacheState_EnabledFlagReflectsRoutingOptions()
+    {
+        // 关闭（默认）：卡片文案需区分"未开启"与"已开启但无 eligible 流量"
+        using (var factory = new FeatureFactory(enableResponseCache: false))
+        {
+            using var client = CreateClient(factory);
+            using var response = await client.GetAsync("/api/dashboard/state/response-cache");
+            response.EnsureSuccessStatusCode();
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.False(doc.RootElement.GetProperty("enabled").GetBoolean());
+            Assert.Equal(0, doc.RootElement.GetProperty("sets").GetInt64());
+        }
+
+        // 开启：enabled=true，无流量时计数仍全 0（网关内缓存仅非流式请求参与）
+        using (var factory = new FeatureFactory(enableResponseCache: true))
+        {
+            using var client = CreateClient(factory);
+            using var response = await client.GetAsync("/api/dashboard/state/response-cache");
+            response.EnsureSuccessStatusCode();
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.True(doc.RootElement.GetProperty("enabled").GetBoolean());
+            Assert.Equal(0, doc.RootElement.GetProperty("hits").GetInt64());
+            Assert.Equal(0, doc.RootElement.GetProperty("misses").GetInt64());
+        }
     }
 
     // ── 配置变更审计 + Webhook/Fusion 配置往返 ─────────────────────

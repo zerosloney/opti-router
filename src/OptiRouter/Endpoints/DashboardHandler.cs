@@ -336,12 +336,13 @@ public static class DashboardHandler
             });
         });
 
-        endpoints.MapGet("/api/dashboard/state/response-cache", (MemoryResponseCache responseCache) =>
+        endpoints.MapGet("/api/dashboard/state/response-cache", (MemoryResponseCache responseCache, IOptionsMonitor<RouterOptions> options) =>
         {
             var (hits, misses, sets, current, max) = responseCache.GetStats();
             long total = hits + misses;
             return Results.Ok(new
             {
+                enabled = options.CurrentValue.Routing.EnableResponseCache,
                 hits,
                 misses,
                 sets,

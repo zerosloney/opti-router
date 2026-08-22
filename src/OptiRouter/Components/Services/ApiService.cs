@@ -915,6 +915,7 @@ public class ApiService
 
     /// <summary>响应缓存命中统计（进程内计数，重启归零）。</summary>
     public record ResponseCacheStatsDto(
+        bool Enabled,
         long Hits,
         long Misses,
         long Sets,

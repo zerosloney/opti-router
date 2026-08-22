@@ -276,7 +276,11 @@
                         <div class="text-secondary">
                             当前条目 @ResponseCacheStats.CurrentEntries.ToString("N0") / 上限 @ResponseCacheStats.MaxEntries.ToString("N0")
                         </div>
-                        <div class="meta-text" style="font-size: 0.72rem;">全为 0 且未波动说明响应缓存未开启（路由页可热启用）。</div>
+                        <div class="meta-text" style="font-size: 0.72rem;">
+                            @(ResponseCacheStats.Enabled
+                                ? "已开启——仅非流式请求参与缓存；计数全为 0 表示暂无可缓存的非流式流量。"
+                                : "未开启（路由页可热启用）。")
+                        </div>
                     </div>
                 }
                 else
