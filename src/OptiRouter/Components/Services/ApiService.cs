@@ -905,7 +905,7 @@ public class ApiService
         bool IsExhausted);
 
     /// <summary>提示词缓存亲和：SHA-256 指纹 → 上次成功服务的模型。Items 最多 50 条。</summary>
-    public record AffinityPageDto(int TotalCount, List<AffinityStateDto> Items);
+    public record AffinityPageDto(int TotalCount, List<AffinityStateDto> Items, bool Enabled = false);
 
     public record AffinityStateDto(
         string Fingerprint,

@@ -1,0 +1,73 @@
+@if (Type == "stat")
+{
+    <div class="stats-row @Class" style="@Style">
+        @for (int i = 0; i < Count; i++)
+        {
+            <div class="stat-card">
+                <div class="skeleton skeleton-text" style="width: 45%; height: 12px; margin-bottom: 8px;"></div>
+                <div class="skeleton skeleton-text" style="width: 75%; height: 26px;"></div>
+            </div>
+        }
+    </div>
+}
+else if (Type == "table")
+{
+    <div class="table-wrap @Class" style="@Style">
+        <table class="config-table">
+            <thead>
+                <tr>
+                    @for (int c = 0; c < Cols; c++)
+                    {
+                        <th>
+                            <div class="skeleton skeleton-text" style="width: 60%; height: 14px;"></div>
+                        </th>
+                    }
+                </tr>
+            </thead>
+            <tbody>
+                @for (int r = 0; r < Rows; r++)
+                {
+                    <tr>
+                        @for (int c = 0; c < Cols; c++)
+                        {
+                            <td>
+                                <div class="skeleton skeleton-text" style="width: @(c == 0 ? "80%" : c == Cols - 1 ? "40%" : "60%"); height: 14px;"></div>
+                            </td>
+                        }
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+else if (Type == "card")
+{
+    <div class="skeleton-cards-grid @Class" style="@Style">
+        @for (int i = 0; i < Count; i++)
+        {
+            <div class="sub-card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <div class="skeleton skeleton-text" style="width: 40%; height: 18px;"></div>
+                    <div class="skeleton skeleton-badge" style="width: 60px; height: 20px;"></div>
+                </div>
+                <div class="skeleton skeleton-text" style="width: 90%; height: 12px; margin-bottom: 8px;"></div>
+                <div class="skeleton skeleton-text" style="width: 65%; height: 12px;"></div>
+            </div>
+        }
+    </div>
+}
+else
+{
+    <div class="skeleton @Class" style="width: @(Width ?? "100%"); height: @(Height ?? "60px"); @Style"></div>
+}
+
+@code {
+    [Parameter] public string Type { get; set; } = "stat"; // "stat" | "table" | "card" | "custom"
+    [Parameter] public int Count { get; set; } = 4;
+    [Parameter] public int Rows { get; set; } = 5;
+    [Parameter] public int Cols { get; set; } = 4;
+    [Parameter] public string? Width { get; set; }
+    [Parameter] public string? Height { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public string? Style { get; set; }
+}

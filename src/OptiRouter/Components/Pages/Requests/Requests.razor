@@ -1,6 +1,8 @@
 @page "/requests"
+@using OptiRouter.Components.Services
 @inject ApiService Api
 @inject IJSRuntime JS
+@inject ToastService Toast
 @inject Microsoft.Extensions.Logging.ILogger<Requests> Logger
 @implements IDisposable
 
@@ -10,30 +12,42 @@
     <!-- 实时请求流 -->
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
-            <span>实时请求流 (Live Request Stream)</span>
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="requests" Size="18" Class="text-primary" />
+                <span>实时请求流 (Live Request Stream)</span>
+            </span>
             @if (MetricsLoading)
             {
-                <span class="tag tag-info" style="font-size: 0.75rem;">加载中...</span>
+                <span class="tag tag-info" style="font-size: 0.75rem;">
+                    <AppIcon Name="refresh" Size="12" />
+                    <span>加载中...</span>
+                </span>
             }
             else
             {
-                <span class="tag tag-success" style="font-size: 0.75rem;">● 实时抓取</span>
+                <span class="tag tag-success" style="font-size: 0.75rem;">
+                    <span class="user-status-dot" style="width: 6px; height: 6px;"></span>
+                    <span>实时抓取</span>
+                </span>
             }
         </div>
         @if (!string.IsNullOrEmpty(MetricsError))
         {
-            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @MetricsError</div>
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">
+                <AppIcon Name="alert" Size="14" />
+                <span>@MetricsError</span>
+            </div>
         }
-        <div class="table-wrap">
-            <table class="log-table">
-                <thead>
-                    <tr>
-                        <th scope="col">时间</th><th scope="col">请求 ID</th><th scope="col">路由模型</th><th scope="col">分档 Tier</th><th scope="col">请求内容</th><th scope="col">Tokens (In/Out)</th><th scope="col">延迟 / TTFT</th><th scope="col">成本</th><th scope="col">类型</th><th scope="col">状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @if (Metrics?.System.RecentRequests != null && Metrics.System.RecentRequests.Any())
-                    {
+        @if (Metrics?.System.RecentRequests != null && Metrics.System.RecentRequests.Any())
+        {
+            <div class="table-wrap">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">时间</th><th scope="col">请求 ID</th><th scope="col">路由模型</th><th scope="col">分档 Tier</th><th scope="col">请求内容</th><th scope="col">Tokens (In/Out)</th><th scope="col">延迟 / TTFT</th><th scope="col">成本</th><th scope="col">类型</th><th scope="col">状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
                         @foreach (var r in Metrics.System.RecentRequests)
                         {
                             <tr>
@@ -42,9 +56,9 @@
                                 <td><strong>@r.Model</strong></td>
                                 <td><span class="tag tag-info">@r.RoutedTier</span></td>
                                 <td><span style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
-                                <td>@r.PromptTokens / @r.CompletionTokens</td>
-                                <td>@r.LatencyMs.ToString("F0") ms / @(r.TimeToFirstTokenMs is { } reqTtft ? $"{reqTtft:F0} ms" : "--")</td>
-                                <td style="color: var(--ok-text); font-weight: bold;">$@r.Cost.ToString("F6")</td>
+                                <td class="table-mono">@UiFormatter.FormatNumber(r.PromptTokens) / @UiFormatter.FormatNumber(r.CompletionTokens)</td>
+                                <td>@UiFormatter.FormatLatency(r.LatencyMs) / @(r.TimeToFirstTokenMs is { } reqTtft ? UiFormatter.FormatLatency(reqTtft) : "--")</td>
+                                <td style="color: var(--ok-text); font-weight: bold;">@UiFormatter.FormatCost(r.Cost)</td>
                                 <td>
                                     <span class="tag tag-secondary">@(r.IsStreaming ? "流式" : "JSON")</span>
                                     @if (!string.IsNullOrEmpty(r.FusionRole))
@@ -52,25 +66,41 @@
                                         <span class="tag tag-info">@r.FusionRole</span>
                                     }
                                 </td>
-                                <td class="@(r.Success ? "text-success" : "text-danger")">
-                                    @(r.Success ? "✓ 成功" : "✗ 失败")
+                                <td>
+                                    @if (r.Success)
+                                    {
+                                        <span class="tag tag-success">
+                                            <AppIcon Name="check" Size="12" />
+                                            <span>成功</span>
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="tag tag-danger">
+                                            <AppIcon Name="alert" Size="12" />
+                                            <span>失败</span>
+                                        </span>
+                                    }
                                 </td>
                             </tr>
                         }
-                    }
-                    else
-                    {
-                        <tr><td colspan="10" class="text-center text-secondary">暂无实时请求流数据</td></tr>
-                    }
-                </tbody>
-            </table>
-        </div>
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="requests" Title="暂无实时请求流数据" Description="当客户端向 OptiRouter 发起 API 对话补全请求时，实时链路信息将在此即时更新呈现。" />
+        }
     </div>
 
     <!-- 审计分析：时间窗全量聚合报告（策略调优闭环） -->
     <div class="glass-card">
-        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
-            <span>审计分析 (Audit Analysis)</span>
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; flex-wrap: wrap; gap: 8px;">
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="overview" Size="18" Class="text-info" />
+                <span>审计分析 (Audit Analysis)</span>
+            </span>
             <div class="trend-controls" style="margin-top: 0;">
                 @foreach (var (key, text) in new[] { ("24h", "近24小时"), ("7d", "近7天"), ("30d", "近30天") })
                 {
@@ -80,25 +110,27 @@
         </div>
         @if (AnalysisLoading)
         {
-            <div class="text-secondary" style="padding: 24px 0; text-align: center;">分析中...</div>
+            <div style="margin-top: 12px;">
+                <SkeletonLoader Type="stat" Count="4" />
+            </div>
         }
         else if (Analysis == null || Analysis.TotalRequests == 0)
         {
-            <div class="text-secondary" style="padding: 24px 0; text-align: center;">窗口内无审计数据</div>
+            <EmptyState Icon="overview" Title="该窗口内暂无聚合审计数据" Description="所选时间窗口内未检测到任何请求记录，请尝试切换至更长的时间窗口（如近7天或近30天）。" />
         }
         else
         {
             var s = Analysis.Summary;
             <div style="display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0;">
-                <span class="tag tag-secondary">总请求 @Analysis.TotalRequests.ToString("N0")</span>
-                <span class="tag @(s.SuccessRatePct >= 95 ? "tag-success" : s.SuccessRatePct >= 80 ? "tag-info" : "tag-danger")">成功率 @s.SuccessRatePct.ToString("F1")%（失败 @s.Failures）</span>
-                <span class="tag tag-secondary">成本 $@s.TotalCostUsd.ToString("F4")</span>
-                <span class="tag tag-info">P50/P95/P99 @(s.P50LatencyMs.ToString("F0"))/@(s.P95LatencyMs.ToString("F0"))/@(s.P99LatencyMs.ToString("F0")) ms</span>
-                <span class="tag tag-secondary">Token 入/出 @(s.PromptTokens.ToString("N0"))/@(s.CompletionTokens.ToString("N0"))</span>
-                <span class="tag @(Analysis.Cascade.TriggerRatePct > 20 ? "tag-warning" : "tag-secondary")">级联触发 @Analysis.Cascade.TriggerRatePct.ToString("F1")%</span>
+                <span class="tag tag-secondary">总请求 @UiFormatter.FormatNumber(Analysis.TotalRequests)</span>
+                <span class="tag @(s.SuccessRatePct >= 95 ? "tag-success" : s.SuccessRatePct >= 80 ? "tag-info" : "tag-danger")">成功率 @UiFormatter.FormatPercent(s.SuccessRatePct)（失败 @UiFormatter.FormatNumber(s.Failures)）</span>
+                <span class="tag tag-secondary">成本 @UiFormatter.FormatCost(s.TotalCostUsd)</span>
+                <span class="tag tag-info">P50/P95/P99 @UiFormatter.FormatLatency(s.P50LatencyMs)/@UiFormatter.FormatLatency(s.P95LatencyMs)/@UiFormatter.FormatLatency(s.P99LatencyMs)</span>
+                <span class="tag tag-secondary">Token 入/出 @UiFormatter.FormatNumber(s.PromptTokens)/@UiFormatter.FormatNumber(s.CompletionTokens)</span>
+                <span class="tag @(Analysis.Cascade.TriggerRatePct > 20 ? "tag-warning" : "tag-secondary")">级联触发 @UiFormatter.FormatPercent(Analysis.Cascade.TriggerRatePct)</span>
                 @if (Analysis.Fusion.FusionRequests > 0)
                 {
-                    <span class="tag tag-info">Fusion @Analysis.Fusion.FusionRequests 次</span>
+                    <span class="tag tag-info">Fusion @UiFormatter.FormatNumber(Analysis.Fusion.FusionRequests) 次</span>
                 }
             </div>
 
@@ -130,11 +162,11 @@
                                 {
                                     <tr>
                                         <td><span class="tag tag-info">@t.Tier</span></td>
-                                        <td>@t.Requests.ToString("N0")</td>
-                                        <td class="@(t.Failures > 0 ? "text-danger" : "")">@t.Failures</td>
-                                        <td>@t.SuccessRatePct.ToString("F1")%</td>
-                                        <td style="color: var(--ok-text);">$@t.CostUsd.ToString("F4")</td>
-                                        <td>@t.CostSharePct.ToString("F1")%</td>
+                                        <td class="table-mono">@UiFormatter.FormatNumber(t.Requests)</td>
+                                        <td class="@(t.Failures > 0 ? "text-danger" : "") table-mono">@t.Failures</td>
+                                        <td>@UiFormatter.FormatPercent(t.SuccessRatePct)</td>
+                                        <td style="color: var(--ok-text);">@UiFormatter.FormatCost(t.CostUsd)</td>
+                                        <td>@UiFormatter.FormatPercent(t.CostSharePct)</td>
                                     </tr>
                                 }
                             </tbody>
@@ -153,8 +185,8 @@
                                 {
                                     <tr>
                                         <td title="@r.Reason" style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">@Truncate(r.Reason, 40)</td>
-                                        <td>@r.Requests.ToString("N0")</td>
-                                        <td class="@(r.SuccessRatePct >= 80 ? "text-success" : "text-danger")">@r.SuccessRatePct.ToString("F1")%</td>
+                                        <td class="table-mono">@UiFormatter.FormatNumber(r.Requests)</td>
+                                        <td class="@(r.SuccessRatePct >= 80 ? "text-success" : "text-danger")">@UiFormatter.FormatPercent(r.SuccessRatePct)</td>
                                     </tr>
                                 }
                             </tbody>
@@ -177,10 +209,18 @@
 
     <!-- 审计日志 -->
     <div class="glass-card">
-        <div class="card-label">历史请求审计日志 (点击任意行查看 Debugger Trace 详情)</div>
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="requests" Size="18" Class="text-primary" />
+                <span>历史请求审计日志 (点击任意行查看 Debugger Trace 详情)</span>
+            </span>
+        </div>
         @if (!string.IsNullOrEmpty(AuditError))
         {
-            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @AuditError</div>
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">
+                <AppIcon Name="alert" Size="14" />
+                <span>@AuditError</span>
+            </div>
         }
         <div class="log-controls">
             <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" style="width: 140px;" />
@@ -209,19 +249,25 @@
                 <option value="50">每页 50 条</option>
                 <option value="100">每页 100 条</option>
             </select>
-            <button class="btn-primary" @onclick="ApplyLogFilters">🔍 组合筛选</button>
-            <button class="btn-ghost" @onclick="ExportLogCsv">⬇ 导出 CSV</button>
+            <button class="btn-primary" @onclick="ApplyLogFilters">
+                <AppIcon Name="search" Size="14" />
+                <span>组合筛选</span>
+            </button>
+            <button class="btn-ghost" @onclick="ExportLogCsv">
+                <AppIcon Name="download" Size="14" />
+                <span>导出 CSV</span>
+            </button>
         </div>
-        <div class="table-wrap">
-            <table class="log-table">
-                <thead>
-                    <tr>
-                        <th scope="col">时间</th><th scope="col">模型</th><th scope="col">Tier</th><th scope="col">请求内容</th><th scope="col">Token</th><th scope="col">缓存 hit/write</th><th scope="col">费用</th><th scope="col">延迟</th><th scope="col">TTFT</th><th scope="col">状态</th><th scope="col">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @if (AuditItems.Any())
-                    {
+        @if (AuditItems.Any())
+        {
+            <div class="table-wrap">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">时间</th><th scope="col">模型</th><th scope="col">Tier</th><th scope="col">请求内容</th><th scope="col">Token</th><th scope="col">缓存 hit/write</th><th scope="col">费用</th><th scope="col">延迟</th><th scope="col">TTFT</th><th scope="col">状态</th><th scope="col">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
                         @foreach (var item in AuditItems)
                         {
                             <tr @onclick="() => SelectLogItem(item)" style="cursor: pointer;" class="hover-row">
@@ -229,33 +275,53 @@
                                 <td><strong>@item.Model</strong></td>
                                 <td><span class="badge badge-info">@item.RoutedTier</span></td>
                                 <td><span style="font-size: 0.8rem; color: var(--text-secondary); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(item.RequestContent) ? "-" : Truncate(item.RequestContent, 30))</span></td>
-                                <td>@(item.PromptTokens + item.CompletionTokens)</td>
-                                <td>@item.CachedInputTokens / @item.CacheWriteInputTokens</td>
+                                <td class="table-mono">@UiFormatter.FormatNumber(item.PromptTokens + item.CompletionTokens)</td>
+                                <td class="table-mono">@UiFormatter.FormatNumber(item.CachedInputTokens) / @UiFormatter.FormatNumber(item.CacheWriteInputTokens)</td>
                                 <td style="color: var(--success); font-weight: 600;">
-                                    $@item.Cost.ToString("F6")
+                                    @UiFormatter.FormatCost(item.Cost)
                                     @if (item.IsEstimated)
                                     {
                                         <span class="tag tag-warning">预估</span>
                                     }
                                 </td>
-                                <td>@item.LatencyMs.ToString("F0") ms</td>
-                                <td>@(item.TimeToFirstTokenMs is { } auditTtft ? $"{auditTtft:F0} ms" : "--")</td>
-                                <td class="@(item.Success ? "text-success" : "text-danger")" style="font-weight: 500;">
-                                    @(item.Success ? "✓ 成功" : item.QuotaLimited ? "⚠ 配额受限" : "✗ 失败")
+                                <td>@UiFormatter.FormatLatency(item.LatencyMs)</td>
+                                <td>@(item.TimeToFirstTokenMs is { } auditTtft ? UiFormatter.FormatLatency(auditTtft) : "--")</td>
+                                <td>
+                                    @if (item.Success)
+                                    {
+                                        <span class="tag tag-success">
+                                            <AppIcon Name="check" Size="12" />
+                                            <span>成功</span>
+                                        </span>
+                                    }
+                                    else if (item.QuotaLimited)
+                                    {
+                                        <span class="tag tag-warning">
+                                            <AppIcon Name="alert" Size="12" />
+                                            <span>配额受限</span>
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="tag tag-danger">
+                                            <AppIcon Name="alert" Size="12" />
+                                            <span>失败</span>
+                                        </span>
+                                    }
                                 </td>
                                 <td>
                                     <button class="btn-ghost btn-sm" @onclick:stopPropagation="true" @onclick="() => SelectLogItem(item)">详情</button>
                                 </td>
                             </tr>
                         }
-                    }
-                    else
-                    {
-                        <tr><td colspan="11" class="text-center text-secondary">暂无符合条件的日志数据</td></tr>
-                    }
-                </tbody>
-            </table>
-        </div>
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="search" Title="未检索到符合条件的请求日志" Description="当前筛选条件下没有匹配的记录，请尝试调整搜索词、时间窗口或分档筛选。" ActionText="清空筛选条件" OnAction="ResetFiltersAsync" />
+        }
         <div class="pagination">
             <span class="text-secondary">显示 @AuditItems.Count 条，共 @AuditTotal 条@(AuditBufferLimited ? "（已达最近 500 条缓冲上限，仅统计其中匹配）" : "")</span>
             <div>
@@ -271,7 +337,10 @@
     <div class="drawer-backdrop" @onclick="() => SelectedLogItem = null" style="justify-content: flex-end;">
         <div class="drawer-content" @onclick:stopPropagation="true" style="width: 520px; max-width: 90vw; height: 100%; padding: 24px; overflow-y: auto;">
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 16px;">
-                <span style="font-weight: 600; font-size: 1.05rem; color: var(--text-primary);">📌 请求全链路 Debugger Trace</span>
+                <span style="font-weight: 600; font-size: 1.05rem; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
+                    <AppIcon Name="requests" Size="18" Class="text-primary" />
+                    <span>请求全链路 Debugger Trace</span>
+                </span>
                 <button class="btn-ghost btn-sm" @onclick="() => SelectedLogItem = null">&times;</button>
             </div>
 
@@ -290,21 +359,24 @@
                         <span class="text-muted">路由 Tier:</span> <span class="badge badge-info" style="margin-left: 4px;">@SelectedLogItem.RoutedTier</span>
                     </div>
                     <div class="sub-card" style="padding: 10px;">
-                        <span class="text-muted">端到端耗时:</span> <span style="font-weight: 600; color: var(--success); margin-left: 4px;">@SelectedLogItem.LatencyMs ms</span>
+                        <span class="text-muted">端到端耗时:</span> <span style="font-weight: 600; color: var(--success); margin-left: 4px;">@UiFormatter.FormatLatency(SelectedLogItem.LatencyMs)</span>
                     </div>
                     <div class="sub-card" style="padding: 10px;">
-                        <span class="text-muted">流式 TTFT:</span> <span style="margin-left: 4px;">@(SelectedLogItem.TimeToFirstTokenMs is { } t ? $"{t} ms" : "--")</span>
+                        <span class="text-muted">流式 TTFT:</span> <span style="margin-left: 4px;">@(SelectedLogItem.TimeToFirstTokenMs is { } t ? UiFormatter.FormatLatency(t) : "--")</span>
                     </div>
                     <div class="sub-card" style="padding: 10px;">
-                        <span class="text-muted">Tokens:</span> <span style="margin-left: 4px;">@SelectedLogItem.PromptTokens / @SelectedLogItem.CompletionTokens</span>
+                        <span class="text-muted">Tokens:</span> <span style="margin-left: 4px;">@UiFormatter.FormatNumber(SelectedLogItem.PromptTokens) / @UiFormatter.FormatNumber(SelectedLogItem.CompletionTokens)</span>
                     </div>
                     <div class="sub-card" style="padding: 10px;">
-                        <span class="text-muted">费用:</span> <span style="color: var(--success); font-weight: 600; margin-left: 4px;">$@SelectedLogItem.Cost.ToString("F6")</span>
+                        <span class="text-muted">费用:</span> <span style="color: var(--success); font-weight: 600; margin-left: 4px;">@UiFormatter.FormatCost(SelectedLogItem.Cost)</span>
                     </div>
                 </div>
 
                 <div class="sub-card" style="margin-top: 4px;">
-                    <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px;">🧠 路由决策 Reasons 链</div>
+                    <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+                        <AppIcon Name="router" Size="14" Class="text-primary" />
+                        <span>路由决策 Reasons 链</span>
+                    </div>
                     <div class="table-mono" style="font-size: 0.78rem; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; background: var(--bg-input); padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">@SelectedLogItem.RoutingReason</div>
                 </div>
 
@@ -316,7 +388,10 @@
                    || SelectedLogItem.CascadeTriggered)
                 {
                     <div class="sub-card" style="margin-top: 4px;">
-                        <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px;">🔬 学习反馈与融合调度</div>
+                        <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="benchmarks" Size="14" Class="text-warning" />
+                            <span>学习反馈与融合调度</span>
+                        </div>
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.78rem;">
                             @if (SelectedLogItem.Reward is { } reward)
                             {
@@ -340,7 +415,7 @@
                             }
                             @if (SelectedLogItem.CascadeTriggered)
                             {
-                                <div><span class="tag tag-warning">⚡ 触发级联升级</span></div>
+                                <div><span class="tag tag-warning">触发级联升级</span></div>
                             }
                         </div>
                     </div>
@@ -349,7 +424,10 @@
                 @if (!string.IsNullOrEmpty(SelectedLogItem.RequestContent))
                 {
                     <div class="sub-card" style="margin-top: 4px;">
-                        <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px;">📝 请求内容（脱敏后）</div>
+                        <div style="color: var(--text-primary); font-size: 0.82rem; font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="overview" Size="14" Class="text-info" />
+                            <span>请求内容（脱敏后）</span>
+                        </div>
                         <div style="font-size: 0.8rem; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; background: var(--bg-input); padding: 10px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">@SelectedLogItem.RequestContent</div>
                     </div>
                 }
@@ -357,7 +435,8 @@
                 @if (!string.IsNullOrEmpty(SelectedLogItem.ErrorMessage))
                 {
                     <div class="alert-banner alert-error" style="margin-top: 4px;">
-                        <div style="font-size: 0.8rem; font-family: 'JetBrains Mono', monospace;">❌ @SelectedLogItem.ErrorMessage</div>
+                        <AppIcon Name="alert" Size="14" />
+                        <div style="font-size: 0.8rem; font-family: 'JetBrains Mono', monospace;">@SelectedLogItem.ErrorMessage</div>
                     </div>
                 }
             </div>
@@ -449,6 +528,7 @@
             ToUtcIso(LogFilterFrom),
             ToUtcIso(LogFilterTo));
         await JS.InvokeVoidAsync("open", url, "_blank");
+        Toast.ShowInfo("正在导出审计日志 CSV 数据...", "数据导出");
     }
 
     private string? AuditError;
@@ -458,6 +538,21 @@
     {
         LogOffset = 0;
         await LoadLogs();
+        Toast.ShowInfo($"筛选完成，共匹配到 {AuditTotal} 条日志", "筛选结果");
+    }
+
+    private async Task ResetFiltersAsync()
+    {
+        LogFilterModel = "";
+        LogFilterQuery = "";
+        LogFilterFrom = null;
+        LogFilterTo = null;
+        LogFilterTier = "";
+        LogFilterStatus = "";
+        LogFilterMinLatency = 0;
+        LogOffset = 0;
+        await LoadLogs();
+        Toast.ShowSuccess("已重置所有筛选条件", "筛选重置");
     }
 
     protected override async Task OnInitializedAsync()

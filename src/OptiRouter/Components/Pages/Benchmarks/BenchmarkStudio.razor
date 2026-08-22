@@ -7,6 +7,7 @@
 @using OptiRouter.Routing
 @using OptiRouter.Configuration
 @using Microsoft.Extensions.Options
+@using OptiRouter.Components.Services
 @inject StressBenchmarkEngine BenchmarkEngine
 @inject RouterEngine Engine
 @inject IOptionsMonitor<RouterOptions> OptionsMonitor
@@ -14,6 +15,7 @@
 @inject McpToolComplexityAnalyzer ToolComplexityAnalyzer
 @inject IPromptPruner PromptPruner
 @inject DistributedMeshSynchronizer MeshSynchronizer
+@inject ToastService ToastService
 @implements IDisposable
 
 <PageTitle>OptiRouter - 性能基准、MCP 生态与分布式 Mesh 拓扑</PageTitle>
@@ -25,17 +27,26 @@
             <p class="studio-subtitle">实时并发压测、Model Context Protocol 工具目录态势感知与分布式状态同步网格</p>
         </div>
         <div class="header-badges">
-            <span class="badge badge-primary">Node: @MeshSynchronizer.LocalNodeId</span>
-            <span class="badge badge-success">Mesh Synchronized</span>
+            <span class="tag tag-primary">
+                <AppIcon Name="models" Size="14" />
+                <span>Node: @MeshSynchronizer.LocalNodeId</span>
+            </span>
+            <span class="tag tag-success">
+                <AppIcon Name="check" Size="14" />
+                <span>Mesh Synchronized</span>
+            </span>
         </div>
     </header>
 
     <div class="dashboard-grid">
         <!-- 模块 1: 在线高并发压测台 -->
-        <section class="card benchmark-card">
-            <div class="card-header">
-                <h2>⚡ 路由决策基准压测 (Routing Decision Benchmark，不调用上游 API)</h2>
-                <span class="badge @(isRunningBenchmark ? "badge-warning" : "badge-secondary")">
+        <section class="glass-card benchmark-card">
+            <div class="benchmark-card-header">
+                <h2>
+                    <AppIcon Name="benchmarks" Size="18" Class="text-warning" />
+                    <span>路由决策基准压测 (Routing Decision Benchmark)</span>
+                </h2>
+                <span class="tag @(isRunningBenchmark ? "tag-warning" : "tag-secondary")">
                     @(isRunningBenchmark ? "压测进行中..." : "就绪")
                 </span>
             </div>
@@ -51,17 +62,24 @@
                 </div>
 
                 <div class="control-group">
-                    <label>并发 Worker 数: <strong>@concurrency</strong></label>
+                    <label>
+                        <span>并发 Worker 数</span>
+                        <strong>@concurrency</strong>
+                    </label>
                     <input type="range" min="1" max="100" step="1" class="form-range" @bind="concurrency" disabled="@isRunningBenchmark" />
                 </div>
 
                 <div class="control-group">
-                    <label>总请求量: <strong>@totalRequests</strong></label>
+                    <label>
+                        <span>总请求量</span>
+                        <strong>@UiFormatter.FormatNumber(totalRequests)</strong>
+                    </label>
                     <input type="range" min="50" max="5000" step="50" class="form-range" @bind="totalRequests" disabled="@isRunningBenchmark" />
                 </div>
 
-                <button class="btn btn-primary" @onclick="RunBenchmarkAsync" disabled="@isRunningBenchmark">
-                    @(isRunningBenchmark ? "正在执行压测..." : "▶ 启动并发压测")
+                <button class="btn-primary" @onclick="RunBenchmarkAsync" disabled="@isRunningBenchmark" style="width: 100%; justify-content: center;">
+                    <AppIcon Name="@(isRunningBenchmark ? "refresh" : "benchmarks")" Size="16" />
+                    <span>@(isRunningBenchmark ? "正在执行压测..." : "启动并发压测")</span>
                 </button>
             </div>
 
@@ -75,7 +93,7 @@
                         </div>
                         <div class="metric-box">
                             <div class="metric-label">成功率</div>
-                            <div class="metric-value">@((latestReport.SuccessRequests * 100.0 / latestReport.TotalRequests).ToString("F1"))%</div>
+                            <div class="metric-value text-success">@((latestReport.SuccessRequests * 100.0 / latestReport.TotalRequests).ToString("F1"))%</div>
                         </div>
                         <div class="metric-box">
                             <div class="metric-label">中位数延迟 (P50)</div>
@@ -83,7 +101,7 @@
                         </div>
                         <div class="metric-box">
                             <div class="metric-label">长尾延迟 (P99)</div>
-                            <div class="metric-value">@latestReport.Latency.P99Ms.ToString("F3") ms</div>
+                            <div class="metric-value text-warning">@latestReport.Latency.P99Ms.ToString("F3") ms</div>
                         </div>
                     </div>
 
@@ -117,16 +135,23 @@
                     </div>
                 </div>
             }
+            else if (!isRunningBenchmark)
+            {
+                <EmptyState Icon="benchmarks" Title="暂无基准压测运行记录" Description="配置压测场景、并发 Worker 数与请求量后，点击上方「启动并发压测」开始采集吞吐与长尾延迟指标。" />
+            }
         </section>
 
         <!-- 模块 2: MCP 工具目录与复杂度感知 -->
-        <section class="card mcp-card">
-            <div class="card-header">
-                <h2>🧩 MCP (Model Context Protocol) 工具生态目录</h2>
-                <span class="badge badge-info">@registeredTools.Count 个注册工具</span>
+        <section class="glass-card mcp-card">
+            <div class="benchmark-card-header">
+                <h2>
+                    <AppIcon Name="router" Size="18" Class="text-primary" />
+                    <span>MCP (Model Context Protocol) 工具生态目录</span>
+                </h2>
+                <span class="tag tag-info">@registeredTools.Count 个注册工具</span>
             </div>
 
-            <div class="table-responsive">
+            <div class="percentile-table-container">
                 <table class="data-table">
                     <thead>
                         <tr>
@@ -142,7 +167,7 @@
                         @if (registeredTools.Count == 0)
                         {
                             <tr>
-                                <td colspan="6" class="text-muted text-center">暂无注册的 MCP 工具（支持自动通过 ToolRegistry 注册）</td>
+                                <td colspan="6" class="text-secondary text-center" style="padding: 24px;">暂无注册的 MCP 工具（支持自动通过 ToolRegistry 注册）</td>
                             </tr>
                         }
                         else
@@ -151,12 +176,15 @@
                             {
                                 var complexity = ToolComplexityAnalyzer.Analyze(new[] { tool });
                                 <tr>
-                                    <td><strong>@tool.Name</strong><div class="text-muted small">@tool.Description</div></td>
-                                    <td><span class="badge badge-primary">@complexity.ComplexityScore.ToString("F1")</span></td>
-                                    <td><span class="badge badge-tier">@complexity.RecommendedMinTier</span></td>
+                                    <td>
+                                        <strong>@tool.Name</strong>
+                                        <div class="text-secondary" style="font-size: 0.75rem; margin-top: 2px;">@tool.Description</div>
+                                    </td>
+                                    <td><span class="tag tag-primary">@complexity.ComplexityScore.ToString("F1")</span></td>
+                                    <td><span class="badge badge-info">@complexity.RecommendedMinTier</span></td>
                                     <td>@complexity.MaxNestingDepth 级</td>
                                     <td>@complexity.TotalProperties 个</td>
-                                    <td><span class="badge badge-success">Valid</span></td>
+                                    <td><span class="tag tag-success">Valid</span></td>
                                 </tr>
                             }
                         }
@@ -166,125 +194,65 @@
         </section>
 
         <!-- 模块 3: 分布式 State Mesh 拓扑与 KV Cache 共享 -->
-        <section class="card mesh-card">
-            <div class="card-header">
-                <h2>🌐 分布式状态同步网格 (Distributed State Mesh)</h2>
-                <span class="badge badge-primary">P2P Mesh Active</span>
+        <section class="glass-card mesh-card">
+            <div class="benchmark-card-header">
+                <h2>
+                    <AppIcon Name="models" Size="18" Class="text-purple" />
+                    <span>分布式状态同步网格 (Distributed State Mesh)</span>
+                </h2>
+                <span class="tag tag-primary">P2P Mesh Active</span>
             </div>
 
             <div class="mesh-summary">
                 <div class="mesh-node-item">
-                    <div class="node-icon">🖥</div>
+                    <div class="node-icon">
+                        <AppIcon Name="models" Size="20" />
+                    </div>
                     <div class="node-info">
                         <div class="node-title">本地节点 (Local Node)</div>
-                        <div class="node-meta">ID: <code>@MeshSynchronizer.LocalNodeId</code></div>
+                        <div class="node-meta">ID: <code style="color: var(--primary);">@MeshSynchronizer.LocalNodeId</code></div>
                     </div>
-                    <span class="badge badge-success">Leader/Active</span>
+                    <span class="tag tag-success">Leader/Active</span>
                 </div>
                 <div class="mesh-stats-grid">
                     <div class="stat-item">
-                        <div class="stat-value">KV-Prefix Trie</div>
-                        <div class="stat-label">分布式上下文缓存热度</div>
+                        <div class="stat-item-value">KV-Prefix Trie</div>
+                        <div class="stat-item-label">分布式上下文缓存热度</div>
                     </div>
                     <div class="stat-item">
-                        <div class="stat-value">Kalman Filter</div>
-                        <div class="stat-label">多节点延迟预估器</div>
+                        <div class="stat-item-value">Kalman Filter</div>
+                        <div class="stat-item-label">多节点延迟预估器</div>
                     </div>
                     <div class="stat-item">
-                        <div class="stat-value">Cluster Ledger</div>
-                        <div class="stat-label">跨网关配额统一结算</div>
+                        <div class="stat-item-value">Cluster Ledger</div>
+                        <div class="stat-item-label">跨网关配额统一结算</div>
                     </div>
                 </div>
             </div>
         </section>
 
         <!-- 模块 4: 自适应 Prompt 压缩与瘦身 -->
-        <section class="card compression-card">
-            <div class="card-header">
-                <h2>✂️ 智能提示词压缩与 Token 瘦身 (Prompt Pruner)</h2>
-                <span class="badge badge-success">Enabled</span>
+        <section class="glass-card compression-card">
+            <div class="benchmark-card-header">
+                <h2>
+                    <AppIcon Name="shield" Size="18" Class="text-success" />
+                    <span>智能提示词压缩与 Token 瘦身 (Prompt Pruner)</span>
+                </h2>
+                <span class="tag tag-success">Enabled</span>
             </div>
 
             <div class="compression-info">
                 <p>实时对系统指令（System Prompt）进行多轮去重，自动裁剪历史寒暄客套，并对代码块（<code>```</code>）与 JSON 数据结构进行严格 100% 语法无损保护。</p>
-                <div class="compression-features">
-                    <span class="pill">✓ System Prompt 去重</span>
-                    <span class="pill">✓ 历史寒暄智能剪枝</span>
-                    <span class="pill">✓ 代码块严格保护</span>
-                    <span class="pill">✓ JSON 结构无损</span>
+                <div class="pill-list">
+                    <span class="pill"><AppIcon Name="check" Size="12" /> System Prompt 去重</span>
+                    <span class="pill"><AppIcon Name="check" Size="12" /> 历史寒暄智能剪枝</span>
+                    <span class="pill"><AppIcon Name="check" Size="12" /> 代码块严格保护</span>
+                    <span class="pill"><AppIcon Name="check" Size="12" /> JSON 结构无损</span>
                 </div>
             </div>
         </section>
     </div>
 </div>
-
-<style>
-    .studio-container { padding: 24px; max-width: 1400px; margin: 0 auto; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-    .studio-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid #334155; padding-bottom: 16px; }
-    .studio-title { font-size: 24px; font-weight: 700; color: #f8fafc; margin: 0; }
-    .studio-subtitle { font-size: 14px; color: #94a3b8; margin-top: 4px; }
-    .dashboard-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
-    .card { background: #1e293b; border-radius: 12px; border: 1px solid #334155; padding: 20px; }
-    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
-    .card-header h2 { font-size: 16px; font-weight: 600; margin: 0; color: #e2e8f0; }
-    .badge { padding: 4px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; }
-    .badge-primary { background: #3b82f6; color: #fff; }
-    .badge-success { background: #10b981; color: #fff; }
-    .badge-warning { background: #f59e0b; color: #fff; }
-    .badge-info { background: #06b6d4; color: #fff; }
-    .badge-secondary { background: #475569; color: #e2e8f0; }
-    .badge-tier { background: #6366f1; color: #fff; }
-    .benchmark-controls { display: flex; flex-direction: column; gap: 14px; }
-    .control-group { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #cbd5e1; }
-    .form-control { background: #0f172a; border: 1px solid #475569; color: #f8fafc; border-radius: 6px; padding: 8px 12px; }
-    .form-range { accent-color: #3b82f6; }
-    .btn { padding: 10px 16px; border-radius: 6px; font-weight: 600; cursor: pointer; border: none; }
-    .btn-primary { background: #3b82f6; color: #fff; }
-    .btn-primary:hover { background: #2563eb; }
-    .metrics-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; }
-    .metric-box { background: #0f172a; border-radius: 8px; padding: 12px; border: 1px solid #334155; }
-    .metric-label { font-size: 12px; color: #94a3b8; }
-    .metric-value { font-size: 18px; font-weight: 700; color: #f8fafc; margin-top: 4px; }
-    .metric-value.highlight { color: #38bdf8; }
-    .data-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 13px; }
-    .data-table th, .data-table td { padding: 10px; text-align: left; border-bottom: 1px solid #334155; }
-    .data-table th { color: #94a3b8; font-weight: 600; background: #0f172a; }
-    .pill { display: inline-block; padding: 4px 10px; background: #0f172a; border: 1px solid #334155; border-radius: 9999px; font-size: 12px; color: #38bdf8; margin-right: 8px; margin-top: 8px; }
-    .mesh-node-item { display: flex; align-items: center; gap: 12px; background: #0f172a; padding: 12px; border-radius: 8px; border: 1px solid #334155; }
-    .node-icon { font-size: 24px; }
-    .node-info { flex: 1; }
-    .node-title { font-weight: 600; color: #f8fafc; }
-    .node-meta { font-size: 12px; color: #94a3b8; }
-    .mesh-stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
-    .stat-item { background: #0f172a; padding: 10px; border-radius: 8px; border: 1px solid #334155; text-align: center; }
-    .stat-value { font-weight: 600; color: #e2e8f0; font-size: 13px; }
-    .stat-label { font-size: 11px; color: #94a3b8; margin-top: 2px; }
-    @@media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 1fr; } }
-
-    /* 浅色主题覆盖（本页样式块为独立深色设计，需按 data-theme 重映射） */
-    [data-theme="light"] .studio-container { color: #0f172a; }
-    [data-theme="light"] .studio-header { border-bottom-color: #e2e8f0; }
-    [data-theme="light"] .studio-title { color: #0f172a; }
-    [data-theme="light"] .studio-subtitle { color: #64748b; }
-    [data-theme="light"] .card { background: #ffffff; border-color: #e2e8f0; }
-    [data-theme="light"] .card-header h2 { color: #1e293b; }
-    [data-theme="light"] .badge-secondary { background: #e2e8f0; color: #334155; }
-    [data-theme="light"] .metric-box { background: #f8fafc; border-color: #e2e8f0; }
-    [data-theme="light"] .metric-value { color: #0f172a; }
-    [data-theme="light"] .metric-value.highlight { color: #0284c7; }
-    [data-theme="light"] .metric-label { color: #64748b; }
-    [data-theme="light"] .data-table th, [data-theme="light"] .data-table td { border-bottom-color: #e2e8f0; }
-    [data-theme="light"] .data-table th { color: #475569; background: #f1f5f9; }
-    [data-theme="light"] .pill { background: #ffffff; border-color: #cbd5e1; color: #0369a1; }
-    [data-theme="light"] .mesh-node-item { background: #f8fafc; border-color: #e2e8f0; }
-    [data-theme="light"] .node-title { color: #0f172a; }
-    [data-theme="light"] .node-meta { color: #64748b; }
-    [data-theme="light"] .stat-item { background: #f8fafc; border-color: #e2e8f0; }
-    [data-theme="light"] .stat-value { color: #1e293b; }
-    [data-theme="light"] .stat-label { color: #64748b; }
-    [data-theme="light"] .control-group { color: #475569; }
-    [data-theme="light"] .form-control { background: #ffffff; border-color: #cbd5e1; color: #0f172a; }
-</style>
 
 @code {
     private bool isRunningBenchmark = false;
@@ -355,6 +323,16 @@
                         Success: decision.Candidates.Count > 0));
                 },
                 _benchmarkCts.Token);
+
+            ToastService.ShowSuccess($"并发压测已完成！RPS: {latestReport.RequestsPerSecond:F1} req/s，P50: {latestReport.Latency.P50Ms:F3}ms", "基准压测完成");
+        }
+        catch (OperationCanceledException)
+        {
+            ToastService.ShowWarning("压测已被用户中断或页面已切换", "压测已取消");
+        }
+        catch (Exception ex)
+        {
+            ToastService.ShowError("压测执行失败：" + ex.Message, "基准压测异常");
         }
         finally
         {

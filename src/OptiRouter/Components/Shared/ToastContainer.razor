@@ -1,0 +1,63 @@
+@using OptiRouter.Components.Services
+@inject ToastService ToastService
+@implements IDisposable
+
+@if (ToastService.Toasts.Count > 0)
+{
+    <div class="toast-container" aria-live="polite">
+        @foreach (var toast in ToastService.Toasts)
+        {
+            var typeClass = toast.Type switch
+            {
+                ToastType.Success => "toast-success",
+                ToastType.Warning => "toast-warning",
+                ToastType.Error => "toast-error",
+                _ => "toast-info"
+            };
+
+            var iconName = toast.Type switch
+            {
+                ToastType.Success => "check",
+                ToastType.Warning => "alert",
+                ToastType.Error => "alert",
+                _ => "shield"
+            };
+
+            <div class="toast-card @typeClass animate-slide-in" key="@toast.Id">
+                <div class="toast-icon">
+                    <AppIcon Name="@iconName" Size="18" />
+                </div>
+                <div class="toast-body">
+                    @if (!string.IsNullOrEmpty(toast.Title))
+                    {
+                        <div class="toast-title">@toast.Title</div>
+                    }
+                    <div class="toast-msg">@toast.Message</div>
+                </div>
+                <button class="toast-close-btn" @onclick="() => ToastService.Dismiss(toast.Id)" aria-label="关闭通知">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    protected override void OnInitialized()
+    {
+        ToastService.OnChange += OnToastChanged;
+    }
+
+    private void OnToastChanged()
+    {
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        ToastService.OnChange -= OnToastChanged;
+    }
+}

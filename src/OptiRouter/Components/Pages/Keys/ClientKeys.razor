@@ -1,94 +1,123 @@
 @page "/keys"
+@using OptiRouter.Components.Services
 @inject ApiService Api
 @inject IJSRuntime JS
+@inject ToastService Toast
 
 <PageTitle>OptiRouter - 客户端管理</PageTitle>
 
 <div class="models-page">
-    <!-- 🔑 客户端 API Key 与租户配额控制台 -->
+    <!-- 客户端 API Key 与租户配额控制台 -->
     <div class="glass-card">
         <div class="card-label">
-            <span>🔑 客户端 API Key 与租户配额控制台 (Client Quota Studio)</span>
-            <span style="display: flex; gap: 8px;">
-                <button class="btn-ghost btn-sm" @onclick="ExportUsageCsv">⬇ 导出用量 CSV</button>
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="keys" Size="18" Class="text-primary" />
+                <span>客户端 API Key 与租户配额控制台 (Client Quota Studio)</span>
+            </span>
+            <span style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button class="btn-ghost btn-sm" @onclick="ExportUsageCsv">
+                    <AppIcon Name="download" Size="14" />
+                    <span>导出用量 CSV</span>
+                </button>
                 <button class="btn-primary btn-sm" @onclick="ToggleAddKeyForm">
-                    @(ShowAddKeyForm ? "- 取消签发" : "+ 签发租户 API Key")
+                    <AppIcon Name="@(ShowAddKeyForm ? "trash" : "plus")" Size="14" />
+                    <span>@(ShowAddKeyForm ? "取消签发" : "签发租户 API Key")</span>
                 </button>
             </span>
         </div>
 
         @if (!string.IsNullOrEmpty(ListLoadError))
         {
-            <div class="alert-banner alert-error" style="margin-top: 10px;">⚠️ @ListLoadError</div>
+            <div class="alert-banner alert-error" style="margin-top: 10px;">
+                <AppIcon Name="alert" Size="16" />
+                <span>@ListLoadError</span>
+            </div>
         }
 
         @if (!string.IsNullOrEmpty(MutationError))
         {
-            <div class="alert-banner alert-error" style="margin-top: 10px;">⚠️ @MutationError</div>
+            <div class="alert-banner alert-error" style="margin-top: 10px;">
+                <AppIcon Name="alert" Size="16" />
+                <span>@MutationError</span>
+            </div>
         }
 
         @if (ShowAddKeyForm)
         {
-            <div class="add-form" style="margin-top: 12px;">
+            <div class="add-form sub-card" style="margin-top: 12px; padding: 14px;">
                 <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
-                    <input type="text" placeholder="租户/部门名称 (如: 财务部 App)" @bind="NewTenantName" style="width: 240px;" />
+                    <input type="text" class="form-control" placeholder="租户/部门名称 (如: 财务部 App)" @bind="NewTenantName" style="width: 240px;" />
                     <div style="display: flex; align-items: center; gap: 6px;">
                         <span class="text-secondary" style="font-size: 0.85rem;">日预算 ($, 0=不限):</span>
-                        <input type="number" step="10" min="0" @bind="NewTenantBudget" style="width: 100px; color: var(--success); font-weight: 600;" />
+                        <input type="number" step="10" min="0" @bind="NewTenantBudget" class="form-control" style="width: 100px; color: var(--success); font-weight: 600;" />
                     </div>
                     <div style="display: flex; align-items: center; gap: 6px;">
                         <span class="text-secondary" style="font-size: 0.85rem;">QPS 上限:</span>
-                        <input type="number" step="5" min="1" @bind="NewTenantQps" style="width: 80px;" />
+                        <input type="number" step="5" min="1" @bind="NewTenantQps" class="form-control" style="width: 80px;" />
                     </div>
-                    <button class="btn-primary" @onclick="CreateClientKey">确认签发</button>
+                    <button class="btn-primary" @onclick="CreateClientKey">
+                        <AppIcon Name="check" Size="16" />
+                        <span>确认签发</span>
+                    </button>
                 </div>
             </div>
         }
 
-        <div class="table-wrap" style="margin-top: 12px;">
-            <table class="config-table">
-                <thead>
-                    <tr>
-                        <th scope="col">租户/部门</th><th scope="col">API Key</th><th scope="col">日预算 ($)</th><th scope="col">今日消费</th><th scope="col">用量占比</th><th scope="col">今日请求</th><th scope="col">QPS 限制</th><th scope="col">状态</th><th scope="col">签发时间</th><th scope="col">操作</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @if (KeyList.Any())
-                    {
+        @if (IsLoading)
+        {
+            <div style="margin-top: 12px;">
+                <SkeletonLoader Type="table" Rows="4" Cols="10" />
+            </div>
+        }
+        else if (KeyList.Any())
+        {
+            <div class="table-wrap" style="margin-top: 12px;">
+                <table class="config-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">租户/部门</th><th scope="col">API Key</th><th scope="col">日预算 ($)</th><th scope="col">今日消费</th><th scope="col">用量占比</th><th scope="col">今日请求</th><th scope="col">QPS 限制</th><th scope="col">状态</th><th scope="col">签发时间</th><th scope="col">操作</th>
+                        </tr>
+                    </thead>
+                    <tbody>
                         @foreach (var k in KeyList)
                         {
                             <tr>
                                 <td><strong>@k.TenantName</strong></td>
                                 <td class="table-mono" style="color: var(--primary);">@k.KeyPrefix</td>
-                                <td>$@k.DailyBudgetUsd.ToString("N0")</td>
-                                <td style="color: var(--success); font-weight: 600;">$@k.DailySpendUsd.ToString("F4")</td>
-                                <td style="min-width: 130px;">
+                                <td>$@UiFormatter.FormatNumber((long)k.DailyBudgetUsd)</td>
+                                <td style="color: var(--success); font-weight: 600;">@UiFormatter.FormatCost(k.DailySpendUsd)</td>
+                                <td style="min-width: 140px;">
                                     <div style="display: flex; align-items: center; gap: 8px;">
                                         <div class="quota-bar"><div class="quota-fill @((k.QuotaUtilization >= 80) ? "quota-fill-danger" : "")" style="width: @(Math.Min(100, k.QuotaUtilization).ToString("F0"))%;"></div></div>
-                                        <span class="@(k.QuotaUtilization >= 80 ? "text-danger" : "text-secondary")" style="font-size: 0.8rem; white-space: nowrap;">@k.QuotaUtilization.ToString("F1")%</span>
+                                        <span class="@(k.QuotaUtilization >= 80 ? "text-danger" : "text-secondary")" style="font-size: 0.8rem; white-space: nowrap;">@UiFormatter.FormatPercent(k.QuotaUtilization)</span>
                                     </div>
-                                    <div class="text-secondary" style="font-size: 0.72rem; margin-top: 2px;">剩余 $@k.RemainingBudgetUsd.ToString("F2")</div>
+                                    <div class="text-secondary" style="font-size: 0.72rem; margin-top: 2px;">剩余 @UiFormatter.FormatCost(k.RemainingBudgetUsd)</div>
                                 </td>
-                                <td>@k.DailyRequestCount</td>
+                                <td class="table-mono">@UiFormatter.FormatNumber(k.DailyRequestCount)</td>
                                 <td>@k.MaxQps QPS</td>
                                 <td>
-                                    <span class="@(k.Enabled ? "text-success" : "text-secondary")" style="font-weight: 600;">@(k.Enabled ? "正常" : "已禁用")</span>
+                                    <span class="tag @(k.Enabled ? "tag-success" : "tag-secondary")">@(k.Enabled ? "正常" : "已禁用")</span>
                                 </td>
-                                <td>@k.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
-                                <td style="display: flex; gap: 6px;">
-                                    <button class="btn-ghost btn-sm" @onclick="() => ToggleKeyEnabled(k)">@(k.Enabled ? "禁用" : "启用")</button>
-                                    <button class="btn-danger btn-sm" @onclick="() => DeleteKey(k)">删除</button>
+                                <td class="text-secondary" style="font-size: 0.8rem;">@k.CreatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")</td>
+                                <td>
+                                    <div style="display: flex; gap: 6px;">
+                                        <button class="btn-ghost btn-sm" @onclick="() => ToggleKeyEnabled(k)">@(k.Enabled ? "禁用" : "启用")</button>
+                                        <button class="btn-danger btn-sm" @onclick="() => DeleteKey(k)">
+                                            <AppIcon Name="trash" Size="13" />
+                                            <span>删除</span>
+                                        </button>
+                                    </div>
                                 </td>
                             </tr>
                         }
-                    }
-                    else
-                    {
-                        <tr><td colspan="10" class="text-center text-secondary">暂无签发的客户端 API Key，点击上方 "+ 签发租户 API Key" 开始分配。</td></tr>
-                    }
-                </tbody>
-            </table>
-        </div>
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="keys" Title="暂无客户端 API 密钥" Description="签发租户访问密钥并分配日预算与限流配额，开启精细化成本核算与访问控制。" ActionText="签发租户 API Key" OnAction="ToggleAddKeyForm" />
+        }
     </div>
 </div>
 
@@ -96,11 +125,17 @@
 {
     <div class="drawer-backdrop" @onclick="CloseIssuedKey">
         <div class="key-modal" @onclick:stopPropagation="true">
-            <div class="key-modal-title">🔑 新租户密钥（仅显示一次）</div>
+            <div class="key-modal-title" style="display: flex; align-items: center; gap: 8px;">
+                <AppIcon Name="keys" Size="18" Class="text-warning" />
+                <span>新租户密钥（仅显示一次）</span>
+            </div>
             <div class="key-modal-warn">租户「@IssuedTenant」——请立即复制保存，关闭后无法再次获取。</div>
             <div class="key-modal-value">@IssuedPlaintextKey</div>
             <div class="key-modal-actions">
-                <button class="btn-primary" @onclick="CopyIssuedKey">📋 复制密钥</button>
+                <button class="btn-primary" @onclick="CopyIssuedKey">
+                    <AppIcon Name="copy" Size="16" />
+                    <span>复制密钥</span>
+                </button>
                 <button class="btn-ghost" @onclick="CloseIssuedKey">关 闭</button>
             </div>
             @if (!string.IsNullOrEmpty(CopyFeedback))
@@ -113,6 +148,7 @@
 
 @code {
     private List<ApiService.TenantUsageDto> KeyList = new();
+    private bool IsLoading = true;
     private bool ShowAddKeyForm = false;
     private string NewTenantName = "";
     private decimal NewTenantBudget = 100.0m;
@@ -133,6 +169,10 @@
         catch (Exception ex)
         {
             ListLoadError = "密钥用量加载失败：" + ex.Message;
+        }
+        finally
+        {
+            IsLoading = false;
         }
     }
 
@@ -160,11 +200,13 @@
             ShowAddKeyForm = false;
             NewTenantName = "";
             MutationError = null;
+            Toast.ShowSuccess($"已成功签发租户「{created.TenantName}」的 API Key", "签发成功");
             await LoadClientKeys();
         }
         else
         {
             MutationError = "签发失败：" + (error ?? "未知错误");
+            Toast.ShowError("签发失败：" + (error ?? "未知错误"), "操作失败");
         }
     }
 
@@ -177,13 +219,18 @@
     private async Task ExportUsageCsv()
     {
         await JS.InvokeVoidAsync("open", Api.BuildKeysUsageExportUrl(), "_blank");
+        Toast.ShowInfo("正在导出用量 CSV 数据...", "数据导出");
     }
 
     private async Task CopyIssuedKey()
     {
         if (IssuedPlaintextKey == null) return;
         bool ok = await JS.InvokeAsync<bool>("copyToClipboard", IssuedPlaintextKey);
-        CopyFeedback = ok ? "✓ 已复制到剪贴板" : "✗ 复制失败，请手动选择复制";
+        CopyFeedback = ok ? "已复制到剪贴板" : "复制失败，请手动选择复制";
+        if (ok)
+        {
+            Toast.ShowSuccess("API Key 已复制到剪贴板", "复制成功");
+        }
     }
 
     private void CloseIssuedKey()
@@ -198,10 +245,12 @@
         if (!ok)
         {
             MutationError = (k.Enabled ? "禁用" : "启用") + $"「{k.TenantName}」失败：" + (error ?? "未知错误");
+            Toast.ShowError(MutationError, "操作失败");
         }
         else
         {
             MutationError = null;
+            Toast.ShowInfo($"已{(k.Enabled ? "禁用" : "启用")}租户「{k.TenantName}」的 API 密钥", "状态更新");
         }
         await LoadClientKeys();
     }
@@ -216,10 +265,12 @@
         if (!ok)
         {
             MutationError = "删除失败：" + (error ?? "未知错误");
+            Toast.ShowError(MutationError, "操作失败");
         }
         else
         {
             MutationError = null;
+            Toast.ShowWarning($"已删除租户「{k.TenantName}」的 API Key", "删除成功");
         }
         await LoadClientKeys();
     }

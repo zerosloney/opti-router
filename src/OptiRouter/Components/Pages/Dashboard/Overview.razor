@@ -20,7 +20,10 @@
     <!-- 告警历史：出现/恢复事件留痕（进程内环形缓冲，重启清空） -->
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center;">
-            <span>🔔 告警历史 (Alert History)</span>
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="alert" Size="18" Class="text-warning" />
+                <span>告警历史 (Alert History)</span>
+            </span>
             <span class="text-secondary" style="font-size: 0.75rem;">@AlertHistory.Count 条最近事件</span>
         </div>
         @if (AlertHistory.Any())
@@ -38,11 +41,17 @@
                                 <td>
                                     @if (evt.EventType == "resolved")
                                     {
-                                        <span class="tag tag-success">✓ 已恢复</span>
+                                        <span class="tag tag-success">
+                                            <AppIcon Name="check" Size="12" />
+                                            <span>已恢复</span>
+                                        </span>
                                     }
                                     else
                                     {
-                                        <span class="tag tag-danger">⚠ 告警</span>
+                                        <span class="tag tag-danger">
+                                            <AppIcon Name="alert" Size="12" />
+                                            <span>告警</span>
+                                        </span>
                                     }
                                 </td>
                                 <td><span class="badge @(evt.Level == "critical" ? "badge-danger" : "badge-info")">@evt.Level</span></td>
@@ -56,59 +65,87 @@
         }
         else
         {
-            <div class="text-secondary text-center" style="padding: 16px;">暂无告警事件——服务启动以来未检测到预算/熔断/失败率异常，或历史已被重启清空。</div>
+            <EmptyState Icon="shield" Title="系统运行健康稳定" Description="服务启动以来未检测到任何预算超支、上游模型熔断或高异常率告警事件。" />
         }
     </div>
 
     <!-- 核心指标卡 -->
-    @if (MetricsLoading)
+    @if (MetricsLoading && Metrics == null)
     {
-        <div style="padding: 2rem; text-align: center; color: var(--text-secondary);">
-            <span class="tag tag-info">加载中...</span>
+        <SkeletonLoader Type="stat" Count="5" />
+    }
+    else
+    {
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="stat-card-label">日预算消耗</div>
+                <div class="stat-card-val">@UiFormatter.FormatCost(Metrics?.System.Budget.DailySpend ?? 0)</div>
+                <div class="budget-bar" style="margin-top: 8px;">
+                    <div class="budget-fill" style="width: @(BudgetPercent)%"></div>
+                </div>
+                <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">@UiFormatter.FormatPercent(BudgetPercent) / 上限 @UiFormatter.FormatCost(Metrics?.System.Budget.DailyBudgetUsd ?? 0)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">累计消费</div>
+                <div class="stat-card-val" style="color:var(--info-text);">@UiFormatter.FormatCost(Metrics?.System.Budget.TotalSpend ?? 0)</div>
+                <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">服务启动以来合计</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">总请求数</div>
+                <div class="stat-card-val">@UiFormatter.FormatNumber(Metrics?.System.TotalRequests ?? 0)</div>
+                <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">QPS: @((Metrics?.System.Qps ?? 0).ToString("F1"))</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">总 Token 数</div>
+                <div class="stat-card-val">@UiFormatter.FormatNumber(Metrics?.System.TotalTokens ?? 0)</div>
+                <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">缓存命中 @UiFormatter.FormatNumber(Metrics?.System.CachedInputTokens ?? 0) / 写入 @UiFormatter.FormatNumber(Metrics?.System.CacheWriteInputTokens ?? 0)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-card-label">平均延迟</div>
+                <div class="stat-card-val">@UiFormatter.FormatLatency(Metrics?.System.AvgLatencyMs ?? 0)</div>
+                <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">平均 TTFT: @(Metrics?.System.AvgTtftMs is { } ttft ? UiFormatter.FormatLatency(ttft) : "--")</div>
+            </div>
         </div>
     }
-    <div class="stats-row">
-        <div class="stat-card">
-            <div class="stat-card-label">日预算消耗</div>
-            <div class="stat-card-val">$@((Metrics?.System.Budget.DailySpend ?? 0).ToString("F6"))</div>
-            <div class="budget-bar" style="margin-top: 8px;">
-                <div class="budget-fill" style="width: @(BudgetPercent)%"></div>
-            </div>
-            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">@BudgetPercent.ToString("F2")% / 上限 $@((Metrics?.System.Budget.DailyBudgetUsd ?? 0).ToString("F2"))</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-card-label">累计消费</div>
-            <div class="stat-card-val" style="color:var(--info-text);">$@((Metrics?.System.Budget.TotalSpend ?? 0).ToString("F6"))</div>
-            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">服务启动以来合计</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-card-label">总请求数</div>
-            <div class="stat-card-val">@((Metrics?.System.TotalRequests ?? 0).ToString("N0"))</div>
-            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">QPS: @((Metrics?.System.Qps ?? 0).ToString("F1"))</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-card-label">总 Token 数</div>
-            <div class="stat-card-val">@((Metrics?.System.TotalTokens ?? 0).ToString("N0"))</div>
-            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">缓存命中 @((Metrics?.System.CachedInputTokens ?? 0).ToString("N0")) / 写入 @((Metrics?.System.CacheWriteInputTokens ?? 0).ToString("N0"))</div>
-        </div>
-        <div class="stat-card">
-            <div class="stat-card-label">平均延迟</div>
-            <div class="stat-card-val">@((Metrics?.System.AvgLatencyMs ?? 0).ToString("F1")) ms</div>
-            <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">平均 TTFT: @(Metrics?.System.AvgTtftMs is { } ttft ? $"{ttft:F1} ms" : "--")</div>
-        </div>
-    </div>
 
     <!-- 智能降本 ROI 归因卡片 -->
     <div class="glass-card roi-card">
-        <div class="card-label" style="color: var(--success); font-weight: 600; font-size: 0.95rem;">智能降本 ROI 归因看板</div>
-        <div style="display: flex; align-items: baseline; gap: 14px; margin: 8px 0;">
-            <div class="stat-value" style="color: var(--success); font-size: 2rem; font-weight: 700;">$@((Metrics?.System.Roi?.SavedUsd ?? 0).ToString("F6"))</div>
-            <div class="badge badge-success" style="font-size: 0.85rem; padding: 0.3rem 0.75rem;">
-                智能路由降本 @((Metrics?.System.Roi?.SavingRatePercent ?? 0).ToString("F1"))%
-            </div>
+        <div class="card-label" style="margin-bottom: 1rem;">
+            <span style="display: inline-flex; align-items: center; gap: 6px; color: var(--ok-text); font-weight: 600; font-size: 0.95rem;">
+                <AppIcon Name="shield" Size="16" />
+                <span>智能降本 ROI 归因看板</span>
+            </span>
+            <span class="tag tag-success" style="font-size: 0.72rem; font-weight: 500;">分级路由与缓存优化成效</span>
         </div>
-        <div class="meta-text">
-            基线预估成本（全使用强模型）：$@((Metrics?.System.Roi?.BaselineCostUsd ?? 0).ToString("F6")) | 实际优化处理成本：$@((Metrics?.System.Roi?.ActualCostUsd ?? 0).ToString("F6"))
+        <div class="roi-grid">
+            <div class="roi-metric-item">
+                <div class="stat-row-label" style="font-size: 0.78rem;">已累计节约成本</div>
+                <div class="stat-card-val table-mono" style="color: var(--ok-text); font-size: 1.85rem; font-weight: 700; margin: 4px 0 2px 0;">
+                    @UiFormatter.FormatCost(Metrics?.System.Roi?.SavedUsd ?? 0)
+                </div>
+                <div style="font-size: 0.72rem; color: var(--dim-text);">智能路由节约总收益</div>
+            </div>
+            <div class="roi-metric-item">
+                <div class="stat-row-label" style="font-size: 0.78rem;">综合降本比例</div>
+                <div class="stat-card-val table-mono" style="color: var(--ok-text); font-size: 1.85rem; font-weight: 700; margin: 4px 0 2px 0;">
+                    @UiFormatter.FormatPercent(Metrics?.System.Roi?.SavingRatePercent ?? 0)
+                </div>
+                <div style="font-size: 0.72rem; color: var(--dim-text);">相对全强模型基线降幅</div>
+            </div>
+            <div class="roi-metric-item">
+                <div class="stat-row-label" style="font-size: 0.78rem;">基线预估成本</div>
+                <div class="stat-card-val table-mono" style="font-size: 1.85rem; font-weight: 700; margin: 4px 0 2px 0; color: var(--text-primary);">
+                    @UiFormatter.FormatCost(Metrics?.System.Roi?.BaselineCostUsd ?? 0)
+                </div>
+                <div style="font-size: 0.72rem; color: var(--dim-text);">全量使用强模型理论开销</div>
+            </div>
+            <div class="roi-metric-item">
+                <div class="stat-row-label" style="font-size: 0.78rem;">实际优化处理成本</div>
+                <div class="stat-card-val table-mono" style="font-size: 1.85rem; font-weight: 700; margin: 4px 0 2px 0; color: var(--text-primary);">
+                    @UiFormatter.FormatCost(Metrics?.System.Roi?.ActualCostUsd ?? 0)
+                </div>
+                <div style="font-size: 0.72rem; color: var(--dim-text);">分级路由优化后实际花费</div>
+            </div>
         </div>
     </div>
 
@@ -128,18 +165,21 @@
         <!-- 数据安全与 PII 脱敏防护看板 -->
         <div class="glass-card">
             <div class="card-label" style="display: flex; justify-content: space-between; align-items: center;">
-                <span>数据合规与 PII 防护</span>
+                <span style="display: inline-flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="shield" Size="16" Class="text-primary" />
+                    <span>数据合规与 PII 防护</span>
+                </span>
                 <span class="tag tag-info">数据不出域: @(Metrics?.System.Security?.DataSovereigntyEnabled == true ? "已开启" : "未开启")</span>
             </div>
             <div style="display: flex; align-items: baseline; gap: 12px; margin: 8px 0;">
-                <div class="stat-value" style="font-size: 2rem; font-weight: 700;">@((Metrics?.System.Security?.PiiProtectedTotal ?? 0).ToString("N0")) <span style="font-size: 0.9rem; font-weight: normal; color: var(--text-secondary);">次敏感项脱敏</span></div>
+                <div class="stat-value" style="font-size: 2rem; font-weight: 700;">@UiFormatter.FormatNumber(Metrics?.System.Security?.PiiProtectedTotal ?? 0) <span style="font-size: 0.9rem; font-weight: normal; color: var(--text-secondary);">次敏感项脱敏</span></div>
             </div>
             <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;">
-                <span class="tag tag-secondary">📱 手机号: @((Metrics?.System.Security?.PhoneProtected ?? 0).ToString("N0"))</span>
-                <span class="tag tag-secondary">📧 邮箱: @((Metrics?.System.Security?.EmailProtected ?? 0).ToString("N0"))</span>
-                <span class="tag tag-secondary">🆔 身份证: @((Metrics?.System.Security?.IdCardProtected ?? 0).ToString("N0"))</span>
-                <span class="tag tag-secondary">💳 银行卡: @((Metrics?.System.Security?.CreditCardProtected ?? 0).ToString("N0"))</span>
-                <span class="tag tag-secondary">🌐 IP 地址: @((Metrics?.System.Security?.IpProtected ?? 0).ToString("N0"))</span>
+                <span class="tag tag-secondary">手机号: @UiFormatter.FormatNumber(Metrics?.System.Security?.PhoneProtected ?? 0)</span>
+                <span class="tag tag-secondary">邮箱: @UiFormatter.FormatNumber(Metrics?.System.Security?.EmailProtected ?? 0)</span>
+                <span class="tag tag-secondary">身份证: @UiFormatter.FormatNumber(Metrics?.System.Security?.IdCardProtected ?? 0)</span>
+                <span class="tag tag-secondary">银行卡: @UiFormatter.FormatNumber(Metrics?.System.Security?.CreditCardProtected ?? 0)</span>
+                <span class="tag tag-secondary">IP 地址: @UiFormatter.FormatNumber(Metrics?.System.Security?.IpProtected ?? 0)</span>
             </div>
         </div>
     </div>
@@ -163,54 +203,66 @@
             @if (WindowKey != "all" && WindowData.WindowHours > WindowData.RetentionHours && WindowData.RetentionHours > 0)
             {
                 <div class="alert-banner alert-warning" style="margin: 10px 0; padding: 8px 12px; font-size: 0.85rem;">
-                    ⚠ 当前窗口 (@WindowData.WindowHours h) 超出审计保留期 (@WindowData.RetentionHours h)，更早数据已被淘汰，仅显示保留期内数据。
+                    <AppIcon Name="alert" Size="14" />
+                    <span>当前窗口 (@WindowData.WindowHours h) 超出审计保留期 (@WindowData.RetentionHours h)，更早数据已被淘汰，仅显示保留期内数据。</span>
                 </div>
             }
             <div class="stats-row">
                 <div class="stat-card">
                     <div class="stat-card-label">输入 Token</div>
-                    <div class="stat-card-val">@WindowData.InputTokens.ToString("N0")</div>
+                    <div class="stat-card-val">@UiFormatter.FormatNumber(WindowData.InputTokens)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">输出 Token</div>
-                    <div class="stat-card-val">@WindowData.OutputTokens.ToString("N0")</div>
+                    <div class="stat-card-val">@UiFormatter.FormatNumber(WindowData.OutputTokens)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">缓存命中率</div>
-                    <div class="stat-card-val" style="color:var(--ok-text);">@WindowData.CacheHitRatePercent.ToString("F1")%</div>
-                    <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">命中 @WindowData.CachedInputTokens.ToString("N0") / 未缓存 @WindowData.UncachedInputTokens.ToString("N0")</div>
+                    <div class="stat-card-val" style="color:var(--ok-text);">@UiFormatter.FormatPercent(WindowData.CacheHitRatePercent)</div>
+                    <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">命中 @UiFormatter.FormatNumber(WindowData.CachedInputTokens) / 未缓存 @UiFormatter.FormatNumber(WindowData.UncachedInputTokens)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">错误率</div>
-                    <div class="stat-card-val" style="color:@(WindowData.ErrorRatePercent > 0 ? "var(--warn-text)" : "var(--faint-text)");">@WindowData.ErrorRatePercent.ToString("F2")%</div>
-                    <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">失败 @WindowData.Failures.ToString("N0") / 请求 @WindowData.TotalRequests.ToString("N0")</div>
+                    <div class="stat-card-val" style="color:@(WindowData.ErrorRatePercent > 0 ? "var(--warn-text)" : "var(--faint-text)");">@UiFormatter.FormatPercent(WindowData.ErrorRatePercent)</div>
+                    <div style="font-size:0.7rem;color:var(--dim-text);margin-top:4px;">失败 @UiFormatter.FormatNumber(WindowData.Failures) / 请求 @UiFormatter.FormatNumber(WindowData.TotalRequests)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">平均延迟</div>
-                    <div class="stat-card-val">@WindowData.AvgLatencyMs.ToString("F1") ms</div>
+                    <div class="stat-card-val">@UiFormatter.FormatLatency(WindowData.AvgLatencyMs)</div>
                 </div>
                 <div class="stat-card">
                     <div class="stat-card-label">总成本</div>
-                    <div class="stat-card-val" style="color:var(--ok-text);">$@WindowData.TotalCost.ToString("F4")</div>
+                    <div class="stat-card-val" style="color:var(--ok-text);">@UiFormatter.FormatCost(WindowData.TotalCost)</div>
                 </div>
             </div>
         }
         else
         {
-            <div class="text-center text-secondary" style="padding: 20px;">加载中...</div>
+            <SkeletonLoader Type="stat" Count="5" />
         }
     </div>
 
     <!-- 路由内部状态 -->
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span>路由内部状态 (Internal Routing State)</span>
+            <span style="display: inline-flex; align-items: center; gap: 6px;">
+                <AppIcon Name="router" Size="16" Class="text-primary" />
+                <span>路由内部状态 (Internal Routing State)</span>
+            </span>
             <span class="tag tag-secondary">进程内状态 · 重启清空</span>
         </div>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 10px;">
             <!-- 上游配额水位 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">⚡ 上游配额水位</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between;">
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        <AppIcon Name="benchmarks" Size="14" Class="text-warning" />
+                        <span>上游配额水位</span>
+                    </span>
+                    <span class="tag @(QuotaStates.Any(q => q.IsExhausted) ? "tag-danger" : "tag-success")" style="font-size: 0.7rem;">
+                        @(QuotaStates.Any(q => q.IsExhausted) ? "存在耗尽" : "水位充裕")
+                    </span>
+                </div>
                 @if (QuotaStates.Any())
                 {
                     <div style="display: flex; flex-direction: column; gap: 6px; font-size: 0.78rem;">
@@ -224,7 +276,7 @@
                                 }
                                 else
                                 {
-                                    <span class="text-secondary">Req: @(q.RequestsRemaining?.ToString("N0") ?? "--") · Tok: @(q.TokensRemaining?.ToString("N0") ?? "--")</span>
+                                    <span class="text-secondary">Req: @(q.RequestsRemaining is { } rrem ? UiFormatter.FormatNumber(rrem) : "--") · Tok: @(q.TokensRemaining is { } trem ? UiFormatter.FormatNumber(trem) : "--")</span>
                                 }
                             </div>
                         }
@@ -232,23 +284,33 @@
                 }
                 else
                 {
-                    <div class="text-secondary text-center" style="padding: 12px; font-size: 0.8rem;">暂无上游配额观测数据</div>
+                    <div style="display: flex; flex-direction: column; gap: 6px; font-size: 0.8rem;">
+                        <div class="text-secondary">配额监控状态: <strong style="color: var(--success);">水位正常</strong></div>
+                        <div class="text-secondary" style="font-size: 0.75rem;">上游模型未触发 RateLimit / 429 限制</div>
+                    </div>
                 }
+                <div class="meta-text" style="font-size: 0.72rem; margin-top: 8px;">
+                    实时捕获上游 OpenAI / Claude 等响应头中的动态配额。
+                </div>
             </div>
 
             <!-- 提示词缓存亲和 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">🔗 提示词缓存亲和</div>
-                <div style="font-size: 0.85rem; margin-bottom: 6px;">
-                    总条目: <strong>@AffinityState.TotalCount.ToString("N0")</strong>
-                    <span class="text-secondary" style="font-size: 0.72rem;">（仅展示最近 5 条）</span>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between;">
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        <AppIcon Name="models" Size="14" Class="text-primary" />
+                        <span>提示词缓存亲和</span>
+                    </span>
+                    <span class="tag @(AffinityState.Enabled ? "tag-info" : "tag-secondary")" style="font-size: 0.7rem;">
+                        @(AffinityState.Enabled ? (AffinityState.TotalCount > 0 ? $"{AffinityState.TotalCount} 条映射" : "已开启 · 0 条") : "未开启")
+                    </span>
                 </div>
                 @if (AffinityState.Items.Any())
                 {
                     <div style="display: flex; flex-direction: column; gap: 5px; font-size: 0.75rem;">
                         @foreach (var e in AffinityState.Items.Take(5))
                         {
-                            <div style="display: flex; justify-content: space-between; gap: 8px; align-items: center;">
+                            <div style="display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 2px 0;">
                                 <span class="table-mono" style="color: var(--text-muted);">@(e.Fingerprint.Length > 12 ? e.Fingerprint[..12] : e.Fingerprint)…</span>
                                 <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--primary);">→ @e.ModelName</span>
                             </div>
@@ -257,36 +319,58 @@
                 }
                 else
                 {
-                    <div class="text-secondary text-center" style="padding: 12px; font-size: 0.8rem;">暂无亲和映射（需开启 PromptCacheAffinity）</div>
+                    <div style="display: flex; flex-direction: column; gap: 6px; font-size: 0.8rem;">
+                        <div class="text-secondary">
+                            当前亲和映射: <strong class="table-mono" style="color: @(AffinityState.Enabled ? "var(--primary)" : "var(--text-muted)");">@UiFormatter.FormatNumber(AffinityState.TotalCount)</strong> 条
+                        </div>
+                        <div class="text-secondary" style="font-size: 0.75rem;">
+                            @(AffinityState.Enabled
+                                ? "已就绪：正在捕获 Prompt 公共前缀指纹哈希"
+                                : "未启用：根据请求前缀哈希定向复用供应商 KV Cache")
+                        </div>
+                    </div>
                 }
+                <div class="meta-text" style="font-size: 0.72rem; margin-top: 8px;">
+                    @(AffinityState.Enabled
+                        ? "已开启——按请求 Prompt 前缀将同源会话分发至同一模型提高 KV Cache 命中。"
+                        : "未开启（可在「路由控制台」开启 PromptCacheAffinity 提示词亲和）。")
+                </div>
             </div>
 
             <!-- 响应缓存 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">💾 响应缓存</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between;">
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        <AppIcon Name="router" Size="14" Class="text-info" />
+                        <span>响应缓存</span>
+                    </span>
+                    <span class="tag @(ResponseCacheStats?.Enabled == true ? "tag-info" : "tag-secondary")" style="font-size: 0.7rem;">
+                        @(ResponseCacheStats?.Enabled == true ? "已开启" : "未开启")
+                    </span>
+                </div>
                 @if (ResponseCacheStats != null)
                 {
                     <div style="display: flex; flex-direction: column; gap: 6px; font-size: 0.8rem;">
                         <div>
-                            命中率: <strong style="color: @(ResponseCacheStats.HitRatePercent >= 50 ? "var(--success)" : ResponseCacheStats.HitRatePercent > 0 ? "var(--warning)" : "var(--text-secondary)");">@ResponseCacheStats.HitRatePercent.ToString("F1")%</strong>
+                            命中率: <strong style="color: @(ResponseCacheStats.HitRatePercent >= 50 ? "var(--success)" : ResponseCacheStats.HitRatePercent > 0 ? "var(--warning)" : "var(--text-secondary)");">@UiFormatter.FormatPercent(ResponseCacheStats.HitRatePercent)</strong>
                         </div>
                         <div class="text-secondary">
-                            命中 @ResponseCacheStats.Hits.ToString("N0") · 未命中 @ResponseCacheStats.Misses.ToString("N0") · 累计写入 @ResponseCacheStats.Sets.ToString("N0")
+                            命中 @UiFormatter.FormatNumber(ResponseCacheStats.Hits) · 未命中 @UiFormatter.FormatNumber(ResponseCacheStats.Misses) · 写入 @UiFormatter.FormatNumber(ResponseCacheStats.Sets)
                         </div>
                         <div class="text-secondary">
-                            当前条目 @ResponseCacheStats.CurrentEntries.ToString("N0") / 上限 @ResponseCacheStats.MaxEntries.ToString("N0")
-                        </div>
-                        <div class="meta-text" style="font-size: 0.72rem;">
-                            @(ResponseCacheStats.Enabled
-                                ? "已开启——仅非流式请求参与缓存；计数全为 0 表示暂无可缓存的非流式流量。"
-                                : "未开启（路由页可热启用）。")
+                            当前条目 @UiFormatter.FormatNumber(ResponseCacheStats.CurrentEntries) / 上限 @UiFormatter.FormatNumber(ResponseCacheStats.MaxEntries)
                         </div>
                     </div>
                 }
                 else
                 {
-                    <div class="text-secondary text-center" style="padding: 12px; font-size: 0.8rem;">统计不可用</div>
+                    <div class="text-secondary" style="padding: 6px 0; font-size: 0.8rem;">统计不可用</div>
                 }
+                <div class="meta-text" style="font-size: 0.72rem; margin-top: 8px;">
+                    @(ResponseCacheStats?.Enabled == true
+                        ? "已开启——仅非流式请求参与缓存；计数全为 0 表示暂无可缓存流量。"
+                        : "未开启（可在「路由控制台」热启用）。")
+                </div>
             </div>
         </div>
     </div>
@@ -295,18 +379,21 @@
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
             <span>实时请求流 (Live Request Stream)</span>
-            <NavLink href="/requests" class="nav-link" style="font-size: 0.85rem;">查看全部请求 →</NavLink>
+            <NavLink href="/requests" class="nav-link" style="font-size: 0.85rem; display: inline-flex; align-items: center; gap: 4px;">
+                <span>查看全部请求</span>
+                <AppIcon Name="arrow-right" Size="14" />
+            </NavLink>
         </div>
-        <div class="table-wrap">
-            <table class="log-table">
-                <thead>
-                    <tr>
-                        <th scope="col">时间</th><th scope="col">请求 ID</th><th scope="col">路由模型</th><th scope="col">分档 Tier</th><th scope="col">请求内容</th><th scope="col">Tokens (In/Out)</th><th scope="col">延迟 / TTFT</th><th scope="col">成本</th><th scope="col">类型</th><th scope="col">状态</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    @if (RecentRequests.Any())
-                    {
+        @if (RecentRequests.Any())
+        {
+            <div class="table-wrap">
+                <table class="log-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">时间</th><th scope="col">请求 ID</th><th scope="col">路由模型</th><th scope="col">分档 Tier</th><th scope="col">请求内容</th><th scope="col">Tokens (In/Out)</th><th scope="col">延迟 / TTFT</th><th scope="col">成本</th><th scope="col">类型</th><th scope="col">状态</th>
+                        </tr>
+                    </thead>
+                    <tbody>
                         @foreach (var r in RecentRequests)
                         {
                             <tr>
@@ -315,9 +402,9 @@
                                 <td><strong>@r.Model</strong></td>
                                 <td><span class="tag tag-info">@r.RoutedTier</span></td>
                                 <td><span style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
-                                <td>@r.PromptTokens / @r.CompletionTokens</td>
-                                <td>@r.LatencyMs.ToString("F0") ms / @(r.TimeToFirstTokenMs is { } reqTtft ? $"{reqTtft:F0} ms" : "--")</td>
-                                <td style="color: var(--ok-text); font-weight: bold;">$@r.Cost.ToString("F6")</td>
+                                <td class="table-mono">@UiFormatter.FormatNumber(r.PromptTokens) / @UiFormatter.FormatNumber(r.CompletionTokens)</td>
+                                <td>@UiFormatter.FormatLatency(r.LatencyMs) / @(r.TimeToFirstTokenMs is { } reqTtft ? UiFormatter.FormatLatency(reqTtft) : "--")</td>
+                                <td style="color: var(--ok-text); font-weight: bold;">@UiFormatter.FormatCost(r.Cost)</td>
                                 <td>
                                     <span class="tag tag-secondary">@(r.IsStreaming ? "流式" : "JSON")</span>
                                     @if (!string.IsNullOrEmpty(r.FusionRole))
@@ -325,19 +412,32 @@
                                         <span class="tag tag-info">@r.FusionRole</span>
                                     }
                                 </td>
-                                <td class="@(r.Success ? "text-success" : "text-danger")">
-                                    @(r.Success ? "✓ 成功" : "✗ 失败")
+                                <td>
+                                    @if (r.Success)
+                                    {
+                                        <span class="tag tag-success">
+                                            <AppIcon Name="check" Size="12" />
+                                            <span>成功</span>
+                                        </span>
+                                    }
+                                    else
+                                    {
+                                        <span class="tag tag-danger">
+                                            <AppIcon Name="alert" Size="12" />
+                                            <span>失败</span>
+                                        </span>
+                                    }
                                 </td>
                             </tr>
                         }
-                    }
-                    else
-                    {
-                        <tr><td colspan="10" class="text-center text-secondary">暂无实时请求流数据</td></tr>
-                    }
-                </tbody>
-            </table>
-        </div>
+                    </tbody>
+                </table>
+            </div>
+        }
+        else
+        {
+            <EmptyState Icon="requests" Title="暂无实时请求流数据" Description="当客户端向 OptiRouter 发起 API 代理请求时，实时链路、Token 与费用数据将在此自动呈现。" />
+        }
     </div>
 </div>
 

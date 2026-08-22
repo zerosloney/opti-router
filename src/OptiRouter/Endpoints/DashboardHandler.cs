@@ -325,11 +325,12 @@ public static class DashboardHandler
             return Results.Ok(new { items });
         });
 
-        endpoints.MapGet("/api/dashboard/state/cache-affinity", (PromptCacheAffinityStore store) =>
+        endpoints.MapGet("/api/dashboard/state/cache-affinity", (PromptCacheAffinityStore store, IOptionsMonitor<RouterOptions> options) =>
         {
             var entries = store.GetEntries();
             return Results.Ok(new
             {
+                enabled = options.CurrentValue.Routing.EnablePromptCacheAffinity,
                 totalCount = entries.Count,
                 // 条目可达上万，只下发最近 50 条；指纹已是最短可辨前缀展示由前端截断
                 items = entries.Take(50)

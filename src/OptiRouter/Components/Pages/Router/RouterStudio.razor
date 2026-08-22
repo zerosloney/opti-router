@@ -1,6 +1,8 @@
 @page "/router"
+@using OptiRouter.Components.Services
 @inject ApiService Api
 @inject IJSRuntime JS
+@inject ToastService ToastService
 @implements IDisposable
 
 <PageTitle>OptiRouter - 路由实验室</PageTitle>
@@ -9,16 +11,28 @@
     <!-- 路由引擎状态 -->
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem;">
-            <span>路由引擎状态</span>
-            <span class="tag tag-info" style="font-size: 0.75rem;">● 每 60 秒自动刷新</span>
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="router" Size="18" Class="text-primary" />
+                <span>路由引擎状态</span>
+            </span>
+            <span class="tag tag-info" style="font-size: 0.75rem;">
+                <span class="user-status-dot" style="width: 6px; height: 6px;"></span>
+                <span>每 60 秒自动刷新</span>
+            </span>
         </div>
         @if (!string.IsNullOrEmpty(MetricsError))
         {
-            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @MetricsError（显示的是上一次成功数据）</div>
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">
+                <AppIcon Name="alert" Size="14" />
+                <span>@MetricsError（显示的是上一次成功数据）</span>
+            </div>
         }
         @if (!string.IsNullOrEmpty(LearningError))
         {
-            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">⚠️ @LearningError（显示的是上一次成功数据）</div>
+            <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">
+                <AppIcon Name="alert" Size="14" />
+                <span>@LearningError（显示的是上一次成功数据）</span>
+            </div>
         }
         <div class="stats-row">
             <div class="stat-card">
@@ -47,7 +61,10 @@
     <!-- 一键预设 -->
     <div class="glass-card">
         <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-            <span>🚀 推荐配置预设</span>
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="benchmarks" Size="18" Class="text-warning" />
+                <span>推荐配置预设</span>
+            </span>
             @if (PresetSummaries.Count > 0)
             {
                 @if (!string.IsNullOrEmpty(MatchedPresetName))
@@ -72,12 +89,15 @@
                         </div>
                         @if (isMatched)
                         {
-                            <span class="tag tag-success" style="font-size: 0.7rem;">✓ 匹配</span>
+                            <span class="tag tag-success" style="font-size: 0.7rem;">
+                                <AppIcon Name="check" Size="11" />
+                                <span>匹配</span>
+                            </span>
                         }
                     </div>
                     <div class="preset-card-desc">@preset.Description</div>
                     <button class="btn-ghost btn-sm preset-card-btn" @onclick="() => ApplyPresetToForm(preset.Name)" disabled="@(SelectedPresetName == preset.Name)">
-                        @(SelectedPresetName == preset.Name ? "✓ 已填充到表单" : "填充到表单")
+                        @(SelectedPresetName == preset.Name ? "已填充到表单" : "填充到表单")
                     </button>
                 </div>
             }
@@ -89,10 +109,14 @@
 
     <!-- 系统策略与预算动态控制面板 -->
     <div class="glass-card">
-        <div class="card-label">
-            <span>⚙️ 系统路由策略与预算配置控制台</span>
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="overview" Size="18" Class="text-primary" />
+                <span>系统路由策略与预算配置控制台</span>
+            </span>
             <button class="btn-primary btn-sm" @onclick="SaveSystemConfig" disabled="@(IsConfigSaving || _baseline is null || DirtyCount == 0)">
-                @(IsConfigSaving ? "热更新保存中..." : (DirtyCount > 0 ? $"💾 保存并热生效（{DirtyCount} 项变更）" : "💾 保存并热生效"))
+                <AppIcon Name="check" Size="14" />
+                <span>@(IsConfigSaving ? "热更新保存中..." : (DirtyCount > 0 ? $"保存并热生效（{DirtyCount} 项变更）" : "保存并热生效"))</span>
             </button>
         </div>
 
@@ -103,7 +127,8 @@
         @if (DirtyCount > 0)
         {
             <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.8rem;">
-                ⚠️ 有 @DirtyCount 项未保存的变更。切换页面或刷新前请先保存。
+                <AppIcon Name="alert" Size="14" />
+                <span>有 @DirtyCount 项未保存的变更。切换页面或刷新前请先保存。</span>
                 <button class="btn-ghost btn-sm" style="margin-left: 8px;" @onclick="DiscardChanges">放弃更改</button>
             </div>
         }
@@ -111,7 +136,10 @@
         <div class="config-grid">
             <!-- ① 基础路由 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">🧭 基础路由</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="router" Size="15" Class="text-primary" />
+                    <span>基础路由</span>
+                </div>
                 <div class="config-group-header">路由策略</div>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnableRuleClassifier)) ? "dirty-field" : "")">
@@ -206,7 +234,10 @@
 
             <!-- ② 可靠性与预算 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">🛡️ 可靠性与预算</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="shield" Size="15" Class="text-warning" />
+                    <span>可靠性与预算</span>
+                </div>
                 <div class="config-group-header">故障转移</div>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnableFailover)) ? "dirty-field" : "")">
@@ -278,7 +309,10 @@
 
             <!-- ③ 学习与优化 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">🧠 学习与优化</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="models" Size="15" Class="text-info" />
+                    <span>学习与优化</span>
+                </div>
                 <div class="config-group-header">强化学习</div>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnableThompsonSampling)) ? "dirty-field" : "")">
@@ -488,7 +522,10 @@
 
             <!-- ⑤ 高级编排 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">⚡ 高级编排</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="benchmarks" Size="15" Class="text-warning" />
+                    <span>高级编排</span>
+                </div>
                 <div class="config-group-header">Fusion MoA</div>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnableFusionRouter)) ? "dirty-field" : "")">
@@ -739,14 +776,23 @@
 
     <!-- Thompson 学习状态监控 -->
     <div class="glass-card">
-        <div class="card-label">
-            <span>🧠 强化学习状态监控 (Thompson Sampling Explorer)</span>
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="overview" Size="18" Class="text-info" />
+                <span>强化学习状态监控 (Thompson Sampling Explorer)</span>
+            </span>
             <span style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
                 <span class="tag @(Metrics?.System.Routing.EnableLatencyAware == true ? "tag-success" : "tag-warning")">
                     延迟感知重排 @(Metrics?.System.Routing.EnableLatencyAware == true ? "已启用" : "未启用")
                 </span>
-                <button class="btn-ghost btn-sm" @onclick="ExportLearningCsv">⬇ 导出 CSV</button>
-                <button class="btn-danger btn-sm" @onclick="ResetLearningState">↺ 重置学习状态</button>
+                <button class="btn-ghost btn-sm" @onclick="ExportLearningCsv">
+                    <AppIcon Name="download" Size="14" />
+                    <span>导出 CSV</span>
+                </button>
+                <button class="btn-danger btn-sm" @onclick="ResetLearningState">
+                    <AppIcon Name="refresh" Size="14" />
+                    <span>重置学习状态</span>
+                </button>
             </span>
         </div>
         @if (!string.IsNullOrEmpty(LearningStatusMsg))
@@ -787,7 +833,7 @@
                                     </div>
                                 </td>
                                 <td class="table-mono">@s.Alpha.ToString("F2") / @s.Beta.ToString("F2")</td>
-                                <td>@s.Samples.ToString("N0")</td>
+                                <td class="table-mono">@UiFormatter.FormatNumber(s.Samples)</td>
                                 <td class="text-secondary">@(s.LastUpdateUtc.Year > 1 ? s.LastUpdateUtc.ToLocalTime().ToString("MM-dd HH:mm:ss") : "--")</td>
                             </tr>
                         }
@@ -806,8 +852,11 @@
 
     <!-- 语义路由规则管理 -->
     <div class="glass-card">
-        <div class="card-label">
-            <span>🧭 语义路由规则工作室 (Semantic Routes Studio)</span>
+        <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+            <span style="display: inline-flex; align-items: center; gap: 8px;">
+                <AppIcon Name="router" Size="18" Class="text-primary" />
+                <span>语义路由规则工作室 (Semantic Routes Studio)</span>
+            </span>
             <span class="tag @(SemanticRouterEnabled ? "tag-success" : "tag-warning")">
                 语义路由 @(SemanticRouterEnabled ? "已启用" : "未启用") · 阈值 @SemanticThreshold.ToString("F2")
             </span>
@@ -823,7 +872,8 @@
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
                     <span style="font-weight: 600; font-size: 0.9rem;">规则列表 (@SemanticRoutes.Count)</span>
                     <button class="btn-primary btn-sm" @onclick="SaveSemanticRoutes" disabled="@IsSrSaving">
-                        @(IsSrSaving ? "保存中..." : "💾 保存全部并热生效")
+                        <AppIcon Name="check" Size="14" />
+                        <span>@(IsSrSaving ? "保存中..." : "保存全部并热生效")</span>
                     </button>
                 </div>
                 @if (SemanticRoutes.Any())
@@ -1440,6 +1490,7 @@
         RecomputeMatchedPreset();
         ConfigStatusOk = true;
         ConfigStatusMsg = $"✓ 预设「{presetName}」已填充到表单（{DirtyCount} 项待保存变更），可继续微调后保存。";
+        ToastService.ShowInfo($"预设「{presetName}」已填充到表单（{DirtyCount} 项待保存变更）", "预设已填充");
     }
 
     private void DiscardChanges()
@@ -1677,6 +1728,7 @@
                     return;
                 ConfigStatusOk = true;
                 ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
+                ToastService.ShowSuccess("配置已热更新并在数据平面实时生效！", "配置已保存");
                 await LoadMetrics();
                 await LoadConfigChanges();
             }
@@ -1684,12 +1736,14 @@
             {
                 ConfigStatusOk = false;
                 ConfigStatusMsg = "✗ 保存被拒绝: " + ExtractErrorBody(error);
+                ToastService.ShowError("保存被拒绝: " + ExtractErrorBody(error), "保存失败");
             }
         }
         catch (Exception ex)
         {
             ConfigStatusOk = false;
             ConfigStatusMsg = "✗ 错误: " + ex.Message;
+            ToastService.ShowError("保存异常: " + ex.Message, "系统错误");
         }
         finally
         {
@@ -2007,6 +2061,7 @@
                     : "✗ 保存被拒绝: " + ExtractErrorBody(error);
             if (ok)
             {
+                ToastService.ShowSuccess($"{SemanticRoutes.Count} 条语义路由已保存并热生效", "语义规则保存");
                 // 语义路由与主配置共享同一份配置文档版本：保存成功后同步版本，
                 // 避免随后的主配置保存因持有过期版本被 409 拒绝。
                 if (!string.IsNullOrWhiteSpace(version))
@@ -2014,6 +2069,14 @@
                     _configVersion = version;
                     _semanticRoutesVersion = version;
                 }
+            }
+            else if (conflict)
+            {
+                ToastService.ShowWarning("规则已被并发修改，已重新加载最新规则，请核对后重试保存", "并发冲突");
+            }
+            else
+            {
+                ToastService.ShowError("保存被拒绝: " + ExtractErrorBody(error), "规则保存失败");
             }
             // 成功或版本冲突都需要重载规则集（刷新版本号与规则内容）。
             if (ok || conflict)
@@ -2025,6 +2088,7 @@
         {
             SrStatusOk = false;
             SrStatusMsg = "✗ 错误: " + ex.Message;
+            ToastService.ShowError("保存异常: " + ex.Message, "系统错误");
         }
         finally
         {

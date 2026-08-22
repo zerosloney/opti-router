@@ -4,39 +4,63 @@
 <div class="app-shell">
     <aside class="side-nav">
         <div class="logo-area">
-            <div class="logo-icon">&#931;</div>
-            <div class="logo-title">OptiRouter</div>
-            <div class="logo-sub">OBSERVABILITY</div>
+            <div class="logo-icon">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <polygon points="4 4 20 4 12 12 20 20 4 20 10 12 4 4" />
+                </svg>
+            </div>
+            <div class="logo-text-group">
+                <div class="logo-title">OptiRouter</div>
+                <div class="logo-sub">OBSERVABILITY</div>
+            </div>
             <button class="theme-toggle" @onclick="ToggleTheme" title="@(IsLightTheme ? "切换到深色主题" : "切换到浅色主题")"
                     aria-pressed="@IsLightTheme" aria-label="切换深色/浅色主题">
-                <span class="theme-toggle-icon">@(IsLightTheme ? "🌙" : "☀")</span>
+                <AppIcon Name="@(IsLightTheme ? "moon" : "sun")" Size="16" />
             </button>
         </div>
         <nav class="side-nav-links">
             <NavLink href="/overview" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon">◎</span> 总览 <span class="nav-en">Overview</span>
+                <span class="nav-icon"><AppIcon Name="overview" Size="18" /></span>
+                <span class="nav-text">总览</span>
+                <span class="nav-en">Overview</span>
             </NavLink>
             <NavLink href="/requests" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon">⇄</span> 请求 <span class="nav-en">Requests</span>
+                <span class="nav-icon"><AppIcon Name="requests" Size="18" /></span>
+                <span class="nav-text">请求追踪</span>
+                <span class="nav-en">Requests</span>
             </NavLink>
             <NavLink href="/models" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon">▤</span> 模型 <span class="nav-en">Models</span>
+                <span class="nav-icon"><AppIcon Name="models" Size="18" /></span>
+                <span class="nav-text">模型配置</span>
+                <span class="nav-en">Models</span>
             </NavLink>
             <NavLink href="/router" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon">⛭</span> 路由 <span class="nav-en">Router</span>
+                <span class="nav-icon"><AppIcon Name="router" Size="18" /></span>
+                <span class="nav-text">路由引擎</span>
+                <span class="nav-en">Router</span>
             </NavLink>
             <NavLink href="/keys" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon">🔑</span> 客户端 <span class="nav-en">Keys</span>
+                <span class="nav-icon"><AppIcon Name="keys" Size="18" /></span>
+                <span class="nav-text">租户配额</span>
+                <span class="nav-en">Keys</span>
             </NavLink>
             <NavLink href="/benchmarks" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon">⚡</span> 压测 &amp; 生态 <span class="nav-en">Benchmark &amp; Mesh</span>
+                <span class="nav-icon"><AppIcon Name="benchmarks" Size="18" /></span>
+                <span class="nav-text">压测 &amp; 生态</span>
+                <span class="nav-en">Benchmarks</span>
             </NavLink>
         </nav>
         <div class="side-nav-footer">
-            <div class="side-nav-user">管理员</div>
+            <div class="side-nav-user" title="已通过管理员身份认证">
+                <span class="user-status-dot"></span>
+                <span class="user-name">管理员</span>
+            </div>
             <form method="post" action="/logout">
                 <AntiforgeryToken />
-                <button type="submit" class="side-nav-logout">退出</button>
+                <button type="submit" class="side-nav-logout" title="退出管理控制台">
+                    <AppIcon Name="logout" Size="14" />
+                    <span>退出</span>
+                </button>
             </form>
         </div>
     </aside>
@@ -44,6 +68,7 @@
     <main class="app-main">
         @Body
     </main>
+    <ToastContainer />
 </div>
 
 @code {

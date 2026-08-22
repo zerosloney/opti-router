@@ -47,182 +47,466 @@ function legacyCopyToClipboard(text) {
     finally { document.body.removeChild(ta); }
 }
 
+// ── 辅助：三阶贝塞尔样条插值 ──
+function drawSmoothSpline(ctx, pts) {
+    if (!pts || pts.length === 0) return;
+    if (pts.length === 1) {
+        ctx.lineTo(pts[0].x, pts[0].y);
+        return;
+    }
+    if (pts.length === 2) {
+        ctx.lineTo(pts[1].x, pts[1].y);
+        return;
+    }
+    for (var i = 0; i < pts.length - 1; i++) {
+        var p0 = i > 0 ? pts[i - 1] : pts[i];
+        var p1 = pts[i];
+        var p2 = pts[i + 1];
+        var p3 = i < pts.length - 2 ? pts[i + 2] : p2;
+        
+        var cp1x = p1.x + (p2.x - p0.x) / 6;
+        var cp1y = p1.y + (p2.y - p0.y) / 6;
+        var cp2x = p2.x - (p3.x - p1.x) / 6;
+        var cp2y = p2.y - (p3.y - p1.y) / 6;
+        
+        ctx.bezierCurveTo(cp1x, cp1y, cp2x, cp2y, p2.x, p2.y);
+    }
+}
+
+function roundRect(c, x, y, w, h, r) {
+    if (w < 2 * r) r = w / 2;
+    if (h < 2 * r) r = h / 2;
+    c.beginPath();
+    c.moveTo(x + r, y);
+    c.arcTo(x + w, y, x + w, y + h, r);
+    c.arcTo(x + w, y + h, x, y + h, r);
+    c.arcTo(x, y + h, x, y, r);
+    c.arcTo(x, y, x + w, y, r);
+    c.closePath();
+}
+
 window.drawTrendChart = function(canvas, data) {
     if (!canvas || !data || data.length === 0) return;
-    var ctx = canvas.getContext('2d');
-    var dpr = window.devicePixelRatio || 1;
-    var rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
-    // setTransform 重置后再 scale，避免多次调用累积缩放
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.scale(dpr, dpr);
-    var W = rect.width, H = rect.height;
-    var pad = {t: 20, r: 24, b: 32, l: 64};
-    var cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
-    ctx.clearRect(0, 0, W, H);
-    var vals = data.map(function(d){ return d.amount; });
-    var mx = Math.max.apply(null, vals.concat([0.001]));
     
-    // Gridlines & Y-Axis Labels
-    var gridColor = getComputedStyle(document.documentElement).getPropertyValue('--chart-grid').trim() || 'rgba(255, 255, 255, 0.04)';
-    ctx.strokeStyle = gridColor;
-    ctx.lineWidth = 1;
-    for (var i = 0; i <= 4; i++) {
-        var y = pad.t + ch * i / 4;
-        ctx.beginPath();
-        ctx.moveTo(pad.l, y);
-        ctx.lineTo(W - pad.r, y);
-        ctx.stroke();
+    // 自动清理与绑定交互事件
+    canvas._trendData = data;
+    if (!canvas._hasInteractiveEvents) {
+        canvas._hasInteractiveEvents = true;
+        canvas._hoverIndex = -1;
         
-        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText('$' + (mx - mx * i / 4).toFixed(4), pad.l - 10, y + 3.5);
+        var handleMove = function(e) {
+            var rect = canvas.getBoundingClientRect();
+            var mx = e.clientX - rect.left;
+            var curData = canvas._trendData;
+            if (!curData || curData.length === 0) return;
+            
+            var pad = {t: 24, r: 24, b: 36, l: 68};
+            var cw = rect.width - pad.l - pad.r;
+            var step = cw / Math.max(curData.length - 1, 1);
+            var nearestIdx = Math.round((mx - pad.l) / step);
+            nearestIdx = Math.max(0, Math.min(curData.length - 1, nearestIdx));
+            
+            if (canvas._hoverIndex !== nearestIdx) {
+                canvas._hoverIndex = nearestIdx;
+                render();
+            }
+        };
+        
+        var handleLeave = function() {
+            if (canvas._hoverIndex !== -1) {
+                canvas._hoverIndex = -1;
+                render();
+            }
+        };
+        
+        canvas.addEventListener('mousemove', handleMove);
+        canvas.addEventListener('mouseleave', handleLeave);
+        
+        if (window.ResizeObserver) {
+            new ResizeObserver(function() {
+                if (canvas._trendData) render();
+            }).observe(canvas.parentElement);
+        }
     }
     
-    // Points calculation
-    var pts = data.map(function(d, i){ 
-        return { 
-            x: pad.l + cw * i / Math.max(data.length - 1, 1), 
-            y: pad.t + ch - (ch * d.amount / mx) 
-        }; 
-    });
-    
-    // Gradient fill under curve
-    var grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
-    grad.addColorStop(0, 'rgba(99, 102, 241, 0.16)');
-    grad.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, H - pad.b);
-    pts.forEach(function(p){ ctx.lineTo(p.x, p.y); });
-    ctx.lineTo(pts[pts.length - 1].x, H - pad.b);
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
-    
-    // Line stroke
-    ctx.beginPath();
-    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
-    ctx.lineWidth = 2;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    pts.forEach(function(p, i){ i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); });
-    ctx.stroke();
-    
-    // Data point dots
-    pts.forEach(function(p){
+    function render() {
+        var curData = canvas._trendData;
+        if (!curData || curData.length === 0) return;
+        var ctx = canvas.getContext('2d');
+        var dpr = window.devicePixelRatio || 1;
+        var rect = canvas.parentElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        
+        var W = rect.width, H = rect.height;
+        var pad = {t: 24, r: 24, b: 36, l: 68};
+        var cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+        ctx.clearRect(0, 0, W, H);
+        
+        var isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+        var primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
+        var textSecondary = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
+        var gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(15, 23, 42, 0.06)';
+        
+        var vals = curData.map(function(d){ return d.amount; });
+        var mx = Math.max.apply(null, vals.concat([0.001]));
+        
+        // Gridlines & Y-Axis
+        ctx.save();
+        ctx.strokeStyle = gridColor;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 4]);
+        for (var i = 0; i <= 4; i++) {
+            var y = pad.t + ch * i / 4;
+            ctx.beginPath();
+            ctx.moveTo(pad.l, y);
+            ctx.lineTo(W - pad.r, y);
+            ctx.stroke();
+            
+            ctx.fillStyle = textSecondary;
+            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.textAlign = 'right';
+            ctx.fillText('$' + (mx - mx * i / 4).toFixed(4), pad.l - 12, y + 3.5);
+        }
+        ctx.restore();
+        
+        // Calculate points
+        var pts = curData.map(function(d, i){ 
+            return { 
+                x: pad.l + cw * i / Math.max(curData.length - 1, 1), 
+                y: pad.t + ch - (ch * d.amount / mx),
+                data: d
+            }; 
+        });
+        
+        // Area Gradient Fill
+        var grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
+        grad.addColorStop(0, isDark ? 'rgba(99, 102, 241, 0.32)' : 'rgba(99, 102, 241, 0.22)');
+        grad.addColorStop(0.5, isDark ? 'rgba(99, 102, 241, 0.10)' : 'rgba(99, 102, 241, 0.06)');
+        grad.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
+        
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
-        ctx.fillStyle = '#6366f1';
+        ctx.moveTo(pts[0].x, H - pad.b);
+        ctx.lineTo(pts[0].x, pts[0].y);
+        drawSmoothSpline(ctx, pts);
+        ctx.lineTo(pts[pts.length - 1].x, H - pad.b);
+        ctx.closePath();
+        ctx.fillStyle = grad;
         ctx.fill();
-        ctx.lineWidth = 1.5;
-        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#0f172a';
+        
+        // Smooth Spline Stroke with subtle glow
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        drawSmoothSpline(ctx, pts);
+        ctx.strokeStyle = primaryColor;
+        ctx.lineWidth = 2.5;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.shadowColor = isDark ? 'rgba(99, 102, 241, 0.5)' : 'rgba(99, 102, 241, 0.3)';
+        ctx.shadowBlur = 8;
         ctx.stroke();
-    });
+        ctx.restore();
+        
+        // Data point dots
+        pts.forEach(function(p, i){
+            var isHovered = (canvas._hoverIndex === i);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, isHovered ? 5.5 : 3.5, 0, Math.PI * 2);
+            ctx.fillStyle = isHovered ? '#ffffff' : primaryColor;
+            ctx.fill();
+            ctx.lineWidth = isHovered ? 3 : 2;
+            ctx.strokeStyle = primaryColor;
+            ctx.stroke();
+        });
+        
+        // X-Axis Labels
+        ctx.fillStyle = textSecondary;
+        ctx.font = '11px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        curData.forEach(function(d, i){
+            var x = pad.l + cw * i / Math.max(curData.length - 1, 1);
+            var dateStr = new Date(d.date + 'T00:00:00Z').toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
+            ctx.fillText(dateStr, x, H - pad.b + 20);
+        });
+        
+        // Interactive Hover Tooltip & Crosshair
+        if (canvas._hoverIndex >= 0 && canvas._hoverIndex < pts.length) {
+            var hp = pts[canvas._hoverIndex];
+            
+            // Vertical Crosshair
+            ctx.save();
+            ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.3)' : 'rgba(15, 23, 42, 0.25)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 3]);
+            ctx.beginPath();
+            ctx.moveTo(hp.x, pad.t);
+            ctx.lineTo(hp.x, H - pad.b);
+            ctx.stroke();
+            ctx.restore();
+            
+            // Tooltip Box
+            var tipTextDate = hp.data.date;
+            var tipTextCost = '支出: $' + hp.data.amount.toFixed(4);
+            ctx.font = '11px "JetBrains Mono", monospace';
+            var boxW = Math.max(ctx.measureText(tipTextDate).width, ctx.measureText(tipTextCost).width) + 20;
+            var boxH = 44;
+            var boxX = Math.min(Math.max(hp.x - boxW / 2, 8), W - boxW - 8);
+            var boxY = Math.max(hp.y - boxH - 12, 8);
+            
+            ctx.save();
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
+            ctx.shadowBlur = 12;
+            ctx.shadowOffsetY = 4;
+            ctx.fillStyle = isDark ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.96)';
+            ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)';
+            ctx.lineWidth = 1;
+            roundRect(ctx, boxX, boxY, boxW, boxH, 6);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+            
+            ctx.fillStyle = textSecondary;
+            ctx.font = '10px "JetBrains Mono", monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(tipTextDate, boxX + 10, boxY + 16);
+            
+            ctx.fillStyle = isDark ? '#38bdf8' : '#0284c7';
+            ctx.font = 'bold 11px "JetBrains Mono", monospace';
+            ctx.fillText(tipTextCost, boxX + 10, boxY + 34);
+        }
+    }
     
-    // X-Axis Labels
-    ctx.fillStyle = '#64748b';
-    ctx.font = '11px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    data.forEach(function(d, i){
-        var x = pad.l + cw * i / Math.max(data.length - 1, 1);
-        ctx.fillText(new Date(d.date + 'T00:00:00Z').toLocaleDateString(undefined, {month: 'short', day: 'numeric'}), x, H - pad.b + 18);
-    });
+    render();
 };
 
-// 审计分析：按日请求量线图（整数 Y 轴，与 drawTrendChart 同风格）。
-// data: [{day: 'YYYY-MM-DD', requests: n, successes: n, costUsd: x}]
 window.drawAnalysisTrendChart = function(canvas, data) {
     if (!canvas || !data || data.length === 0) return;
-    var ctx = canvas.getContext('2d');
-    var dpr = window.devicePixelRatio || 1;
-    var rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.scale(dpr, dpr);
-    var W = rect.width, H = rect.height;
-    var pad = {t: 20, r: 24, b: 32, l: 56};
-    var cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
-    ctx.clearRect(0, 0, W, H);
-    var mx = Math.max.apply(null, data.map(function(d){ return d.requests; }).concat([1]));
-
-    var gridColor = getComputedStyle(document.documentElement).getPropertyValue('--chart-grid').trim() || 'rgba(255, 255, 255, 0.04)';
-    ctx.strokeStyle = gridColor;
-    ctx.lineWidth = 1;
-    for (var i = 0; i <= 4; i++) {
-        var y = pad.t + ch * i / 4;
-        ctx.beginPath();
-        ctx.moveTo(pad.l, y);
-        ctx.lineTo(W - pad.r, y);
-        ctx.stroke();
-
-        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'right';
-        ctx.fillText(String(Math.ceil(mx - mx * i / 4)), pad.l - 10, y + 3.5);
+    
+    canvas._analysisTrendData = data;
+    if (!canvas._hasInteractiveEvents) {
+        canvas._hasInteractiveEvents = true;
+        canvas._hoverIndex = -1;
+        
+        var handleMove = function(e) {
+            var rect = canvas.getBoundingClientRect();
+            var mx = e.clientX - rect.left;
+            var curData = canvas._analysisTrendData;
+            if (!curData || curData.length === 0) return;
+            
+            var pad = {t: 24, r: 24, b: 36, l: 60};
+            var cw = rect.width - pad.l - pad.r;
+            var step = cw / Math.max(curData.length - 1, 1);
+            var nearestIdx = Math.round((mx - pad.l) / step);
+            nearestIdx = Math.max(0, Math.min(curData.length - 1, nearestIdx));
+            
+            if (canvas._hoverIndex !== nearestIdx) {
+                canvas._hoverIndex = nearestIdx;
+                render();
+            }
+        };
+        
+        var handleLeave = function() {
+            if (canvas._hoverIndex !== -1) {
+                canvas._hoverIndex = -1;
+                render();
+            }
+        };
+        
+        canvas.addEventListener('mousemove', handleMove);
+        canvas.addEventListener('mouseleave', handleLeave);
+        
+        if (window.ResizeObserver) {
+            new ResizeObserver(function() {
+                if (canvas._analysisTrendData) render();
+            }).observe(canvas.parentElement);
+        }
     }
-
-    var pts = data.map(function(d, i) {
-        return { x: pad.l + cw * i / Math.max(data.length - 1, 1), y: pad.t + ch - (ch * d.requests / mx) };
-    });
-
-    var grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
-    grad.addColorStop(0, 'rgba(99, 102, 241, 0.16)');
-    grad.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, H - pad.b);
-    pts.forEach(function(p){ ctx.lineTo(p.x, p.y); });
-    ctx.lineTo(pts[pts.length - 1].x, H - pad.b);
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
-    ctx.lineWidth = 2;
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-    pts.forEach(function(p, i){ i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y); });
-    ctx.stroke();
-
-    pts.forEach(function(p){
+    
+    function render() {
+        var curData = canvas._analysisTrendData;
+        if (!curData || curData.length === 0) return;
+        var ctx = canvas.getContext('2d');
+        var dpr = window.devicePixelRatio || 1;
+        var rect = canvas.parentElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+        
+        var W = rect.width, H = rect.height;
+        var pad = {t: 24, r: 24, b: 36, l: 60};
+        var cw = W - pad.l - pad.r, ch = H - pad.t - pad.b;
+        ctx.clearRect(0, 0, W, H);
+        
+        var isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+        var primaryColor = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
+        var textSecondary = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
+        var gridColor = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(15, 23, 42, 0.06)';
+        
+        var mx = Math.max.apply(null, curData.map(function(d){ return d.requests; }).concat([1]));
+        
+        // Gridlines
+        ctx.save();
+        ctx.strokeStyle = gridColor;
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 4]);
+        for (var i = 0; i <= 4; i++) {
+            var y = pad.t + ch * i / 4;
+            ctx.beginPath();
+            ctx.moveTo(pad.l, y);
+            ctx.lineTo(W - pad.r, y);
+            ctx.stroke();
+            
+            ctx.fillStyle = textSecondary;
+            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.textAlign = 'right';
+            ctx.fillText(String(Math.ceil(mx - mx * i / 4)), pad.l - 12, y + 3.5);
+        }
+        ctx.restore();
+        
+        var pts = curData.map(function(d, i) {
+            return {
+                x: pad.l + cw * i / Math.max(curData.length - 1, 1),
+                y: pad.t + ch - (ch * d.requests / mx),
+                data: d
+            };
+        });
+        
+        // Area Gradient
+        var grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
+        grad.addColorStop(0, isDark ? 'rgba(99, 102, 241, 0.32)' : 'rgba(99, 102, 241, 0.22)');
+        grad.addColorStop(0.5, isDark ? 'rgba(99, 102, 241, 0.10)' : 'rgba(99, 102, 241, 0.06)');
+        grad.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
+        
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 3, 0, Math.PI * 2);
-        ctx.fillStyle = '#6366f1';
+        ctx.moveTo(pts[0].x, H - pad.b);
+        ctx.lineTo(pts[0].x, pts[0].y);
+        drawSmoothSpline(ctx, pts);
+        ctx.lineTo(pts[pts.length - 1].x, H - pad.b);
+        ctx.closePath();
+        ctx.fillStyle = grad;
         ctx.fill();
-    });
-
-    ctx.fillStyle = '#64748b';
-    ctx.font = '11px "JetBrains Mono", monospace';
-    ctx.textAlign = 'center';
-    data.forEach(function(d, i){
-        var x = pad.l + cw * i / Math.max(data.length - 1, 1);
-        ctx.fillText(new Date(d.day + 'T00:00:00Z').toLocaleDateString(undefined, {month: 'short', day: 'numeric'}), x, H - pad.b + 18);
-    });
+        
+        // Smooth Spline
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(pts[0].x, pts[0].y);
+        drawSmoothSpline(ctx, pts);
+        ctx.strokeStyle = primaryColor;
+        ctx.lineWidth = 2.5;
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.shadowColor = isDark ? 'rgba(99, 102, 241, 0.5)' : 'rgba(99, 102, 241, 0.3)';
+        ctx.shadowBlur = 8;
+        ctx.stroke();
+        ctx.restore();
+        
+        // Dots
+        pts.forEach(function(p, i){
+            var isHovered = (canvas._hoverIndex === i);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, isHovered ? 5.5 : 3.5, 0, Math.PI * 2);
+            ctx.fillStyle = isHovered ? '#ffffff' : primaryColor;
+            ctx.fill();
+            ctx.lineWidth = isHovered ? 3 : 2;
+            ctx.strokeStyle = primaryColor;
+            ctx.stroke();
+        });
+        
+        // X-Axis Labels
+        ctx.fillStyle = textSecondary;
+        ctx.font = '11px "JetBrains Mono", monospace';
+        ctx.textAlign = 'center';
+        curData.forEach(function(d, i){
+            var x = pad.l + cw * i / Math.max(curData.length - 1, 1);
+            var dateStr = new Date(d.day + 'T00:00:00Z').toLocaleDateString(undefined, {month: 'short', day: 'numeric'});
+            ctx.fillText(dateStr, x, H - pad.b + 20);
+        });
+        
+        // Hover Tooltip
+        if (canvas._hoverIndex >= 0 && canvas._hoverIndex < pts.length) {
+            var hp = pts[canvas._hoverIndex];
+            
+            ctx.save();
+            ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.3)' : 'rgba(15, 23, 42, 0.25)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 3]);
+            ctx.beginPath();
+            ctx.moveTo(hp.x, pad.t);
+            ctx.lineTo(hp.x, H - pad.b);
+            ctx.stroke();
+            ctx.restore();
+            
+            var tipDate = hp.data.day;
+            var tipReq = '请求数: ' + hp.data.requests;
+            ctx.font = '11px "JetBrains Mono", monospace';
+            var boxW = Math.max(ctx.measureText(tipDate).width, ctx.measureText(tipReq).width) + 20;
+            var boxH = 44;
+            var boxX = Math.min(Math.max(hp.x - boxW / 2, 8), W - boxW - 8);
+            var boxY = Math.max(hp.y - boxH - 12, 8);
+            
+            ctx.save();
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.28)';
+            ctx.shadowBlur = 12;
+            ctx.shadowOffsetY = 4;
+            ctx.fillStyle = isDark ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.96)';
+            ctx.strokeStyle = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)';
+            ctx.lineWidth = 1;
+            roundRect(ctx, boxX, boxY, boxW, boxH, 6);
+            ctx.fill();
+            ctx.stroke();
+            ctx.restore();
+            
+            ctx.fillStyle = textSecondary;
+            ctx.font = '10px "JetBrains Mono", monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(tipDate, boxX + 10, boxY + 16);
+            
+            ctx.fillStyle = isDark ? '#38bdf8' : '#0284c7';
+            ctx.font = 'bold 11px "JetBrains Mono", monospace';
+            ctx.fillText(tipReq, boxX + 10, boxY + 34);
+        }
+    }
+    
+    render();
 };
 
-// 审计分析：水平条形图（标签 + 数值文本自适应）。
-// items: [{label: 'model-a', value: 123, text: '97.5% · $0.42'}]，调用方负责排序与截断。
 window.drawAnalysisBarChart = function(canvas, items) {
     if (!canvas || !items || items.length === 0) return;
+    
     var ctx = canvas.getContext('2d');
     var dpr = window.devicePixelRatio || 1;
     var rect = canvas.parentElement.getBoundingClientRect();
-    canvas.width = rect.width * dpr; canvas.height = rect.height * dpr;
+    if (rect.width <= 0 || rect.height <= 0) return;
+    
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.scale(dpr, dpr);
+    
     var W = rect.width, H = rect.height;
     var labelW = Math.min(180, W * 0.32);
-    var rowH = Math.min(28, H / items.length);
-    var barMax = W - labelW - 110;
+    var rowH = Math.min(32, H / items.length);
+    var barMax = Math.max(40, W - labelW - 130);
     ctx.clearRect(0, 0, W, H);
-    var mx = Math.max.apply(null, items.map(function(d){ return d.value; }).concat([0.001]));
-
+    
+    var isDark = document.documentElement.getAttribute('data-theme') !== 'light';
     var primary = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
     var textSecondary = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
+    var trackBg = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(15, 23, 42, 0.05)';
+    
+    var mx = Math.max.apply(null, items.map(function(d){ return d.value; }).concat([0.001]));
 
     items.forEach(function(it, i) {
         var cy = i * rowH + rowH / 2;
+        
         // 标签（左对齐，超长截断）
         ctx.fillStyle = textSecondary;
         ctx.font = '11px "JetBrains Mono", monospace';
@@ -230,26 +514,27 @@ window.drawAnalysisBarChart = function(canvas, items) {
         var label = it.label || '-';
         while (ctx.measureText(label).width > labelW - 12 && label.length > 4) label = label.slice(0, -2);
         ctx.fillText(label, 0, cy + 3.5);
-        // 条
-        var bw = Math.max(2, barMax * it.value / mx);
-        ctx.fillStyle = primary;
-        ctx.globalAlpha = 0.85;
-        roundRect(ctx, labelW, cy - 6, bw, 12, 3);
+        
+        // 底层轨道 (Track)
+        ctx.fillStyle = trackBg;
+        roundRect(ctx, labelW, cy - 6, barMax, 12, 6);
         ctx.fill();
-        ctx.globalAlpha = 1;
-        // 数值文本
-        ctx.fillStyle = textSecondary;
+        
+        // 前景条 (Gradient Bar)
+        var bw = Math.max(4, barMax * it.value / mx);
+        var barGrad = ctx.createLinearGradient(labelW, 0, labelW + bw, 0);
+        barGrad.addColorStop(0, primary);
+        barGrad.addColorStop(1, isDark ? '#38bdf8' : '#0284c7');
+        
+        ctx.fillStyle = barGrad;
+        roundRect(ctx, labelW, cy - 6, bw, 12, 6);
+        ctx.fill();
+        
+        // 数值与指标文本
+        ctx.fillStyle = isDark ? '#e2e8f0' : '#334155';
+        ctx.font = '11px "JetBrains Mono", monospace';
         ctx.textAlign = 'left';
-        ctx.fillText(it.text || String(it.value), labelW + bw + 8, cy + 3.5);
+        ctx.fillText(it.text || String(it.value), labelW + barMax + 12, cy + 3.5);
     });
-
-    function roundRect(c, x, y, w, h, r) {
-        c.beginPath();
-        c.moveTo(x + r, y);
-        c.arcTo(x + w, y, x + w, y + h, r);
-        c.arcTo(x + w, y + h, x, y + h, r);
-        c.arcTo(x, y + h, x, y, r);
-        c.arcTo(x, y, x + w, y, r);
-        c.closePath();
-    }
 };
+

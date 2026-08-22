@@ -1,0 +1,38 @@
+<div class="empty-state-card @Class" style="@Style">
+    <div class="empty-state-icon-wrap">
+        <AppIcon Name="@Icon" Size="32" Class="empty-state-icon" />
+    </div>
+    @if (!string.IsNullOrEmpty(Title))
+    {
+        <div class="empty-state-title">@Title</div>
+    }
+    @if (!string.IsNullOrEmpty(Description))
+    {
+        <div class="empty-state-desc">@Description</div>
+    }
+    @if (ChildContent != null)
+    {
+        <div class="empty-state-custom">
+            @ChildContent
+        </div>
+    }
+    @if (!string.IsNullOrEmpty(ActionText) && OnAction.HasDelegate)
+    {
+        <div class="empty-state-actions">
+            <button class="btn-primary btn-sm" @onclick="OnAction">
+                @ActionText
+            </button>
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public string Icon { get; set; } = "search";
+    [Parameter] public string Title { get; set; } = "暂无数据";
+    [Parameter] public string? Description { get; set; }
+    [Parameter] public string? ActionText { get; set; }
+    [Parameter] public EventCallback OnAction { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+    [Parameter] public string? Class { get; set; }
+    [Parameter] public string? Style { get; set; }
+}

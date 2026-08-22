@@ -649,6 +649,7 @@ builder.Services.AddScoped<ApiService>(sp =>
     var nav = sp.GetRequiredService<NavigationManager>();
     return new ApiService(client, nav, sp.GetService<IHttpContextAccessor>(), sp.GetService<ILogger<ApiService>>());
 });
+builder.Services.AddScoped<ToastService>();
 
 int requestsPerMinute = builder.Configuration.GetValue<int?>("OptiRouter:RequestsPerMinute") ?? 60;
 if (requestsPerMinute <= 0)
