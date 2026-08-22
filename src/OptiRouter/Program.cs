@@ -543,6 +543,10 @@ builder.Services.AddHostedService<LatencyStatsAggregatorService>();
 // 审计保留淘汰：按 AuditRetentionHours 周期 EvictBefore，防止 request_audit 无界增长。
 builder.Services.AddHostedService<AuditRetentionService>();
 
+// 会话粘性回载：启动时从审计历史恢复每会话最近成功模型——IMemoryCache 粘性重启即清空，
+// 活跃 harness 会话跨重启的首个请求会重新抽签换上游，烧掉整个 prompt 缓存前缀。
+builder.Services.AddHostedService<SessionAffinityWarmupService>();
+
 // 指标 gauge 刷新服务：周期同步花费/断路器 gauge（复用探活周期，零独立定时器）。
 // EnableMetrics=false 时不影响功能，但 gauge 保持零值。
 builder.Services.AddHostedService<MetricsGaugeUpdaterService>();
