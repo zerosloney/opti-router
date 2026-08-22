@@ -373,6 +373,28 @@ public class OpenAICompatibleModelClientTests
     #region ProbeAsync tests
 
     [Fact]
+    public async Task ProbeAsync_DoesNotCapMaxTokens_ReasoningModelsRejectTinyBudget()
+    {
+        // reasoning 模型（如 ox-alpha）思考会耗尽小额度导致内容为空，上游直接
+        // 500 "empty response content"（实测 max_tokens 1~32 均 500）。
+        // 探活不设上限（null 不序列化），由上游取默认值。
+        var endpoint = CreateEndpoint();
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        await client.ProbeAsync();
+
+        var sentBody = handler.GetLastRequestContent();
+        Assert.NotNull(sentBody);
+        using var doc = JsonDocument.Parse(sentBody);
+        Assert.False(doc.RootElement.TryGetProperty("max_tokens", out _));
+    }
+
+    [Fact]
     public async Task ProbeAsync_WhenSuccess_ReturnsHealthy()
     {
         // Arrange

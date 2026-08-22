@@ -222,7 +222,10 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         {
             Model = _endpoint.UpstreamModelId,
             Messages = new List<ChatMessage> { ChatMessage.FromText("user", "ping") },
-            MaxTokens = 1,
+            // 不设 max_tokens（null 不序列化）：reasoning 模型（如 ox-alpha）思考会耗尽
+            // 小额度导致内容为空，上游直接 500 "empty response content"（实测 1~32 均 500）。
+            // 不限额由上游取默认，"ping" 的回复本身极短，成本可忽略。
+            MaxTokens = null,
             Stream = false
         };
 
