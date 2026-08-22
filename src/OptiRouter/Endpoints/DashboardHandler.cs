@@ -70,7 +70,16 @@ public static class DashboardHandler
             {
                 entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(5);
                 entry.Size = 1;
-                return Results.Json(store.GetDailyHistory(days));
+                // 归档只含已跨天的快照，需并入当日实时累计，趋势图才能显示"今天"。
+                // 元组 Item1/Item2 是公共字段、STJ 不序列化（直接 Json 会输出 [{}]），
+                // 必须投影为 {date, amount}，且 date 为 yyyy-MM-dd（blazor.js 以 date+'T00:00:00Z' 解析）。
+                DateTime today = DateTime.UtcNow.Date;
+                var points = store.GetDailyHistory(days)
+                    .Where(h => h.Date != today)
+                    .Select(h => new { date = h.Date.ToString("yyyy-MM-dd"), amount = h.Amount })
+                    .ToList();
+                points.Add(new { date = today.ToString("yyyy-MM-dd"), amount = store.GetDaily(today) });
+                return Results.Json(points);
             });
         });
 

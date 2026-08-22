@@ -156,6 +156,54 @@ public class DashboardFeatureTests
         Assert.Contains("req-export-1", csv, StringComparison.Ordinal);
     }
 
+    // ── 费用趋势：归档 + 当日实时 ─────────────────────────────────
+
+    [Fact]
+    public async Task Trends_MergesArchivedDaysWithTodayLiveSpend_InDateAmountShape()
+    {
+        using var factory = new FeatureFactory();
+        var ledger = factory.Services.GetRequiredService<ICostLedgerStore>();
+        DateTime today = DateTime.UtcNow.Date;
+        DateTime yesterday = today.AddDays(-1);
+        ledger.AddDaily(yesterday, 2m);
+        ledger.SnapshotDaily(yesterday);          // 模拟跨天归档（仅过去日期可入档）
+        ledger.AddDaily(today, 1.25m);            // 当日实时累计（从未入档）
+        using var client = CreateClient(factory);
+
+        using var response = await client.GetAsync("/api/dashboard/trends?days=7");
+        response.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        // 修复前两处缺陷都会让本断言失败：
+        // 1) 元组直接 Results.Json 输出 [{}]（Item1/Item2 是字段，STJ 不序列化）；
+        // 2) 当日实时花费永不进趋势（只读归档表）。
+        var root = doc.RootElement;
+        Assert.Equal(JsonValueKind.Array, root.ValueKind);
+        Assert.Equal(2, root.GetArrayLength());
+        Assert.Equal(yesterday.ToString("yyyy-MM-dd"), root[0].GetProperty("date").GetString());
+        Assert.Equal(2m, root[0].GetProperty("amount").GetDecimal());
+        Assert.Equal(today.ToString("yyyy-MM-dd"), root[1].GetProperty("date").GetString());
+        Assert.Equal(1.25m, root[1].GetProperty("amount").GetDecimal());
+    }
+
+    [Fact]
+    public async Task Trends_EmptyHistory_StillShowsTodayLiveSpend()
+    {
+        using var factory = new FeatureFactory();
+        var ledger = factory.Services.GetRequiredService<ICostLedgerStore>();
+        ledger.AddDaily(DateTime.UtcNow, 0.75m);  // 无任何归档、当天有消费（服务首日场景）
+        using var client = CreateClient(factory);
+
+        using var response = await client.GetAsync("/api/dashboard/trends?days=7");
+        response.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+        var root = doc.RootElement;
+        Assert.Equal(1, root.GetArrayLength());
+        Assert.Equal(DateTime.UtcNow.ToString("yyyy-MM-dd"), root[0].GetProperty("date").GetString());
+        Assert.Equal(0.75m, root[0].GetProperty("amount").GetDecimal());
+    }
+
     // ── 配置变更审计 + Webhook/Fusion 配置往返 ─────────────────────
 
     [Fact]
