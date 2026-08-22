@@ -221,10 +221,11 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         var probeRequest = new ChatRequest
         {
             Model = _endpoint.UpstreamModelId,
-            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "ping") },
+            // 探活问题带身份核对语义，回答经 Reply 回显管理台（"看回答"验证模型身份/连通）。
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "你是什么模型") },
             // 不设 max_tokens（null 不序列化）：reasoning 模型（如 ox-alpha）思考会耗尽
             // 小额度导致内容为空，上游直接 500 "empty response content"（实测 1~32 均 500）。
-            // 不限额由上游取默认，"ping" 的回复本身极短，成本可忽略。
+            // 不限额由上游取默认，探活回复本身极短，成本可忽略。
             MaxTokens = null,
             Stream = false
         };
@@ -235,10 +236,11 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(5));
 
-            await CompleteAsync(probeRequest, cts.Token).ConfigureAwait(false);
+            var raw = await CompleteRawAsync(probeRequest, cts.Token).ConfigureAwait(false);
             sw.Stop();
 
-            return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds);
+            string? reply = ExtractReplyText(raw.Body);
+            return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds, Reply: string.IsNullOrWhiteSpace(reply) ? null : reply);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -257,6 +259,37 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         }
         // 外部取消（cancellationToken 已取消）：异常向上传播，由探活服务识别为关停信号，
         // 不计失败——曾在此被转成 Healthy=false，导致关停噪声熔断健康模型。
+    }
+
+    /// <summary>
+    /// 从原始响应体提取首条回答文本：标准格式 choices 在根节点；
+    /// 部分聚合上游（如 cline/stealth 的 ox-alpha）把 choices 包在 data 字段下。
+    /// </summary>
+    private static string? ExtractReplyText(string body)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object) return null;
+
+            JsonElement choices = root.TryGetProperty("choices", out var standard) ? standard
+                : root.TryGetProperty("data", out var wrapped)
+                  && wrapped.ValueKind == JsonValueKind.Object
+                  && wrapped.TryGetProperty("choices", out var nested) ? nested
+                : default;
+            if (choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0) return null;
+
+            return choices[0].TryGetProperty("message", out var message)
+                && message.TryGetProperty("content", out var content)
+                && content.ValueKind == JsonValueKind.String
+                ? content.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <inheritdoc />

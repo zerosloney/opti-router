@@ -193,8 +193,9 @@ public sealed class AnthropicModelClient : IModelClient
         var probeRequest = new ChatRequest
         {
             Model = _endpoint.UpstreamModelId,
-            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "ping") },
-            MaxTokens = 1,
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "你是什么模型") },
+            // Anthropic 协议 max_tokens 必填，不能省略；64 容纳一句身份回答（太小会被截空）。
+            MaxTokens = 64,
             Stream = false
         };
 
@@ -203,9 +204,10 @@ public sealed class AnthropicModelClient : IModelClient
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(5));
-            await CompleteAsync(probeRequest, cts.Token).ConfigureAwait(false);
+            var response = await CompleteAsync(probeRequest, cts.Token).ConfigureAwait(false);
             sw.Stop();
-            return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds);
+            string? reply = response.Choices.Count > 0 ? response.Choices[0].Message.GetText() : null;
+            return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds, Reply: string.IsNullOrWhiteSpace(reply) ? null : reply);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

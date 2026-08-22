@@ -395,6 +395,45 @@ public class OpenAICompatibleModelClientTests
     }
 
     [Fact]
+    public async Task ProbeAsync_ExtractsIdentityReply_FromStandardShape()
+    {
+        var endpoint = CreateEndpoint();
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                choices = new[] { new { message = new { role = "assistant", content = "我是 DeepSeek" } } }
+            }), Encoding.UTF8, "application/json")
+        };
+        var client = CreateClient(endpoint, CreateHandler(response));
+
+        var result = await client.ProbeAsync();
+
+        Assert.True(result.Healthy);
+        Assert.Equal("我是 DeepSeek", result.Reply);
+    }
+
+    [Fact]
+    public async Task ProbeAsync_ExtractsIdentityReply_FromDataWrappedShape()
+    {
+        // 部分聚合上游（cline/stealth ox-alpha）非流式响应把 choices 包在 data 下。
+        var endpoint = CreateEndpoint();
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(new
+            {
+                data = new { choices = new[] { new { message = new { role = "assistant", content = "我是 ox-alpha" } } } }
+            }), Encoding.UTF8, "application/json")
+        };
+        var client = CreateClient(endpoint, CreateHandler(response));
+
+        var result = await client.ProbeAsync();
+
+        Assert.True(result.Healthy);
+        Assert.Equal("我是 ox-alpha", result.Reply);
+    }
+
+    [Fact]
     public async Task ProbeAsync_WhenSuccess_ReturnsHealthy()
     {
         // Arrange

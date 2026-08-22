@@ -191,8 +191,9 @@ public sealed class GeminiModelClient : IModelClient
         var probeRequest = new ChatRequest
         {
             Model = _endpoint.UpstreamModelId,
-            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "ping") },
-            MaxTokens = 1,
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "你是什么模型") },
+            // 不设上限（与 OpenAI 探活同理）：reasoning 模型小额度思考耗尽会报错或截空。
+            MaxTokens = null,
             Stream = false
         };
 
@@ -201,9 +202,10 @@ public sealed class GeminiModelClient : IModelClient
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(5));
-            await CompleteAsync(probeRequest, cts.Token).ConfigureAwait(false);
+            var response = await CompleteAsync(probeRequest, cts.Token).ConfigureAwait(false);
             sw.Stop();
-            return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds);
+            string? reply = response.Choices.Count > 0 ? response.Choices[0].Message.GetText() : null;
+            return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds, Reply: string.IsNullOrWhiteSpace(reply) ? null : reply);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

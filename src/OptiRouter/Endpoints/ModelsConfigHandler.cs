@@ -263,11 +263,16 @@ public static class ModelsConfigHandler
         var client = clientProvider.GetClient(model);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Min(10, model.TimeoutSeconds)));
         var result = await client.ProbeAsync(cts.Token).ConfigureAwait(false);
+        // 探活回答（"你是什么模型"）截断后随 message 回显，管理员可直接核对模型身份。
+        string reply = result.Reply?.Trim() ?? "";
+        if (reply.Length > 80) reply = reply[..80] + "…";
         return Results.Ok(new
         {
             success = result.Healthy,
             latencyMs = (long)result.LatencyMs,
-            message = result.Healthy ? "连接正常 (OK)" : "连接异常",
+            message = !result.Healthy
+                ? "连接异常"
+                : reply.Length > 0 ? $"连接正常 (OK) · 回答: {reply}" : "连接正常 (OK)",
             error = SanitizeProbeError(result.Error)
         });
     }
