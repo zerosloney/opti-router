@@ -29,12 +29,14 @@ public sealed class BudgetGuardPolicy : IRouterPolicy
             return previous.Append("budget-guard", "disabled");
         }
 
-        var (dailySpend, _) = _ledger.GetSpend();
+        // 执行口径读"已入账 + in-flight 预留"：计费在流结束后落账，若只看已入账，
+        // 并发请求可在各自计费落账前集体越过预算线（TOCTOU）。展示口径仍走 GetSpend。
+        decimal dailySpend = _ledger.GetEffectiveDailySpend();
         var budget = context.Options.Budget;
 
         bool dailyExhausted = budget.DailyBudgetUsd > 0 && dailySpend >= budget.DailyBudgetUsd;
         // 会话预算仅在 X-Session-Id 头存在时启用；缺头时 sessionSpend 记为未超。
-        decimal sessionSpend = context.SessionId is { } sid ? _ledger.GetSessionSpend(sid) : 0m;
+        decimal sessionSpend = context.SessionId is { } sid ? _ledger.GetEffectiveSessionSpend(sid) : 0m;
         bool sessionExhausted = context.SessionId is not null
             && budget.SessionBudgetUsd is { } sessionBudget
             && sessionSpend >= sessionBudget;

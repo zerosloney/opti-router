@@ -101,6 +101,71 @@ public class CostLedger
         return _store.GetSession(sessionId);
     }
 
+    // ---- in-flight 预算预留（TOCTOU 防护） ----
+    // 预算守卫在请求前检查、计费在流结束后落账，中间窗口内并发请求可集体越过预算线。
+    // 请求发起前按预估成本 Reserve，结束（无论成败）Release，守卫读"已入账 + 预留"有效值。
+    // 预留是本地执行口径：不入库、不广播 mesh——各节点各自预留，多节点全局预算精度不变。
+
+    private readonly object _reserveLock = new();
+    private decimal _reservedDaily;
+    private readonly Dictionary<string, decimal> _reservedSessions = new();
+
+    /// <summary>
+    /// 预扣一笔 in-flight 成本预留（日 + 会话两个维度，与 <see cref="Record"/> 对称）。
+    /// 必须与 <see cref="Release"/> 严格配对（调用方 try/finally 或 using 保证）。
+    /// </summary>
+    public void Reserve(decimal amount, string? sessionId = null)
+    {
+        if (amount <= 0m) return;
+        lock (_reserveLock)
+        {
+            _reservedDaily += amount;
+            if (!string.IsNullOrEmpty(sessionId))
+                _reservedSessions[sessionId] = _reservedSessions.GetValueOrDefault(sessionId) + amount;
+        }
+    }
+
+    /// <summary>
+    /// 释放预留。clamp 到 0 防配对失误（如 Arm 后重复释放）导致负数。
+    /// </summary>
+    public void Release(decimal amount, string? sessionId = null)
+    {
+        if (amount <= 0m) return;
+        lock (_reserveLock)
+        {
+            _reservedDaily = Math.Max(0m, _reservedDaily - amount);
+            if (!string.IsNullOrEmpty(sessionId))
+            {
+                decimal remaining = Math.Max(0m, _reservedSessions.GetValueOrDefault(sessionId) - amount);
+                if (remaining == 0m) _reservedSessions.Remove(sessionId);
+                else _reservedSessions[sessionId] = remaining;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 含 in-flight 预留的日花费（已入账 + 预留）。预算守卫的执行口径；
+    /// 展示/告警口径继续用 <see cref="GetDailySpend"/>（只看已入账）。
+    /// </summary>
+    public decimal GetEffectiveDailySpend()
+    {
+        lock (_reserveLock)
+        {
+            return GetDailySpend() + _reservedDaily;
+        }
+    }
+
+    /// <summary>
+    /// 含 in-flight 预留的会话花费（已入账 + 预留）。
+    /// </summary>
+    public decimal GetEffectiveSessionSpend(string sessionId)
+    {
+        lock (_reserveLock)
+        {
+            return GetSessionSpend(sessionId) + _reservedSessions.GetValueOrDefault(sessionId);
+        }
+    }
+
     /// <summary>
     /// 重置全局累计花费（不重置日花费和按会话账户）。
     /// </summary>

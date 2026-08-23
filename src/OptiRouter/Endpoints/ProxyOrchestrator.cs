@@ -265,6 +265,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
         }
 
+        // in-flight 预算预留作用域：using var 在迭代器提前 Dispose（客户端断开）时也保证释放。
+        using var budgetReservation = new BudgetReservationScope(_recorder, sessionId);
+
         while (true)
         {
             if (globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
@@ -292,6 +295,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     throw new BudgetExhaustedException(decision.Reason);
                 }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
+            }
+
+            // 预算预扣：本轮决策已过守卫，立即占用本请求预估成本，使后续并发请求的守卫
+            // 看到"已入账 + 全部 in-flight"。Dispose（含迭代器提前终止）释放预留，真实计费后净额即实际。
+            if (options.Routing.EnableBudgetGuard && options.Budget.ReservationMaxOutputTokens > 0)
+            {
+                budgetReservation.Arm(EstimateReservationCost(
+                    decision.Candidates[0], decision.EstimatedInputTokens, request, options.Budget.ReservationMaxOutputTokens));
             }
 
             // regenerate 负反馈：同键请求在窗口内重发且上次为成功 → 惩罚上次模型（每请求只消费一次）。
@@ -724,6 +735,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
         }
 
+        // in-flight 预算预留作用域：using var 在迭代器提前 Dispose（客户端断开）时也保证释放。
+        using var budgetReservation = new BudgetReservationScope(_recorder, sessionId);
+
         while (true)
         {
             if (globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested)
@@ -749,6 +763,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     throw new BudgetExhaustedException(decision.Reason);
                 }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
+            }
+
+            // 预算预扣：本轮决策已过守卫，立即占用本请求预估成本，使后续并发请求的守卫
+            // 看到"已入账 + 全部 in-flight"。Dispose（含迭代器提前终止）释放预留，真实计费后净额即实际。
+            if (options.Routing.EnableBudgetGuard && options.Budget.ReservationMaxOutputTokens > 0)
+            {
+                budgetReservation.Arm(EstimateReservationCost(
+                    decision.Candidates[0], decision.EstimatedInputTokens, request, options.Budget.ReservationMaxOutputTokens));
             }
 
             // regenerate 负反馈（与非流式对称）：同键请求窗口内重发且上次成功 → 惩罚上次模型。
@@ -1108,6 +1130,55 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         if (_clientProvider is IAsyncDisposable ad) await ad.DisposeAsync().ConfigureAwait(false);
         else if (_clientProvider is IDisposable d) d.Dispose();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>
+    /// in-flight 预算预留作用域：构造后按需 Arm 一次预扣额，Dispose（含流式迭代器提前 Dispose，
+    /// 即客户端断开）时释放。using var 形式让编译器生成的 finally 覆盖所有提前终止路径。
+    /// </summary>
+    private sealed class BudgetReservationScope : IDisposable
+    {
+        private readonly OutcomeRecorder _recorder;
+        private readonly string? _sessionId;
+        private decimal _amount;
+        private bool _armed;
+
+        public BudgetReservationScope(OutcomeRecorder recorder, string? sessionId)
+        {
+            _recorder = recorder;
+            _sessionId = sessionId;
+        }
+
+        /// <summary>首轮路由决策后预扣。幂等：failover 后续轮次不重估（换模型价格差异属可接受近似）。</summary>
+        public void Arm(decimal amount)
+        {
+            if (_armed || amount <= 0m) return;
+            _armed = true;
+            _amount = amount;
+            _recorder.ReserveCostEstimate(amount, _sessionId);
+        }
+
+        public void Dispose()
+        {
+            if (_amount > 0m)
+            {
+                _recorder.ReleaseCostEstimate(_amount, _sessionId);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 预算预留估算：输入估算成本 + 输出预估成本（min(请求 max_tokens, 配置上限)）。
+    /// 融合路由（panel 并行 ×N）按单请求口径预留会低估，属已知近似。
+    /// </summary>
+    private static decimal EstimateReservationCost(
+        ModelEndpointOptions candidate, int estimatedInputTokens, ChatRequest request, int reservationMaxOutputTokens)
+    {
+        decimal inputCost = OutcomeRecorder.EstimateInputCost(candidate, estimatedInputTokens);
+        int maxOutput = request.MaxTokens is { } mt
+            ? Math.Min(mt, reservationMaxOutputTokens)
+            : reservationMaxOutputTokens;
+        return inputCost + maxOutput * candidate.OutputPricePerMillion / 1_000_000m;
     }
 
     /// <summary>

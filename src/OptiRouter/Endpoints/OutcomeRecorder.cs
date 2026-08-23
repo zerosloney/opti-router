@@ -226,6 +226,23 @@ public sealed class OutcomeRecorder
     }
 
     /// <summary>
+    /// 预算预留透传：请求发起前预扣 in-flight 预估成本，防止并发请求在计费落账前
+    /// 集体越过预算线（TOCTOU）。见 <see cref="CostLedger.Reserve"/>。
+    /// </summary>
+    public void ReserveCostEstimate(decimal amount, string? sessionId)
+    {
+        _ledger.Reserve(amount, sessionId);
+    }
+
+    /// <summary>
+    /// 释放预算预留，严格与 <see cref="ReserveCostEstimate"/> 配对（请求 finally）。
+    /// </summary>
+    public void ReleaseCostEstimate(decimal amount, string? sessionId)
+    {
+        _ledger.Release(amount, sessionId);
+    }
+
+    /// <summary>
     /// 入账成本，写失败不破坏已成功的请求（与审计一致）。
     /// 上游已对请求计费，故账本写失败仅记录告警，不向上抛。
     /// </summary>

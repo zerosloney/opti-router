@@ -747,6 +747,19 @@ public class RouterOptionsValidatorTests
         Assert.Contains("ContextualBanditAlpha", result.FailureMessage);
     }
 
+    [Fact]
+    public void ReservationMaxOutputTokensNegative_ShouldReturnFailure()
+    {
+        // 预算预留的输出上限为负是配置错误（合法值 >= 0，0 = 关闭预留）。
+        var options = CreateValidOptions();
+        options.Budget.ReservationMaxOutputTokens = -1;
+
+        var result = CreateValidator().Validate(null, options);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("ReservationMaxOutputTokens", result.FailureMessage);
+    }
+
     [Theory]
     [InlineData(0.49)]
     [InlineData(1.0)]

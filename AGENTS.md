@@ -56,4 +56,3 @@ D:/nssm/nssm.exe start OptiRouter
 
 - `dotnet run` → http://localhost:5157（launchSettings），Development，单实例守卫关闭。
 - 测试：`dotnet test tests/OptiRouter.Tests`（集成测试自建 WebApplicationFactory 宿主，不读 launchSettings）。
-- 仓库根目录的 `*.py`、`test*.cs` 是历史脚手架，与构建无关。

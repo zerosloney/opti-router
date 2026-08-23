@@ -29,6 +29,12 @@ jobs:
       - name: Restore
         run: dotnet restore OptiRouter.sln
 
+      - name: Audit dependencies (CVE)
+        # 供应链 P1：直接+传递依赖漏洞扫描，发现漏洞即失败（NuGet.org 漏洞库）。
+        run: |
+          dotnet list src/OptiRouter/OptiRouter.csproj package --include-transitive --vulnerable --fail-on-vulnerabilities
+          dotnet list tests/OptiRouter.Tests/OptiRouter.Tests.csproj package --include-transitive --vulnerable --fail-on-vulnerabilities
+
       - name: Build
         # -warnaserror 在 CI 层强制零警告（与 csproj TreatWarningsAsErrors 一致）。
         run: dotnet build OptiRouter.sln -c Release --no-restore -warnaserror

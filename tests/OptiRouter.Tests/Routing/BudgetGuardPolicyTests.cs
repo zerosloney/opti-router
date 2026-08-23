@@ -123,4 +123,51 @@ public class BudgetGuardPolicyTests
         Assert.NotEmpty(result.Candidates);
         Assert.Contains("session=disabled(no-header)", result.Reason);
     }
+
+    [Fact]
+    public void Apply_OtherInflightRequestReserved_TreatsDailyBudgetAsExhausted()
+    {
+        // TOCTOU 防护：已入账 0.9 < 预算 1，但另一并发请求 in-flight 预留 0.5——
+        // 守卫必须读"已入账 + 预留"（1.4 ≥ 1）拒绝，而不是等流结束后才反应。
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
+        options.Budget.DailyBudgetUsd = 1m;
+        options.Budget.EnforceOnExhausted = BudgetExhaustionMode.Reject;
+        ledger.Record(0.9m);
+        ledger.Reserve(0.5m); // 模拟另一并发请求的 in-flight 预扣
+
+        var policy = new BudgetGuardPolicy(ledger);
+        var result = Apply(policy, options, options.Models.Where(m => m.Enabled).ToList());
+
+        Assert.Empty(result.Candidates);
+        Assert.True(result.BudgetExhausted);
+
+        // 预留释放后恢复放行。
+        ledger.Release(0.5m);
+        var after = Apply(policy, options, options.Models.Where(m => m.Enabled).ToList());
+        Assert.NotEmpty(after.Candidates);
+    }
+
+    [Fact]
+    public void Apply_SessionReservation_BlocksSessionBudget()
+    {
+        // 会话维度同样受 in-flight 预留约束。
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("gpt-4o", ModelTier.Strong, 128000, 5m),
+            ("deepseek-chat", ModelTier.Cheap, 32000, 0.01m));
+        options.Budget.DailyBudgetUsd = 100m;
+        options.Budget.SessionBudgetUsd = 1m;
+        options.Budget.EnforceOnExhausted = BudgetExhaustionMode.Reject;
+        ledger.Record(0.6m, "session-1");
+        ledger.Reserve(0.5m, "session-1");
+
+        var policy = new BudgetGuardPolicy(ledger);
+        var result = Apply(policy, options, options.Models.Where(m => m.Enabled).ToList(), sessionId: "session-1");
+
+        Assert.Empty(result.Candidates);
+        Assert.True(result.BudgetExhausted);
+    }
 }

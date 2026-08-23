@@ -67,4 +67,12 @@ public sealed class BudgetOptions
     /// Redis 键前缀。默认 "optirouter:"。
     /// </summary>
     public string RedisKeyPrefix { get; set; } = "optirouter:";
+
+    /// <summary>
+    /// in-flight 预算预留的输出 token 预估上限。请求发起前按"输入估算成本 + 输出预估成本"
+    /// 预扣预算，防止并发请求在计费落账（流结束后）之前集体越过预算线（TOCTOU）；
+    /// 请求结束释放预留、按真实用量入账。请求带 max_tokens 时取两者较小值。
+    /// 0 = 关闭预留（退回纯事后检查）。默认 4096——估大误拒、估小留窗口的平衡点。
+    /// </summary>
+    public int ReservationMaxOutputTokens { get; set; } = 4096;
 }

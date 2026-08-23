@@ -104,6 +104,11 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Budget.SessionEvictionHours 不能为负数。");
         }
 
+        if (options.Budget.ReservationMaxOutputTokens < 0)
+        {
+            return ValidateOptionsResult.Fail("Budget.ReservationMaxOutputTokens 不能为负数（0 = 关闭 in-flight 预算预留）。");
+        }
+
         if (options.Routing.FailoverHalfOpenMaxProbes <= 0)
         {
             return ValidateOptionsResult.Fail("Routing.FailoverHalfOpenMaxProbes 必须大于 0。");
