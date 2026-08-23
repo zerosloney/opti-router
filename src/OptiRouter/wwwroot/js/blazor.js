@@ -538,3 +538,35 @@ window.drawAnalysisBarChart = function(canvas, items) {
     });
 };
 
+// ===== Blazor Server 会话保活与断线恢复 =====
+// 管理台是 Blazor Server：页面加载后浏览器不再发任何 HTTP 请求（全走 WebSocket），
+// 登录 Cookie 的 8h 滑动过期无请求可续期，面板常开超 8h 必然掉登录。
+
+// 会话保活：每 30 分钟带 Cookie 请求一次授权 ping 端点，让滑动续期真正生效。
+// 响应无需处理：Cookie 已失效时拿到 401，由下方重连终态恢复兜底转登录页。
+setInterval(function () {
+    fetch('/api/dashboard/session/ping', { credentials: 'same-origin', cache: 'no-store' })
+        .catch(function () { });
+}, 30 * 60 * 1000);
+
+// 重连终态自动恢复：断线重连彻底失败（components-reconnect-failed，如 Cookie 过期后
+// negotiate 被 302 到 /login）或电路被拒（components-reconnect-rejected，如服务重启）
+// 时，内置横幅会永久卡住。此处代替用户点"重新加载"：Cookie 有效则整页刷新自愈，
+// 已过期则被服务端 302 到 /login 重新登录。
+// intentional-simple: 1s 轮询 modal class（元素由 blazor.server.js 断线时动态创建），
+// 终态几秒内被捕捉即可；60s 内只自动刷新一次（sessionStorage 标记）防循环刷新。
+(function () {
+    var MARK = 'optirouter-reconnect-reload-at';
+    setInterval(function () {
+        var m = document.getElementById('components-reconnect-modal');
+        if (!m) return;
+        var c = m.className;
+        if (c.indexOf('components-reconnect-failed') < 0 && c.indexOf('components-reconnect-rejected') < 0) return;
+        var last = 0;
+        try { last = +(sessionStorage.getItem(MARK) || 0); } catch (e) { }
+        if (Date.now() - last < 60000) return;
+        try { sessionStorage.setItem(MARK, String(Date.now())); } catch (e) { }
+        window.location.reload();
+    }, 1000);
+})();
+

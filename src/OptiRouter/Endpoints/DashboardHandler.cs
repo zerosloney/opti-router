@@ -744,6 +744,12 @@ public static class DashboardHandler
             // 带 BOM 便于 Excel 正确识别 UTF-8 中文。
             return Results.Text("\uFEFF" + sb.ToString(), "text/csv", System.Text.Encoding.UTF8);
         });
+
+        // 会话保活（Blazor Server 管理台专用）：页面加载后浏览器不再发 HTTP 请求，
+        // Cookie 的 8h 滑动过期无请求可滑动，面板常开超 8h 必然掉登录（断线重连
+        // negotiate 被 302 到 /login，重连横幅永久卡死）。前端 blazor.js 每 30 分钟
+        // 带 Cookie 请求本端点触发续期。鉴权由管理端中间件按 /api/dashboard 前缀统一执行。
+        endpoints.MapGet("/api/dashboard/session/ping", () => Results.NoContent());
     }
 
     /// <summary>租户用量视图（不含 KeyHash）。</summary>
