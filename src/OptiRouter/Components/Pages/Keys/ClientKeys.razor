@@ -124,7 +124,8 @@
 @if (IssuedPlaintextKey != null)
 {
     <div class="drawer-backdrop" @onclick="CloseIssuedKey">
-        <div class="key-modal" @onclick:stopPropagation="true">
+        <div class="key-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true"
+             aria-label="新租户密钥（仅显示一次）">
             <div class="key-modal-title" style="display: flex; align-items: center; gap: 8px;">
                 <AppIcon Name="keys" Size="18" Class="text-warning" />
                 <span>新租户密钥（仅显示一次）</span>

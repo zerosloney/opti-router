@@ -335,7 +335,8 @@
 @if (SelectedLogItem != null)
 {
     <div class="drawer-backdrop" @onclick="() => SelectedLogItem = null" style="justify-content: flex-end;">
-        <div class="drawer-content" @onclick:stopPropagation="true" style="width: 520px; max-width: 90vw; height: 100%; padding: 24px; overflow-y: auto;">
+        <div class="drawer-content" @onclick:stopPropagation="true" role="dialog" aria-modal="true" aria-label="请求详情"
+             style="width: 520px; max-width: 90vw; height: 100%; padding: 24px; overflow-y: auto;">
             <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 14px; margin-bottom: 16px;">
                 <span style="font-weight: 600; font-size: 1.05rem; color: var(--text-primary); display: flex; align-items: center; gap: 8px;">
                     <AppIcon Name="requests" Size="18" Class="text-primary" />
