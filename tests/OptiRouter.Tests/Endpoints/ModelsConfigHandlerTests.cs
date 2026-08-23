@@ -24,7 +24,6 @@ public class ModelsConfigHandlerTests
             Directory.CreateDirectory(_tempRoot);
             File.Copy(FindSourceAppsettings(), Path.Combine(_tempRoot, "appsettings.json"));
             builder.UseSetting(WebHostDefaults.ContentRootKey, _tempRoot);
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:AdminApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:ConfigDbPath", Path.Combine(_tempRoot, "optirouter-config.db"));
@@ -32,6 +31,7 @@ public class ModelsConfigHandlerTests
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("models-test-key");
                 services.Configure<RouterOptions>(options =>
                 {
                     options.Models.Clear();

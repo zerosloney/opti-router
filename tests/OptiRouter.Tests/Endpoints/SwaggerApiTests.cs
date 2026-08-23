@@ -21,13 +21,13 @@ public sealed class SwaggerApiTests
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", AdminKey);
             builder.UseSetting("OptiRouter:AdminApiKey", AdminKey);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("swagger-test-admin-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

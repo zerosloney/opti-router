@@ -76,15 +76,18 @@ dotnet build OptiRouter.sln -c Release
 
 ```bash
 # Windows PowerShell
-$env:OptiRouter__ProxyApiKey = "your-proxy-api-key"
 $env:OptiRouter__Models__0__ApiKey = "sk-..."
 
 # Linux / macOS
-export OptiRouter__ProxyApiKey="your-proxy-api-key"
 export OptiRouter__Models__0__ApiKey="sk-..."
 ```
 
-If `ProxyApiKey` is empty, all `/v1/*` requests will be rejected.
+- **Proxy auth (tenant keys)**: `/v1/*` requests use tenant Client Keys (created on the
+  dashboard Keys page, per-key QPS limits and daily budgets). The legacy global
+  `ProxyApiKey` has been removed.
+- **Admin key**: stored as a SHA256 hash in the config database (seeded once from
+  `OptiRouter:AdminApiKey` on first boot, then ignored; generated randomly and logged
+  once at startup when absent). Rotate by clearing the `security` scope and restarting.
 
 ### Run
 

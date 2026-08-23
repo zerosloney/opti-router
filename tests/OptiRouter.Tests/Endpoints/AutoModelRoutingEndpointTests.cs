@@ -76,13 +76,13 @@ internal sealed class AutoRoutingWebApplicationFactory : WebApplicationFactory<P
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["OptiRouter:ProxyApiKey"] = "auto-test-key"
             });
         });
 
         builder.ConfigureServices(services =>
         {
             services.RemoveBackgroundServices();
+            services.UseFixedTenantKey("auto-test-key");
             services.Configure<RouterOptions>(options =>
             {
                 options.Models.Clear();

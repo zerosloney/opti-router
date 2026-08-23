@@ -29,12 +29,12 @@ public class FusionModeTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("fusion-test-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();
@@ -331,12 +331,12 @@ public class FusionModeTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("fusion-probe-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();
@@ -436,12 +436,12 @@ public class FusionModeTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("hedge-test-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

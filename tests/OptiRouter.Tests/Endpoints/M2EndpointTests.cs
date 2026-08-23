@@ -72,7 +72,6 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
         {
             var inMemoryConfig = new Dictionary<string, string?>
             {
-                ["OptiRouter:ProxyApiKey"] = "m2-test-key",
                 ["OptiRouter:RequestsPerMinute"] = RequestsPerMinute.ToString(),
                 ["OptiRouter:MaxConcurrentRequestsPerPartition"] = MaxConcurrentRequestsPerPartition.ToString(),
                 ["OptiRouter:TrustProxyHeaders"] = TrustProxyHeaders.ToString(),
@@ -91,6 +90,7 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(services =>
         {
             services.RemoveBackgroundServices();
+            services.UseFixedTenantKey("m2-test-key");
             // 覆盖 Program 的权威文件配置，测试不依赖工作区中的 models-config.json。
             services.Configure<RouterOptions>(options =>
             {

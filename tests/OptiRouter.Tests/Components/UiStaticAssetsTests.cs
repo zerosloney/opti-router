@@ -13,12 +13,12 @@ public class UiStaticAssetsTests
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
-            builder.UseSetting("OptiRouter:ProxyApiKey", "ui-test-key");
             builder.UseSetting("OptiRouter:AdminApiKey", "ui-test-key");
             builder.UseSetting("OptiRouter:Routing:EnableHealthProbe", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("ui-test-key");
                 // 覆盖 Program 的权威文件配置，测试不依赖工作区中的 models-config.json。
                 services.Configure<RouterOptions>(options =>
                 {

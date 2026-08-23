@@ -79,15 +79,17 @@ dotnet build OptiRouter.sln -c Release
 
 ```bash
 # Windows PowerShell
-$env:OptiRouter__ProxyApiKey = "your-proxy-api-key"
 $env:OptiRouter__Models__0__ApiKey = "sk-..."
 
 # Linux / macOS
-export OptiRouter__ProxyApiKey="your-proxy-api-key"
 export OptiRouter__Models__0__ApiKey="sk-..."
 ```
 
-`ProxyApiKey` 为空时，所有 `/v1/*` 请求都会被拒绝。
+- **代理鉴权（租户 key）**：`/v1/*` 请求使用租户 Client Key（管理台 Keys 页创建，
+  按 key 独立限 QPS/日预算）。全局 `ProxyApiKey` 已移除。
+- **管理密钥（AdminApiKey）**：SHA256 哈希存配置库（首次启动时 appsettings/环境变量中的
+  `OptiRouter:AdminApiKey` 作为种子哈希入库后即被忽略；两者皆缺则生成随机密钥并打印
+  启动日志一次）。轮换 = 清空配置库 `security` scope 后重启。
 
 ### 运行
 

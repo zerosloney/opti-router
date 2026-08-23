@@ -67,6 +67,11 @@ string configDbPath = builder.Configuration["OptiRouter:ConfigDbPath"]
     ?? Path.Combine(builder.Environment.ContentRootPath, "data", "optirouter-config.db");
 string? configDbConnectionString = builder.Configuration["OptiRouter:ConfigDbConnectionString"];
 builder.Services.AddSingleton(sp => new AppConfigDbStore(configDbPath, configDbConnectionString));
+// 管理端密钥：哈希存配置库 security scope（构造时种子；appsettings 仅首启种子源）。
+builder.Services.AddSingleton(sp => new OptiRouter.Configuration.AdminKeyStore(
+    sp.GetRequiredService<AppConfigDbStore>(),
+    sp.GetRequiredService<IConfiguration>(),
+    sp.GetService<ILogger<OptiRouter.Configuration.AdminKeyStore>>()));
 builder.Configuration.Sources.Add(new DbAppConfigSource { DbPath = configDbPath, ConnectionString = configDbConnectionString });
 
 // Bind and validate RouterOptions on startup.
@@ -720,10 +725,9 @@ SeedConfigFromLegacySources(
     Path.Combine(app.Environment.ContentRootPath, "models-config.json"));
 ((IConfigurationRoot)app.Configuration).Reload();
 
-if (string.IsNullOrWhiteSpace(app.Configuration["OptiRouter:AdminApiKey"]))
-{
-    app.Logger.LogWarning("OptiRouter:AdminApiKey 未配置：管理控制台登录与管理 API 鉴权将全部失败。请配置独立的 AdminApiKey（不应与 ProxyApiKey 复用）。");
-}
+// 管理端密钥预热：哈希存配置库 security scope（appsettings 仅首启种子，明文不再进代码库）。
+// 库与种子源都缺时会生成随机密钥并在日志打印明文一次。
+_ = app.Services.GetRequiredService<OptiRouter.Configuration.AdminKeyStore>();
 
 // 配置热重载时清理 Thompson 采样状态：剔除已删除/改名的模型条目，防 _states 无界泄漏。
 // OnChange 在 models-config.json 写入触发 IConfigurationRoot.Reload 后派发。
@@ -836,20 +840,12 @@ app.Use(async (context, next) =>
     // 管理端与代理分离鉴权：
     //   - 管理路径（dashboard/models 页面与 /api/dashboard、/api/models）：优先放行已登录会话（Cookie），
     //     兼容 Authorization: Bearer <AdminApiKey>（脚本/测试客户端）。未认证的页面请求 302 到 /login，API 请求 401。
-    //   - /v1/* 代理路径：ProxyApiKey 或租户 ClientKeyService（保持不变）。
+    //   - /v1/* 代理路径：租户 ClientKeyService 全局准入（全局 ProxyApiKey 已移除——泄露面收敛，所有客户端走租户 key）。
     bool isAdminPath = IsAdminPath(context.Request.Path);
     bool isV1Path = IsProxyPath(context.Request.Path);
-    string? proxyKey = app.Configuration["OptiRouter:ProxyApiKey"];
-    // 管理端密钥仅 AdminApiKey（不再回退 ProxyApiKey）：ProxyApiKey 发给 API 客户端，
-    // 允许它登录管理台构成权限越界。未配 AdminApiKey 时管理台鉴权总失败（仅剩已登录会话，会话过期即不可用）。
-    string adminKey = app.Configuration["OptiRouter:AdminApiKey"] ?? "";
+    var adminKeyStore = app.Services.GetRequiredService<OptiRouter.Configuration.AdminKeyStore>();
 
-    if (isV1Path && AdminKeyVerifier.IsValid(proxyKey, ExtractBearerToken(context)))
-    {
-        // The global proxy key remains compatible and is deliberately not sent through
-        // ClientKeyService, so it never consumes a tenant's QPS window or daily budget.
-    }
-    else if (isV1Path && !isAdminPath)
+    if (isV1Path && !isAdminPath)
     {
         var authorizationResult = context.RequestServices
             .GetRequiredService<ClientKeyService>()
@@ -914,7 +910,7 @@ app.Use(async (context, next) =>
             }
         }
 
-        bool bearerAuthenticated = presentedToken is not null && AdminKeyVerifier.IsValid(adminKey, presentedToken);
+        bool bearerAuthenticated = presentedToken is not null && adminKeyStore.IsValid(presentedToken);
 
         if (!sessionAuthenticated && !bearerAuthenticated)
         {
@@ -939,8 +935,9 @@ app.Use(async (context, next) =>
             return;
         }
     }
-    else if (!AdminKeyVerifier.IsValid(proxyKey, ExtractBearerToken(context)))
+    else
     {
+        // 兜底：受保护路径既非 /v1 代理也非管理前缀（前缀集合并集外的理论场景）——直接拒绝。
         await ProtocolErrorHelper.WriteProxyErrorAsync(
             context,
             StatusCodes.Status401Unauthorized,

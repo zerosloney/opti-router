@@ -31,12 +31,12 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("cascade-test-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();
@@ -96,12 +96,12 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("no-strong-test-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();
@@ -144,12 +144,12 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("null-usage-test-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

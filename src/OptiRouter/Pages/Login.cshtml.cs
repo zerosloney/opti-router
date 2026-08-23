@@ -11,13 +11,15 @@ namespace OptiRouter.Pages;
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 public class LoginModel : PageModel
 {
-    private readonly IConfiguration _config;
+    private readonly OptiRouter.Configuration.AdminKeyStore _adminKeyStore;
     private readonly LoginRateLimiter _rateLimiter;
+    private readonly IConfiguration _config;
 
-    public LoginModel(IConfiguration config, LoginRateLimiter rateLimiter)
+    public LoginModel(OptiRouter.Configuration.AdminKeyStore adminKeyStore, LoginRateLimiter rateLimiter, IConfiguration config)
     {
-        _config = config;
+        _adminKeyStore = adminKeyStore;
         _rateLimiter = rateLimiter;
+        _config = config;
     }
 
     [BindProperty]
@@ -37,10 +39,8 @@ public class LoginModel : PageModel
             return Page();
         }
 
-        var adminKey = _config["OptiRouter:AdminApiKey"];
-
-        // 仅接受 AdminApiKey：ProxyApiKey 发给 API 客户端，允许其登录管理台构成权限越界。
-        if (string.IsNullOrWhiteSpace(AdminKey) || !AdminKeyVerifier.IsValid(adminKey, AdminKey))
+        // 管理密钥存配置库（SHA256 哈希，AdminKeyStore 统一校验），appsettings 仅首启种子源。
+        if (string.IsNullOrWhiteSpace(AdminKey) || !_adminKeyStore.IsValid(AdminKey))
         {
             _rateLimiter.RecordFailure(clientIp);
             ErrorMessage = "密钥不正确，请重试";

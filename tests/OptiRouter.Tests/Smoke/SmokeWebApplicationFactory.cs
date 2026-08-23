@@ -30,7 +30,6 @@ internal sealed class SmokeWebApplicationFactory : WebApplicationFactory<Program
     /// <inheritdoc />
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
-        builder.UseSetting("OptiRouter:ProxyApiKey", TestProxyApiKey);
         builder.UseSetting("OptiRouter:RequestsPerMinute", "60");
         // 测试用临时配置库，避免读/写真实 data/optirouter-config.db。
         builder.UseSetting("OptiRouter:ConfigDbPath",
@@ -42,6 +41,7 @@ internal sealed class SmokeWebApplicationFactory : WebApplicationFactory<Program
         builder.ConfigureServices(services =>
         {
             services.RemoveBackgroundServices();
+            services.UseFixedTenantKey("test-proxy-key");
             // 不覆盖 IModelClientProvider，让 Program.cs 中注册的真实 ModelClientProvider 生效，
             // 从而让 OpenAICompatibleModelClient 真正发出 HTTP 到 WireMock。
             ConfigureTestServicesAction?.Invoke(services);

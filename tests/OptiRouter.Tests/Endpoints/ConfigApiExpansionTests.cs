@@ -32,7 +32,6 @@ public class ConfigApiExpansionTests
             File.Copy(FindSourceAppsettings(), Path.Combine(_tempRoot, "appsettings.json"));
             builder.UseSetting(WebHostDefaults.ContentRootKey, _tempRoot);
 
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:AdminApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             // 测试用临时配置库：PUT 校验用例经 PersistRoutingDocuments 落库到临时文件，不污染真实配置库。
@@ -42,6 +41,7 @@ public class ConfigApiExpansionTests
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("config-test-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

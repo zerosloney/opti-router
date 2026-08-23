@@ -31,7 +31,6 @@ public class DashboardFeatureTests
             Directory.CreateDirectory(_tempRoot);
             File.Copy(FindSourceAppsettings(), Path.Combine(_tempRoot, "appsettings.json"));
             builder.UseSetting(WebHostDefaults.ContentRootKey, _tempRoot);
-            builder.UseSetting("OptiRouter:ProxyApiKey", Key);
             builder.UseSetting("OptiRouter:AdminApiKey", Key);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:ConfigDbPath", Path.Combine(_tempRoot, "optirouter-config.db"));
@@ -41,6 +40,7 @@ public class DashboardFeatureTests
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("feature-test-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

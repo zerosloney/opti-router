@@ -148,7 +148,6 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
     /// <inheritdoc />
     protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
     {
-        builder.UseSetting("OptiRouter:ProxyApiKey", ProxyApiKey);
         builder.UseSetting("OptiRouter:RequestsPerMinute", RequestsPerMinute.ToString());
         if (AdminApiKey is not null)
         {
@@ -164,6 +163,7 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
         builder.ConfigureServices(services =>
         {
             services.RemoveBackgroundServices();
+            services.UseFixedTenantKey(ProxyApiKey);
             services.AddSingleton<IModelClientProvider>(new TestModelClientProvider(MockClients));
             ConfigureTestServicesAction?.Invoke(services);
         });
@@ -666,22 +666,16 @@ public class ChatCompletionsEndpointTests
     }
 
     [Fact]
-    public async Task Post_GlobalProxyKeyRemainsCompatible_AndDoesNotConsumeTenantQps()
+    public async Task Post_LegacyGlobalProxyKey_IsRejected()
     {
-        using var tenant = CreateTenantKeyFixture(dailyBudgetUsd: 0m, maxQps: 1);
-        using var globalClient = tenant.Factory.CreateClient(TestWebApplicationFactory.TestProxyApiKey);
-        using var tenantClient = tenant.Factory.CreateClient(tenant.PlaintextKey);
+        // 全局 ProxyApiKey 已移除（泄露面收敛）：旧全局 key 不再是有效凭证，
+        // /v1 一律走租户 ClientKey 全局准入，未知 key 直接 401。
+        using var tenant = CreateTenantKeyFixture();
+        using var legacyClient = tenant.Factory.CreateClient("legacy-global-proxy-key");
 
-        using var globalFirst = await PostChatAsync(globalClient);
-        using var globalSecond = await PostChatAsync(globalClient);
-        Assert.Equal(0m, Assert.Single(tenant.Service.GetAllKeys()).DailySpendUsd);
+        using var response = await PostChatAsync(legacyClient);
 
-        using var tenantResponse = await PostChatAsync(tenantClient);
-
-        Assert.Equal(HttpStatusCode.OK, globalFirst.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, globalSecond.StatusCode);
-        Assert.Equal(HttpStatusCode.OK, tenantResponse.StatusCode);
-        Assert.True(Assert.Single(tenant.Service.GetAllKeys()).DailySpendUsd > 0m);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
@@ -1142,10 +1136,12 @@ public class ChatCompletionsEndpointTests
         var audits = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(10);
         var sessions = audits.Where(r => r.Model == "model-a").Select(r => r.SessionId).ToList();
         Assert.Equal(3, sessions.Count);
-        Assert.All(sessions, sid => Assert.StartsWith("conv-", sid));
+        // 租户 key 认证下 SessionId 带多租户隔离前缀（client=…;session=…），指纹断言在裸 conv- 段进行。
+        var bare = sessions.Where(sid => sid is not null).Select(sid => sid![sid!.IndexOf("conv-", StringComparison.Ordinal)..]).ToList();
+        Assert.All(bare, sid => Assert.StartsWith("conv-", sid));
         // 三个请求只产生两个会话指纹：first-task 两轮相同，second-task 独立
-        Assert.Equal(2, sessions.Distinct().Count());
-        var firstTaskSession = sessions.GroupBy(sid => sid).Single(g => g.Count() == 2).Key;
+        Assert.Equal(2, bare.Distinct().Count());
+        var firstTaskSession = bare.GroupBy(sid => sid).Single(g => g.Count() == 2).Key;
     }
 
     [Fact]

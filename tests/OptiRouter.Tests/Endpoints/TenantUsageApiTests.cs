@@ -29,13 +29,13 @@ public sealed class TenantUsageApiTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
-            builder.UseSetting("OptiRouter:ProxyApiKey", AdminKey);
             builder.UseSetting("OptiRouter:AdminApiKey", AdminKey);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "6000");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("tenant-test-admin-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

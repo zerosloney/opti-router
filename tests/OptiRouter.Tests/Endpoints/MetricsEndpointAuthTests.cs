@@ -35,7 +35,6 @@ public sealed class MetricsEndpointAuthTests
             {
                 var inMemoryConfig = new Dictionary<string, string?>
                 {
-                    ["OptiRouter:ProxyApiKey"] = "test-proxy-key",
                     ["OptiRouter:Routing:EnableMetrics"] = EnableMetrics.ToString(),
                     ["OptiRouter:Routing:MetricsEndpointPath"] = MetricsEndpointPath
                 };
@@ -55,6 +54,7 @@ public sealed class MetricsEndpointAuthTests
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("test-proxy-key");
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();
