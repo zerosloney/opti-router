@@ -171,3 +171,4 @@ cleanup_handler.py
 
 # 本地 AI CLI 工具会话状态（内含指向用户目录的符号链接）
 .antigravitycli/
+reports/
