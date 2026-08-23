@@ -41,6 +41,7 @@ internal sealed class SmokeWebApplicationFactory : WebApplicationFactory<Program
         builder.UseSetting("OptiRouter:EnableSingleInstanceGuard", "false");
         builder.ConfigureServices(services =>
         {
+            services.RemoveBackgroundServices();
             // 不覆盖 IModelClientProvider，让 Program.cs 中注册的真实 ModelClientProvider 生效，
             // 从而让 OpenAICompatibleModelClient 真正发出 HTTP 到 WireMock。
             ConfigureTestServicesAction?.Invoke(services);

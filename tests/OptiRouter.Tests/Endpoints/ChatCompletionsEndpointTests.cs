@@ -163,6 +163,7 @@ internal sealed class TestWebApplicationFactory : WebApplicationFactory<Program>
         builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
         builder.ConfigureServices(services =>
         {
+            services.RemoveBackgroundServices();
             services.AddSingleton<IModelClientProvider>(new TestModelClientProvider(MockClients));
             ConfigureTestServicesAction?.Invoke(services);
         });

@@ -41,6 +41,7 @@ public class ConfigApiExpansionTests
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
+                services.RemoveBackgroundServices();
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

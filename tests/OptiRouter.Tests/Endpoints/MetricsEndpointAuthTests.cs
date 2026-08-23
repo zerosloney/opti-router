@@ -54,6 +54,7 @@ public sealed class MetricsEndpointAuthTests
 
             builder.ConfigureServices(services =>
             {
+                services.RemoveBackgroundServices();
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

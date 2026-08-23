@@ -40,6 +40,7 @@ public class DashboardFeatureTests
                 builder.UseSetting("OptiRouter:Routing:EnableResponseCache", "true");
             builder.ConfigureServices(services =>
             {
+                services.RemoveBackgroundServices();
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

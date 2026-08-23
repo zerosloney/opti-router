@@ -36,6 +36,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
+                services.RemoveBackgroundServices();
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();
@@ -100,6 +101,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
+                services.RemoveBackgroundServices();
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();
@@ -147,6 +149,7 @@ public class CascadeCostAccountingTests : IClassFixture<WebApplicationFactory<Pr
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
+                services.RemoveBackgroundServices();
                 services.Configure<RouterOptions>(opt =>
                 {
                     opt.Models.Clear();

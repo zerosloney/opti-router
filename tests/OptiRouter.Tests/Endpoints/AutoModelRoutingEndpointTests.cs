@@ -82,6 +82,7 @@ internal sealed class AutoRoutingWebApplicationFactory : WebApplicationFactory<P
 
         builder.ConfigureServices(services =>
         {
+            services.RemoveBackgroundServices();
             services.Configure<RouterOptions>(options =>
             {
                 options.Models.Clear();

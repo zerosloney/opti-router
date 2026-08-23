@@ -31,6 +31,7 @@ public class ModelsConfigHandlerTests
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>
             {
+                services.RemoveBackgroundServices();
                 services.Configure<RouterOptions>(options =>
                 {
                     options.Models.Clear();

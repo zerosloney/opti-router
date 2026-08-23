@@ -90,6 +90,7 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
 
         builder.ConfigureServices(services =>
         {
+            services.RemoveBackgroundServices();
             // 覆盖 Program 的权威文件配置，测试不依赖工作区中的 models-config.json。
             services.Configure<RouterOptions>(options =>
             {
