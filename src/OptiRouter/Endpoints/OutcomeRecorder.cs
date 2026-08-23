@@ -227,11 +227,22 @@ public sealed class OutcomeRecorder
 
     /// <summary>
     /// 预算预留透传：请求发起前预扣 in-flight 预估成本，防止并发请求在计费落账前
-    /// 集体越过预算线（TOCTOU）。见 <see cref="CostLedger.Reserve"/>。
+    /// 集体越过预算线（TOCTOU）。同时覆盖全局账本（<see cref="CostLedger.Reserve"/>）
+    /// 与授权租户的日预算账户（<see cref="ClientKeyService.ReserveSpend"/>）。
     /// </summary>
     public void ReserveCostEstimate(decimal amount, string? sessionId)
     {
         _ledger.Reserve(amount, sessionId);
+        try
+        {
+            string? keyId = AuthorizedTenantKeyId();
+            if (keyId is not null)
+                _clientKeyService?.ReserveSpend(keyId, amount);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Tenant spend reservation failed; in-flight spend may under-block");
+        }
     }
 
     /// <summary>
@@ -240,6 +251,31 @@ public sealed class OutcomeRecorder
     public void ReleaseCostEstimate(decimal amount, string? sessionId)
     {
         _ledger.Release(amount, sessionId);
+        try
+        {
+            string? keyId = AuthorizedTenantKeyId();
+            if (keyId is not null)
+                _clientKeyService?.ReleaseSpend(keyId, amount);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Tenant spend reservation release failed; reservation may leak until process restart");
+        }
+    }
+
+    /// <summary>
+    /// 当前请求授权租户的 KeyId；无租户上下文（全局代理 Key/管理端）返回 null。
+    /// </summary>
+    private string? AuthorizedTenantKeyId()
+    {
+        if (_clientKeyService is null
+            || _httpContextAccessor?.HttpContext?.Items[typeof(ClientKeyAuthorizationResult)]
+                is not ClientKeyAuthorizationResult { Status: ClientKeyAuthorizationStatus.Authorized } authorization
+            || string.IsNullOrWhiteSpace(authorization.KeyId))
+        {
+            return null;
+        }
+        return authorization.KeyId;
     }
 
     /// <summary>
@@ -271,16 +307,13 @@ public sealed class OutcomeRecorder
 
         try
         {
-            if (_clientKeyService is null
-                || _httpContextAccessor?.HttpContext?.Items[typeof(ClientKeyAuthorizationResult)]
-                    is not ClientKeyAuthorizationResult authorization
-                || authorization.Status != ClientKeyAuthorizationStatus.Authorized
-                || string.IsNullOrWhiteSpace(authorization.KeyId))
+            string? keyId = AuthorizedTenantKeyId();
+            if (keyId is null)
             {
                 return;
             }
 
-            _clientKeyService.RecordSpend(authorization.KeyId, cost);
+            _clientKeyService!.RecordSpend(keyId, cost);
         }
         catch (Exception ex)
         {

@@ -49,6 +49,10 @@ public sealed class ClientKeyService : IDisposable
     // DB 模式待提交的按 key 花费增量（本实例视角），flush 时以相对增量提交到库；
     // 请求数不走增量——由全局准入语句在库端原子计数。
     private readonly Dictionary<string, decimal> _pendingDeltas = new(StringComparer.Ordinal);
+    // in-flight 花费预留（按 keyId，请求发起前预扣、结束释放）：租户预算与全局账本同源的
+    // TOCTOU 防护——预算检查在授权时、计费在请求完成后，窗口内并发请求会集体越过预算线。
+    // 仅进程内口径：不落库、不进增量，多节点各自保守（与 CostLedger 预留语义一致）。
+    private readonly Dictionary<string, decimal> _spendReservations = new(StringComparer.Ordinal);
     // 0 = DB 准入正常，1 = 已降级进程内口径。按状态迁移记日志，故障期间不逐请求刷屏。
     private int _dbAuthDegraded;
     private List<ClientKeyInfo>? _cachedKeys;
@@ -259,11 +263,16 @@ public sealed class ClientKeyService : IDisposable
 
             if (_mariaDb is not null)
             {
-                // 记忆体预算快速拒绝（含本实例未提交增量），预算耗尽时省一次 DB 往返。
-                if (matched.DailyBudgetUsd > 0m && matched.DailySpendUsd >= matched.DailyBudgetUsd)
+                // 记忆体预算快速拒绝（含本实例未提交增量 + in-flight 预留），预算耗尽时省一次 DB 往返。
+                if (IsBudgetExhaustedEffective(matched))
                     return identity(ClientKeyAuthorizationStatus.BudgetExhausted, RetryAfterSecondsForDay(today));
 
-                return AuthorizeViaDbNoLock(matched, identity, today, currentWindow);
+                var dbResult = AuthorizeViaDbNoLock(matched, identity, today, currentWindow);
+                // DB 放行后的进程内复核：TryAdmit 只看库内已提交花费，本实例 in-flight 预留
+                // 对库不可见——预留口径已超限时本地保守拒绝，堵住库口径的同一 TOCTOU 窗口。
+                if (dbResult.Status == ClientKeyAuthorizationStatus.Authorized && IsBudgetExhaustedEffective(matched))
+                    return identity(ClientKeyAuthorizationStatus.BudgetExhausted, RetryAfterSecondsForDay(today));
+                return dbResult;
             }
 
             // 文件后端：进程内固定秒窗 QPS + 记忆体预算。
@@ -282,7 +291,7 @@ public sealed class ClientKeyService : IDisposable
                 return identity(ClientKeyAuthorizationStatus.RateLimited, RetryAfterSecondsForWindow(currentWindow));
             }
 
-            if (matched.DailyBudgetUsd > 0m && matched.DailySpendUsd >= matched.DailyBudgetUsd)
+            if (IsBudgetExhaustedEffective(matched))
             {
                 if (changed)
                     PersistKeys(keys);
@@ -395,6 +404,48 @@ public sealed class ClientKeyService : IDisposable
             else
                 _spendDirty = true;
         }
+    }
+
+    /// <summary>
+    /// 预扣租户 in-flight 花费（预算 TOCTOU 防护，与 <see cref="RecordSpend"/> 对称）。
+    /// 必须与 <see cref="ReleaseSpend"/> 严格配对（调用方 try/finally 或 using 保证）。
+    /// </summary>
+    public void ReserveSpend(string keyId, decimal amount)
+    {
+        if (string.IsNullOrWhiteSpace(keyId) || amount <= 0m)
+            return;
+
+        lock (_gate)
+        {
+            _spendReservations[keyId] = _spendReservations.GetValueOrDefault(keyId) + amount;
+        }
+    }
+
+    /// <summary>
+    /// 释放预留。clamp 到 0 防配对失误（如重复释放）导致负数。
+    /// </summary>
+    public void ReleaseSpend(string keyId, decimal amount)
+    {
+        if (string.IsNullOrWhiteSpace(keyId) || amount <= 0m)
+            return;
+
+        lock (_gate)
+        {
+            decimal remaining = Math.Max(0m, _spendReservations.GetValueOrDefault(keyId) - amount);
+            if (remaining == 0m) _spendReservations.Remove(keyId);
+            else _spendReservations[keyId] = remaining;
+        }
+    }
+
+    /// <summary>
+    /// 含 in-flight 预留的预算耗尽判定（已入账记忆值 + 预留）。须在 _gate 锁内调用。
+    /// 跨午夜仍未释放的预留会计入新一天（保守方向，预留本身是分钟级瞬态，可接受）。
+    /// </summary>
+    private bool IsBudgetExhaustedEffective(ClientKeyInfo key)
+    {
+        if (key.DailyBudgetUsd <= 0m)
+            return false;
+        return key.DailySpendUsd + _spendReservations.GetValueOrDefault(key.KeyId) >= key.DailyBudgetUsd;
     }
 
     /// <summary>

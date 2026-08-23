@@ -299,7 +299,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             // 预算预扣：本轮决策已过守卫，立即占用本请求预估成本，使后续并发请求的守卫
             // 看到"已入账 + 全部 in-flight"。Dispose（含迭代器提前终止）释放预留，真实计费后净额即实际。
-            if (options.Routing.EnableBudgetGuard && options.Budget.ReservationMaxOutputTokens > 0)
+            // 门控只看旋钮不看 EnableBudgetGuard：租户级预算（ClientKeyService）独立于全局守卫执行，
+            // 预留经 OutcomeRecorder 同时覆盖全局账本与授权租户两个维度。
+            if (options.Budget.ReservationMaxOutputTokens > 0)
             {
                 budgetReservation.Arm(EstimateReservationCost(
                     decision.Candidates[0], decision.EstimatedInputTokens, request, options.Budget.ReservationMaxOutputTokens));
@@ -767,7 +769,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             // 预算预扣：本轮决策已过守卫，立即占用本请求预估成本，使后续并发请求的守卫
             // 看到"已入账 + 全部 in-flight"。Dispose（含迭代器提前终止）释放预留，真实计费后净额即实际。
-            if (options.Routing.EnableBudgetGuard && options.Budget.ReservationMaxOutputTokens > 0)
+            // 门控只看旋钮不看 EnableBudgetGuard：租户级预算（ClientKeyService）独立于全局守卫执行，
+            // 预留经 OutcomeRecorder 同时覆盖全局账本与授权租户两个维度。
+            if (options.Budget.ReservationMaxOutputTokens > 0)
             {
                 budgetReservation.Arm(EstimateReservationCost(
                     decision.Candidates[0], decision.EstimatedInputTokens, request, options.Budget.ReservationMaxOutputTokens));

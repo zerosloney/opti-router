@@ -110,6 +110,55 @@ public sealed class ClientKeyServiceTests
     }
 
     [Fact]
+    public void ReserveSpend_BlocksAuthorize_InflightRequestsCannotCollectivelyOverspend()
+    {
+        // 租户预算 TOCTOU 防护：已入账 0.6 < 预算 1，但另一并发请求 in-flight 预留 0.5——
+        // 授权必须读"已入账 + 预留"（1.1 ≥ 1）拒绝，而不是等流结束后计费才反应。
+        using var fixture = new TempFixture();
+        var service = CreateService(fixture.Path);
+        var (plaintext, info) = service.CreateKey("tenant-a", dailyBudgetUsd: 1m, maxQps: 20);
+
+        service.RecordSpend(info.KeyId, 0.6m);
+        service.ReserveSpend(info.KeyId, 0.5m);
+        Assert.Equal(ClientKeyAuthorizationStatus.BudgetExhausted, service.AuthorizeRequest(plaintext).Status);
+
+        // 预留释放后恢复放行。
+        service.ReleaseSpend(info.KeyId, 0.5m);
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
+    }
+
+    [Fact]
+    public void ReserveRelease_ClampsAtZero_AndIgnoresInvalidInputs()
+    {
+        using var fixture = new TempFixture();
+        var service = CreateService(fixture.Path);
+        var (plaintext, info) = service.CreateKey("tenant-a", dailyBudgetUsd: 1m, maxQps: 20);
+
+        service.ReserveSpend(info.KeyId, 2m);
+        service.ReleaseSpend(info.KeyId, 3m); // 超额释放 clamp 到 0，不得出现负数
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
+
+        service.ReserveSpend("   ", 1m);   // 无效 keyId 无效果
+        service.ReserveSpend(info.KeyId, 0m); // 非正数无效果
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
+    }
+
+    [Fact]
+    public void ReserveSpend_IsPerKey_OtherTenantUnaffected()
+    {
+        using var fixture = new TempFixture();
+        var service = CreateService(fixture.Path);
+        var (_, a) = service.CreateKey("tenant-a", dailyBudgetUsd: 1m, maxQps: 20);
+        var (plaintextB, _) = service.CreateKey("tenant-b", dailyBudgetUsd: 1m, maxQps: 20);
+
+        service.RecordSpend(a.KeyId, 0.6m);
+        service.ReserveSpend(a.KeyId, 0.5m);
+
+        // tenant-b 无预留不受影响（按 keyId 隔离）。
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintextB).Status);
+    }
+
+    [Fact]
     public void ExistingHashedFileWithoutDate_RemainsCompatible()
     {
         using var fixture = new TempFixture();
