@@ -145,7 +145,8 @@ builder.Services.AddSingleton<ICostLedgerStore>(sp =>
     if (string.Equals(provider, "MariaDb", StringComparison.OrdinalIgnoreCase))
     {
         return new MariaDbCostLedgerStore(options.Budget.MariaDbConnectionString,
-            logger: sp.GetService<ILogger<MariaDbCostLedgerStore>>());
+            logger: sp.GetService<ILogger<MariaDbCostLedgerStore>>(),
+            alertHistory: sp.GetService<OptiRouter.Health.AlertHistory>());
     }
     if (string.Equals(provider, "Postgres", StringComparison.OrdinalIgnoreCase))
     {
@@ -155,7 +156,8 @@ builder.Services.AddSingleton<ICostLedgerStore>(sp =>
     if (string.Equals(provider, "Redis", StringComparison.OrdinalIgnoreCase))
     {
         return new RedisCostLedgerStore(options.Budget.RedisConnectionString, options.Budget.RedisKeyPrefix,
-            logger: sp.GetService<ILogger<RedisCostLedgerStore>>());
+            logger: sp.GetService<ILogger<RedisCostLedgerStore>>(),
+            alertHistory: sp.GetService<OptiRouter.Health.AlertHistory>());
     }
     if (!options.Budget.UsePersistentStore || string.Equals(provider, "InMemory", StringComparison.OrdinalIgnoreCase))
     {
@@ -233,7 +235,8 @@ builder.Services.AddOpenTelemetry()
 builder.Services.AddSingleton<ClientKeyService>(sp => new ClientKeyService(
     Path.Combine(builder.Environment.ContentRootPath, "data", "client-keys.json"),
     sp.GetRequiredService<ILogger<ClientKeyService>>(),
-    mariaDbConnectionString: configDbConnectionString));
+    mariaDbConnectionString: configDbConnectionString,
+    alertHistory: sp.GetService<OptiRouter.Health.AlertHistory>()));
 
 builder.Services.AddSingleton<CostLedger>(sp =>
 {
@@ -370,6 +373,7 @@ builder.Services.AddSingleton<LoginRateLimiter>();
 builder.Services.AddSingleton<IResponseCache>(sp => new MemoryResponseCache(
     sp.GetRequiredService<IMemoryCache>(),
     sp.GetRequiredService<IOptions<RouterOptions>>().Value.Routing.ResponseCacheMaxEntries,
+    sp.GetRequiredService<IOptions<RouterOptions>>().Value.Routing.ResponseCacheMaxBytes,
     useSize: true)); // AddMemoryCache 设了 SizeLimit，entry 须申报 Size
 // 同一实例的具体类型注册：MaxEntries 在构造时绑定（重启生效），dashboard 状态端点借它读命中/写入统计。
 builder.Services.AddSingleton(sp => (MemoryResponseCache)sp.GetRequiredService<IResponseCache>());

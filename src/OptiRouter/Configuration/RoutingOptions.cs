@@ -116,6 +116,12 @@ public sealed class RoutingOptions
     public int ResponseCacheMaxEntries { get; set; } = 1000;
 
     /// <summary>
+    /// 响应缓存字节预算（软上限）。缓存的是完整响应体，MB 级大响应 × 条目数上限会无界吃内存——
+    /// 按条目 UTF-8 体量估算累计，超预算后新条目不再写入，淘汰时归还。默认 128MB，0 = 不限字节。
+    /// </summary>
+    public long ResponseCacheMaxBytes { get; set; } = 128L * 1024 * 1024;
+
+    /// <summary>
     /// 成本感知权重 α ∈ [0,1]。0=禁用（默认，reward 仅看延迟/质量）。
     /// &gt;0 时 reward = (1-α)·原reward + α·costReward，引导学习状态在质量/延迟相近时偏好便宜模型。建议 0.2~0.4。
     /// </summary>

@@ -18,17 +18,19 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
     private readonly string _prefix;
     private readonly ICostLedgerStore _fallback;
     private readonly Microsoft.Extensions.Logging.ILogger? _logger;
+    private readonly OptiRouter.Health.AlertHistory? _alertHistory;
     private bool _disposed;
 
     /// <summary>
     /// 初始化 Redis 成本账本。
     /// </summary>
     public RedisCostLedgerStore(string? connectionString, string prefix = "optirouter:", ICostLedgerStore? fallback = null,
-        Microsoft.Extensions.Logging.ILogger? logger = null)
+        Microsoft.Extensions.Logging.ILogger? logger = null, OptiRouter.Health.AlertHistory? alertHistory = null)
     {
         _prefix = prefix ?? "optirouter:";
         _fallback = fallback ?? new InMemoryCostLedgerStore();
         _logger = logger;
+        _alertHistory = alertHistory;
 
         if (string.IsNullOrWhiteSpace(connectionString))
         {
@@ -49,6 +51,8 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
             _logger?.LogError(ex,
                 "Redis cost ledger unavailable: connection failed, permanently falling back to in-memory store. " +
                 "Budget/circuit state will be per-node and lost on restart until the process is restarted with a reachable Redis");
+            _alertHistory?.Record(OptiRouter.Health.DegradationAlerts.Degraded("cost-ledger-redis",
+                "Redis cost ledger unreachable at startup; permanently degraded to in-memory (per-node state, lost on restart)"));
             _redis = null;
             _db = null;
         }
@@ -74,6 +78,8 @@ public sealed class RedisCostLedgerStore : ICostLedgerStore
         _logger?.LogError(ex,
             "Redis cost ledger failed at runtime: permanently falling back to in-memory store. " +
             "Budget/circuit state will be per-node and lost on restart until the process is restarted with a reachable Redis");
+        _alertHistory?.Record(OptiRouter.Health.DegradationAlerts.Degraded("cost-ledger-redis",
+            "Redis cost ledger failed at runtime; permanently degraded to in-memory (per-node state, lost on restart)"));
     }
 
     /// <summary>带运行期降级守卫的 Redis 读/写：故障时转交 fallback 执行本次操作，不向上抛。</summary>

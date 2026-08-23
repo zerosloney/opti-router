@@ -18,6 +18,7 @@ public sealed class MariaDbCostLedgerStore : ICostLedgerStore
     private readonly string? _connectionString;
     private readonly ICostLedgerStore _fallback;
     private readonly ILogger? _logger;
+    private readonly OptiRouter.Health.AlertHistory? _alertHistory;
     // 0 = MariaDB 正常，1 = 已降级内存。按状态迁移记日志，DB 故障期间不逐请求刷屏。
     private int _degraded;
     private bool _disposed;
@@ -28,11 +29,14 @@ public sealed class MariaDbCostLedgerStore : ICostLedgerStore
     /// <param name="connectionString">MariaDB 连接串（StoreProvider=MariaDb 时必填）。</param>
     /// <param name="fallback">降级回退 store（默认内存账本）。</param>
     /// <param name="logger">日志记录器（可选）。</param>
-    public MariaDbCostLedgerStore(string? connectionString, ICostLedgerStore? fallback = null, ILogger? logger = null)
+    /// <param name="alertHistory">降级/恢复事件同步记入告警历史（可选；Dashboard/Webhook 可见）。</param>
+    public MariaDbCostLedgerStore(string? connectionString, ICostLedgerStore? fallback = null, ILogger? logger = null,
+        OptiRouter.Health.AlertHistory? alertHistory = null)
     {
         _connectionString = connectionString;
         _fallback = fallback ?? new InMemoryCostLedgerStore();
         _logger = logger;
+        _alertHistory = alertHistory;
 
         if (!string.IsNullOrWhiteSpace(_connectionString))
         {
@@ -55,6 +59,8 @@ public sealed class MariaDbCostLedgerStore : ICostLedgerStore
                 "MariaDB cost ledger degraded: {Operation} failed, falling back to in-memory store. " +
                 "Budget/circuit state is per-node until MariaDB recovers and is NOT merged back on recovery",
                 operation);
+            _alertHistory?.Record(OptiRouter.Health.DegradationAlerts.Degraded("cost-ledger-mariadb",
+                $"MariaDB cost ledger degraded ({operation} failed); budget/circuit state is per-node until recovery"));
         }
     }
 
@@ -65,6 +71,8 @@ public sealed class MariaDbCostLedgerStore : ICostLedgerStore
             _logger?.LogWarning(
                 "MariaDB cost ledger recovered; subsequent writes go to MariaDB again. " +
                 "Note: spend recorded during the degraded window stayed in the in-memory fallback and was not merged");
+            _alertHistory?.Record(OptiRouter.Health.DegradationAlerts.Recovered("cost-ledger-mariadb",
+                "MariaDB cost ledger recovered; degraded-window spend was not merged back"));
         }
     }
 

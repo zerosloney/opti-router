@@ -43,6 +43,7 @@ public sealed class ClientKeyService : IDisposable
     // MariaDB 后端；null = JSON 文件后端（null! 以免文件代码路径逐处判空，方法入口先委托 DB 后端）。
     private readonly MariaDbClientKeyStore? _mariaDb = null!;
     private readonly ILogger<ClientKeyService> _logger;
+    private readonly OptiRouter.Health.AlertHistory? _alertHistory;
     private readonly TimeProvider _timeProvider;
     private readonly object _gate = new();
     private readonly Dictionary<string, QpsWindow> _qpsWindows = new(StringComparer.Ordinal);
@@ -76,7 +77,8 @@ public sealed class ClientKeyService : IDisposable
         ILogger<ClientKeyService> logger,
         TimeProvider? timeProvider = null,
         TimeSpan? flushInterval = null,
-        string? mariaDbConnectionString = null)
+        string? mariaDbConnectionString = null,
+        OptiRouter.Health.AlertHistory? alertHistory = null)
     {
         ArgumentNullException.ThrowIfNull(logger);
         _logger = logger;
@@ -93,6 +95,7 @@ public sealed class ClientKeyService : IDisposable
                 : filePath;
         }
 
+        _alertHistory = alertHistory;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _flushInterval = flushInterval ?? DefaultFlushInterval;
 
@@ -369,13 +372,19 @@ public sealed class ClientKeyService : IDisposable
             _logger.LogError(ex,
                 "Client key global admission degraded: MariaDB unreachable, falling back to per-process QPS/budget. " +
                 "Limits are per-node until MariaDB recovers");
+            _alertHistory?.Record(OptiRouter.Health.DegradationAlerts.Degraded("client-key-admission",
+                "Tenant key global admission degraded (MariaDB unreachable); QPS/budget limits are per-node until recovery"));
         }
     }
 
     private void MarkAuthRecovered()
     {
         if (Interlocked.Exchange(ref _dbAuthDegraded, 0) == 1)
+        {
             _logger.LogWarning("Client key global admission recovered; QPS/budget limits are global again");
+            _alertHistory?.Record(OptiRouter.Health.DegradationAlerts.Recovered("client-key-admission",
+                "Tenant key global admission recovered; QPS/budget limits are global again"));
+        }
     }
 
     /// <summary>

@@ -129,6 +129,9 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
             return ValidateOptionsResult.Fail("Routing.StreamFirstTokenTimeoutMs 不能为负数。");
         }
 
+        if (options.Routing.ResponseCacheMaxBytes < 0)
+            return ValidateOptionsResult.Fail("Routing.ResponseCacheMaxBytes 不能为负数（0 = 不限字节）。");
+
         if (options.Routing.EnableResponseCache)
         {
             if (options.Routing.ResponseCacheTtlSeconds <= 0)

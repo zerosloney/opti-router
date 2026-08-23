@@ -339,7 +339,7 @@ public static class DashboardHandler
 
         endpoints.MapGet("/api/dashboard/state/response-cache", (MemoryResponseCache responseCache, IOptionsMonitor<RouterOptions> options) =>
         {
-            var (hits, misses, sets, current, max) = responseCache.GetStats();
+            var (hits, misses, sets, current, max, currentBytes, maxBytes) = responseCache.GetStats();
             long total = hits + misses;
             return Results.Ok(new
             {
@@ -349,6 +349,8 @@ public static class DashboardHandler
                 sets,
                 currentEntries = current,
                 maxEntries = max,
+                currentBytes,
+                maxBytes,
                 hitRatePercent = total > 0 ? (double)hits / total * 100.0 : 0.0
             });
         });
