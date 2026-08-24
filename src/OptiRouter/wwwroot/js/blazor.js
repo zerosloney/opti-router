@@ -588,3 +588,12 @@ setInterval(function () {
     }, 1000);
 })();
 
+// BFCache 恢复直接刷新：浏览器把页面冻结进 Back-Forward Cache 时会杀掉 WebSocket
+// （控制台 1006），返回该页时 Blazor 内置重连要走完整个协议——电路已销毁时要等
+// 重试耗尽进终态才被上面兜底，期间横幅卡住。pageshow.persisted 即"自 BFCache 恢复"，
+// 直接整页刷新拿新鲜电路：Cookie 有效秒级自愈，过期被 302 到 /login。
+// 每次恢复都刷新是正确行为（需用户一次前进/后退触发，不构成刷新循环，不设防环标记）。
+window.addEventListener('pageshow', function (e) {
+    if (e.persisted) window.location.reload();
+});
+

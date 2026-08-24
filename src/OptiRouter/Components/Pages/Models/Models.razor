@@ -448,13 +448,15 @@
 
                 <div style="display: flex; align-items: center; gap: 12px;">
                     <div class="stepper-nav">
-                        <div class="step-item @(DiscoverStep == 1 ? "active" : "done")" @onclick="() => { if (DiscoverStep == 2) BackToSourceStep(); }">
-                            <span class="step-num-circle">@(DiscoverStep > 1 ? "✓" : "1")</span>
+                        <div class="step-item @(DiscoverStep == 1 ? "active" : "done")" role="button"
+                             tabindex="@(DiscoverStep == 2 ? 0 : -1)" title="@(DiscoverStep == 2 ? "返回上一步" : null)"
+                             @onclick="StepOneClick" @onkeydown="StepOneKey">
+                            <span class="step-num-circle" aria-hidden="true">@(DiscoverStep > 1 ? "✓" : "1")</span>
                             <span>配置上游源</span>
                         </div>
                         <span class="step-divider" aria-hidden="true">›</span>
                         <div class="step-item @(DiscoverStep == 2 ? "active" : "")">
-                            <span class="step-num-circle">2</span>
+                            <span class="step-num-circle" aria-hidden="true">2</span>
                             <span>筛选与导入</span>
                         </div>
                     </div>
@@ -1090,6 +1092,13 @@
     private void BackToSourceStep()
     {
         DiscoverStep = 1;
+    }
+
+    // stepper 第一步仅在 Step 2 时可交互（点击/回车/空格返回上一步）
+    private void StepOneClick() { if (DiscoverStep == 2) BackToSourceStep(); }
+    private void StepOneKey(KeyboardEventArgs e)
+    {
+        if (e.Key is "Enter" or " ") StepOneClick();
     }
 
     private async Task RunDiscoverAsync()

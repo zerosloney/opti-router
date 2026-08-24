@@ -44,13 +44,16 @@ D:/nssm/nssm.exe start OptiRouter
 根因：Blazor Server 页面加载后浏览器不再发 HTTP 请求（全走 WebSocket），Cookie 的
 8h 滑动过期无请求可续期；过期后重连 negotiate 被 302 到 /login，重连永久失败。
 
-两道防线，移除任一都会复发：
+三道防线，移除任一都会复发：
 
 1. `GET /api/dashboard/session/ping`（DashboardHandler，管理端中间件鉴权）+ blazor.js
    每 30 分钟浏览器侧 fetch 续期——必须由浏览器发起，Set-Cookie 才能落回浏览器，
    在 C# 电路里用 ApiService 调用是无效的。
 2. blazor.js 轮询重连终态 class（`components-reconnect-failed`/`rejected`）自动整页刷新：
    Cookie 有效自愈，过期则被 302 回登录页；60s sessionStorage 防循环。
+3. blazor.js `pageshow.persisted`（BFCache 恢复）直接整页刷新：浏览器把页面冻结进
+   Back-Forward Cache 时会杀掉 WebSocket（控制台 1006），返回页面时内置重连要走完
+   整个协议，电路已销毁则横幅卡到终态才被防线 2 兜底——恢复瞬间刷新拿新鲜电路。
 
 ## 开发环境
 

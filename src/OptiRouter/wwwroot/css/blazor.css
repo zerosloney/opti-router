@@ -1769,6 +1769,7 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
 .text-success { color: var(--success); }
 .text-danger { color: var(--danger); }
 .text-warning { color: var(--warning); }
+.text-purple { color: var(--purple); }
 .text-secondary { color: var(--text-secondary); }
 .text-muted { color: var(--text-muted); }
 .text-primary { color: var(--text-primary); }
