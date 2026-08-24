@@ -121,38 +121,131 @@
         else
         {
             var s = Analysis.Summary;
-            <div style="display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0;">
-                <span class="tag tag-secondary">总请求 @UiFormatter.FormatNumber(Analysis.TotalRequests)</span>
-                <span class="tag @(s.SuccessRatePct >= 95 ? "tag-success" : s.SuccessRatePct >= 80 ? "tag-info" : "tag-danger")">成功率 @UiFormatter.FormatPercent(s.SuccessRatePct)（失败 @UiFormatter.FormatNumber(s.Failures)）</span>
-                <span class="tag tag-secondary">成本 @UiFormatter.FormatCost(s.TotalCostUsd)</span>
-                <span class="tag tag-info">P50/P95/P99 @UiFormatter.FormatLatency(s.P50LatencyMs)/@UiFormatter.FormatLatency(s.P95LatencyMs)/@UiFormatter.FormatLatency(s.P99LatencyMs)</span>
-                <span class="tag tag-secondary">Token 入/出 @UiFormatter.FormatNumber(s.PromptTokens)/@UiFormatter.FormatNumber(s.CompletionTokens)</span>
-                <span class="tag @(Analysis.Cascade.TriggerRatePct > 20 ? "tag-warning" : "tag-secondary")">级联触发 @UiFormatter.FormatPercent(Analysis.Cascade.TriggerRatePct)</span>
-                @if (Analysis.Fusion.FusionRequests > 0)
-                {
-                    <span class="tag tag-info">Fusion @UiFormatter.FormatNumber(Analysis.Fusion.FusionRequests) 次</span>
-                }
+            <div class="audit-kpi-grid">
+                <div class="audit-kpi-card">
+                    <div class="audit-kpi-label">
+                        <span>总请求量</span>
+                        <AppIcon Name="requests" Size="13" Class="text-primary" />
+                    </div>
+                    <div class="audit-kpi-val">@UiFormatter.FormatNumber(Analysis.TotalRequests)</div>
+                    <div class="audit-kpi-sub">
+                        @if (s.Failures > 0)
+                        {
+                            <span class="text-danger">失败 @UiFormatter.FormatNumber(s.Failures)</span>
+                        }
+                        else
+                        {
+                            <span class="text-success">全部请求成功</span>
+                        }
+                    </div>
+                </div>
+                <div class="audit-kpi-card">
+                    <div class="audit-kpi-label">
+                        <span>综合成功率</span>
+                        <AppIcon Name="check" Size="13" Class="@(s.SuccessRatePct >= 95 ? "text-success" : s.SuccessRatePct >= 80 ? "text-warning" : "text-danger")" />
+                    </div>
+                    <div class="audit-kpi-val" style="color: @(s.SuccessRatePct >= 95 ? "var(--success)" : s.SuccessRatePct >= 80 ? "var(--warning)" : "var(--danger)");">
+                        @UiFormatter.FormatPercent(s.SuccessRatePct)
+                    </div>
+                    <div class="audit-kpi-sub">
+                        <span>稳定性指数 @(s.SuccessRatePct >= 99 ? "卓越" : s.SuccessRatePct >= 95 ? "良好" : "需排查")</span>
+                    </div>
+                </div>
+                <div class="audit-kpi-card">
+                    <div class="audit-kpi-label">
+                        <span>累计花费成本</span>
+                        <AppIcon Name="shield" Size="13" Class="text-success" />
+                    </div>
+                    <div class="audit-kpi-val" style="color: var(--ok-text);">
+                        @UiFormatter.FormatCost(s.TotalCostUsd)
+                    </div>
+                    <div class="audit-kpi-sub">
+                        <span>平均单次 @UiFormatter.FormatCost(Analysis.TotalRequests > 0 ? (s.TotalCostUsd / Analysis.TotalRequests) : 0.0)</span>
+                    </div>
+                </div>
+                <div class="audit-kpi-card">
+                    <div class="audit-kpi-label">
+                        <span>延迟分位数 (P95)</span>
+                        <AppIcon Name="refresh" Size="13" Class="text-info" />
+                    </div>
+                    <div class="audit-kpi-val">
+                        @UiFormatter.FormatLatency(s.P95LatencyMs)
+                    </div>
+                    <div class="audit-kpi-sub">
+                        <span>P50: @UiFormatter.FormatLatency(s.P50LatencyMs) · P99: @UiFormatter.FormatLatency(s.P99LatencyMs)</span>
+                    </div>
+                </div>
+                <div class="audit-kpi-card">
+                    <div class="audit-kpi-label">
+                        <span>Token 总吞吐</span>
+                        <AppIcon Name="benchmarks" Size="13" Class="text-purple" />
+                    </div>
+                    <div class="audit-kpi-val">
+                        @UiFormatter.FormatCompactNumber(s.PromptTokens + s.CompletionTokens)
+                    </div>
+                    <div class="audit-kpi-sub">
+                        <span>入 @UiFormatter.FormatCompactNumber(s.PromptTokens) / 出 @UiFormatter.FormatCompactNumber(s.CompletionTokens)</span>
+                    </div>
+                </div>
+                <div class="audit-kpi-card">
+                    <div class="audit-kpi-label">
+                        <span>智能路由 & 级联</span>
+                        <AppIcon Name="router" Size="13" Class="text-warning" />
+                    </div>
+                    <div class="audit-kpi-val">
+                        @UiFormatter.FormatPercent(Analysis.Cascade.TriggerRatePct)
+                    </div>
+                    <div class="audit-kpi-sub">
+                        @if (Analysis.Fusion.FusionRequests > 0)
+                        {
+                            <span>Fusion @UiFormatter.FormatNumber(Analysis.Fusion.FusionRequests) 次</span>
+                        }
+                        else
+                        {
+                            <span>级联调度升级率</span>
+                        }
+                    </div>
+                </div>
             </div>
 
-            <div class="chart-pair">
-                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 8px 0 0 0;">
-                    <div class="card-label">按日请求趋势</div>
-                    <div class="chart-container">
+            <!-- 图表对 1: 趋势与模型分布 -->
+            <div class="audit-chart-pair">
+                <div class="audit-sub-card">
+                    <div class="card-label">
+                        <span style="display: inline-flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="requests" Size="15" Class="text-primary" />
+                            <span>按日请求趋势</span>
+                        </span>
+                        <span class="text-secondary" style="font-size: 0.72rem; font-weight: normal;">
+                            日均 @((Analysis.DailyTrend.Count > 0 ? (double)Analysis.TotalRequests / Analysis.DailyTrend.Count : 0).ToString("F0")) 请求 / 天
+                        </span>
+                    </div>
+                    <div class="audit-chart-box">
                         <canvas id="analysis-trend-chart" @ref="AnalysisTrendCanvas" role="img" aria-label="按日请求趋势图"></canvas>
                     </div>
                 </div>
-                <div class="glass-card" style="background: transparent; box-shadow: none; padding: 8px 0 0 0;">
-                    <div class="card-label">模型分布（请求量 · 成功率 · 成本）</div>
-                    <div style="position: relative; width: 100%; height: @(Math.Max(120, Math.Min(8, Analysis.ByModel.Count) * 30 + 16))px;">
+                <div class="audit-sub-card">
+                    <div class="card-label">
+                        <span style="display: inline-flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="overview" Size="15" Class="text-info" />
+                            <span>模型分布 (Top 8)</span>
+                        </span>
+                        <span class="text-secondary" style="font-size: 0.72rem; font-weight: normal;">请求量 · 成功率 · 成本</span>
+                    </div>
+                    <div class="audit-chart-box">
                         <canvas id="analysis-model-chart" @ref="AnalysisModelCanvas" role="img" aria-label="模型请求分布条形图"></canvas>
                     </div>
                 </div>
             </div>
 
-            <div class="chart-pair">
-                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 8px 0 0 0;">
-                    <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; flex-wrap: wrap; gap: 8px;">
-                        <span>供应商用量</span>
+            <!-- 图表对 2: 供应商用量与汇总 -->
+            <div class="audit-chart-pair">
+                <div class="audit-sub-card">
+                    <div class="card-label">
+                        <span style="display: inline-flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="benchmarks" Size="15" Class="text-purple" />
+                            <span>供应商用量</span>
+                        </span>
                         <div class="trend-controls" style="margin-top: 0;">
                             @foreach (var (metric, metricText) in new[] { ("tokens", "输入Token"), ("requests", "请求数"), ("output", "输出Token") })
                             {
@@ -160,21 +253,27 @@
                             }
                         </div>
                     </div>
-                    <div style="position: relative; width: 100%; height: @(Math.Max(120, Math.Min(8, Analysis.ByProvider.Count) * 30 + 16))px;">
+                    <div class="audit-chart-box">
                         <canvas id="analysis-provider-chart" @ref="AnalysisProviderCanvas" role="img" aria-label="供应商用量条形图（可切换请求数与输入输出 Token）"></canvas>
                     </div>
                 </div>
-                <div class="glass-card" style="background: transparent; box-shadow: none; padding: 0;">
-                    <div class="card-label">供应商汇总</div>
-                    <div class="table-wrap">
+                <div class="audit-sub-card">
+                    <div class="card-label">
+                        <span style="display: inline-flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="shield" Size="15" Class="text-success" />
+                            <span>供应商汇总</span>
+                        </span>
+                        <span class="text-secondary" style="font-size: 0.72rem; font-weight: normal;">共 @Analysis.ByProvider.Count 个供应商</span>
+                    </div>
+                    <div class="table-wrap" style="max-height: 220px; overflow-y: auto;">
                         <table class="log-table">
-                            <thead>
+                            <thead style="position: sticky; top: 0; background: var(--bg-surface); z-index: 1;">
                                 <tr>
                                     <th scope="col">供应商</th>
-                                    <th scope="col">模型数</th>
+                                    <th scope="col">模型</th>
                                     <th scope="col">请求</th>
                                     <th scope="col">失败</th>
-                                    <th scope="col">输入tok（缓存）</th>
+                                    <th scope="col">输入tok (缓存)</th>
                                     <th scope="col">输出tok</th>
                                     <th scope="col">成本</th>
                                 </tr>
@@ -187,9 +286,9 @@
                                         <td class="table-mono">@p.ModelCount</td>
                                         <td class="table-mono">@UiFormatter.FormatNumber(p.Requests)</td>
                                         <td class="@(p.Failures > 0 ? "text-danger" : "") table-mono">@p.Failures</td>
-                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(p.PromptTokens) <span class="text-secondary">(@UiFormatter.FormatCompactNumber(p.CachedInputTokens) · @CacheSharePct(p.CachedInputTokens, p.PromptTokens))</span></td>
+                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(p.PromptTokens) <span class="text-secondary" style="font-size: 0.72rem;">(@CacheSharePct(p.CachedInputTokens, p.PromptTokens))</span></td>
                                         <td class="table-mono">@UiFormatter.FormatCompactNumber(p.CompletionTokens)</td>
-                                        <td style="color: var(--ok-text);">@UiFormatter.FormatCost(p.CostUsd)</td>
+                                        <td style="color: var(--ok-text); font-weight: 600;">@UiFormatter.FormatCost(p.CostUsd)</td>
                                     </tr>
                                 }
                             </tbody>
@@ -198,79 +297,133 @@
                 </div>
             </div>
 
-            <div class="chart-pair">
-                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 0;">
-                    <div class="card-label">模型用量（按输入 Token 降序）</div>
+            <!-- 卡片 3: 模型用量全览（通栏表格） -->
+            <div class="audit-sub-card full-width" style="margin-bottom: 14px;">
+                <div class="card-label">
+                    <span style="display: inline-flex; align-items: center; gap: 6px;">
+                        <AppIcon Name="router" Size="15" Class="text-primary" />
+                        <span>模型用量明细 (按输入 Token 降序)</span>
+                    </span>
+                    <span class="text-secondary" style="font-size: 0.72rem; font-weight: normal;">共统计 @Analysis.ByModel.Count 个活跃模型</span>
+                </div>
+                <div class="table-wrap" style="max-height: 320px; overflow-y: auto;">
+                    <table class="log-table">
+                        <thead style="position: sticky; top: 0; background: var(--bg-surface); z-index: 1;">
+                            <tr>
+                                <th scope="col">模型</th>
+                                <th scope="col">供应商</th>
+                                <th scope="col">请求</th>
+                                <th scope="col">成功率</th>
+                                <th scope="col">输入tok (缓存命中)</th>
+                                <th scope="col">输出tok</th>
+                                <th scope="col">成本</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var m in Analysis.ByModel.OrderByDescending(x => x.PromptTokens))
+                            {
+                                <tr>
+                                    <td class="table-mono" title="@m.Model"><strong>@Truncate(m.Model, 36)</strong></td>
+                                    <td><span class="tag tag-secondary">@ProviderOf(m.Model)</span></td>
+                                    <td class="table-mono">@UiFormatter.FormatNumber(m.Requests)</td>
+                                    <td class="@(m.SuccessRatePct >= 95 ? "text-success" : m.SuccessRatePct >= 80 ? "text-warning" : "text-danger") table-mono">@UiFormatter.FormatPercent(m.SuccessRatePct)</td>
+                                    <td class="table-mono">
+                                        <div>@UiFormatter.FormatCompactNumber(m.PromptTokens) <span class="text-secondary" style="font-size: 0.72rem;">(命中 @UiFormatter.FormatCompactNumber(m.CachedInputTokens) · @CacheSharePct(m.CachedInputTokens, m.PromptTokens))</span></div>
+                                        @if (m.PromptTokens > 0 && m.CachedInputTokens > 0)
+                                        {
+                                            <div class="tier-progress-track" style="height: 4px; max-width: 140px;">
+                                                <div class="tier-progress-bar tier-cheap" style="width: @(Math.Min(100.0, 100.0 * m.CachedInputTokens / m.PromptTokens))%;"></div>
+                                            </div>
+                                        }
+                                    </td>
+                                    <td class="table-mono">@UiFormatter.FormatCompactNumber(m.CompletionTokens)</td>
+                                    <td style="color: var(--ok-text); font-weight: 600;">@UiFormatter.FormatCost(m.CostUsd)</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- 卡片对 4: Tier 分布与路由原因 -->
+            <div class="audit-chart-pair equal-split">
+                <div class="audit-sub-card">
+                    <div class="card-label">
+                        <span style="display: inline-flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="router" Size="15" Class="text-info" />
+                            <span>分档 (Tier) 分布</span>
+                        </span>
+                        <span class="text-secondary" style="font-size: 0.72rem; font-weight: normal;">分级流量与成本份额</span>
+                    </div>
                     <div class="table-wrap">
                         <table class="log-table">
                             <thead>
                                 <tr>
-                                    <th scope="col">模型</th>
-                                    <th scope="col">供应商</th>
+                                    <th scope="col">Tier</th>
                                     <th scope="col">请求</th>
+                                    <th scope="col">失败</th>
                                     <th scope="col">成功率</th>
-                                    <th scope="col">输入tok（缓存命中）</th>
-                                    <th scope="col">输出tok</th>
                                     <th scope="col">成本</th>
+                                    <th scope="col">成本份额</th>
                                 </tr>
-                            </thead>
-                            <tbody>
-                                @foreach (var m in Analysis.ByModel.OrderByDescending(x => x.PromptTokens))
-                                {
-                                    <tr>
-                                        <td class="table-mono" title="@m.Model">@Truncate(m.Model, 36)</td>
-                                        <td><span class="tag tag-secondary">@ProviderOf(m.Model)</span></td>
-                                        <td class="table-mono">@UiFormatter.FormatNumber(m.Requests)</td>
-                                        <td class="@(m.SuccessRatePct >= 80 ? "text-success" : "text-danger")">@UiFormatter.FormatPercent(m.SuccessRatePct)</td>
-                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(m.PromptTokens) <span class="text-secondary">(@UiFormatter.FormatCompactNumber(m.CachedInputTokens) · @CacheSharePct(m.CachedInputTokens, m.PromptTokens))</span></td>
-                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(m.CompletionTokens)</td>
-                                        <td style="color: var(--ok-text);">@UiFormatter.FormatCost(m.CostUsd)</td>
-                                    </tr>
-                                }
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <div class="chart-pair">
-                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 0;">
-                    <div class="card-label">分档 (Tier) 分布</div>
-                    <div class="table-wrap">
-                        <table class="log-table">
-                            <thead>
-                                <tr><th scope="col">Tier</th><th scope="col">请求</th><th scope="col">失败</th><th scope="col">成功率</th><th scope="col">成本</th><th scope="col">成本份额</th></tr>
                             </thead>
                             <tbody>
                                 @foreach (var t in Analysis.ByTier)
                                 {
+                                    var tierClass = t.Tier.ToLowerInvariant() switch
+                                    {
+                                        "strong" => "tier-strong",
+                                        "medium" => "tier-medium",
+                                        _ => "tier-cheap"
+                                    };
                                     <tr>
-                                        <td><span class="tag tag-info">@t.Tier</span></td>
+                                        <td>
+                                            <span class="tag @(t.Tier == "Strong" ? "tag-danger" : t.Tier == "Medium" ? "tag-info" : "tag-success")">@t.Tier</span>
+                                        </td>
                                         <td class="table-mono">@UiFormatter.FormatNumber(t.Requests)</td>
                                         <td class="@(t.Failures > 0 ? "text-danger" : "") table-mono">@t.Failures</td>
-                                        <td>@UiFormatter.FormatPercent(t.SuccessRatePct)</td>
-                                        <td style="color: var(--ok-text);">@UiFormatter.FormatCost(t.CostUsd)</td>
-                                        <td>@UiFormatter.FormatPercent(t.CostSharePct)</td>
+                                        <td class="table-mono">@UiFormatter.FormatPercent(t.SuccessRatePct)</td>
+                                        <td style="color: var(--ok-text); font-weight: 600;">@UiFormatter.FormatCost(t.CostUsd)</td>
+                                        <td>
+                                            <div style="display: flex; align-items: center; gap: 8px;">
+                                                <span class="table-mono" style="font-size: 0.78rem; min-width: 40px;">@UiFormatter.FormatPercent(t.CostSharePct)</span>
+                                                <div class="tier-progress-track" style="flex: 1; min-width: 50px;">
+                                                    <div class="tier-progress-bar @tierClass" style="width: @(Math.Min(100.0, t.CostSharePct))%;"></div>
+                                                </div>
+                                            </div>
+                                        </td>
                                     </tr>
                                 }
                             </tbody>
                         </table>
                     </div>
                 </div>
-                <div class="glass-card" style="background: transparent; box-shadow: none; padding: 0;">
-                    <div class="card-label">路由原因 Top 5</div>
+                <div class="audit-sub-card">
+                    <div class="card-label">
+                        <span style="display: inline-flex; align-items: center; gap: 6px;">
+                            <AppIcon Name="benchmarks" Size="15" Class="text-warning" />
+                            <span>路由原因 Top 5</span>
+                        </span>
+                        <span class="text-secondary" style="font-size: 0.72rem; font-weight: normal;">决策归因与自动升配</span>
+                    </div>
                     <div class="table-wrap">
                         <table class="log-table">
                             <thead>
-                                <tr><th scope="col">原因</th><th scope="col">次数</th><th scope="col">成功率</th></tr>
+                                <tr>
+                                    <th scope="col">原因</th>
+                                    <th scope="col">次数</th>
+                                    <th scope="col">成功率</th>
+                                </tr>
                             </thead>
                             <tbody>
                                 @foreach (var r in Analysis.ByReason.Take(5))
                                 {
                                     <tr>
-                                        <td title="@r.Reason" style="max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">@Truncate(r.Reason, 40)</td>
+                                        <td title="@r.Reason" style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                            <span class="text-secondary" style="font-size: 0.8rem;">@Truncate(r.Reason, 38)</span>
+                                        </td>
                                         <td class="table-mono">@UiFormatter.FormatNumber(r.Requests)</td>
-                                        <td class="@(r.SuccessRatePct >= 80 ? "text-success" : "text-danger")">@UiFormatter.FormatPercent(r.SuccessRatePct)</td>
+                                        <td class="@(r.SuccessRatePct >= 80 ? "text-success" : "text-danger") table-mono">@UiFormatter.FormatPercent(r.SuccessRatePct)</td>
                                     </tr>
                                 }
                             </tbody>
@@ -278,11 +431,11 @@
                     </div>
                     @if (Analysis.Cascade.UpgradedFrom.Count > 0)
                     {
-                        <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px;">
-                            <span class="text-secondary" style="font-size: 0.78rem;">级联升级自：</span>
+                        <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border-subtle);">
+                            <span class="text-secondary" style="font-size: 0.75rem;">级联升级自：</span>
                             @foreach (var kv in Analysis.Cascade.UpgradedFrom.Take(6))
                             {
-                                <span class="tag tag-secondary">@kv.Key ×@kv.Value</span>
+                                <span class="tag tag-secondary" style="font-size: 0.72rem;">@kv.Key ×@kv.Value</span>
                             }
                         </div>
                     }
@@ -306,12 +459,14 @@
                 <span>@AuditError</span>
             </div>
         }
-        <div class="log-controls">
-            <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" style="width: 140px;" />
-            <input type="text" placeholder="搜索 Request/Trace ID..." @bind="LogFilterQuery" style="width: 170px;" />
-            <input type="datetime-local" title="起始时间（本地时区）" @bind="LogFilterFrom" style="width: 170px;" />
-            <span class="text-secondary">→</span>
-            <input type="datetime-local" title="结束时间（本地时区）" @bind="LogFilterTo" style="width: 170px;" />
+        <div class="audit-log-controls">
+            <input type="text" placeholder="按模型筛选..." @bind="LogFilterModel" />
+            <input type="text" placeholder="搜索 Request/Trace ID..." @bind="LogFilterQuery" />
+            <div class="date-range-group">
+                <input type="datetime-local" title="起始时间（本地时区）" @bind="LogFilterFrom" />
+                <span class="text-secondary">→</span>
+                <input type="datetime-local" title="结束时间（本地时区）" @bind="LogFilterTo" />
+            </div>
             <select @bind="LogFilterTier">
                 <option value="">全能力分档</option>
                 <option value="Strong">Strong</option>
@@ -333,14 +488,16 @@
                 <option value="50">每页 50 条</option>
                 <option value="100">每页 100 条</option>
             </select>
-            <button class="btn-primary" @onclick="ApplyLogFilters">
-                <AppIcon Name="search" Size="14" />
-                <span>组合筛选</span>
-            </button>
-            <button class="btn-ghost" @onclick="ExportLogCsv">
-                <AppIcon Name="download" Size="14" />
-                <span>导出 CSV</span>
-            </button>
+            <div class="audit-log-actions">
+                <button class="btn-primary" style="flex: 1;" @onclick="ApplyLogFilters">
+                    <AppIcon Name="search" Size="14" />
+                    <span>组合筛选</span>
+                </button>
+                <button class="btn-ghost" style="flex: 1;" @onclick="ExportLogCsv">
+                    <AppIcon Name="download" Size="14" />
+                    <span>导出 CSV</span>
+                </button>
+            </div>
         </div>
         @if (AuditItems.Any())
         {

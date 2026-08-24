@@ -481,61 +481,79 @@ window.drawAnalysisTrendChart = function(canvas, data) {
 window.drawAnalysisBarChart = function(canvas, items) {
     if (!canvas || !items || items.length === 0) return;
     
-    var ctx = canvas.getContext('2d');
-    var dpr = window.devicePixelRatio || 1;
-    var rect = canvas.parentElement.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) return;
-    
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.scale(dpr, dpr);
-    
-    var W = rect.width, H = rect.height;
-    var labelW = Math.min(180, W * 0.32);
-    var rowH = Math.min(32, H / items.length);
-    var barMax = Math.max(40, W - labelW - 130);
-    ctx.clearRect(0, 0, W, H);
-    
-    var isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-    var primary = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
-    var textSecondary = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
-    var trackBg = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(15, 23, 42, 0.05)';
-    
-    var mx = Math.max.apply(null, items.map(function(d){ return d.value; }).concat([0.001]));
+    canvas._analysisBarItems = items;
+    if (!canvas._hasBarResizeObserver) {
+        canvas._hasBarResizeObserver = true;
+        if (window.ResizeObserver && canvas.parentElement) {
+            new ResizeObserver(function() {
+                if (canvas._analysisBarItems) render();
+            }).observe(canvas.parentElement);
+        }
+    }
 
-    items.forEach(function(it, i) {
-        var cy = i * rowH + rowH / 2;
+    function render() {
+        var curItems = canvas._analysisBarItems;
+        if (!curItems || curItems.length === 0) return;
+        var ctx = canvas.getContext('2d');
+        var dpr = window.devicePixelRatio || 1;
+        var rect = canvas.parentElement.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
         
-        // 标签（左对齐，超长截断）
-        ctx.fillStyle = textSecondary;
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'left';
-        var label = it.label || '-';
-        while (ctx.measureText(label).width > labelW - 12 && label.length > 4) label = label.slice(0, -2);
-        ctx.fillText(label, 0, cy + 3.5);
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
         
-        // 底层轨道 (Track)
-        ctx.fillStyle = trackBg;
-        roundRect(ctx, labelW, cy - 6, barMax, 12, 6);
-        ctx.fill();
+        var W = rect.width, H = rect.height;
+        var labelW = Math.min(180, W * 0.32);
+        var rowH = Math.min(30, Math.max(22, H / curItems.length));
+        var totalContentH = curItems.length * rowH;
+        var startY = totalContentH < H ? (H - totalContentH) / 2 : 0;
+        var barMax = Math.max(40, W - labelW - 140);
+        ctx.clearRect(0, 0, W, H);
         
-        // 前景条 (Gradient Bar)
-        var bw = Math.max(4, barMax * it.value / mx);
-        var barGrad = ctx.createLinearGradient(labelW, 0, labelW + bw, 0);
-        barGrad.addColorStop(0, primary);
-        barGrad.addColorStop(1, isDark ? '#38bdf8' : '#0284c7');
+        var isDark = document.documentElement.getAttribute('data-theme') !== 'light';
+        var primary = getComputedStyle(document.documentElement).getPropertyValue('--primary').trim() || '#6366f1';
+        var textSecondary = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#64748b';
+        var trackBg = isDark ? 'rgba(255, 255, 255, 0.05)' : 'rgba(15, 23, 42, 0.05)';
         
-        ctx.fillStyle = barGrad;
-        roundRect(ctx, labelW, cy - 6, bw, 12, 6);
-        ctx.fill();
-        
-        // 数值与指标文本
-        ctx.fillStyle = isDark ? '#e2e8f0' : '#334155';
-        ctx.font = '11px "JetBrains Mono", monospace';
-        ctx.textAlign = 'left';
-        ctx.fillText(it.text || String(it.value), labelW + barMax + 12, cy + 3.5);
-    });
+        var mx = Math.max.apply(null, curItems.map(function(d){ return d.value; }).concat([0.001]));
+
+        curItems.forEach(function(it, i) {
+            var cy = startY + i * rowH + rowH / 2;
+            
+            // 标签（左对齐，超长截断）
+            ctx.fillStyle = textSecondary;
+            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.textAlign = 'left';
+            var label = it.label || '-';
+            while (ctx.measureText(label).width > labelW - 12 && label.length > 4) label = label.slice(0, -2);
+            ctx.fillText(label, 0, cy + 3.5);
+            
+            // 底层轨道 (Track)
+            ctx.fillStyle = trackBg;
+            roundRect(ctx, labelW, cy - 6, barMax, 12, 6);
+            ctx.fill();
+            
+            // 前景条 (Gradient Bar)
+            var bw = Math.max(4, barMax * it.value / mx);
+            var barGrad = ctx.createLinearGradient(labelW, 0, labelW + bw, 0);
+            barGrad.addColorStop(0, primary);
+            barGrad.addColorStop(1, isDark ? '#38bdf8' : '#0284c7');
+            
+            ctx.fillStyle = barGrad;
+            roundRect(ctx, labelW, cy - 6, bw, 12, 6);
+            ctx.fill();
+            
+            // 数值与指标文本
+            ctx.fillStyle = isDark ? '#e2e8f0' : '#334155';
+            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(it.text || String(it.value), labelW + barMax + 12, cy + 3.5);
+        });
+    }
+
+    render();
 };
 
 // ===== Blazor Server 会话保活与断线恢复 =====

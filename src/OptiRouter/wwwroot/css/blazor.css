@@ -1869,60 +1869,171 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
    从上游拉取模型弹窗 & 表单内模型快捷拉取选择器
    ========================================================================== */
 
+/* ==========================================================================
+   从上游拉取模型弹窗 & 表单内模型快捷拉取选择器 (Modern Redesign)
+   ========================================================================== */
+
 .modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.65);
-    backdrop-filter: blur(8px);
+    background: rgba(0, 0, 0, 0.72);
+    backdrop-filter: blur(10px);
     z-index: 1000;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 1.5rem;
     animation: fade-in 0.2s var(--ease-out);
 }
 
 .discover-modal {
-    width: min(860px, 95vw);
+    width: min(920px, 96vw);
     max-height: 88vh;
     display: flex;
     flex-direction: column;
-    padding: 1.5rem;
-    border-radius: var(--radius-lg);
-    background: var(--bg-surface);
-    border: 1px solid var(--border);
-    box-shadow: var(--shadow-modal);
+    padding: 0;
+    border-radius: var(--radius-xl);
+    background: linear-gradient(180deg, var(--bg-surface) 0%, var(--bg-card) 100%);
+    border: 1px solid var(--border-hover);
+    box-shadow: var(--shadow-modal), 0 0 0 1px rgba(255, 255, 255, 0.06);
     animation: modal-scale-in 0.22s var(--ease-out);
+    overflow: hidden;
 }
 
 .discover-modal .modal-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding-bottom: 0.9rem;
+    padding: 1.1rem 1.5rem;
     border-bottom: 1px solid var(--border);
-    margin-bottom: 1rem;
+    background: rgba(255, 255, 255, 0.015);
+    margin-bottom: 0;
 }
 
-.discover-modal .modal-title {
+.discover-modal .modal-header-left {
     display: flex;
     align-items: center;
-    gap: 10px;
-    font-size: 1.08rem;
+    gap: 12px;
+}
+
+.discover-modal .modal-icon-glow {
+    width: 36px;
+    height: 36px;
+    border-radius: 10px;
+    background: var(--primary-glow);
+    border: 1px solid var(--primary-border);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--primary);
+    flex-shrink: 0;
+}
+
+.discover-modal .modal-title-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.discover-modal .modal-title-text {
+    font-size: 1.05rem;
     font-weight: 600;
     color: var(--text-primary);
-    flex-wrap: wrap;
+    letter-spacing: -0.01em;
+}
+
+.discover-modal .modal-subtitle {
+    font-size: 0.74rem;
+    color: var(--text-secondary);
+}
+
+/* Stepper Component */
+.stepper-nav {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    padding: 3px 6px;
+    border-radius: var(--radius-full);
+}
+
+.step-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    padding: 3px 10px;
+    border-radius: var(--radius-full);
+    transition: all var(--duration-fast);
+    cursor: default;
+}
+
+.step-item.active {
+    background: var(--primary-glow);
+    border: 1px solid var(--primary-border);
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.step-item.done {
+    color: var(--success);
+    cursor: pointer;
+}
+
+.step-item.done:hover {
+    background: var(--bg-subtle-hover);
+}
+
+.step-num-circle {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    font-size: 0.68rem;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    transition: all var(--duration-fast);
+}
+
+.step-item.active .step-num-circle {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #ffffff;
+    box-shadow: 0 0 10px rgba(99, 102, 241, 0.4);
+}
+
+.step-item.done .step-num-circle {
+    background: var(--success);
+    border-color: var(--success);
+    color: #ffffff;
+}
+
+.step-divider {
+    color: var(--text-faint);
+    font-size: 0.75rem;
 }
 
 .discover-modal .modal-x {
     background: transparent;
     border: none;
-    font-size: 1.4rem;
+    font-size: 1.3rem;
     line-height: 1;
     color: var(--text-secondary);
     cursor: pointer;
-    padding: 2px 8px;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border-radius: var(--radius-sm);
-    transition: color var(--duration-fast), background var(--duration-fast);
+    transition: all var(--duration-fast);
 }
 
 .discover-modal .modal-x:hover {
@@ -1933,84 +2044,241 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
 .discover-modal .modal-body {
     flex: 1;
     overflow-y: auto;
-    padding-right: 4px;
+    padding: 1.25rem 1.5rem;
     display: flex;
     flex-direction: column;
-    gap: 0.9rem;
+    gap: 1rem;
 }
 
 .discover-modal .modal-footer {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
     align-items: center;
     gap: 0.75rem;
-    padding-top: 1rem;
+    padding: 1rem 1.5rem;
     border-top: 1px solid var(--border);
-    margin-top: 0.75rem;
+    background: rgba(255, 255, 255, 0.015);
+    margin-top: 0;
 }
 
-.step-badge {
+.discover-modal .modal-footer-right {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+/* Source Switcher (Segmented Tab Control) */
+.source-segmented-tabs {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 3px;
+    gap: 4px;
+}
+
+.source-tab-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 8px 14px;
+    font-size: 0.84rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all var(--duration-fast);
+}
+
+.source-tab-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-subtle);
+}
+
+.source-tab-btn.active {
+    background: var(--bg-card);
+    border-color: var(--border-hover);
+    color: var(--text-primary);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+}
+
+/* Provider Quick Preset Chips */
+.preset-section {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.preset-title {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.preset-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.preset-pill {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    font-size: 0.75rem;
-    padding: 2px 9px;
-    border-radius: 9999px;
-    background: var(--bg-subtle);
+    font-size: 0.76rem;
+    padding: 4px 10px;
+    background: var(--bg-surface);
     border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
     color: var(--text-secondary);
-    font-weight: 500;
+    cursor: pointer;
+    transition: all var(--duration-fast);
 }
 
-.step-badge.active {
-    background: rgba(99, 102, 241, 0.15);
-    border-color: rgba(99, 102, 241, 0.4);
+.preset-pill:hover {
+    border-color: var(--primary);
+    color: var(--text-primary);
+    background: var(--bg-subtle-hover);
+    transform: translateY(-1px);
+}
+
+.preset-pill.active {
+    background: var(--primary-glow);
+    border-color: var(--primary);
     color: var(--primary);
     font-weight: 600;
 }
 
-.step-badge .step-num {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    font-size: 0.66rem;
-    font-weight: 700;
-    flex: none;
-    background: var(--bg-subtle-hover);
+/* Existing Model Summary Card */
+.source-preview-card {
+    background: var(--bg-subtle);
     border: 1px solid var(--border);
+    border-left: 3px solid var(--primary);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+}
+
+.preview-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.preview-label {
+    font-size: 0.7rem;
     color: var(--text-muted);
-    transition: all var(--duration-fast);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
 }
 
-.step-badge.active .step-num {
-    background: var(--primary);
-    border-color: var(--primary);
-    color: #fff;
+.preview-value {
+    font-size: 0.82rem;
+    color: var(--text-primary);
 }
 
-.step-badge.done {
+/* Discovering Scanner Animation Banner */
+.discovering-banner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: rgba(99, 102, 241, 0.08);
+    border: 1px solid var(--primary-border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    font-size: 0.84rem;
+}
+
+.discovering-pulse-ring {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    border: 2px solid var(--primary);
+    border-top-color: transparent;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+/* Step 2: Source Breadcrumb / Header Bar */
+.discover-source-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    font-size: 0.78rem;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.discover-source-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     color: var(--text-secondary);
 }
 
-.step-badge.done .step-num {
-    background: var(--success-glow);
-    border-color: var(--success-border);
-    color: var(--success);
+.discover-source-url {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-primary);
+    font-size: 0.78rem;
 }
 
-.step-sep {
-    color: var(--text-faint);
-    font-size: 0.85rem;
+.discover-switch-link {
+    color: var(--primary);
+    font-weight: 500;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.78rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
 }
 
+.discover-switch-link:hover {
+    text-decoration: underline;
+}
+
+/* Bulk Config Card in Step 2 */
 .bulk-config-card {
     background: var(--bg-subtle);
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
-    padding: 0.85rem 1rem;
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.bulk-config-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 0.76rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.bulk-config-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 10px;
@@ -2024,9 +2292,9 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
 }
 
 .bulk-config-card label {
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     font-weight: 500;
-    color: var(--text-secondary);
+    color: var(--text-muted);
 }
 
 .bulk-config-card select,
@@ -2035,28 +2303,102 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     font-size: 0.82rem;
     padding: 4px 8px;
     border-radius: var(--radius-sm);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
 }
 
+/* Step 2 Toolbar & Filters */
 .discover-toolbar {
     display: flex;
     justify-content: space-between;
     align-items: center;
     gap: 10px;
     flex-wrap: wrap;
-    padding: 4px 0;
+    padding: 2px 0;
 }
 
-.discover-search-input {
-    min-width: 220px;
+.discover-search-wrap {
+    position: relative;
+    display: flex;
+    align-items: center;
     flex: 1;
-    max-width: 340px;
-    height: 32px;
-    font-size: 0.82rem;
-    padding: 4px 10px;
+    min-width: 220px;
+    max-width: 320px;
 }
 
+.discover-search-wrap .search-icon {
+    position: absolute;
+    left: 9px;
+    color: var(--text-muted);
+    pointer-events: none;
+    display: flex;
+}
+
+.discover-search-wrap input {
+    width: 100%;
+    height: 32px;
+    padding-left: 30px;
+    padding-right: 26px;
+    font-size: 0.8rem;
+    border-radius: var(--radius-sm);
+}
+
+.discover-search-clear {
+    position: absolute;
+    right: 6px;
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    cursor: pointer;
+    padding: 2px 4px;
+}
+
+.discover-search-clear:hover {
+    color: var(--text-primary);
+}
+
+.filter-pills-group {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    padding: 2px;
+}
+
+.filter-pill-btn {
+    background: transparent;
+    border: none;
+    font-size: 0.74rem;
+    padding: 3px 8px;
+    border-radius: 4px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all var(--duration-fast);
+}
+
+.filter-pill-btn:hover {
+    color: var(--text-primary);
+}
+
+.filter-pill-btn.active {
+    background: var(--bg-card);
+    color: var(--primary);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+}
+
+.batch-actions-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* Model Discovered Table */
 .discover-table-wrap {
-    max-height: 320px;
+    max-height: 330px;
     overflow-y: auto;
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
@@ -2072,22 +2414,79 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
 .discover-table thead th {
     position: sticky;
     top: 0;
-    background: var(--bg-subtle);
+    background: var(--bg-surface);
+    backdrop-filter: blur(8px);
     z-index: 2;
     padding: 8px 12px;
     text-align: left;
     font-weight: 600;
     color: var(--text-secondary);
     border-bottom: 1px solid var(--border);
+    font-size: 0.76rem;
 }
 
 .discover-table tbody td {
     padding: 8px 12px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    border-bottom: 1px solid var(--border-subtle);
+    vertical-align: middle;
+}
+
+.discover-table tbody tr {
+    transition: background var(--duration-fast);
 }
 
 .discover-table tbody tr:hover {
     background: var(--bg-subtle-hover);
+}
+
+.discover-table tbody tr.row-selected {
+    background: rgba(99, 102, 241, 0.05);
+}
+
+.model-id-cell {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 500;
+    color: var(--text-primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn-row-add {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.72rem;
+    padding: 3px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    color: var(--primary);
+    cursor: pointer;
+    transition: all var(--duration-fast);
+}
+
+.btn-row-add:hover:not(:disabled) {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #ffffff;
+}
+
+.btn-row-add:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Empty State inside table */
+.discover-empty-state {
+    padding: 2.5rem 1rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 0.82rem;
 }
 
 /* 模型添加/编辑表单内 — 模型选择器 */
@@ -2933,6 +3332,190 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     background: linear-gradient(90deg, var(--primary) 0%, #38bdf8 100%);
     border-radius: 999px;
     transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ==========================================================================
+   Requests & Audit Analysis Page Refinements
+   ========================================================================== */
+
+/* 顶部 6 栏自适应 KPI 指标网格 */
+.audit-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 10px;
+    margin: 12px 0 16px 0;
+}
+
+.audit-kpi-card {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: all var(--duration-fast);
+    position: relative;
+    overflow: hidden;
+}
+
+.audit-kpi-card:hover {
+    border-color: var(--primary-border);
+    background: var(--bg-subtle-hover);
+    transform: translateY(-1px);
+}
+
+.audit-kpi-label {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-weight: 500;
+}
+
+.audit-kpi-val {
+    font-size: 1.35rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    font-family: 'JetBrains Mono', monospace;
+    margin: 4px 0 2px 0;
+    line-height: 1.2;
+}
+
+.audit-kpi-sub {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* 审计分析嵌套子卡片 */
+.audit-sub-card {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.audit-sub-card.full-width {
+    width: 100%;
+}
+
+.audit-sub-card .card-label {
+    margin-bottom: 0;
+    font-size: 0.88rem;
+    font-weight: 600;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.audit-chart-pair {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 14px;
+    margin-bottom: 14px;
+}
+
+.audit-chart-pair.equal-split {
+    grid-template-columns: 1fr 1fr;
+}
+
+@media (max-width: 1024px) {
+    .audit-chart-pair,
+    .audit-chart-pair.equal-split {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* 图表自适应容器 */
+.audit-chart-box {
+    position: relative;
+    width: 100%;
+    height: 220px;
+    display: flex;
+    align-items: center;
+}
+
+/* 响应式日志筛选栏 */
+.audit-log-controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+    gap: 8px;
+    margin-bottom: 1rem;
+    align-items: center;
+}
+
+.audit-log-controls .date-range-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    grid-column: span 2;
+}
+
+@media (max-width: 768px) {
+    .audit-log-controls .date-range-group {
+        grid-column: span 1;
+        flex-direction: column;
+        align-items: stretch;
+    }
+}
+
+.audit-log-controls input,
+.audit-log-controls select {
+    width: 100%;
+    height: 34px;
+    padding: 4px 8px;
+    font-size: 0.8rem;
+}
+
+.audit-log-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    grid-column: span 2;
+}
+
+@media (max-width: 768px) {
+    .audit-log-actions {
+        grid-column: span 1;
+    }
+}
+
+/* Tier 与模型分布进度条 */
+.tier-progress-track {
+    width: 100%;
+    height: 6px;
+    background: var(--bg-input);
+    border-radius: var(--radius-full);
+    overflow: hidden;
+    margin-top: 3px;
+}
+
+.tier-progress-bar {
+    height: 100%;
+    border-radius: var(--radius-full);
+    transition: width 0.3s ease;
+}
+
+.tier-progress-bar.tier-strong {
+    background: linear-gradient(90deg, #8b5cf6, #a855f7);
+}
+
+.tier-progress-bar.tier-medium {
+    background: linear-gradient(90deg, #3b82f6, #06b6d4);
+}
+
+.tier-progress-bar.tier-cheap {
+    background: linear-gradient(90deg, #10b981, #34d399);
 }
 
 
