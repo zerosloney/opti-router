@@ -86,12 +86,21 @@ public static class ModelsConfigHandler
             if (string.IsNullOrWhiteSpace(req.BaseUrl))
                 return Results.BadRequest(new { error = "BaseUrl is required" });
 
+            // 凭据复制：ApiKey 缺省时从既有模型（discover 批量导入的凭证源）在服务端复制，
+            // 明文 key 不出服务端——前端不再需要 reveal 后回传。
+            string? apiKey = req.ApiKey;
+            if (string.IsNullOrWhiteSpace(apiKey) && !string.IsNullOrWhiteSpace(req.ApiKeySourceModel))
+            {
+                apiKey = cfg.LoadModels()
+                    .FirstOrDefault(m => string.Equals(m.Name, req.ApiKeySourceModel, StringComparison.Ordinal))?.ApiKey;
+            }
+
             var model = new ModelEndpointOptions
             {
                 Name = req.Name?.Trim() ?? string.Empty,
                 Id = req.Id?.Trim() ?? string.Empty,
                 BaseUrl = req.BaseUrl.Trim().TrimEnd('/'),
-                ApiKey = req.ApiKey,
+                ApiKey = apiKey,
                 Provider = req.Provider?.Trim() ?? string.Empty,
                 Family = req.Family?.Trim() ?? string.Empty,
                 Tier = Enum.TryParse<ModelTier>(req.Tier, ignoreCase: true, out var tier) ? tier : ModelTier.Medium,
@@ -514,7 +523,8 @@ public static class ModelsConfigHandler
         decimal? CachedInputPricePerMillion = null,
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null,
-        double Weight = 1.0);
+        double Weight = 1.0,
+        string? ApiKeySourceModel = null);
 }
 
 /// <summary>上游 provider 模型拉取请求。ApiKey 可空，开源自托管多不要求鉴权；ModelName 指定时自动复用已配置模型的凭据与端点。</summary>

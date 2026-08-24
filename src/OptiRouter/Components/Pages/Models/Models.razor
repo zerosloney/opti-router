@@ -872,6 +872,8 @@
     private string DiscoverSourceBaseUrl = "";
     private string DiscoverSourceProtocol = "OpenAI";
     private string? DiscoverSourceApiKey;
+    /// <summary>已有模型源拉取时的凭证源模型名（批量导入经服务端 ApiKeySourceModel 复制 key，明文不出服务端）；手动输入模式为 null。</summary>
+    private string? DiscoverSourceModelName;
 
     private record ProviderPreset(string Name, string BaseUrl, string Protocol, string Icon, string Hint);
     private static readonly ProviderPreset[] Presets = new[]
@@ -1079,6 +1081,7 @@
         DiscoverSourceBaseUrl = "";
         DiscoverSourceProtocol = "OpenAI";
         DiscoverSourceApiKey = null;
+        DiscoverSourceModelName = null;
         DiscoverSearchText = "";
         BulkAddDeployType = "public";
         ShowDiscoverModal = true;
@@ -1117,16 +1120,18 @@
             DiscoverSourceProtocol = DiscoverManualProtocol;
             DiscoverSourceApiKey = string.IsNullOrWhiteSpace(DiscoverManualApiKey) ? null : DiscoverManualApiKey.Trim();
             apiKey = DiscoverSourceApiKey;
+            DiscoverSourceModelName = null; // 手动输入的 key 随请求明文传递，无需服务端复制
         }
         else
         {
             var src = ModelList.FirstOrDefault(m => m.Name == DiscoverSelectedModelName) ?? ModelList.FirstOrDefault(m => m.Enabled);
             if (src is null) { DiscoverError = "选择的已有模型已不存在"; return; }
             DiscoverSourceBaseUrl = src.BaseUrl;
-            var (key, _) = await Api.RevealModelApiKeyAsync(src.Name);
-            DiscoverSourceApiKey = key;
-            apiKey = key;
+            // 凭据零回传：discover 由服务端按 ModelName 解析；批量导入经 ApiKeySourceModel 服务端复制。
+            DiscoverSourceApiKey = null;
+            apiKey = null;
             modelName = src.Name;
+            DiscoverSourceModelName = src.Name;
             if (string.Equals(src.Provider, "gemini", StringComparison.OrdinalIgnoreCase) ||
                 src.BaseUrl.Contains("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase))
             {
@@ -1175,6 +1180,7 @@
             Name: row.Model.Id,
             BaseUrl: DiscoverSourceBaseUrl,
             ApiKey: DiscoverSourceApiKey,
+            ApiKeySourceModel: DiscoverSourceModelName,
             Tier: BulkAddTier,
             MaxContextTokens: BulkAddMaxContextTokens,
             TimeoutSeconds: 120,
@@ -1224,6 +1230,7 @@
                     Name: row.Model.Id,
                     BaseUrl: DiscoverSourceBaseUrl,
                     ApiKey: DiscoverSourceApiKey,
+                    ApiKeySourceModel: DiscoverSourceModelName,
                     Tier: BulkAddTier,
                     MaxContextTokens: BulkAddMaxContextTokens,
                     TimeoutSeconds: 120,

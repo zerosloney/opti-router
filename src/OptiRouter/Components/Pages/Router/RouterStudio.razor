@@ -785,6 +785,13 @@
                 <span class="tag @(Metrics?.System.Routing.EnableLatencyAware == true ? "tag-success" : "tag-warning")">
                     延迟感知重排 @(Metrics?.System.Routing.EnableLatencyAware == true ? "已启用" : "未启用")
                 </span>
+                @if (Calibration is not null)
+                {
+                    <span class="tag @(Calibration.Ratio is >= 0.9 and <= 1.1 ? "tag-success" : "tag-info")"
+                          title="token 估算校准比率（actual/estimated 的 EMA）与采样数。长期偏离 1.0 = 内层估算偏差未被拉平，预算预留会失准。">
+                        估算校准 ×@Calibration.Ratio.ToString("F2")（n=@Calibration.Observations）
+                    </span>
+                }
                 <button class="btn-ghost btn-sm" @onclick="ExportLearningCsv">
                     <AppIcon Name="download" Size="14" />
                     <span>导出 CSV</span>
@@ -1183,6 +1190,7 @@
 @code {
     private ApiService.DashboardMetrics? Metrics;
     private List<ApiService.LearningStateDto> LearningStates = new();
+    private ApiService.CalibrationDiagnosticsDto? Calibration;
     private List<ApiService.ConfigChangeDto> ConfigChanges = new();
     private string? LearningStatusMsg;
     private bool LearningStatusOk;
@@ -1955,6 +1963,7 @@
         try
         {
             LearningStates = await Api.GetLearningAsync();
+            Calibration = await Api.GetCalibrationDiagnosticsAsync();
             LearningError = null;
         }
         catch (Exception ex)

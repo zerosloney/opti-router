@@ -138,6 +138,21 @@ public static class DashboardHandler
             return Results.Text("\uFEFF" + sb.ToString(), "text/csv", System.Text.Encoding.UTF8);
         });
 
+        // 3d. token 估算校准诊断：校准比率 EMA（actual/estimated）与采样数。
+        //     验证 CalibratingTokenEstimator 收敛情况——比率长期偏离 1.0 说明内层估算
+        //     偏差未被拉平（如修复前的平方根收敛缺陷），预算预留会系统性失准。
+        endpoints.MapGet("/api/dashboard/diagnostics/calibration", (
+            Routing.CalibratingTokenEstimator estimator,
+            IOptionsMonitor<RouterOptions> options) =>
+        {
+            return Results.Json(new
+            {
+                mode = options.CurrentValue.Routing.TokenEstimation.ToString(),
+                ratio = Math.Round(estimator.CurrentRatio, 4),
+                observations = estimator.Observations
+            });
+        });
+
         // 3d. Alert History：告警出现/恢复事件（进程内环形缓冲，重启清空）
         endpoints.MapGet("/api/dashboard/alerts/history", (AlertHistory history)
             => Results.Ok(history.GetRecent(100)));

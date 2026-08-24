@@ -119,6 +119,10 @@ public class ApiService
         return result ?? new List<LearningStateDto>();
     }
 
+    /// <summary>token 估算校准诊断（比率 EMA + 采样数 + 估算模式）。</summary>
+    public async Task<CalibrationDiagnosticsDto?> GetCalibrationDiagnosticsAsync()
+        => await GetFromJsonAsync<CalibrationDiagnosticsDto>(Url("/api/dashboard/diagnostics/calibration"));
+
     /// <summary>重置 Thompson/Bandit 学习状态为初始先验（含持久化回落）。</summary>
     public async Task<(bool Ok, string? Error)> ResetLearningAsync()
     {
@@ -749,6 +753,9 @@ public class ApiService
         int Samples,
         DateTimeOffset LastUpdateUtc);
 
+    /// <summary>token 估算校准诊断：Ratio 为 actual/estimated 的 EMA（长期偏离 1.0 = 未收敛）；Observations 为进程内采样数。</summary>
+    public record CalibrationDiagnosticsDto(string Mode, double Ratio, int Observations);
+
     public record AuditPage(List<AuditItem> Items, int TotalCount, bool BufferLimited = false);
 
     public record AuditItem(
@@ -820,7 +827,8 @@ public class ApiService
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null,
         string? Id = null,
-        double Weight = 1.0);
+        double Weight = 1.0,
+        string? ApiKeySourceModel = null);
 
     /// <summary>上游模型拉取响应（与 ModelsConfigHandler.DiscoveredModel 同结构）。</summary>
     public record DiscoveredModel(string Id, string? Name, string? OwnedBy, System.Text.Json.JsonElement? Raw);
