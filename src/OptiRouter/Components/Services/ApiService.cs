@@ -225,6 +225,7 @@ public class ApiService
         DateTime FromUtc, DateTime ToUtc, int TotalRequests,
         AuditAnalysisSummaryDto Summary,
         List<AuditModelStatsDto> ByModel,
+        List<AuditProviderStatsDto> ByProvider,
         List<AuditTierStatsDto> ByTier,
         AuditCascadeDto Cascade,
         AuditFusionDto Fusion,
@@ -238,7 +239,11 @@ public class ApiService
 
     public sealed record AuditModelStatsDto(
         string Model, int Requests, int Failures, double SuccessRatePct, double CostUsd,
-        double AvgLatencyMs, double P95LatencyMs, long PromptTokens, long CompletionTokens);
+        double AvgLatencyMs, double P95LatencyMs, long PromptTokens, long CompletionTokens, long CachedInputTokens);
+
+    public sealed record AuditProviderStatsDto(
+        string Provider, int Requests, int Failures, double SuccessRatePct,
+        long PromptTokens, long CachedInputTokens, long CompletionTokens, double CostUsd, int ModelCount);
 
     public sealed record AuditTierStatsDto(
         string Tier, int Requests, int Failures, double SuccessRatePct, double CostUsd, double CostSharePct);
@@ -522,6 +527,25 @@ public class ApiService
         }
     }
 
+    /// <summary>拉取上游 provider 的可订阅模型列表。返回 null 表示网关层错误；502/501 等上游错误由服务端抛出并包装在 err。</summary>
+    public async Task<(List<DiscoveredModel>? Models, string? Error)> DiscoverModelsAsync(string baseUrl, string? apiKey, string protocol)
+    {
+        try
+        {
+            using var resp = await SendAsync(HttpMethod.Post, Url("/api/models/discover"), new { baseUrl, apiKey, protocol });
+            if (resp.IsSuccessStatusCode)
+            {
+                var items = await resp.Content.ReadFromJsonAsync<List<DiscoveredModel>>().ConfigureAwait(false);
+                return (items ?? new List<DiscoveredModel>(), null);
+            }
+            return (null, await ReadErrorAsync(resp));
+        }
+        catch (Exception ex)
+        {
+            return (null, ex.Message);
+        }
+    }
+
     public async Task<(bool Ok, string? Error)> UpdateModelAsync(string name, UpdateModelRequest req)
     {
         try
@@ -795,6 +819,9 @@ public class ApiService
         bool? IsLocalOrPrivate = null,
         string? Id = null,
         double Weight = 1.0);
+
+    /// <summary>上游模型拉取响应（与 ModelsConfigHandler.DiscoveredModel 同结构）。</summary>
+    public record DiscoveredModel(string Id, string? Name, string? OwnedBy, System.Text.Json.JsonElement? Raw);
 
     public record UpdateModelRequest(
         string? BaseUrl,

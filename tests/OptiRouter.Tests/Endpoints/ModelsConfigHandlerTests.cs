@@ -11,9 +11,12 @@ namespace OptiRouter.Tests.Endpoints;
 
 public class ModelsConfigHandlerTests
 {
-    private sealed class ModelsFactory : WebApplicationFactory<Program>
+    public class ModelsFactory : WebApplicationFactory<Program>
     {
         public const string Key = "models-test-key";
+
+        /// <summary>外部可注入的上游响应器；null 表示不替换 model-discover 的 HttpClient。</summary>
+        internal FakeUpstreamHandler? Upstream { get; init; }
 
         private readonly string _tempRoot = Path.Combine(
             Path.GetTempPath(),
@@ -46,6 +49,11 @@ public class ModelsConfigHandlerTests
                     });
                     options.Routing.EnableHealthProbe = false;
                 });
+                if (Upstream is not null)
+                {
+                    services.AddHttpClient("model-discover")
+                        .ConfigurePrimaryHttpMessageHandler(() => Upstream);
+                }
             });
         }
 
@@ -61,6 +69,44 @@ public class ModelsConfigHandlerTests
         // 源 appsettings.json 由测试项目复制到输出目录（见 OptiRouter.Tests.csproj），不向上遍历目录树。
         private static string FindSourceAppsettings()
             => Path.Combine(AppContext.BaseDirectory, "RepositoryFiles", "appsettings.json");
+
+    /// <summary>假上游响应器：根据预设 URL 模板返回配置响应并记录请求。</summary>
+    internal sealed class FakeUpstreamHandler : HttpMessageHandler
+    {
+        public sealed record RecordedRequest(Uri Url, HttpRequestHeaders Headers, string? Body);
+        public List<RecordedRequest> Calls { get; } = new();
+
+        private readonly Dictionary<string, Func<RecordedRequest, HttpResponseMessage>> _routes;
+        private readonly Func<RecordedRequest, HttpResponseMessage>? _defaultRoute;
+
+        public FakeUpstreamHandler(
+            Dictionary<string, Func<RecordedRequest, HttpResponseMessage>> routes,
+            Func<RecordedRequest, HttpResponseMessage>? defaultRoute = null)
+        {
+            _routes = routes;
+            _defaultRoute = defaultRoute;
+        }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            string? body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            var recorded = new RecordedRequest(request.RequestUri!, request.Headers, body);
+            Calls.Add(recorded);
+
+            foreach (var (key, factory) in _routes)
+            {
+                if (recorded.Url.ToString().Contains(key, StringComparison.OrdinalIgnoreCase))
+                    return factory(recorded);
+            }
+            return _defaultRoute is null
+                ? new HttpResponseMessage(HttpStatusCode.NotFound) { Content = new StringContent("no fake route matched " + recorded.Url) }
+                : _defaultRoute(recorded);
+        }
+    }
+
+    private sealed class DiscoverFactory : ModelsFactory
+    {
+        public DiscoverFactory(FakeUpstreamHandler upstream) { Upstream = upstream; }
     }
 
     [Fact]
@@ -235,4 +281,207 @@ public class ModelsConfigHandlerTests
             Assert.Equal(0, model.GetProperty("outputPricePerMillion").GetDecimal());
         }
     }
+
+    /// <summary>拼 POST body 的小工具：property names 默认使用 camelCase 与服务端 DiscoverRequest 对齐。</summary>
+    private static StringContent DiscoverBody(object body) =>
+        new(JsonSerializer.Serialize(body, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+            Encoding.UTF8, "application/json");
+
+    [Fact]
+    public async Task Discover_OpenAI_ReturnsParsedModels_WithBearerAuth()
+    {
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/v1/models"] = _ => JsonResponse("""
+                    {"object":"list","data":[
+                        {"id":"gpt-4o","object":"model","created":1,"owned_by":"openai","context_length":128000},
+                        {"id":"o1-preview","object":"model","created":1,"owned_by":"openai"}
+                    ]}
+                    """),
+            });
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://api.openai.com", apiKey = "sk-test", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var body = await resp.Content.ReadAsStringAsync();
+        using var doc = JsonDocument.Parse(body);
+        var arr = doc.RootElement.EnumerateArray().ToList();
+        Assert.Equal(2, arr.Count);
+        Assert.Equal("gpt-4o", arr[0].GetProperty("id").GetString());
+        Assert.Equal("openai", arr[0].GetProperty("ownedBy").GetString());
+        Assert.Equal("o1-preview", arr[1].GetProperty("id").GetString());
+
+        var sent = fake.Calls.Single();
+        Assert.Equal("https://api.openai.com/v1/models", sent.Url.ToString());
+        Assert.Equal("Bearer", sent.Headers.Authorization!.Scheme);
+        Assert.Equal("sk-test", sent.Headers.Authorization!.Parameter);
+    }
+
+    [Fact]
+    public async Task Discover_OpenAI_BaseUrlEndingWithV1_DoesNotDoublePath()
+    {
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/v1/models"] = _ => JsonResponse("""{"object":"list","data":[]}"""),
+            });
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://api.openai.com/v1/", apiKey = "k", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        Assert.Equal("https://api.openai.com/v1/models", fake.Calls.Single().Url.ToString());
+    }
+
+    [Fact]
+    public async Task Discover_OpenAI_NoApiKey_StillIssuesRequestWithoutAuth()
+    {
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/v1/models"] = _ => JsonResponse("""{"object":"list","data":[{"id":"llama3","owned_by":"ollama"}]}"""),
+            });
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "http://localhost:11434", apiKey = (string?)null, protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var sent = fake.Calls.Single();
+        Assert.Null(sent.Headers.Authorization); // 上游鉴权 header 不应发出。
+    }
+
+    [Fact]
+    public async Task Discover_Gemini_UsesV1BetaEndpoint_AndGoogApiKeyHeader()
+    {
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/v1beta/models"] = _ => JsonResponse("""
+                    {"models":[{"name":"models/gemini-1.5-pro"},{"name":"models/gemini-1.5-flash"}],"nextPageToken":""}
+                    """),
+            },
+            defaultRoute: _ => JsonResponse("""{"object":"list","data":[]}"""));
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://generativelanguage.googleapis.com", apiKey = "goog-key", protocol = "Gemini" }));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        var sent = fake.Calls.Single();
+        Assert.Equal("https://generativelanguage.googleapis.com/v1beta/models", sent.Url.ToString());
+        // Gemini header 通过集合名寻址（Headers[name].FirstOrDefault）。
+        var googHeader = sent.Headers.GetValues("x-goog-api-key").Single();
+        Assert.Equal("goog-key", googHeader);
+    }
+
+    [Fact]
+    public async Task Discover_Anthropic_Returns501_NoPublicListEndpoint()
+    {
+        var fake = new FakeUpstreamHandler(new());
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://api.anthropic.com", apiKey = "k", protocol = "Anthropic" }));
+
+        Assert.Equal(HttpStatusCode.NotImplemented, resp.StatusCode);
+        Assert.Empty(fake.Calls); // 端点直接 501，不发起上游请求。
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Contains("Anthropic", doc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task Discover_Upstream5xx_Becomes502WithBody()
+    {
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/v1/models"] = _ => new HttpResponseMessage(HttpStatusCode.InternalServerError)
+                {
+                    Content = new StringContent("boom")
+                },
+            });
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://api.example.com", apiKey = "k", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Contains("500", doc.RootElement.GetProperty("error").GetString());
+        Assert.Equal("boom", doc.RootElement.GetProperty("body").GetString());
+    }
+
+    [Fact]
+    public async Task Discover_NetworkFailure_Becomes502()
+    {
+        var fake = new FakeUpstreamHandler(new(),
+            defaultRoute: _ => throw new HttpRequestException("connection refused"));
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "http://does-not-exist.invalid", apiKey = "k", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Contains("connection refused", doc.RootElement.GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task Discover_EmptyData_Returns200EmptyArray()
+    {
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/v1/models"] = _ => JsonResponse("""{"object":"list","data":[]}"""),
+            });
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://api.example.com", apiKey = "k", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal(0, doc.RootElement.GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Discover_MissingBaseUrl_Returns400()
+    {
+        using var factory = new DiscoverFactory(new FakeUpstreamHandler(new()));
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "", apiKey = "k", protocol = "OpenAI" }));
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    private static HttpResponseMessage JsonResponse(string json) =>
+        new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+}
+
 }

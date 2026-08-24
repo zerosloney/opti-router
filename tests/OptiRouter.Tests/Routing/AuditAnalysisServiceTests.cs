@@ -1,14 +1,32 @@
+using Microsoft.Extensions.Options;
 using OptiRouter.Configuration;
 using OptiRouter.Routing;
 
 namespace OptiRouter.Tests.Routing;
 
+/// <summary>固定快照的 IOptionsMonitor 替身，仅供测试注入模型→供应商映射。</summary>
+internal sealed class FixedOptionsMonitor(RouterOptions value) : IOptionsMonitor<RouterOptions>
+{
+    public RouterOptions CurrentValue => value;
+    public RouterOptions Get(string? name) => value;
+    public IDisposable? OnChange(Action<RouterOptions, string?> listener) => null;
+}
+
 /// <summary>
 /// 审计分析服务聚合口径测试：基于 InMemoryRequestAuditStore 构造跨模型/分档/级联/多日的
-/// 合成记录，验证总览、分模型、分档、级联、路由原因与日趋势的数值正确性。
+/// 合成记录，验证总览、分模型、分供应商、分档、级联、路由原因与日趋势的数值正确性。
 /// </summary>
 public class AuditAnalysisServiceTests
 {
+    private static AuditAnalysisService CreateAnalyzer(
+        InMemoryRequestAuditStore store, params (string Name, string Provider)[] models)
+    {
+        var options = new RouterOptions();
+        foreach (var (name, provider) in models)
+            options.Models.Add(new ModelEndpointOptions { Name = name, Provider = provider });
+        return new AuditAnalysisService(store, new FixedOptionsMonitor(options));
+    }
+
     private static RequestAuditRecord Rec(
         DateTime ts, string model, bool success, decimal cost, long latency,
         ModelTier tier = ModelTier.Medium, bool cascade = false, string? upgradedFrom = null,
@@ -45,7 +63,7 @@ public class AuditAnalysisServiceTests
         store.Append(Rec(day2, "model-a", success: true, cost: 0.3m, latency: 300, tier: ModelTier.Strong, reason: "initial"));
         store.Append(Rec(day2, "model-c", success: true, cost: 0.4m, latency: 500, tier: ModelTier.Medium, reason: "fusion: panel"));
 
-        var analyzer = new AuditAnalysisService(store);
+        var analyzer = CreateAnalyzer(store);
         var report = analyzer.Analyze(
             new DateTime(2026, 8, 18, 0, 0, 0, DateTimeKind.Utc),
             new DateTime(2026, 8, 20, 0, 0, 0, DateTimeKind.Utc));
@@ -106,7 +124,7 @@ public class AuditAnalysisServiceTests
     public void Analyze_EmptyWindow_ReturnsZeroedReport()
     {
         var store = new InMemoryRequestAuditStore();
-        var analyzer = new AuditAnalysisService(store);
+        var analyzer = CreateAnalyzer(store);
 
         var report = analyzer.Analyze(
             new DateTime(2026, 8, 18, 0, 0, 0, DateTimeKind.Utc),
@@ -127,7 +145,7 @@ public class AuditAnalysisServiceTests
         store.Append(Rec(ts, "model-a", success: true, cost: 0.1m, latency: 100));
         store.Append(Rec(ts.AddDays(5), "model-a", success: true, cost: 0.1m, latency: 100));
 
-        var analyzer = new AuditAnalysisService(store);
+        var analyzer = CreateAnalyzer(store);
         var report = analyzer.Analyze(ts.AddHours(-1), ts.AddHours(1));
 
         Assert.Equal(1, report.TotalRequests);
@@ -136,9 +154,51 @@ public class AuditAnalysisServiceTests
     [Fact]
     public void Analyze_ReversedRange_Throws()
     {
-        var analyzer = new AuditAnalysisService(new InMemoryRequestAuditStore());
+        var analyzer = CreateAnalyzer(new InMemoryRequestAuditStore());
         Assert.Throws<ArgumentException>(() => analyzer.Analyze(
             new DateTime(2026, 8, 19, 0, 0, 0, DateTimeKind.Utc),
             new DateTime(2026, 8, 18, 0, 0, 0, DateTimeKind.Utc)));
+    }
+
+    [Fact]
+    public void Analyze_ByProvider_GroupsConfiguredModels_AndUnknownBucketForRest()
+    {
+        var store = new InMemoryRequestAuditStore();
+        var ts = new DateTime(2026, 8, 18, 10, 0, 0, DateTimeKind.Utc);
+        store.Append(Rec(ts, "alpha-1", success: true, cost: 0.1m, latency: 100, cached: 60));
+        store.Append(Rec(ts, "alpha-2", success: false, cost: 0m, latency: 0));
+        store.Append(Rec(ts, "beta-1", success: true, cost: 0.2m, latency: 200));
+        store.Append(Rec(ts, "orphan", success: true, cost: 0.3m, latency: 300));
+
+        // "gone" 已下线无流量；"alpha-empty" Provider 为空——两者都不应产生额外桶。
+        var analyzer = CreateAnalyzer(store,
+            ("alpha-1", "one"), ("alpha-2", "one"), ("beta-1", "two"),
+            ("gone", "gone-provider"), ("alpha-empty", ""));
+        var report = analyzer.Analyze(ts.AddHours(-1), ts.AddHours(1));
+
+        Assert.Equal(3, report.ByProvider.Count);
+
+        var one = report.ByProvider.Single(p => p.Provider == "one");
+        Assert.Equal(2, one.Requests);
+        Assert.Equal(1, one.Failures);
+        Assert.Equal(50.0, one.SuccessRatePct);
+        Assert.Equal(2, one.ModelCount);
+        Assert.Equal(200, one.PromptTokens);       // 2 × 100
+        Assert.Equal(60, one.CachedInputTokens);   // 仅 alpha-1 带 cached
+        Assert.Equal(100, one.CompletionTokens);   // 2 × 50
+        Assert.Equal(0.1, one.CostUsd);
+
+        var two = report.ByProvider.Single(p => p.Provider == "two");
+        Assert.Equal(1, two.Requests);
+        Assert.Equal(1, two.ModelCount);
+        Assert.Equal(100, two.PromptTokens);
+
+        var unknown = report.ByProvider.Single(p => p.Provider == AuditAnalysisService.UnknownProvider);
+        Assert.Equal(1, unknown.Requests);
+        Assert.Equal(1, unknown.ModelCount);
+
+        // 逐模型缓存命中：ByModel 补充 CachedInputTokens。
+        Assert.Equal(60, report.ByModel.Single(m => m.Model == "alpha-1").CachedInputTokens);
+        Assert.Equal(0, report.ByModel.Single(m => m.Model == "alpha-2").CachedInputTokens);
     }
 }

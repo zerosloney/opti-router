@@ -305,7 +305,7 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
             await Task.Delay(100);
         }
 
-        var analyzer = new AuditAnalysisService(store);
+        var analyzer = new AuditAnalysisService(store, new FixedOptionsMonitor(new RouterOptions()));
         var report = analyzer.Analyze(baseTime.AddMinutes(-1), DateTime.UtcNow.AddMinutes(1));
 
         // 至少包含本用例的 2 条（其他历史行可能共存），分模型维度可精确断言。

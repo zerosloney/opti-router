@@ -150,6 +150,90 @@
             </div>
 
             <div class="chart-pair">
+                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 8px 0 0 0;">
+                    <div class="card-label" style="display: flex; justify-content: space-between; align-items: center; font-size: 1rem; flex-wrap: wrap; gap: 8px;">
+                        <span>供应商用量</span>
+                        <div class="trend-controls" style="margin-top: 0;">
+                            @foreach (var (metric, metricText) in new[] { ("tokens", "输入Token"), ("requests", "请求数"), ("output", "输出Token") })
+                            {
+                                <button class="@(ProviderMetricKey == metric ? "active" : "")" @onclick="() => SwitchProviderMetric(metric)">@metricText</button>
+                            }
+                        </div>
+                    </div>
+                    <div style="position: relative; width: 100%; height: @(Math.Max(120, Math.Min(8, Analysis.ByProvider.Count) * 30 + 16))px;">
+                        <canvas id="analysis-provider-chart" @ref="AnalysisProviderCanvas" role="img" aria-label="供应商用量条形图（可切换请求数与输入输出 Token）"></canvas>
+                    </div>
+                </div>
+                <div class="glass-card" style="background: transparent; box-shadow: none; padding: 0;">
+                    <div class="card-label">供应商汇总</div>
+                    <div class="table-wrap">
+                        <table class="log-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">供应商</th>
+                                    <th scope="col">模型数</th>
+                                    <th scope="col">请求</th>
+                                    <th scope="col">失败</th>
+                                    <th scope="col">输入tok（缓存）</th>
+                                    <th scope="col">输出tok</th>
+                                    <th scope="col">成本</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var p in Analysis.ByProvider)
+                                {
+                                    <tr>
+                                        <td><span class="tag tag-secondary">@p.Provider</span></td>
+                                        <td class="table-mono">@p.ModelCount</td>
+                                        <td class="table-mono">@UiFormatter.FormatNumber(p.Requests)</td>
+                                        <td class="@(p.Failures > 0 ? "text-danger" : "") table-mono">@p.Failures</td>
+                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(p.PromptTokens) <span class="text-secondary">(@UiFormatter.FormatCompactNumber(p.CachedInputTokens) · @CacheSharePct(p.CachedInputTokens, p.PromptTokens))</span></td>
+                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(p.CompletionTokens)</td>
+                                        <td style="color: var(--ok-text);">@UiFormatter.FormatCost(p.CostUsd)</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-pair">
+                <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 0;">
+                    <div class="card-label">模型用量（按输入 Token 降序）</div>
+                    <div class="table-wrap">
+                        <table class="log-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col">模型</th>
+                                    <th scope="col">供应商</th>
+                                    <th scope="col">请求</th>
+                                    <th scope="col">成功率</th>
+                                    <th scope="col">输入tok（缓存命中）</th>
+                                    <th scope="col">输出tok</th>
+                                    <th scope="col">成本</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var m in Analysis.ByModel.OrderByDescending(x => x.PromptTokens))
+                                {
+                                    <tr>
+                                        <td class="table-mono" title="@m.Model">@Truncate(m.Model, 36)</td>
+                                        <td><span class="tag tag-secondary">@ProviderOf(m.Model)</span></td>
+                                        <td class="table-mono">@UiFormatter.FormatNumber(m.Requests)</td>
+                                        <td class="@(m.SuccessRatePct >= 80 ? "text-success" : "text-danger")">@UiFormatter.FormatPercent(m.SuccessRatePct)</td>
+                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(m.PromptTokens) <span class="text-secondary">(@UiFormatter.FormatCompactNumber(m.CachedInputTokens) · @CacheSharePct(m.CachedInputTokens, m.PromptTokens))</span></td>
+                                        <td class="table-mono">@UiFormatter.FormatCompactNumber(m.CompletionTokens)</td>
+                                        <td style="color: var(--ok-text);">@UiFormatter.FormatCost(m.CostUsd)</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-pair">
                 <div class="glass-card chart-wide" style="background: transparent; box-shadow: none; padding: 0;">
                     <div class="card-label">分档 (Tier) 分布</div>
                     <div class="table-wrap">
@@ -473,6 +557,18 @@
     private bool AnalysisLoading = true;
     private ElementReference AnalysisTrendCanvas;
     private ElementReference AnalysisModelCanvas;
+    private ElementReference AnalysisProviderCanvas;
+    private string ProviderMetricKey = "tokens";
+    /// <summary>模型路由名 → 供应商（随分析加载刷新，用于模型用量表；缺失与后端同规则归"(未配置)"）。</summary>
+    private Dictionary<string, string> _providerByModel = new(StringComparer.Ordinal);
+
+    /// <summary>模型用量表的供应商列；配置缺失时与后端聚合口径一致。</summary>
+    private string ProviderOf(string model)
+        => _providerByModel.TryGetValue(model, out var p) && !string.IsNullOrEmpty(p) ? p : "(未配置)";
+
+    /// <summary>缓存命中占输入 Token 比例；无输入样本时显示 "-"。</summary>
+    private static string CacheSharePct(long cached, long prompt)
+        => prompt > 0 ? UiFormatter.FormatPercent(100.0 * cached / prompt) : "-";
 
     /// <summary>datetime-local 绑定值（Kind=Unspecified 的本地墙钟时间）转 UTC ISO 8601；空返回 null。</summary>
     private static string? ToUtcIso(DateTime? localDateTime)
@@ -589,11 +685,22 @@
         await LoadAnalysisAsync();
     }
 
+    private async Task SwitchProviderMetric(string metric)
+    {
+        if (ProviderMetricKey == metric) return;
+        ProviderMetricKey = metric;
+        await RenderAnalysisChartsAsync();
+    }
+
     private async Task LoadAnalysisAsync()
     {
         AnalysisLoading = true;
         var (from, to) = AnalysisWindow(AnalysisWindowKey);
         Analysis = await Api.GetAuditAnalysisAsync(from, to);
+        // 供应商映射与模型配置同步刷新（管理台可能改配）；失败降级为空表，模型表归"(未配置)"。
+        _providerByModel = (await Api.GetModelsAsync())
+            .Where(m => !string.IsNullOrWhiteSpace(m.Provider))
+            .ToDictionary(m => m.Name, m => m.Provider.Trim(), StringComparer.Ordinal);
         AnalysisLoading = false;
         await InvokeAsync(StateHasChanged);
         await RenderAnalysisChartsAsync();
@@ -620,6 +727,17 @@
                 .ToArray();
             if (bars.Length > 0)
                 await JS.InvokeVoidAsync("drawAnalysisBarChart", AnalysisModelCanvas, bars);
+
+            var providerBars = Analysis.ByProvider.Take(8)
+                .Select(p => ProviderMetricKey switch
+                {
+                    "requests" => new { label = p.Provider, value = (double)p.Requests, text = $"{p.Requests} 次 · {p.SuccessRatePct:F1}%" },
+                    "output" => new { label = p.Provider, value = (double)p.CompletionTokens, text = UiFormatter.FormatCompactNumber(p.CompletionTokens) },
+                    _ => new { label = p.Provider, value = (double)p.PromptTokens, text = $"{UiFormatter.FormatCompactNumber(p.PromptTokens)}（缓存 {UiFormatter.FormatCompactNumber(p.CachedInputTokens)}）" },
+                })
+                .ToArray();
+            if (providerBars.Length > 0)
+                await JS.InvokeVoidAsync("drawAnalysisBarChart", AnalysisProviderCanvas, providerBars);
         }
         catch (Exception ex)
         {

@@ -1,3 +1,5 @@
+using System.Net.Http.Headers;
+using System.Text.Json;
 using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Routing;
@@ -154,6 +156,104 @@ public static class ModelsConfigHandler
             => RevealApiKey(name, cfg, httpContext));
         endpoints.MapGet("/api/models/apikey", (string name, ModelsConfigService cfg, HttpContext httpContext)
             => RevealApiKey(name, cfg, httpContext));
+
+        // 4c. POST discover — 管理员拉取上游可订阅模型列表（OpenAI 兼容 /v1/models、Gemini /v1beta/models）。
+        //    复用现有已配置模型的 BaseUrl+ApiKey 也可手填；返回的 Id 由管理员在 UI 多选后批量创建。
+        endpoints.MapPost("/api/models/discover", async (DiscoverRequest req, IHttpClientFactory httpFactory) =>
+            await DiscoverUpstreamModels(req, httpFactory).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// 拉取上游 provider 的模型清单。Body：<c>{ baseUrl, apiKey?, protocol }</c>。
+    /// Anthropic 没有公开的 models 列表端点，直接 501。
+    /// </summary>
+    private static async Task<IResult> DiscoverUpstreamModels(DiscoverRequest req, IHttpClientFactory httpFactory)
+    {
+        if (req is null || string.IsNullOrWhiteSpace(req.BaseUrl))
+            return Results.BadRequest(new { error = "baseUrl is required" });
+
+        var protocol = string.IsNullOrWhiteSpace(req.Protocol) ? "OpenAI" : req.Protocol!;
+        if (string.Equals(protocol, "Anthropic", StringComparison.OrdinalIgnoreCase))
+            return Results.Json(
+                new { error = "Anthropic does not expose a public /v1/models endpoint; configure upstream model ids manually." },
+                statusCode: StatusCodes.Status501NotImplemented);
+
+        string url = BuildDiscoverUrl(req.BaseUrl.TrimEnd('/'), protocol);
+        var client = httpFactory.CreateClient("model-discover");
+        using var msg = new HttpRequestMessage(HttpMethod.Get, url);
+        if (!string.IsNullOrWhiteSpace(req.ApiKey))
+        {
+            if (string.Equals(protocol, "Gemini", StringComparison.OrdinalIgnoreCase))
+                msg.Headers.Add("x-goog-api-key", req.ApiKey!.Trim());
+            else
+                msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", req.ApiKey!.Trim());
+        }
+
+        HttpResponseMessage resp;
+        try
+        {
+            resp = await client.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            return Results.Json(
+                new { error = $"Upstream unreachable: {ex.Message}" },
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            var errBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            return Results.Json(
+                new { error = $"Upstream returned {(int)resp.StatusCode} {resp.ReasonPhrase}", body = errBody },
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+
+        string text = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+        List<DiscoveredModel> items;
+        try
+        {
+            items = ParseDiscoveredModels(text);
+        }
+        catch (JsonException ex)
+        {
+            return Results.Json(
+                new { error = $"Invalid upstream response: {ex.Message}" },
+                statusCode: StatusCodes.Status502BadGateway);
+        }
+        return Results.Ok(items);
+    }
+
+    /// <summary>OpenAI 兼容按 baseUrl 是否已含 /v1 决定路径，Gemini 走 /v1beta/models。</summary>
+    private static string BuildDiscoverUrl(string baseUrl, string protocol)
+    {
+        if (string.Equals(protocol, "Gemini", StringComparison.OrdinalIgnoreCase))
+            return $"{baseUrl}/v1beta/models";
+        var trimmed = baseUrl.TrimEnd('/');
+        return trimmed.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
+            ? $"{trimmed}/models"
+            : $"{trimmed}/v1/models";
+    }
+
+    /// <summary>解析 OpenAI 兼容 <c>{object:"list", data:[{id, owned_by, ...}, ...]}</c>，未知字段一并透传。</summary>
+    private static List<DiscoveredModel> ParseDiscoveredModels(string body)
+    {
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("data", out var dataEl) || dataEl.ValueKind != JsonValueKind.Array)
+            return new List<DiscoveredModel>();
+
+        var items = new List<DiscoveredModel>();
+        foreach (var entry in dataEl.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.Object) continue;
+            string? id = entry.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String ? idEl.GetString() : null;
+            if (string.IsNullOrWhiteSpace(id)) continue;
+            string? ownedBy = entry.TryGetProperty("owned_by", out var obEl) && obEl.ValueKind == JsonValueKind.String ? obEl.GetString() : null;
+            // name 同 id（多数上游只暴露 id），便于 UI 一行展示。
+            items.Add(new DiscoveredModel(id, id, ownedBy, entry.Clone()));
+        }
+        return items;
     }
 
     private static IResult RevealApiKey(string name, ModelsConfigService cfg, HttpContext httpContext)
@@ -347,3 +447,9 @@ public static class ModelsConfigHandler
         bool? IsLocalOrPrivate = null,
         double Weight = 1.0);
 }
+
+/// <summary>上游 provider 模型拉取请求。ApiKey 可空，开源自托管多不要求鉴权。</summary>
+public record DiscoverRequest(string BaseUrl, string? ApiKey, string? Protocol = "OpenAI");
+
+/// <summary>上游 provider 模型拉取结果。Raw 透传原 JSON 节点，供 UI 扩展展示（如 context_length 等非标字段）。</summary>
+public record DiscoveredModel(string Id, string? Name, string? OwnedBy, JsonElement? Raw);

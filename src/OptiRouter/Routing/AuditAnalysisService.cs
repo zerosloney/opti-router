@@ -1,4 +1,6 @@
 using System.Globalization;
+using Microsoft.Extensions.Options;
+using OptiRouter.Configuration;
 
 namespace OptiRouter.Routing;
 
@@ -9,6 +11,7 @@ public sealed record AuditAnalysisReport(
     int TotalRequests,
     AuditAnalysisSummary Summary,
     IReadOnlyList<AuditModelStats> ByModel,
+    IReadOnlyList<AuditProviderStats> ByProvider,
     IReadOnlyList<AuditTierStats> ByTier,
     AuditCascadeStats Cascade,
     AuditFusionStats Fusion,
@@ -40,7 +43,23 @@ public sealed record AuditModelStats(
     double AvgLatencyMs,
     double P95LatencyMs,
     long PromptTokens,
-    long CompletionTokens);
+    long CompletionTokens,
+    long CachedInputTokens);
+
+/// <summary>
+/// 单供应商聚合：模型路由名经 <see cref="ModelEndpointOptions.Provider"/> 映射归组；
+/// 配置缺失或 Provider 为空的模型归入 <see cref="AuditAnalysisService.UnknownProvider"/> 桶。
+/// </summary>
+public sealed record AuditProviderStats(
+    string Provider,
+    int Requests,
+    int Failures,
+    double SuccessRatePct,
+    long PromptTokens,
+    long CachedInputTokens,
+    long CompletionTokens,
+    double CostUsd,
+    int ModelCount);
 
 /// <summary>单分档（routed_tier）聚合。</summary>
 public sealed record AuditTierStats(
@@ -90,12 +109,18 @@ public sealed class AuditAnalysisService
     private const int PageSize = 5000;
     private const int MaxReasonRows = 20;
 
-    private readonly IRequestAuditStore _store;
+    /// <summary>模型配置缺失或 Provider 为空时的归组桶名。</summary>
+    public const string UnknownProvider = "(未配置)";
 
-    public AuditAnalysisService(IRequestAuditStore store)
+    private readonly IRequestAuditStore _store;
+    private readonly IOptionsMonitor<RouterOptions> _options;
+
+    public AuditAnalysisService(IRequestAuditStore store, IOptionsMonitor<RouterOptions> options)
     {
         ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(options);
         _store = store;
+        _options = options;
     }
 
     /// <summary>聚合 [fromUtc, toUtc] 闭区间窗口的审计记录。</summary>
@@ -111,12 +136,18 @@ public sealed class AuditAnalysisService
         long promptTokens = 0, completionTokens = 0, cachedTokens = 0;
         var latencies = new List<double>();
         var byModel = new Dictionary<string, ModelAcc>(StringComparer.Ordinal);
+        var byProvider = new Dictionary<string, ProviderAcc>(StringComparer.Ordinal);
         var byTier = new Dictionary<string, TierAcc>(StringComparer.Ordinal);
         var byReason = new Dictionary<string, ReasonAcc>(StringComparer.Ordinal);
         var byDay = new Dictionary<string, DayAcc>(StringComparer.Ordinal);
         var upgradedFrom = new Dictionary<string, int>(StringComparer.Ordinal);
         var fusionRoles = new Dictionary<string, int>(StringComparer.Ordinal);
         int cascadeTriggered = 0, fusionRequests = 0;
+
+        // 模型路由名 → 供应商（当前配置快照）；Provider 为空或模型已下线的归未知桶。
+        var providerByModel = _options.CurrentValue.Models
+            .Where(m => !string.IsNullOrWhiteSpace(m.Provider))
+            .ToDictionary(m => m.Name, m => m.Provider.Trim(), StringComparer.Ordinal);
 
         int offset = 0;
         while (true)
@@ -143,7 +174,20 @@ public sealed class AuditAnalysisService
                 m.Cost += (double)r.Cost;
                 m.PromptTokens += r.PromptTokens;
                 m.CompletionTokens += r.CompletionTokens;
+                m.CachedInputTokens += r.CachedInputTokens;
                 if (ok && r.LatencyMs > 0) m.Latencies.Add(r.LatencyMs);
+
+                string provider = providerByModel.TryGetValue(r.Model, out var pv) && !string.IsNullOrEmpty(pv)
+                    ? pv
+                    : UnknownProvider;
+                var pr = byProvider.TryGetValue(provider, out var pa) ? pa : byProvider[provider] = new ProviderAcc();
+                pr.Requests++;
+                if (!ok) pr.Failures++;
+                pr.Cost += (double)r.Cost;
+                pr.PromptTokens += r.PromptTokens;
+                pr.CachedInputTokens += r.CachedInputTokens;
+                pr.CompletionTokens += r.CompletionTokens;
+                pr.Models.Add(r.Model);
 
                 string tier = r.RoutedTier.ToString();
                 var t = byTier.TryGetValue(tier, out var ta) ? ta : byTier[tier] = new TierAcc();
@@ -206,8 +250,21 @@ public sealed class AuditAnalysisService
                 Avg(kv.Value.Latencies),
                 P95(kv.Value.Latencies),
                 kv.Value.PromptTokens,
-                kv.Value.CompletionTokens))
+                kv.Value.CompletionTokens,
+                kv.Value.CachedInputTokens))
             .OrderByDescending(m => m.Requests)
+            .ToList();
+
+        var providerRows = byProvider
+            .Select(kv => new AuditProviderStats(
+                kv.Key, kv.Value.Requests, kv.Value.Failures,
+                Math.Round(100.0 * (kv.Value.Requests - kv.Value.Failures) / Math.Max(1, kv.Value.Requests), 2),
+                kv.Value.PromptTokens,
+                kv.Value.CachedInputTokens,
+                kv.Value.CompletionTokens,
+                Math.Round(kv.Value.Cost, 6),
+                kv.Value.Models.Count))
+            .OrderByDescending(p => p.PromptTokens)
             .ToList();
 
         var tierRows = byTier
@@ -241,7 +298,7 @@ public sealed class AuditAnalysisService
             .OrderBy(d => d.Day)
             .ToList();
 
-        return new AuditAnalysisReport(fromUtc, toUtc, total, summary, modelRows, tierRows, cascade, fusion, reasonRows, dayRows);
+        return new AuditAnalysisReport(fromUtc, toUtc, total, summary, modelRows, providerRows, tierRows, cascade, fusion, reasonRows, dayRows);
     }
 
     private static double Avg(List<double> values)
@@ -263,8 +320,16 @@ public sealed class AuditAnalysisService
     {
         public int Requests, Failures;
         public double Cost;
-        public long PromptTokens, CompletionTokens;
+        public long PromptTokens, CompletionTokens, CachedInputTokens;
         public List<double> Latencies { get; } = new();
+    }
+
+    private sealed class ProviderAcc
+    {
+        public int Requests, Failures;
+        public double Cost;
+        public long PromptTokens, CachedInputTokens, CompletionTokens;
+        public HashSet<string> Models { get; } = new(StringComparer.Ordinal);
     }
 
     private sealed class TierAcc

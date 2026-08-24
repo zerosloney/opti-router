@@ -18,10 +18,16 @@
                 <AppIcon Name="models" Size="18" Class="text-primary" />
                 <span>模型配置</span>
             </div>
-            <button class="btn-primary" @onclick="OpenAddModal">
-                <AppIcon Name="plus" Size="14" />
-                <span>添加模型</span>
-            </button>
+            <div style="display: flex; gap: 8px;">
+                <button class="btn-secondary" @onclick="OpenDiscoverModal" title="拉取上游 provider 可订阅模型">
+                    <AppIcon Name="download" Size="14" />
+                    <span>从上游拉取</span>
+                </button>
+                <button class="btn-primary" @onclick="OpenAddModal">
+                    <AppIcon Name="plus" Size="14" />
+                    <span>添加模型</span>
+                </button>
+            </div>
         </div>
 
         @if (IsLoadingModels)
@@ -374,6 +380,145 @@
     </div>
 }
 
+@* 从上游拉取模型 — 两步式模态：Step 1 选凭证 → 拉取 → Step 2 勾选批量添加 *@
+@if (ShowDiscoverModal)
+{
+    <div class="modal-backdrop" @onclick="CloseDiscoverModal" @onclick:stopPropagation="false">
+        <div class="key-modal" @onclick:stopPropagation="true" role="dialog" aria-modal="true"
+             aria-label="@(DiscoverStep == 1 ? "从上游拉取模型" : "选择要添加的模型")">
+            <div class="modal-header">
+                <div class="modal-title">
+                    <AppIcon Name="download" Size="18" Class="text-info" />
+                    <span>@(DiscoverStep == 1 ? "从上游拉取模型" : "选择要添加的模型")</span>
+                </div>
+                <button class="modal-x" @onclick="CloseDiscoverModal" aria-label="关闭" type="button">×</button>
+            </div>
+
+            @if (DiscoverStep == 1)
+            {
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label for="discover-source">凭证来源</label>
+                        <select id="discover-source" @bind="DiscoverSource">
+                            @foreach (var m in ModelList.Where(m => m.Enabled))
+                            {
+                                <option value="@($"existing:{m.Name}")">@m.Name — @m.BaseUrl (@(m.Provider ?? ""))</option>
+                            }
+                            <option value="manual">手动输入（新建/未配置）</option>
+                        </select>
+                    </div>
+
+                    @if (DiscoverSource == "manual")
+                    {
+                        <div class="form-group">
+                            <label for="discover-baseurl">Base URL</label>
+                            <input id="discover-baseurl" @bind="DiscoverManualBaseUrl" placeholder="https://api.openai.com/v1" />
+                        </div>
+                        <div class="form-group">
+                            <label for="discover-apikey">API Key（开源上游可留空）</label>
+                            <input id="discover-apikey" @bind="DiscoverManualApiKey" placeholder="sk-..." type="password" autocomplete="off" />
+                        </div>
+                        <div class="form-group">
+                            <label for="discover-protocol">协议</label>
+                            <select id="discover-protocol" @bind="DiscoverManualProtocol">
+                                <option value="OpenAI">OpenAI 兼容（/v1/models）</option>
+                                <option value="Gemini">Gemini（/v1beta/models）</option>
+                            </select>
+                        </div>
+                    }
+
+                    @if (!string.IsNullOrEmpty(DiscoverError))
+                    {
+                        <div class="alert-banner alert-danger" style="margin-top: 8px;">
+                            <span>@DiscoverError</span>
+                        </div>
+                    }
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-secondary" @onclick="CloseDiscoverModal" type="button">取消</button>
+                    <button class="btn-primary" @onclick="RunDiscoverAsync" disabled="@IsDiscovering" type="button">
+                        @(IsDiscovering ? "拉取中…" : "拉取")
+                    </button>
+                </div>
+            }
+            else
+            {
+                <div class="modal-body">
+                    <div class="text-secondary" style="font-size: 0.85rem; margin-bottom: 8px;">
+                        上游返回 <strong>@DiscoveredModels.Count</strong> 个模型；勾选要添加的条目，共享以下批量默认值。
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Tier</label>
+                            <select @bind="BulkAddTier">
+                                <option value="Strong">Strong</option>
+                                <option value="Medium">Medium</option>
+                                <option value="Cheap">Cheap</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>MaxContextTokens</label>
+                            <input type="number" min="1" @bind="BulkAddMaxContextTokens" />
+                        </div>
+                        <div class="form-group">
+                            <label>启用</label>
+                            <select @bind="BulkAddEnabled">
+                                <option value="true">启用</option>
+                                <option value="false">禁用</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="table-wrap" style="max-height: 320px; overflow-y: auto;">
+                        <table class="log-table">
+                            <thead>
+                                <tr>
+                                    <th scope="col" style="width: 36px;"><input type="checkbox" @bind="SelectAllChecked" aria-label="全选" /></th>
+                                    <th scope="col">模型 ID</th>
+                                    <th scope="col">供应商</th>
+                                    <th scope="col">状态</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var item in DiscoverSelected)
+                                {
+                                    <tr>
+                                        <td><input type="checkbox" @bind="item.Selected" disabled="@item.AlreadyExists" aria-label="@($"选择选 {item.Model.Id}")" /></td>
+                                        <td class="table-mono">@item.Model.Id</td>
+                                        <td class="text-secondary">@item.Model.OwnedBy</td>
+                                        <td>
+                                            @if (item.AlreadyExists)
+                                            {
+                                                <span class="tag tag-warning">已存在</span>
+                                            }
+                                            else if (item.Added)
+                                            {
+                                                <span class="tag tag-success">已添加</span>
+                                            }
+                                            else if (!string.IsNullOrEmpty(item.AddError))
+                                            {
+                                                <span class="tag tag-danger" title="@item.AddError">失败</span>
+                                            }
+                                        </td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn-secondary" @onclick="BackToSourceStep" type="button">返回</button>
+                    <button class="btn-secondary" @onclick="CloseDiscoverModal" type="button">关闭</button>
+                    <button class="btn-primary" @onclick="BulkAddSelectedAsync" disabled="@(!DiscoverSelected.Any(x => x.Selected) || IsBulkAdding)" type="button">
+                        @(IsBulkAdding ? "添加中…" : $"添加选中 {DiscoverSelected.Count(x => x.Selected)} 个")
+                    </button>
+                </div>
+            }
+        </div>
+    </div>
+}
+
 @code {
     private List<ApiService.ModelDto> ModelList = new();
     private string? ErrorMsg;
@@ -398,6 +543,46 @@
     private bool IsLoadingModels = true;
     private bool HealthLoading = true;
     private List<ApiService.ModelInfo> ModelHealth = new();
+
+    // ── 从上游拉取 ──
+    private bool ShowDiscoverModal;
+    private int DiscoverStep = 1;
+    private string DiscoverSource = "manual";
+    private string DiscoverManualBaseUrl = "";
+    private string DiscoverManualApiKey = "";
+    private string DiscoverManualProtocol = "OpenAI";
+    private string? DiscoverError;
+    private bool IsDiscovering;
+    private List<ApiService.DiscoveredModel> DiscoveredModels = new();
+    private List<DiscoverRow> DiscoverSelected = new();
+    private bool IsBulkAdding;
+    private string BulkAddTier = "Medium";
+    private int BulkAddMaxContextTokens = 200_000;
+    private string BulkAddEnabled = "true";
+    private bool _selectAllToggle;
+    /// <summary>当前拉取会话的源 BaseUrl/Protocol（Step 1 锁定），Step 2 批量添加时回填到新模型。</summary>
+    private string DiscoverSourceBaseUrl = "";
+    private string DiscoverSourceProtocol = "OpenAI";
+
+    /// <summary>拉取模态的中间行（含勾选与添加结果）。</summary>
+    private sealed class DiscoverRow
+    {
+        public ApiService.DiscoveredModel Model { get; init; } = default!;
+        public bool Selected { get; set; }
+        public bool AlreadyExists { get; set; }
+        public bool Added { get; set; }
+        public string? AddError { get; set; }
+    }
+
+    private bool SelectAllChecked
+    {
+        get => _selectAllToggle;
+        set
+        {
+            _selectAllToggle = value;
+            foreach (var r in DiscoverSelected) if (!r.AlreadyExists) r.Selected = value;
+        }
+    }
 
     protected override async Task OnInitializedAsync()
     {
@@ -479,6 +664,141 @@
         finally
         {
             IsLoadingModels = false;
+        }
+    }
+
+    private void OpenDiscoverModal()
+    {
+        // 默认选中第一个已启用供应商；无则回退到手动输入。
+        DiscoverSource = ModelList.Any(m => m.Enabled) ? $"existing:{ModelList.First(m => m.Enabled).Name}" : "manual";
+        DiscoverManualBaseUrl = "";
+        DiscoverManualApiKey = "";
+        DiscoverManualProtocol = "OpenAI";
+        DiscoverError = null;
+        DiscoverStep = 1;
+        DiscoveredModels = new();
+        DiscoverSelected = new();
+        DiscoverSourceBaseUrl = "";
+        DiscoverSourceProtocol = "OpenAI";
+        ShowDiscoverModal = true;
+    }
+
+    private void CloseDiscoverModal()
+    {
+        ShowDiscoverModal = false;
+    }
+
+    private void BackToSourceStep()
+    {
+        DiscoverStep = 1;
+    }
+
+    private async Task RunDiscoverAsync()
+    {
+        DiscoverError = null;
+        string? apiKey;
+        if (DiscoverSource == "manual")
+        {
+            if (string.IsNullOrWhiteSpace(DiscoverManualBaseUrl))
+            {
+                DiscoverError = "请填写 Base URL";
+                return;
+            }
+            DiscoverSourceBaseUrl = DiscoverManualBaseUrl.Trim();
+            DiscoverSourceProtocol = DiscoverManualProtocol;
+            apiKey = string.IsNullOrWhiteSpace(DiscoverManualApiKey) ? null : DiscoverManualApiKey.Trim();
+        }
+        else
+        {
+            var name = DiscoverSource.Substring("existing:".Length);
+            var src = ModelList.FirstOrDefault(m => m.Name == name);
+            if (src is null) { DiscoverError = "选择的供应商已不存在"; return; }
+            // ModelDto.ApiKey 在列表里已脱敏为空，所以"现有供应商"模式只能无 key 拉取。
+            // Protocol 字段当前未下发到列表——主流 OpenAI 兼容先按 OpenAI 走，失败提示用户用手动输入。
+            DiscoverSourceBaseUrl = src.BaseUrl;
+            DiscoverSourceProtocol = "OpenAI";
+            apiKey = null;
+        }
+
+        IsDiscovering = true;
+        try
+        {
+            var (items, err) = await Api.DiscoverModelsAsync(DiscoverSourceBaseUrl, apiKey, DiscoverSourceProtocol);
+            if (err is not null)
+            {
+                DiscoverError = err;
+                return;
+            }
+            DiscoveredModels = items ?? new();
+            if (DiscoveredModels.Count == 0)
+            {
+                DiscoverError = "上游未返回任何模型（data 为空或响应格式不识别）。";
+                return;
+            }
+            var existing = new HashSet<string>(ModelList.Select(m => m.Name), StringComparer.Ordinal);
+            DiscoverSelected = DiscoveredModels
+                .Select(m => new DiscoverRow { Model = m, AlreadyExists = existing.Contains(m.Id) })
+                .ToList();
+            _selectAllToggle = true;
+            foreach (var r in DiscoverSelected) r.Selected = !r.AlreadyExists;
+            DiscoverStep = 2;
+        }
+        finally
+        {
+            IsDiscovering = false;
+        }
+    }
+
+    private async Task BulkAddSelectedAsync()
+    {
+        IsBulkAdding = true;
+        try
+        {
+            var existingNames = new HashSet<string>(ModelList.Select(m => m.Name), StringComparer.Ordinal);
+            int okCount = 0, failCount = 0;
+            foreach (var row in DiscoverSelected.Where(r => r.Selected && !r.AlreadyExists).ToList())
+            {
+                if (existingNames.Contains(row.Model.Id))
+                {
+                    row.AlreadyExists = true; row.Selected = false; continue;
+                }
+                var req = new ApiService.CreateModelRequest(
+                    Name: row.Model.Id,
+                    BaseUrl: DiscoverSourceBaseUrl,
+                    ApiKey: null,
+                    Tier: BulkAddTier,
+                    MaxContextTokens: BulkAddMaxContextTokens,
+                    TimeoutSeconds: 120,
+                    MaxRetries: 0,
+                    Enabled: bool.Parse(BulkAddEnabled),
+                    InputPricePerMillion: 0m,
+                    OutputPricePerMillion: 0m,
+                    Tags: null,
+                    Provider: row.Model.OwnedBy,
+                    Family: null,
+                    CachedInputPricePerMillion: null,
+                    CacheWriteInputPricePerMillion: null,
+                    IsLocalOrPrivate: false,
+                    Id: row.Model.Id,
+                    Weight: 1.0);
+                var (ok, err) = await Api.CreateModelAsync(req);
+                if (ok) { row.Added = true; row.Selected = false; existingNames.Add(row.Model.Id); okCount++; }
+                else { row.AddError = err; failCount++; }
+            }
+            if (okCount > 0)
+            {
+                ToastService.ShowSuccess($"已添加 {okCount} 个模型{(failCount > 0 ? $"，{failCount} 个失败" : "")}",
+                    failCount > 0 ? "部分失败" : "批量添加成功");
+                await LoadModels();
+            }
+            else if (failCount > 0)
+            {
+                ToastService.ShowError($"批量添加失败 {failCount} 个", "请检查错误");
+            }
+        }
+        finally
+        {
+            IsBulkAdding = false;
         }
     }
 

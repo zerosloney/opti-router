@@ -578,6 +578,9 @@ builder.Services.AddHostedService<MetricsGaugeUpdaterService>();
 // 转换事件同步记入 AlertHistory；未配置 AlertWebhookUrl 时仅记录历史，URL 配置后热生效。
 // 10s 超时：webhook 目标无响应时不能让单条推送阻塞默认 100s、告警队列积压。
 builder.Services.AddHttpClient("alert-webhook", client => client.Timeout = TimeSpan.FromSeconds(10));
+
+// 模型配置页拉取上游模型列表的短命命名 client：超时 10 秒（用户期望快速失败）。
+builder.Services.AddHttpClient("model-discover", client => client.Timeout = TimeSpan.FromSeconds(10));
 builder.Services.AddHostedService<OptiRouter.Health.AlertWebhookNotifier>(sp =>
     new OptiRouter.Health.AlertWebhookNotifier(
         () => sp.GetRequiredService<AlertEngine>().Check(),
