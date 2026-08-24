@@ -57,9 +57,11 @@ public sealed class CalibratingTokenEstimator : ITokenEstimator
 
     /// <summary>
     /// 用一次成功请求的真实输入 token 数校正比率。
-    /// 非法样本（估算/实际非正、比值超出 [0.1, 10]）静默丢弃。
+    /// 入参 estimated 是<see cref="Estimate"/>已乘过当前比率的校准值，因此样本比值
+    /// actual/estimated 需再乘当前比率才还原为绝对比率（否则反馈回路收敛到 √(真实偏差)，
+    /// 生产实测残余低估 20%+）。非合法样本（估算/实际非正、比值超出 [0.1, 10]）静默丢弃。
     /// </summary>
-    /// <param name="estimated">本请求的估算输入 token 数。</param>
+    /// <param name="estimated">本请求的估算输入 token 数（校准后，即 decision.EstimatedInputTokens）。</param>
     /// <param name="actualPromptTokens">上游 usage.prompt_tokens。</param>
     public void Observe(int estimated, int actualPromptTokens)
     {
@@ -71,7 +73,9 @@ public sealed class CalibratingTokenEstimator : ITokenEstimator
             return;
 
         double alpha = Volatile.Read(ref _observations) < WarmupSamples ? 0.5 : 0.2;
-        double next = Volatile.Read(ref _ratio) * (1 - alpha) + observed * alpha;
+        double current = Volatile.Read(ref _ratio);
+        // 样本绝对比率 = current × observed（把"对已校准值的偏差"换算回"对内层原始估算的偏差"）。
+        double next = current * (1 - alpha + alpha * observed);
         next = Math.Clamp(next, MinRatio, MaxRatio);
 
         Interlocked.Exchange(ref _ratio, next);

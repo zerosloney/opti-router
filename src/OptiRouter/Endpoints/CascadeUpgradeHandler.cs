@@ -132,7 +132,7 @@ public sealed class CascadeUpgradeHandler
             _recorder.RecordAudit(null, verifierModel.Name, estimatedTokens, verifyResponse.Usage, verifyCost, verifySw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; cascade: " + verifyKind + " " + (confident ? "confident" : "uncertain"),
                 true, null, false, routedTier, cascadeTriggered: true,
-                reward: verifierReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                reward: verifierReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
 
             // 质量信号接入学习状态：自校验置信度此前被丢弃，导致 Thompson/Bandit 系统性偏好"快但不准"的 Cheap。
             // 置信=答案质量高→正反馈强化；不置信→负反馈惩罚，降低后续对该 Cheap 的偏好。reward 值可配置。
@@ -183,7 +183,7 @@ public sealed class CascadeUpgradeHandler
                     strongSw.ElapsedMilliseconds, sessionId, decision.Reason + "; cascade: upgraded from " + cheapModel.Name,
                     true, null, false, routedTier, cascadeTriggered: true, upgradedFrom: cheapModel.Name,
                     timeToFirstTokenMs: strongResponse.Metadata?.ResponseHeaderLatencyMs,
-                    reward: upgradeReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: upgradeReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
 
                 _logger.LogInformation("Cascade upgrade: {Cheap} -> {Strong} (self-verify uncertain)",
                     cheapModel.Name, upgradeTarget.Name);

@@ -191,7 +191,7 @@ public sealed class FusionRouter
                     decision.Reason + "; fusion-router: panel success", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "panel",
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             }
             else
             {
@@ -234,7 +234,7 @@ public sealed class FusionRouter
                     false, lastErrorMessage, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m, fusionRole: "panel",
                     quotaLimited: quotaLimited,
-                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             }
         }
 
@@ -285,7 +285,7 @@ public sealed class FusionRouter
                         true, null, false, routedTier,
                         isAdopted: true, parallelGroupId: groupId, isEstimated: false, fusionRole: "consensus",
                         timeToFirstTokenMs: winnerResponse.Metadata?.ResponseHeaderLatencyMs,
-                        reward: null, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        reward: null, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
 
                     // 记录亲和性信号（与 outer 成功路径对齐——用户实际看到的答案）
                     _recorder.RecordAffinity(sessionId, winnerModel.Name, AffinitySignal.Weak);
@@ -347,7 +347,7 @@ public sealed class FusionRouter
                 decision.Reason + "; fusion-router: analyst", true, null, false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
                 timeToFirstTokenMs: analystResponse.Metadata?.ResponseHeaderLatencyMs,
-                reward: analystReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                reward: analystReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
 
             analysis = FusionSynthesis.ParseAnalysis(analystResponse);
         }
@@ -374,7 +374,7 @@ public sealed class FusionRouter
                 sessionId, decision.Reason + "; fusion-router: analyst failed", false,
                 UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), false, routedTier, isAdopted: false,
                 parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: quotaLimited,
-                reward: analystFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                reward: analystFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             _logger.LogWarning("Fusion router analyst call failed (model {Model}, status {Status}), falling back to serial",
                 analystModel.Name, status);
             // 配额限流的 analyst 已记入 failedInThisRequest（串行降级不再重试该 429 模型）；
@@ -412,7 +412,7 @@ public sealed class FusionRouter
                     sessionId, decision.Reason + "; fusion-router: analyst retry(parse)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false, fusionRole: "analyst",
                     timeToFirstTokenMs: retryResponse.Metadata?.ResponseHeaderLatencyMs,
-                    reward: retryReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: retryReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
 
                 analysis = FusionSynthesis.ParseAnalysis(retryResponse);
 
@@ -458,7 +458,7 @@ public sealed class FusionRouter
                     sessionId, decision.Reason + "; fusion-router: analyst retry failed", false,
                     UpstreamFailureClassifier.SafeMessage(ex, retryQuotaLimited), false, routedTier, isAdopted: false,
                     parallelGroupId: groupId, fusionRole: "analyst", quotaLimited: retryQuotaLimited,
-                    reward: retryFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: retryFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                 _logger.LogWarning(
                     "Fusion router analyst retry failed (model {Model}, status {Status}), falling back to serial",
                     analystModel.Name, retryStatus);
@@ -500,7 +500,7 @@ public sealed class FusionRouter
                 decision.Reason + "; fusion-router: outer", true, null, false, routedTier,
                 isAdopted: true, parallelGroupId: groupId, isEstimated: false, fusionRole: "outer",
                 timeToFirstTokenMs: outerResponse.Metadata?.ResponseHeaderLatencyMs,
-                reward: outerReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                reward: outerReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
 
             _logger.LogInformation("Fusion router: completed (group {GroupId}), panel={PanelCount}, analyst={Analyst}, outer={Outer}",
                 groupId, panelAnswers.Count, analystModel.Name, outerModel.Name);
@@ -529,7 +529,7 @@ public sealed class FusionRouter
                 sessionId, decision.Reason + "; fusion-router: outer failed", false,
                 UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), false, routedTier, isAdopted: false,
                 parallelGroupId: groupId, fusionRole: "outer", quotaLimited: quotaLimited,
-                reward: outerFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                reward: outerFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             _logger.LogWarning("Fusion router outer call failed (model {Model}, status {Status}), falling back to serial",
                 outerModel.Name, status);
             return new FusionAttemptResult(null, outerModel.Name, status,
@@ -660,7 +660,7 @@ public sealed class FusionRouter
                         true, null, true, routedTier, isAdopted: false, fusionRole: "secondary",
                         isEstimated: isEstimated,
                         timeToFirstTokenMs: resp.Metadata?.ResponseHeaderLatencyMs,
-                        reward: secondaryReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        reward: secondaryReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     return (m.Name, ResponseConfidenceChecker.ExtractAssistantText(resp));
                 }
                 catch (Exception ex)
@@ -688,7 +688,7 @@ public sealed class FusionRouter
                         secondarySw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: secondary failed",
                         false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), true, routedTier,
                         isAdopted: false, fusionRole: "secondary", quotaLimited: quotaLimited,
-                        reward: secondaryFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        reward: secondaryFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     return (m.Name, string.Empty);
                 }
             }, ct));
@@ -741,7 +741,7 @@ public sealed class FusionRouter
                 _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, anchorUsage, anchorCost,
                     anchorElapsedMs, sessionId, "fusion-stream-anchor", true, null, true, routedTier,
                     isEstimated: anchorIsEstimated,
-                    reward: anchorReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: anchorReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             }
             else
             {
@@ -752,7 +752,7 @@ public sealed class FusionRouter
                     double anchorFailureReward = _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
                     _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
                         anchorElapsedMs, sessionId, "fusion-stream-anchor", false, "anchor-stream-faulted", true, routedTier,
-                        reward: anchorFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        reward: anchorFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     _logger.LogWarning("Fusion anchor {Name} stream faulted{Tripped}", anchorModel.Name, tripped ? " (circuit tripped)" : "");
                 }
                 else
@@ -823,7 +823,7 @@ public sealed class FusionRouter
                         true, null, true, routedTier, isAdopted: false, fusionRole: "analyst",
                         isEstimated: isEstimated,
                         timeToFirstTokenMs: analystResp.Metadata?.ResponseHeaderLatencyMs,
-                        reward: streamAnalystReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        reward: streamAnalystReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                 }
                 catch (Exception ex)
                 {
@@ -843,7 +843,7 @@ public sealed class FusionRouter
                         analystSw.ElapsedMilliseconds, sessionId, decision.Reason + "; fusion-stream: analyst failed",
                         false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), true, routedTier,
                         isAdopted: false, fusionRole: "analyst", quotaLimited: quotaLimited,
-                        reward: streamAnalystFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        reward: streamAnalystFailureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     throw;
                 }
                 var analysis = FusionSynthesis.ParseAnalysis(analystResp);

@@ -193,7 +193,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,
                     isAdopted: true, parallelGroupId: groupId, isEstimated: adoptedIsEstimated,
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                 accounted.Add(model.Name);
 
                 adopted = response;
@@ -229,7 +229,7 @@ public sealed class RaceOrchestrator
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: cancelled-by-race", false, "cancelled", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                 accounted.Add(model.Name);
                 continue;
             }
@@ -271,7 +271,7 @@ public sealed class RaceOrchestrator
                 false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited), false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m,
                 quotaLimited: quotaLimited,
-                reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             accounted.Add(model.Name);
         }
 
@@ -323,7 +323,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId,
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                 accounted.Add(m.Name);
                 continue;
             }
@@ -345,7 +345,7 @@ public sealed class RaceOrchestrator
                     "quota-exhausted", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false,
                     quotaLimited: true,
-                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             }
             else if (postBreakCancelledByRace)
             {
@@ -360,7 +360,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: cancelled-by-race (post-break)", false,
                     "cancelled", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
-                    reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             }
             else
             {
@@ -377,7 +377,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: failed (post-break)" + (tripped ? " (circuit tripped)" : ""),
                     false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited: false), false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: failureEstCost > 0m,
-                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
             }
             accounted.Add(m.Name);
         }

@@ -103,7 +103,8 @@ public sealed class OutcomeRecorder
         bool quotaLimited = false,
         double? reward = null,
         string? epsilonPromotedModel = null,
-        string? requestContent = null)
+        string? requestContent = null,
+        string? classificationSignal = null)
     {
         try
         {
@@ -147,7 +148,8 @@ public sealed class OutcomeRecorder
                 ParentSpanId: TraceScope.Current?.ParentSpanId,
                 Reward: reward,
                 EpsilonPromotedModel: epsilonPromotedModel,
-                RequestContent: requestContent));
+                RequestContent: requestContent,
+                ClassificationSignal: classificationSignal));
         }
         catch
         {

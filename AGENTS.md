@@ -58,4 +58,7 @@ D:/nssm/nssm.exe start OptiRouter
 ## 开发环境
 
 - `dotnet run` → http://localhost:5157（launchSettings），Development，单实例守卫关闭。
+- **数据库隔离**：launchSettings 注入的 `OptiRouter__ConfigDbConnectionString` 指向独立 `optirouter_dev` 库
+  （生产用 `test` 库，见 appsettings.Production.json）——dev 实例的探活/审计淘汰/预算清扫等
+  HostedService 不得触碰生产数据，两库必须保持分离。
 - 测试：`dotnet test tests/OptiRouter.Tests`（集成测试自建 WebApplicationFactory 宿主，不读 launchSettings）。

@@ -780,6 +780,32 @@ public class RequestAuditStoreTests
 
     [Theory]
     [MemberData(nameof(StoreFactories))]
+    public void Append_RoundTripsClassificationSignal(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var record = SampleRecord() with { ClassificationSignal = "code-complex" };
+
+        store.Append(record);
+        var roundTrip = Assert.Single(store.GetRecent(1));
+
+        Assert.Equal("code-complex", roundTrip.ClassificationSignal);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
+    public void Append_NullClassificationSignal_RoundTrips(Func<IRequestAuditStore> factory)
+    {
+        using var store = factory();
+        var record = SampleRecord() with { ClassificationSignal = null };
+
+        store.Append(record);
+        var roundTrip = Assert.Single(store.GetRecent(1));
+
+        Assert.Null(roundTrip.ClassificationSignal);
+    }
+
+    [Theory]
+    [MemberData(nameof(StoreFactories))]
     public void Append_NullRequestContent_RoundTrips(Func<IRequestAuditStore> factory)
     {
         using var store = factory();

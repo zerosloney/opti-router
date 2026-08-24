@@ -195,8 +195,12 @@ public sealed class AuditAnalysisService
                 if (!ok) t.Failures++;
                 t.Cost += (double)r.Cost;
 
-                // 路由原因可能很长（策略链解释），聚合键截断前 80 字符防分组爆炸。
-                string reasonKey = r.RoutingReason.Length <= 80 ? r.RoutingReason : r.RoutingReason[..80];
+                // 路由归因优先用结构化分类信号（如 code-complex→Strong）聚合——Reason 字符串前缀
+                // 含每次都不同的估算值/候选数，同路径请求会发散成大量小组，统计失真。
+                // 旧记录无信号时回退 Reason 前 80 字符（口径见 ReasonAcc 注释）。
+                string reasonKey = !string.IsNullOrEmpty(r.ClassificationSignal)
+                    ? $"{r.ClassificationSignal}→{r.RoutedTier}"
+                    : (r.RoutingReason.Length <= 80 ? r.RoutingReason : r.RoutingReason[..80]);
                 var rs = byReason.TryGetValue(reasonKey, out var ra) ? ra : byReason[reasonKey] = new ReasonAcc();
                 rs.Requests++;
                 if (!ok) rs.Failures++;

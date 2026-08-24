@@ -77,7 +77,8 @@ CREATE TABLE IF NOT EXISTS optirouter_request_audits (
     parent_span_id TEXT NULL,
     reward DOUBLE PRECISION NULL,
     epsilon_promoted_model TEXT NULL,
-    request_content TEXT NULL
+    request_content TEXT NULL,
+    classification_signal VARCHAR(64) NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_audits_timestamp ON optirouter_request_audits (timestamp DESC);
@@ -96,6 +97,7 @@ CREATE INDEX IF NOT EXISTS idx_audits_model ON optirouter_request_audits (model)
         EnsureColumn("reward", "DOUBLE PRECISION");
         EnsureColumn("epsilon_promoted_model", "TEXT");
         EnsureColumn("request_content", "TEXT");
+        EnsureColumn("classification_signal", "VARCHAR(64)");
     }
 
     // 信任边界守卫：EnsureColumn 用插值拼 DDL（标识符无法参数化）。列名必须是纯小写
@@ -134,9 +136,9 @@ CREATE INDEX IF NOT EXISTS idx_audits_model ON optirouter_request_audits (model)
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
 INSERT INTO optirouter_request_audits
-(timestamp, request_id, model, estimated_tokens, prompt_tokens, completion_tokens, cost, latency_ms, session_id, routing_reason, success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from, is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms, cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited, trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content)
+(timestamp, request_id, model, estimated_tokens, prompt_tokens, completion_tokens, cost, latency_ms, session_id, routing_reason, success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from, is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms, cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited, trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content, classification_signal)
 VALUES
-(@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream, @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft, @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent, @reward, @epsilon, @reqcontent);
+(@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream, @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft, @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent, @reward, @epsilon, @reqcontent, @csignal);
 ";
             cmd.Parameters.AddWithValue("ts", record.Timestamp);
             cmd.Parameters.AddWithValue("rid", (object?)record.RequestId ?? DBNull.Value);
@@ -169,6 +171,7 @@ VALUES
             cmd.Parameters.AddWithValue("reward", (object?)record.Reward ?? DBNull.Value);
             cmd.Parameters.AddWithValue("epsilon", (object?)record.EpsilonPromotedModel ?? DBNull.Value);
             cmd.Parameters.AddWithValue("reqcontent", (object?)record.RequestContent ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("csignal", (object?)record.ClassificationSignal ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
         catch (Exception ex)
@@ -442,7 +445,8 @@ GROUP BY model;
                 ParentSpanId: reader.IsDBNull(reader.GetOrdinal("parent_span_id")) ? null : reader.GetString(reader.GetOrdinal("parent_span_id")),
                 Reward: reader.IsDBNull(reader.GetOrdinal("reward")) ? null : reader.GetDouble(reader.GetOrdinal("reward")),
                 EpsilonPromotedModel: reader.IsDBNull(reader.GetOrdinal("epsilon_promoted_model")) ? null : reader.GetString(reader.GetOrdinal("epsilon_promoted_model")),
-                RequestContent: reader.IsDBNull(reader.GetOrdinal("request_content")) ? null : reader.GetString(reader.GetOrdinal("request_content"))
+                RequestContent: reader.IsDBNull(reader.GetOrdinal("request_content")) ? null : reader.GetString(reader.GetOrdinal("request_content")),
+                ClassificationSignal: reader.IsDBNull(reader.GetOrdinal("classification_signal")) ? null : reader.GetString(reader.GetOrdinal("classification_signal"))
             ));
         }
         return records;

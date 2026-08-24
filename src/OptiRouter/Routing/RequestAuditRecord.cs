@@ -41,6 +41,8 @@ namespace OptiRouter.Routing;
     /// <param name="Reward">本次尝试写入学习状态（Thompson/Bandit）的最终复合 reward（成本加权后）。null = 未记录（如缓存命中行）。</param>
     /// <param name="EpsilonPromotedModel">本次路由决策中被 ε 探索提升到段首的模型名（决策级信息，同决策的所有尝试行共享同一值）；null = 无探索提升。</param>
     /// <param name="RequestContent">请求内容摘要（截断到 500 字符，用于 dashboard 展示）。</param>
+/// <param name="ClassificationSignal">结构化路由分类信号（如 <c>code-complex</c>/<c>simple-qa</c>，RuleClassifier 填充）。
+/// 供审计分析按信号聚合，替代对 <paramref name="RoutingReason"/> 字符串前缀的脆弱分组；null = 未分类（显式指定/缓存命中等）。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -72,4 +74,5 @@ public sealed record RequestAuditRecord(
     string? ParentSpanId = null,
     double? Reward = null,
     string? EpsilonPromotedModel = null,
-    string? RequestContent = null);
+    string? RequestContent = null,
+    string? ClassificationSignal = null);

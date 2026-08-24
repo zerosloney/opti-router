@@ -291,7 +291,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 预算耗尽拒绝也要留审计痕：请求未到上游、不走正常落账路径，
                     // 不记则租户被拒事件在 Requests/Dashboard 完全不可见。
                     _recorder.RecordAudit(null, "budget-guard", decision.EstimatedInputTokens, null, 0m, 0, sessionId,
-                        decision.Reason, false, "budget exhausted", false, routedTier);
+                        decision.Reason, false, "budget exhausted", false, routedTier, classificationSignal: decision.ClassificationSignal);
                     throw new BudgetExhaustedException(decision.Reason);
                 }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
@@ -469,7 +469,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         _recorder.RecordCost(cost, sessionId);
                         _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
-                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     }
                     else
                     {
@@ -481,7 +481,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             _recorder.RecordCost(estCost, sessionId);
                         _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
                             isEstimated: estCost > 0m,
-                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     }
                     _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
@@ -542,7 +542,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m,
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "quota-exhausted", false,
-                        routedTier, quotaLimited: true, requestContent: requestContent);
+                        routedTier, quotaLimited: true, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     _logger.LogWarning("Model {Name} quota exhausted (status {Status}), trying next candidate",
                         candidate.Name, 429);
@@ -560,7 +560,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
-                        lastErrorMessage, false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        lastErrorMessage, false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     _healthTracker.ReleaseProbe(candidate.Name);
                     bool rejectHasOther = HasOtherCandidate(decision, candidate.Name, failedInThisRequest);
                     _logger.LogWarning("Model {Name} rejected request (status {Status}){Action}",
@@ -579,7 +579,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
                     _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
-                        $"upstream-status-{(int)ex.StatusCode}", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        $"upstream-status-{(int)ex.StatusCode}", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
                         candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
                 }
@@ -593,7 +593,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
                         candidate.Name, tripped ? " (circuit tripped)" : "");
                 }
@@ -611,7 +611,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                     outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, isGlobalTimeout ? "global-failover-timeout" : "timeout", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, isGlobalTimeout ? "global-failover-timeout" : "timeout", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     _logger.LogWarning("Model {Name} timed out ({Reason}), trying next{Tripped}",
                         candidate.Name, isGlobalTimeout ? "global failover timeout" : "timeout", tripped ? " (circuit tripped)" : "");
 
@@ -761,7 +761,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 预算耗尽拒绝也要留审计痕：请求未到上游、不走正常落账路径，
                     // 不记则租户被拒事件在 Requests/Dashboard 完全不可见。
                     _recorder.RecordAudit(null, "budget-guard", decision.EstimatedInputTokens, null, 0m, 0, sessionId,
-                        decision.Reason, false, "budget exhausted", false, routedTier);
+                        decision.Reason, false, "budget exhausted", false, routedTier, classificationSignal: decision.ClassificationSignal);
                     throw new BudgetExhaustedException(decision.Reason);
                 }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
@@ -974,7 +974,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                             attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier,
                             quotaLimited: quotaLimited,
-                            reward: preStreamReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                            reward: preStreamReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
 
@@ -1077,7 +1077,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier,
                         isEstimated: isEstimated,
                         timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
-                        reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                        reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, cost.ToString("F6"));
                     yield break;
@@ -1095,7 +1095,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
                             _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                                 attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier,
-                                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent);
+                                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                                 candidate.Name, tripped ? " (circuit tripped)" : "");
                         }

@@ -41,11 +41,27 @@ public sealed class CalibratingTokenEstimatorTests
     {
         var estimator = new CalibratingTokenEstimator(new FixedEstimator(1000));
 
-        // 连续观测同一比值 0.6：暖身后 ratio 应显著逼近 0.6
+        // 反馈环模拟真实调用：每轮用 Estimate() 的输出（校准值）回填观测。
+        // 内层恒 1000、实际恒 600 → 绝对比率应收敛到 0.6。
         for (int i = 0; i < 30; i++)
-            estimator.Observe(1000, 600);
+            estimator.Observe(estimator.Estimate(EmptyRequest), 600);
 
         Assert.InRange(estimator.CurrentRatio, 0.59, 0.61);
+    }
+
+    [Fact]
+    public void Observe_FeedbackLoop_ConvergesToTrueRatio_NotSquareRoot()
+    {
+        // 回归：Observe 收到的是已乘比率的校准值。若样本比值不乘回当前比率，
+        // EMA 不动点为 √(真实比值)（如 2.0 → 1.414），生产残余低估 20%+ 的根因。
+        var estimator = new CalibratingTokenEstimator(new FixedEstimator(1000));
+
+        for (int i = 0; i < 50; i++)
+            estimator.Observe(estimator.Estimate(EmptyRequest), 2000);
+
+        // 收敛到真实比率 2.0，而非 √2 ≈ 1.414
+        Assert.InRange(estimator.CurrentRatio, 1.95, 2.05);
+        Assert.InRange(estimator.Estimate(EmptyRequest), 1950, 2050);
     }
 
     [Fact]
@@ -55,7 +71,7 @@ public sealed class CalibratingTokenEstimatorTests
 
         // 反复观测极端比值 10（真实 token 远高于估算），比率不得突破上限 3.0
         for (int i = 0; i < 50; i++)
-            estimator.Observe(1000, 10_000);
+            estimator.Observe(estimator.Estimate(EmptyRequest), 10_000);
 
         Assert.Equal(3.0, estimator.CurrentRatio);
         Assert.Equal(3000, estimator.Estimate(EmptyRequest));
