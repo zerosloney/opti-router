@@ -31,6 +31,10 @@ public static class ModelsEndpoint
             // 显示 ID 统一为 "{供应商}/{真实模型 Id}"；同基础 ID 重复时追加 " #2"、" #3"。
             var displayIds = ModelDisplayIds.Compute(enabled);
 
+            // auto 的上下文窗口取启用模型的最大值：路由长输入过滤会从中挑装得下的候选，
+            // 用最大值可避免客户端按过小窗口提前截断。空列表时为 0（无候选可承接）。
+            int autoContextTokens = enabled.Count == 0 ? 0 : enabled.Max(m => m.MaxContextTokens);
+
             var data = new List<object>
             {
                 // 虚拟智能路由模型：请求 model="auto" 或缺省 model 时由 RouterEngine 全链路选择。
@@ -42,7 +46,10 @@ public static class ModelsEndpoint
                     owned_by = "opti-router",
                     routing = "auto",
                     description = "Smart routing: OptiRouter selects the best enabled model per request.",
-                    candidates = enabled.Count
+                    candidates = enabled.Count,
+                    context_length = autoContextTokens,
+                    max_model_len = autoContextTokens,
+                    max_context_tokens = autoContextTokens
                 }
             };
 
@@ -69,6 +76,10 @@ public static class ModelsEndpoint
                     tier = m.Tier.ToString().ToLowerInvariant(),
                     provider,
                     family = m.Family,
+                    // 上下文窗口按三大生态的字段名冗余暴露，第三方 agent（Cherry Studio/LobeChat
+                    // 读 context_length，vLLM 系读 max_model_len 等）不再回退默认值（如 256K）。
+                    context_length = m.MaxContextTokens,
+                    max_model_len = m.MaxContextTokens,
                     max_context_tokens = m.MaxContextTokens,
                     tags = m.Tags
                 });

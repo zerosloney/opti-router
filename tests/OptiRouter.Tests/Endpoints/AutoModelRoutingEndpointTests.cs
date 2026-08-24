@@ -172,6 +172,9 @@ public class AutoModelRoutingEndpointTests
         var first = data[0];
         Assert.Equal("auto", first.GetProperty("id").GetString());
         Assert.Equal("auto", first.GetProperty("routing").GetString());
+        // auto 的上下文窗口 = 启用模型最大值（此处 gpt-4o 的 128000），三种生态字段名同值。
+        Assert.Equal(128000, first.GetProperty("context_length").GetInt32());
+        Assert.Equal(128000, first.GetProperty("max_model_len").GetInt32());
 
         // 真实模型 id 统一 {供应商}/{真实模型 Id}；同供应商同模型多 Key 追加序号。
         var ids = data.EnumerateArray()
@@ -190,6 +193,11 @@ public class AutoModelRoutingEndpointTests
         Assert.Equal("gpt-4o", byId["openai/gpt-4o-2024-11-20"].GetProperty("name").GetString());
         Assert.Equal("deepseek-chat", byId["deepseek/deepseek-chat"].GetProperty("upstream_id").GetString());
         Assert.Equal("deepseek-primary", byId["deepseek/deepseek-chat"].GetProperty("name").GetString());
+        // 真实模型的上下文窗口在三种生态字段名下同值（第三方 agent 各读各的约定）。
+        Assert.Equal(64000, byId["deepseek/deepseek-chat"].GetProperty("context_length").GetInt32());
+        Assert.Equal(64000, byId["deepseek/deepseek-chat"].GetProperty("max_model_len").GetInt32());
+        Assert.Equal(64000, byId["deepseek/deepseek-chat"].GetProperty("max_context_tokens").GetInt32());
+        Assert.Equal(128000, byId["openai/gpt-4o-2024-11-20"].GetProperty("context_length").GetInt32());
     }
 
     [Fact]
