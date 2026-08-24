@@ -1969,6 +1969,43 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     font-weight: 600;
 }
 
+.step-badge .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    font-size: 0.66rem;
+    font-weight: 700;
+    flex: none;
+    background: var(--bg-subtle-hover);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    transition: all var(--duration-fast);
+}
+
+.step-badge.active .step-num {
+    background: var(--primary);
+    border-color: var(--primary);
+    color: #fff;
+}
+
+.step-badge.done {
+    color: var(--text-secondary);
+}
+
+.step-badge.done .step-num {
+    background: var(--success-glow);
+    border-color: var(--success-border);
+    color: var(--success);
+}
+
+.step-sep {
+    color: var(--text-faint);
+    font-size: 0.85rem;
+}
+
 .bulk-config-card {
     background: var(--bg-subtle);
     border: 1px solid var(--border);

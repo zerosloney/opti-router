@@ -19,7 +19,7 @@
                 <span>模型配置</span>
             </div>
             <div style="display: flex; gap: 8px;">
-                <button class="btn-secondary" @onclick="OpenDiscoverModal" title="拉取上游 provider 可订阅模型">
+                <button class="btn-ghost" @onclick="OpenDiscoverModal" title="拉取上游 provider 可订阅模型">
                     <AppIcon Name="download" Size="14" />
                     <span>从上游拉取</span>
                 </button>
@@ -437,8 +437,15 @@
                 <div class="modal-title">
                     <AppIcon Name="download" Size="20" Class="text-primary" />
                     <span>@(DiscoverStep == 1 ? "从上游拉取模型" : "批量导入上游模型")</span>
-                    <span class="step-badge @(DiscoverStep == 1 ? "active" : "")">Step 1. 选择上游源</span>
-                    <span class="step-badge @(DiscoverStep == 2 ? "active" : "")">Step 2. 勾选批量导入</span>
+                    <span class="step-badge @(DiscoverStep == 1 ? "active" : "done")">
+                        <span class="step-num" aria-hidden="true">@(DiscoverStep == 1 ? "1" : "✓")</span>
+                        <span>选择上游源</span>
+                    </span>
+                    <span class="step-sep" aria-hidden="true">›</span>
+                    <span class="step-badge @(DiscoverStep == 2 ? "active" : "")">
+                        <span class="step-num" aria-hidden="true">2</span>
+                        <span>勾选批量导入</span>
+                    </span>
                 </div>
                 <button class="modal-x" @onclick="CloseDiscoverModal" aria-label="关闭" type="button">×</button>
             </div>
