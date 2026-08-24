@@ -159,34 +159,61 @@ public static class ModelsConfigHandler
 
         // 4c. POST discover — 管理员拉取上游可订阅模型列表（OpenAI 兼容 /v1/models、Gemini /v1beta/models）。
         //    复用现有已配置模型的 BaseUrl+ApiKey 也可手填；返回的 Id 由管理员在 UI 多选后批量创建。
-        endpoints.MapPost("/api/models/discover", async (DiscoverRequest req, IHttpClientFactory httpFactory) =>
-            await DiscoverUpstreamModels(req, httpFactory).ConfigureAwait(false));
+        endpoints.MapPost("/api/models/discover", async (DiscoverRequest req, IHttpClientFactory httpFactory, ModelsConfigService cfg) =>
+            await DiscoverUpstreamModels(req, httpFactory, cfg).ConfigureAwait(false));
     }
 
     /// <summary>
-    /// 拉取上游 provider 的模型清单。Body：<c>{ baseUrl, apiKey?, protocol }</c>。
+    /// 拉取上游 provider 的模型清单。Body：<c>{ baseUrl?, apiKey?, protocol?, modelName? }</c>。
     /// Anthropic 没有公开的 models 列表端点，直接 501。
     /// </summary>
-    private static async Task<IResult> DiscoverUpstreamModels(DiscoverRequest req, IHttpClientFactory httpFactory)
+    private static async Task<IResult> DiscoverUpstreamModels(DiscoverRequest req, IHttpClientFactory httpFactory, ModelsConfigService cfg)
     {
-        if (req is null || string.IsNullOrWhiteSpace(req.BaseUrl))
+        if (req is null)
+            return Results.BadRequest(new { error = "Request body is required" });
+
+        string? baseUrl = req.BaseUrl;
+        string? apiKey = req.ApiKey;
+        string protocol = string.IsNullOrWhiteSpace(req.Protocol) ? "OpenAI" : req.Protocol!;
+
+        if (!string.IsNullOrWhiteSpace(req.ModelName))
+        {
+            var models = cfg.LoadModels();
+            var names = EffectiveNames(models);
+            int idx = names.FindIndex(n => string.Equals(n, req.ModelName, StringComparison.Ordinal));
+            if (idx >= 0)
+            {
+                var m = models[idx];
+                if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = m.BaseUrl;
+                if (string.IsNullOrWhiteSpace(apiKey)) apiKey = m.ApiKey;
+                if (string.IsNullOrWhiteSpace(req.Protocol) || req.Protocol == "OpenAI")
+                {
+                    if (string.Equals(m.Provider, "gemini", StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrEmpty(m.BaseUrl) && m.BaseUrl.Contains("generativelanguage.googleapis.com", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        protocol = "Gemini";
+                    }
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(baseUrl))
             return Results.BadRequest(new { error = "baseUrl is required" });
 
-        var protocol = string.IsNullOrWhiteSpace(req.Protocol) ? "OpenAI" : req.Protocol!;
         if (string.Equals(protocol, "Anthropic", StringComparison.OrdinalIgnoreCase))
             return Results.Json(
                 new { error = "Anthropic does not expose a public /v1/models endpoint; configure upstream model ids manually." },
                 statusCode: StatusCodes.Status501NotImplemented);
 
-        string url = BuildDiscoverUrl(req.BaseUrl.TrimEnd('/'), protocol);
+        string url = BuildDiscoverUrl(baseUrl.TrimEnd('/'), protocol);
         var client = httpFactory.CreateClient("model-discover");
         using var msg = new HttpRequestMessage(HttpMethod.Get, url);
-        if (!string.IsNullOrWhiteSpace(req.ApiKey))
+        if (!string.IsNullOrWhiteSpace(apiKey))
         {
             if (string.Equals(protocol, "Gemini", StringComparison.OrdinalIgnoreCase))
-                msg.Headers.Add("x-goog-api-key", req.ApiKey!.Trim());
+                msg.Headers.Add("x-goog-api-key", apiKey.Trim());
             else
-                msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", req.ApiKey!.Trim());
+                msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
         }
 
         HttpResponseMessage resp;
@@ -235,23 +262,65 @@ public static class ModelsConfigHandler
             : $"{trimmed}/v1/models";
     }
 
-    /// <summary>解析 OpenAI 兼容 <c>{object:"list", data:[{id, owned_by, ...}, ...]}</c>，未知字段一并透传。</summary>
+    /// <summary>解析 OpenAI 兼容 / Gemini / Ollama 等上游模型列表响应，未知字段一并透传。</summary>
     private static List<DiscoveredModel> ParseDiscoveredModels(string body)
     {
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;
-        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("data", out var dataEl) || dataEl.ValueKind != JsonValueKind.Array)
-            return new List<DiscoveredModel>();
-
         var items = new List<DiscoveredModel>();
-        foreach (var entry in dataEl.EnumerateArray())
+
+        JsonElement? listEl = null;
+        if (root.ValueKind == JsonValueKind.Array)
         {
-            if (entry.ValueKind != JsonValueKind.Object) continue;
-            string? id = entry.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String ? idEl.GetString() : null;
-            if (string.IsNullOrWhiteSpace(id)) continue;
-            string? ownedBy = entry.TryGetProperty("owned_by", out var obEl) && obEl.ValueKind == JsonValueKind.String ? obEl.GetString() : null;
-            // name 同 id（多数上游只暴露 id），便于 UI 一行展示。
-            items.Add(new DiscoveredModel(id, id, ownedBy, entry.Clone()));
+            listEl = root;
+        }
+        else if (root.ValueKind == JsonValueKind.Object)
+        {
+            if (root.TryGetProperty("data", out var dataEl) && dataEl.ValueKind == JsonValueKind.Array)
+                listEl = dataEl;
+            else if (root.TryGetProperty("models", out var modelsEl) && modelsEl.ValueKind == JsonValueKind.Array)
+                listEl = modelsEl;
+            else if (root.TryGetProperty("items", out var itemsEl) && itemsEl.ValueKind == JsonValueKind.Array)
+                listEl = itemsEl;
+        }
+
+        if (listEl.HasValue)
+        {
+            foreach (var entry in listEl.Value.EnumerateArray())
+            {
+                if (entry.ValueKind == JsonValueKind.String)
+                {
+                    var s = entry.GetString();
+                    if (!string.IsNullOrWhiteSpace(s))
+                        items.Add(new DiscoveredModel(s, s, null, null));
+                    continue;
+                }
+                if (entry.ValueKind != JsonValueKind.Object) continue;
+
+                string? id = null;
+                if (entry.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                    id = idEl.GetString();
+                else if (entry.TryGetProperty("name", out var nameProp) && nameProp.ValueKind == JsonValueKind.String)
+                    id = nameProp.GetString();
+                else if (entry.TryGetProperty("model", out var mProp) && mProp.ValueKind == JsonValueKind.String)
+                    id = mProp.GetString();
+
+                if (string.IsNullOrWhiteSpace(id)) continue;
+
+                // 规范化 Gemini "models/gemini-1.5-pro" -> id 为 "gemini-1.5-pro" 或原始 id
+                string cleanId = id.StartsWith("models/", StringComparison.OrdinalIgnoreCase) ? id.Substring("models/".Length) : id;
+                string displayName = cleanId;
+                if (entry.TryGetProperty("displayName", out var dnEl) && dnEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(dnEl.GetString()))
+                    displayName = dnEl.GetString()!;
+
+                string? ownedBy = null;
+                if (entry.TryGetProperty("owned_by", out var obEl) && obEl.ValueKind == JsonValueKind.String)
+                    ownedBy = obEl.GetString();
+                else if (entry.TryGetProperty("ownedBy", out var obEl2) && obEl2.ValueKind == JsonValueKind.String)
+                    ownedBy = obEl2.GetString();
+
+                items.Add(new DiscoveredModel(cleanId, displayName, ownedBy, entry.Clone()));
+            }
         }
         return items;
     }
@@ -448,8 +517,8 @@ public static class ModelsConfigHandler
         double Weight = 1.0);
 }
 
-/// <summary>上游 provider 模型拉取请求。ApiKey 可空，开源自托管多不要求鉴权。</summary>
-public record DiscoverRequest(string BaseUrl, string? ApiKey, string? Protocol = "OpenAI");
+/// <summary>上游 provider 模型拉取请求。ApiKey 可空，开源自托管多不要求鉴权；ModelName 指定时自动复用已配置模型的凭据与端点。</summary>
+public record DiscoverRequest(string? BaseUrl = null, string? ApiKey = null, string? Protocol = "OpenAI", string? ModelName = null);
 
 /// <summary>上游 provider 模型拉取结果。Raw 透传原 JSON 节点，供 UI 扩展展示（如 context_length 等非标字段）。</summary>
 public record DiscoveredModel(string Id, string? Name, string? OwnedBy, JsonElement? Raw);

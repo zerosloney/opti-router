@@ -528,11 +528,13 @@ public class ApiService
     }
 
     /// <summary>拉取上游 provider 的可订阅模型列表。返回 null 表示网关层错误；502/501 等上游错误由服务端抛出并包装在 err。</summary>
-    public async Task<(List<DiscoveredModel>? Models, string? Error)> DiscoverModelsAsync(string baseUrl, string? apiKey, string protocol)
+    public async Task<(List<DiscoveredModel>? Models, string? Error)> DiscoverModelsAsync(
+        string? baseUrl = null, string? apiKey = null, string protocol = "OpenAI", string? modelName = null)
     {
         try
         {
-            using var resp = await SendAsync(HttpMethod.Post, Url("/api/models/discover"), new { baseUrl, apiKey, protocol });
+            using var resp = await SendAsync(HttpMethod.Post, Url("/api/models/discover"),
+                new { baseUrl, apiKey, protocol, modelName });
             if (resp.IsSuccessStatusCode)
             {
                 var items = await resp.Content.ReadFromJsonAsync<List<DiscoveredModel>>().ConfigureAwait(false);

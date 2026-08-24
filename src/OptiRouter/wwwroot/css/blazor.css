@@ -1865,6 +1865,268 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     animation: modal-scale-in 0.22s var(--ease-out);
 }
 
+/* ==========================================================================
+   从上游拉取模型弹窗 & 表单内模型快捷拉取选择器
+   ========================================================================== */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(8px);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: fade-in 0.2s var(--ease-out);
+}
+
+.discover-modal {
+    width: min(860px, 95vw);
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+    padding: 1.5rem;
+    border-radius: var(--radius-lg);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-modal);
+    animation: modal-scale-in 0.22s var(--ease-out);
+}
+
+.discover-modal .modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 0.9rem;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 1rem;
+}
+
+.discover-modal .modal-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 1.08rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    flex-wrap: wrap;
+}
+
+.discover-modal .modal-x {
+    background: transparent;
+    border: none;
+    font-size: 1.4rem;
+    line-height: 1;
+    color: var(--text-secondary);
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: var(--radius-sm);
+    transition: color var(--duration-fast), background var(--duration-fast);
+}
+
+.discover-modal .modal-x:hover {
+    color: var(--text-primary);
+    background: var(--bg-subtle-hover);
+}
+
+.discover-modal .modal-body {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+}
+
+.discover-modal .modal-footer {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    margin-top: 0.75rem;
+}
+
+.step-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.75rem;
+    padding: 2px 9px;
+    border-radius: 9999px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.step-badge.active {
+    background: rgba(99, 102, 241, 0.15);
+    border-color: rgba(99, 102, 241, 0.4);
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.bulk-config-card {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 0.85rem 1rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+}
+
+.bulk-config-card .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 0;
+}
+
+.bulk-config-card label {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.bulk-config-card select,
+.bulk-config-card input {
+    height: 32px;
+    font-size: 0.82rem;
+    padding: 4px 8px;
+    border-radius: var(--radius-sm);
+}
+
+.discover-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 4px 0;
+}
+
+.discover-search-input {
+    min-width: 220px;
+    flex: 1;
+    max-width: 340px;
+    height: 32px;
+    font-size: 0.82rem;
+    padding: 4px 10px;
+}
+
+.discover-table-wrap {
+    max-height: 320px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--bg-surface);
+}
+
+.discover-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+}
+
+.discover-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-subtle);
+    z-index: 2;
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+}
+
+.discover-table tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.discover-table tbody tr:hover {
+    background: var(--bg-subtle-hover);
+}
+
+/* 模型添加/编辑表单内 — 模型选择器 */
+.form-model-picker {
+    margin-top: 8px;
+    padding: 10px 12px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    animation: fade-in 0.15s ease-out;
+}
+
+.form-model-picker-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.form-model-picker-title {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.form-model-picker-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 150px;
+    overflow-y: auto;
+    padding: 2px 0;
+}
+
+.model-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    font-family: 'JetBrains Mono', monospace;
+    padding: 4px 10px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    color: var(--text-primary);
+    cursor: pointer;
+    transition: all var(--duration-fast);
+}
+
+.model-chip:hover {
+    border-color: var(--primary);
+    background: var(--bg-subtle-hover);
+    transform: translateY(-1px);
+}
+
+.model-chip.selected {
+    background: rgba(99, 102, 241, 0.18);
+    border-color: var(--primary);
+    color: var(--primary);
+    font-weight: 600;
+}
+
+.model-chip .chip-owner {
+    font-size: 0.68rem;
+    font-family: inherit;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.05);
+    padding: 1px 4px;
+    border-radius: 4px;
+}
+
 /* 列表 ApiKey 单元格：遮蔽预览/完整密钥 + 眼睛切换按钮 */
 .apikey-cell {
     display: inline-flex;
