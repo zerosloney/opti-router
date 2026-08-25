@@ -235,8 +235,12 @@ public static class ModelsConfigHandler
         if (!resp.IsSuccessStatusCode)
         {
             var errBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+            // 全部候选 404 = 该 base url 不提供 /models 列表端点（如套餐型网关），提示改为手动配置模型 ID
+            var hint = resp.StatusCode == HttpStatusCode.NotFound
+                ? " — no /models endpoint found under this base URL (plan-based gateways may not expose it); configure upstream model ids manually."
+                : string.Empty;
             return Results.Json(
-                new { error = $"Upstream returned {(int)resp.StatusCode} {resp.ReasonPhrase} for {resp.RequestMessage?.RequestUri}", body = errBody },
+                new { error = $"Upstream returned {(int)resp.StatusCode} {resp.ReasonPhrase} for {resp.RequestMessage?.RequestUri}{hint}", body = errBody },
                 statusCode: StatusCodes.Status502BadGateway);
         }
 

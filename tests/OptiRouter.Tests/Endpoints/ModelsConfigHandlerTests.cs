@@ -366,6 +366,31 @@ public class ModelsConfigHandlerTests
     }
 
     [Fact]
+    public async Task Discover_OpenAI_PlanPrefixBaseUrl_FallsBackToSiteRootV1Models()
+    {
+        // 套餐型网关（腾讯 TokenHub Token Plan）：chat 在 /plan/v3 前缀下，模型列表只在站点根 /v1/models
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["https://tokenhub.tencentmaas.com/v1/models"] = _ => JsonResponse("""{"object":"list","data":[{"id":"glm-5.3","owned_by":"tokenhub"}]}"""),
+            });
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://tokenhub.tencentmaas.com/plan/v3", apiKey = "sk-plan-key", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal("glm-5.3", doc.RootElement[0].GetProperty("id").GetString());
+        Assert.Equal(3, fake.Calls.Count);
+        Assert.Equal("https://tokenhub.tencentmaas.com/plan/v3/v1/models", fake.Calls[0].Url.ToString());
+        Assert.Equal("https://tokenhub.tencentmaas.com/plan/v3/models", fake.Calls[1].Url.ToString());
+        Assert.Equal("https://tokenhub.tencentmaas.com/v1/models", fake.Calls[2].Url.ToString());
+    }
+
+    [Fact]
     public async Task Discover_OpenAI_FirstCandidateUnauthorized_DoesNotFallBack()
     {
         // 401 说明路径正确而鉴权失败：不应回退，避免掩盖真实错误并重复发送凭据
