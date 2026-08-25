@@ -354,6 +354,7 @@ builder.Services.AddSingleton<ContextualBanditState>(sp =>
 builder.Services.AddSingleton<UpstreamQuotaStateStore>();
 builder.Services.AddSingleton<PromptCacheAffinityStore>();
 builder.Services.AddSingleton<FusionPanelSelector>();
+builder.Services.AddSingleton<SessionLatencyTracker>();
 builder.Services.AddHttpContextAccessor();
 
 // 管理端登录会话（Cookie）：可视化界面仅管理员登录后可用。
@@ -498,7 +499,7 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
         new DataSovereigntyPolicy(),
         new CapabilityFilterPolicy(),
         new RuleClassifierPolicy(),
-        new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>()),
+        new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>(), sp.GetRequiredService<SessionLatencyTracker>()),
         new SemanticRouterPolicy(vectorEngine),
         new RagAwareRoutingPolicy(ragAnalyzer),
         new McpToolRoutingPolicy(mcpAnalyzer),

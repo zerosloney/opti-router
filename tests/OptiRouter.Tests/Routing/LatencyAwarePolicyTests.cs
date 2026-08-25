@@ -489,4 +489,115 @@ public class LatencyAwarePolicyTests
         // 验证 RouterDecision.EpsilonPromotedModel 被设置为被提升的模型名
         Assert.Equal("c", result.EpsilonPromotedModel);
     }
+
+    // ===== 强档延迟降级 pre-pass（Commit 3） =====
+
+    [Fact]
+    public void DegradeSlowStrong_DisabledByDefault_PassesThrough()
+    {
+        // LatencyDegradeStrongP95Ms=0 (默认关闭) → 即使有慢强档也不动
+        var options = TestHelpers.BuildOptions(
+            ("strong-slow", ModelTier.Strong, 128000, 5m),
+            ("strong-fast", ModelTier.Strong, 128000, 5m),
+            ("medium-a", ModelTier.Medium, 64000, 0.15m));
+        var stats = StubLatencyStatsProvider.WithP95(
+            ("strong-slow", 100_000, 200_000, 10),
+            ("strong-fast", 5_000, 8_000, 10));
+        var policy = new LatencyAwarePolicy(stats, new ThompsonStateStore());
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        Assert.Equal(initial.Candidates.Select(m => m.Name), result.Candidates.Select(m => m.Name));
+    }
+
+    [Fact]
+    public void DegradeSlowStrong_AboveThreshold_MovesSlowToTail()
+    {
+        // strong-slow p95=100s > 30s 阈值 → 移到 candidates 末尾
+        // strong-fast p95=8s < 30s 阈值 → 保留原位
+        var options = TestHelpers.BuildOptions(
+            ("strong-slow", ModelTier.Strong, 128000, 5m),
+            ("strong-fast", ModelTier.Strong, 128000, 5m),
+            ("medium-a", ModelTier.Medium, 64000, 0.15m));
+        options.Routing.LatencyDegradeStrongP95Ms = 30_000;
+        var stats = StubLatencyStatsProvider.WithP95(
+            ("strong-slow", 50_000, 100_000, 10),
+            ("strong-fast", 5_000, 8_000, 10));
+        var policy = new LatencyAwarePolicy(stats, new ThompsonStateStore());
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // 末尾应是 strong-slow
+        Assert.Equal("strong-slow", result.Candidates[^1].Name);
+        Assert.Contains("degraded 1 slow-strong", result.Reason);
+    }
+
+    [Fact]
+    public void DegradeSlowStrong_InsufficientSamples_NotDegraded()
+    {
+        // 强档 p95 超阈值但样本数 < minSamples → 不动（冷启动保护）
+        var options = TestHelpers.BuildOptions(
+            ("strong-slow", ModelTier.Strong, 128000, 5m),
+            ("medium-a", ModelTier.Medium, 64000, 0.15m));
+        options.Routing.LatencyDegradeStrongP95Ms = 30_000;
+        options.Routing.LatencyMinSamples = 5;
+        var stats = StubLatencyStatsProvider.WithP95(
+            ("strong-slow", 50_000, 100_000, 3));  // samples=3 < 5
+        var policy = new LatencyAwarePolicy(stats, new ThompsonStateStore());
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        Assert.Equal(initial.Candidates.Select(m => m.Name), result.Candidates.Select(m => m.Name));
+    }
+
+    [Fact]
+    public void DegradeSlowStrong_OnlyStrongAffected_MediumUntouched()
+    {
+        // 即使 medium p95 也很高，也只动 Strong；medium 保留原位
+        var options = TestHelpers.BuildOptions(
+            ("strong-slow", ModelTier.Strong, 128000, 5m),
+            ("medium-slow", ModelTier.Medium, 64000, 0.15m),
+            ("medium-fast", ModelTier.Medium, 32000, 0.1m));
+        options.Routing.LatencyDegradeStrongP95Ms = 30_000;
+        var stats = StubLatencyStatsProvider.WithP95(
+            ("strong-slow", 50_000, 100_000, 10),
+            ("medium-slow", 30_000, 80_000, 10),  // 也很慢但不动
+            ("medium-fast", 5_000, 8_000, 10));
+        var policy = new LatencyAwarePolicy(stats, new ThompsonStateStore());
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        // strong-slow 移到末尾；medium-slow 保留原位
+        Assert.Equal("strong-slow", result.Candidates[^1].Name);
+        Assert.DoesNotContain("strong-slow", result.Candidates.Take(2).Select(m => m.Name));
+    }
+
+    [Fact]
+    public void DegradeSlowStrong_AllThreeDisabled_ButDegradeEnabled_StillWorks()
+    {
+        // LatencyAware/Thompson/Bandit 全关，但 LatencyDegradeStrongP95Ms 开启 → 仍生效
+        // （pre-pass 独立于段内 reorder 三个开关）
+        var options = TestHelpers.BuildOptions(
+            ("strong-slow", ModelTier.Strong, 128000, 5m),
+            ("strong-fast", ModelTier.Strong, 128000, 5m),
+            ("medium-a", ModelTier.Medium, 64000, 0.15m));
+        options.Routing.EnableLatencyAware = false;
+        options.Routing.EnableThompsonSampling = false;
+        options.Routing.EnableContextualBandit = false;
+        options.Routing.LatencyDegradeStrongP95Ms = 30_000;
+        var stats = StubLatencyStatsProvider.WithP95(
+            ("strong-slow", 50_000, 100_000, 10),
+            ("strong-fast", 5_000, 8_000, 10));
+        var policy = new LatencyAwarePolicy(stats, new ThompsonStateStore());
+
+        var (ctx, initial) = Setup(options, options.Models);
+        var result = policy.Apply(ctx, initial);
+
+        Assert.Equal("strong-slow", result.Candidates[^1].Name);
+        Assert.Contains("degraded 1 slow-strong", result.Reason);
+    }
 }

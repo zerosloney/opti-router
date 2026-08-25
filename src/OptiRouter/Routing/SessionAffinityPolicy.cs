@@ -28,10 +28,12 @@ public sealed record AffinityRecord(string ModelName, DateTimeOffset UpdatedAt);
 
 /// <summary>
 /// 会话粘性路由策略：同 X-Session-Id 的多轮对话尽量命中上次成功的模型，避免风格/能力割裂。
+/// 可选地启用"延迟熔断"逃生：当该 session 最近 N 次请求平均延迟超阈值时，本轮跳过粘性、走主链重新决策，
+/// 解决"session 已被粘到慢模型上"问题（如被粘到 stealth/ox-alpha 的 session 长时间 30-100s）。
 /// </summary>
 /// <remarks>
-/// 决策层无 I/O 原则的例外：仅读内存缓存（IMemoryCache），不触网络/磁盘。
-/// 粘性记录由 <c>ProxyOrchestrator</c> 在请求成功后回写本缓存。
+/// 决策层无 I/O 原则的例外：仅读内存缓存（IMemoryCache + SessionLatencyTracker），不触网络/磁盘。
+/// 粘性记录由 <c>ProxyOrchestrator</c> 在请求成功后回写本缓存；延迟由 <c>OutcomeRecorder</c> 写 tracker。
 /// 策略链位置在 RuleClassifier 之后、SemanticRouter 之前：粘性优先于重新分类，
 /// 但 LongInput/BudgetGuard/Failover 仍可过滤掉装不下/熔断的粘性模型。
 /// </remarks>
@@ -44,10 +46,12 @@ public sealed class SessionAffinityPolicy : IRouterPolicy
     public const string CacheKeyPrefix = "affinity:";
 
     private readonly IMemoryCache _cache;
+    private readonly SessionLatencyTracker? _latencyTracker;
 
-    public SessionAffinityPolicy(IMemoryCache cache)
+    public SessionAffinityPolicy(IMemoryCache cache, SessionLatencyTracker? latencyTracker = null)
     {
         _cache = cache ?? throw new ArgumentNullException(nameof(cache));
+        _latencyTracker = latencyTracker; // 可选注入：未注入时延迟熔断自动跳过
     }
 
     /// <inheritdoc />
@@ -75,6 +79,18 @@ public sealed class SessionAffinityPolicy : IRouterPolicy
         if (context.FailedModels.Contains(remembered))
         {
             return previous.Append("session-affinity", $"remembered '{remembered}' failed, skipped");
+        }
+
+        // 延迟熔断逃生：EscapeAvgLatencyMs > 0 表示开启，tracker 可选注入。
+        // 窗口样本不足（首次访问或未达 windowSize）时放行粘性，不误伤。
+        int escapeThreshold = context.Options.Routing.SessionAffinityEscapeAvgLatencyMs;
+        int windowSize = context.Options.Routing.SessionAffinityEscapeWindowSize;
+        if (escapeThreshold > 0 && _latencyTracker is not null && windowSize > 0
+            && _latencyTracker.TryGetRecentAverage(context.SessionId, out double avgMs, minSamples: windowSize)
+            && avgMs >= escapeThreshold)
+        {
+            return previous.Append("session-affinity",
+                $"escape: avg-latency {avgMs:F0}ms >= {escapeThreshold}ms (window={windowSize}); remembered '{remembered}' skipped");
         }
 
         // 记忆模型不在当前候选链（可能被 LongInput/Budget 过滤）→ 不破坏候选，透传。

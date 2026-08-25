@@ -88,7 +88,8 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
         // bandit 与 thompson 在 RouterOptionsValidator 启动期互斥校验，运行时同时开启为非法配置；
         // 段内 if 顺序 bandit > thompson > latency 是防御性兜底（防配置漂移）。
         // 仅当三者都关闭时整体跳过（保持原 reason 文案对延迟感知的描述）。
-        if (!latencyEnabled && !thompsonEnabled && !banditEnabled)
+        if (!latencyEnabled && !thompsonEnabled && !banditEnabled
+            && context.Options.Routing.LatencyDegradeStrongP95Ms <= 0)
         {
             return previous with { Reason = $"{previous.Reason}; latency-aware: disabled" };
         }
@@ -99,6 +100,22 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
         }
 
         int minSamples = context.Options.Routing.LatencyMinSamples;
+
+        // 强档延迟降级 pre-pass：把 p95 慢的 Strong 档候选移到 candidates 末尾，让段内 reorder
+        // （Thompson/Bandit/SLA）和下游 failover 都不优先挑到它们。与 LongInputForceMedium 互补——
+        // 后者按 prompt 长度屏蔽 Strong，本步骤按历史延迟屏蔽。与 LatencyAware 三个开关正交：
+        // 即使下游 latency/thompson/bandit 全关，本步骤仍生效（因为它的语义独立）。
+        int degradeThreshold = context.Options.Routing.LatencyDegradeStrongP95Ms;
+        int degradedCount = 0;
+        if (degradeThreshold > 0)
+        {
+            var (degradedCandidates, count) = DegradeSlowStrongCandidates(previous.Candidates, degradeThreshold, minSamples);
+            if (count > 0)
+            {
+                degradedCount = count;
+                previous = previous with { Candidates = degradedCandidates };
+            }
+        }
 
         // 按 tier 分段（与 LoadBalancePolicy 一致：候选链按 tier 升序，但下游策略可能打乱，按出现顺序分段）。
         var segments = SegmentByTier(previous.Candidates);
@@ -135,7 +152,7 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             result.AddRange(reordered);
         }
 
-        if (segmentsReordered == 0)
+        if (segmentsReordered == 0 && degradedCount == 0)
         {
             return previous with { Reason = $"{previous.Reason}; latency-aware: no change" };
         }
@@ -144,11 +161,54 @@ public sealed class LatencyAwarePolicy : IRouterPolicy
             ? " [Contextual Bandit]"
             : context.Options.Routing.EnableThompsonSampling ? " [Thompson Sampling]" : "";
         string exploreTag = exploredPromotions > 0 ? $", ε-explore promoted {exploredPromotions}" : "";
+        string degradeTag = degradedCount > 0 ? $", degraded {degradedCount} slow-strong (p95>={degradeThreshold}ms)" : "";
+        if (segmentsReordered == 0)
+        {
+            // 仅 pre-pass 生效、段内未重排：单独标 degradeTag。
+            return previous with
+            {
+                Candidates = result,
+                Reason = $"{previous.Reason}; latency-aware: no segment reorder{degradeTag}"
+            };
+        }
         return previous with
         {
             Candidates = result,
-            Reason = $"{previous.Reason}; latency-aware: reordered {segmentsReordered} tier segment(s){extraTag}{exploreTag}"
+            Reason = $"{previous.Reason}; latency-aware: reordered {segmentsReordered} tier segment(s){extraTag}{exploreTag}{degradeTag}"
         };
+    }
+
+    /// <summary>
+    /// 强档延迟降级 pre-pass：把 p95 慢的 Strong 档候选从原位移出、追加到 candidates 末尾，保持其余候选原顺序。
+    /// 样本不足（&lt; minSamples）的强档不动——冷启动期间不误伤。返回 (新候选列表, 降级数量)。
+    /// </summary>
+    private (List<ModelEndpointOptions> Candidates, int DegradedCount) DegradeSlowStrongCandidates(
+        IReadOnlyList<ModelEndpointOptions> candidates, int p95ThresholdMs, int minSamples)
+    {
+        if (p95ThresholdMs <= 0 || candidates.Count < 2) return (candidates.ToList(), 0);
+
+        var keep = new List<ModelEndpointOptions>(candidates.Count);
+        var degraded = new List<ModelEndpointOptions>();
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            var m = candidates[i];
+            if (m.Tier == ModelTier.Strong)
+            {
+                var stats = _statsProvider.GetStats(m.Name);
+                if (stats is not null && stats.SampleCount >= minSamples && stats.P95LatencyMs >= p95ThresholdMs)
+                {
+                    degraded.Add(m);
+                    continue;
+                }
+            }
+            keep.Add(m);
+        }
+        if (degraded.Count == 0) return (candidates.ToList(), 0);
+
+        var result = new List<ModelEndpointOptions>(candidates.Count);
+        result.AddRange(keep);
+        result.AddRange(degraded);
+        return (result, degraded.Count);
     }
 
     /// <summary>

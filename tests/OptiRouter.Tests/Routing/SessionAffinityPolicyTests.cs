@@ -161,6 +161,154 @@ public class SessionAffinityPolicyTests
         Assert.Contains("already primary", result.Reason);
         Assert.Equal("medium-a", result.Candidates[0].Name);
     }
+
+    // ===== SessionLatencyTracker + 延迟熔断逃生通道 =====
+
+    [Fact]
+    public void LatencyTracker_RecordsAndComputesAverage()
+    {
+        var tracker = new SessionLatencyTracker();
+        tracker.Record("sess1", 1000);
+        tracker.Record("sess1", 2000);
+        tracker.Record("sess1", 3000);
+        Assert.True(tracker.TryGetRecentAverage("sess1", out double avg));
+        Assert.Equal(2000.0, avg, 0);
+    }
+
+    [Fact]
+    public void LatencyTracker_IgnoresInvalidInput()
+    {
+        var tracker = new SessionLatencyTracker();
+        tracker.Record(null, 1000);
+        tracker.Record("", 1000);
+        tracker.Record("sess1", 0);
+        tracker.Record("sess1", -5);
+        Assert.False(tracker.TryGetRecentAverage("sess1", out _));
+        Assert.False(tracker.TryGetRecentAverage("nonexistent", out _));
+    }
+
+    [Fact]
+    public void Affinity_LatencyEscape_AboveThreshold_SkipsStickyModel()
+    {
+        // 5 次平均 50s > 30s 阈值 → 跳过粘性，走主链
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var tracker = new SessionLatencyTracker();
+        for (int i = 0; i < 5; i++) tracker.Record("sess-slow", 50_000);
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess-slow", new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
+
+        var opts = new RouterOptions
+        {
+            Routing = {
+                EnableSessionAffinity = true,
+                SessionAffinityTtlSeconds = 600,
+                SessionAffinityEscapeAvgLatencyMs = 30_000,
+                SessionAffinityEscapeWindowSize = 5
+            }
+        };
+        var policy = new SessionAffinityPolicy(cache, tracker);
+        var previous = new RouterDecision
+        {
+            Candidates = new List<ModelEndpointOptions> { GetModels()[0], GetModels()[1], GetModels()[2] },
+            Reason = "init"
+        };
+        var result = policy.Apply(Context(opts, "sess-slow"), previous);
+
+        // 没有提升 medium-b
+        Assert.NotEqual("medium-b", result.Candidates[0].Name);
+        Assert.Contains("escape: avg-latency", result.Reason);
+    }
+
+    [Fact]
+    public void Affinity_LatencyEscape_BelowThreshold_PromotesAsNormal()
+    {
+        // 5 次平均 5s < 30s 阈值 → 正常提升粘性
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var tracker = new SessionLatencyTracker();
+        for (int i = 0; i < 5; i++) tracker.Record("sess-fast", 5_000);
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess-fast", new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
+
+        var opts = new RouterOptions
+        {
+            Routing = {
+                EnableSessionAffinity = true,
+                SessionAffinityTtlSeconds = 600,
+                SessionAffinityEscapeAvgLatencyMs = 30_000,
+                SessionAffinityEscapeWindowSize = 5
+            }
+        };
+        var policy = new SessionAffinityPolicy(cache, tracker);
+        var previous = new RouterDecision
+        {
+            Candidates = new List<ModelEndpointOptions> { GetModels()[0], GetModels()[1], GetModels()[2] },
+            Reason = "init"
+        };
+        var result = policy.Apply(Context(opts, "sess-fast"), previous);
+
+        Assert.Equal("medium-b", result.Candidates[0].Name);
+        Assert.Contains("promoted 'medium-b' to primary", result.Reason);
+    }
+
+    [Fact]
+    public void Affinity_LatencyEscape_DisabledByDefault_BehavesAsBefore()
+    {
+        // EscapeAvgLatencyMs=0 (默认关闭) → tracker 即使有数据也不影响
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var tracker = new SessionLatencyTracker();
+        for (int i = 0; i < 5; i++) tracker.Record("sess", 100_000);
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess", new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
+
+        var opts = new RouterOptions
+        {
+            Routing = {
+                EnableSessionAffinity = true,
+                SessionAffinityTtlSeconds = 600
+                // EscapeAvgLatencyMs 默认 0
+            }
+        };
+        var policy = new SessionAffinityPolicy(cache, tracker);
+        var previous = new RouterDecision
+        {
+            Candidates = new List<ModelEndpointOptions> { GetModels()[0], GetModels()[1], GetModels()[2] },
+            Reason = "init"
+        };
+        var result = policy.Apply(Context(opts, "sess"), previous);
+
+        Assert.Equal("medium-b", result.Candidates[0].Name);
+        Assert.DoesNotContain("escape", result.Reason);
+    }
+
+    [Fact]
+    public void Affinity_LatencyEscape_InsufficientSamples_DoesNotTrigger()
+    {
+        // 样本不足（< windowSize=5）→ 放行粘性，避免误伤首次访问的 session
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var tracker = new SessionLatencyTracker();
+        // 只写 2 次（window=5）
+        tracker.Record("sess-new", 50_000);
+        tracker.Record("sess-new", 60_000);
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess-new", new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
+
+        var opts = new RouterOptions
+        {
+            Routing = {
+                EnableSessionAffinity = true,
+                SessionAffinityTtlSeconds = 600,
+                SessionAffinityEscapeAvgLatencyMs = 30_000,
+                SessionAffinityEscapeWindowSize = 5
+            }
+        };
+        var policy = new SessionAffinityPolicy(cache, tracker);
+        var previous = new RouterDecision
+        {
+            Candidates = new List<ModelEndpointOptions> { GetModels()[0], GetModels()[1], GetModels()[2] },
+            Reason = "init"
+        };
+        var result = policy.Apply(Context(opts, "sess-new"), previous);
+
+        // 样本不足仍走粘性
+        Assert.Equal("medium-b", result.Candidates[0].Name);
+        Assert.Contains("promoted", result.Reason);
+    }
 }
 
 /// <summary>可推进的假时钟，用于验证粘性时间戳的新鲜度判断。</summary>

@@ -34,6 +34,7 @@ public sealed class OutcomeRecorder
     private readonly ClientKeyService? _clientKeyService;
     private readonly IHttpContextAccessor? _httpContextAccessor;
     private readonly CalibratingTokenEstimator? _calibratingEstimator;
+    private readonly SessionLatencyTracker? _sessionLatencyTracker;
 
     public OutcomeRecorder(
         IRequestAuditStore auditStore,
@@ -53,7 +54,8 @@ public sealed class OutcomeRecorder
         KalmanLatencyTracker? kalmanTracker = null,
         KvCachePrefixTrie? kvCacheTrie = null,
         PredictiveResilienceEngine? resilienceEngine = null,
-        Mesh.DistributedMeshSynchronizer? meshSynchronizer = null)
+        Mesh.DistributedMeshSynchronizer? meshSynchronizer = null,
+        SessionLatencyTracker? sessionLatencyTracker = null)
     {
         _auditStore = auditStore;
         _metrics = metrics;
@@ -73,6 +75,7 @@ public sealed class OutcomeRecorder
         _kvCacheTrie = kvCacheTrie;
         _resilienceEngine = resilienceEngine;
         _meshSynchronizer = meshSynchronizer;
+        _sessionLatencyTracker = sessionLatencyTracker;
     }
 
     /// <summary>
@@ -335,7 +338,11 @@ public sealed class OutcomeRecorder
     /// 仅当无现有粘性或现有粘性已超过一个 TTL 周期（视为不新鲜）时才接管，避免旁路的
     /// 偶发/升级路径覆盖主链刚建立的稳定偏好。
     /// </param>
-    public void RecordAffinity(string? sessionId, string modelName, AffinitySignal signal = AffinitySignal.Strong)
+    /// <param name="latencyMs">
+    /// 本次请求延迟（毫秒，>0）。同时写入 <see cref="SessionLatencyTracker"/>，供 SessionAffinityPolicy
+    /// "延迟熔断"逃生通道使用。&lt;=0 或 tracker 未注入时静默忽略。默认 0（向后兼容）。
+    /// </param>
+    public void RecordAffinity(string? sessionId, string modelName, AffinitySignal signal = AffinitySignal.Strong, long latencyMs = 0)
     {
         if (string.IsNullOrEmpty(sessionId))
             return;
@@ -367,6 +374,18 @@ public sealed class OutcomeRecorder
         catch
         {
             // 粘性记录失败不应影响已成功的请求。
+        }
+
+        // 延迟熔断用数据：与粘性记录一起写入 tracker。tracker 未注入时静默忽略（不破坏旧行为）。
+        // 只在"成功"路径上写；失败请求的延迟不计入（避免污染分布）。
+        try
+        {
+            if (latencyMs > 0)
+                _sessionLatencyTracker?.Record(sessionId, latencyMs);
+        }
+        catch
+        {
+            // 延迟窗口写入失败不应影响主流程。
         }
     }
 

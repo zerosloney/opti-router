@@ -40,9 +40,27 @@ public sealed class RoutingOptions
     public int LongInputThresholdTokens { get; set; } = 32000;
 
     /// <summary>
+    /// 长输入场景下强制将候选限定到 Medium 及以下档（排除 Strong）。
+    /// Strong 档的 stealth/免费层在长 prompt（>30k tokens）下延迟爆炸（p95 70s+、p99 140s+），
+    /// 即使能装下也劣于 Medium 的"小但稳"模型。开启后，长 prompt 不再被路由到 Strong。
+    /// 短 prompt 行为完全不受影响。默认 false（保持既有行为，便于灰度回滚）。
+    /// </summary>
+    public bool LongInputForceMedium { get; set; } = false;
+
+    /// <summary>
     /// 默认能力分档。无明确信号时选哪档模型。
     /// </summary>
     public ModelTier DefaultTier { get; set; } = ModelTier.Medium;
+
+    /// <summary>
+    /// 强档延迟降级阈值（毫秒，默认 0 = 关闭）。
+    /// 开启后，<see cref="LatencyAwarePolicy"/> 在段内 reorder 之前对所有 Strong 档候选做预检：
+    /// 历史 p95 延迟 ≥ 本值的模型被移出原位、追加到 candidates 末尾——使段内 reorder（Thompson/Bandit/SLA）、
+    /// ε 探索、failover 等下游策略在首选位置更难采样到它，从而在路由阶段就把慢强档"降级"到兜底位。
+    /// 与 <see cref="LongInputForceMedium"/> 互补：后者按 prompt 长度屏蔽 Strong，前者按历史延迟屏蔽。
+    /// 样本不足（&lt; <see cref="LatencyMinSamples"/>）的强档不动——避免冷启动期间误伤。
+    /// </summary>
+    public int LatencyDegradeStrongP95Ms { get; set; } = 0;
 
     /// <summary>
     /// 触发跨请求熔断的连续失败次数阈值。达到后该模型进入冷却。
@@ -309,6 +327,21 @@ public sealed class RoutingOptions
     /// 超时后该会话下次请求重新路由，避免长期固定在已不合适的模型。
     /// </summary>
     public int SessionAffinityTtlSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// 会话粘性"延迟熔断"逃生阈值（毫秒，默认 0 = 关闭）。
+    /// 开启后，若该 session 最近 <see cref="SessionAffinityEscapeWindowSize"/> 次请求的平均延迟
+    /// 超过本值，则本轮跳过粘性、走主链重新决策。
+    /// 解决"session 已被粘到慢模型上"问题（如被粘到 stealth/ox-alpha 的 session 长时间 30-100s）。
+    /// 失败请求的延迟不计入窗口（不污染分布）。默认 0 保持既有行为。
+    /// </summary>
+    public int SessionAffinityEscapeAvgLatencyMs { get; set; } = 0;
+
+    /// <summary>
+    /// 会话粘性"延迟熔断"窗口大小（最近 N 次成功请求的延迟平均）。默认 5。
+    /// 必须 >= 1。<see cref="SessionAffinityEscapeAvgLatencyMs"/> = 0 时本字段无意义。
+    /// </summary>
+    public int SessionAffinityEscapeWindowSize { get; set; } = 5;
 
     /// <summary>
     /// Enables privacy-safe stable-prefix cache affinity. The policy stores only a

@@ -462,7 +462,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     double reward = _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
                         actualTier: candidate.Tier, qualityFactor: qualityFactor, completionTokens: response.Usage?.CompletionTokens ?? 0);
                     outcomeReported = true;
-                    _recorder.RecordAffinity(sessionId, candidate.Name);
+                    _recorder.RecordAffinity(sessionId, candidate.Name, AffinitySignal.Strong, attemptSw.ElapsedMilliseconds);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
 
                     if (response.Usage is not null)
@@ -1067,7 +1067,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 流式未累积完整 content/finish_reason，质量因子不接入（默认 1.0）；仅传 actualTier 启用 per-tier 目标。
                     double reward = _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
                         actualTier: candidate.Tier, completionTokens: finalUsage?.CompletionTokens ?? 0, timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
-                    _recorder.RecordAffinity(sessionId, candidate.Name);
+                    _recorder.RecordAffinity(sessionId, candidate.Name, AffinitySignal.Strong, attemptSw.ElapsedMilliseconds);
                     _recorder.RecordPromptCacheAffinity(request, candidate.Name);
                     _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
                     probeResolved = true;
