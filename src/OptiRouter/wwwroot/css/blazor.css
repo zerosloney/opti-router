@@ -84,6 +84,9 @@
     --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
     --duration-fast: 0.15s;
     --duration-normal: 0.22s;
+
+    /* --- Inline Icons（select 箭头等内联 SVG data-URI） --- */
+    --select-arrow-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
 }
 
 /* ==========================================================================
@@ -890,6 +893,18 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     background: var(--danger-glow);
 }
 
+.tag-primary {
+    border: 1px solid var(--primary-border);
+    color: var(--primary);
+    background: var(--primary-glow);
+}
+
+.tag-purple {
+    border: 1px solid var(--purple-border);
+    color: var(--purple);
+    background: var(--purple-glow);
+}
+
 .tag-secondary {
     border: 1px solid var(--border);
     color: var(--text-secondary);
@@ -1212,6 +1227,28 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
 .form-field textarea,
 .form-control {
     width: 100%;
+}
+
+.log-controls select,
+.form-field select,
+.config-table select,
+.add-form select,
+.sub-card select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    cursor: pointer;
+    padding-right: 2rem;
+    background-image: var(--select-arrow-icon);
+    background-position: calc(100% - 0.75rem) center;
+    background-repeat: no-repeat;
+    background-size: 14px 14px;
+}
+
+select option {
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+    padding: 6px 10px;
 }
 
 .add-form {
@@ -2051,6 +2088,72 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     gap: 1rem;
 }
 
+/* Discover Modal Form Groups & Controls */
+.discover-modal .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 0;
+}
+
+.discover-modal .form-group label {
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    letter-spacing: -0.01em;
+}
+
+.discover-modal select,
+.discover-modal input:not([type="checkbox"]):not([type="radio"]) {
+    width: 100%;
+    height: 38px;
+    padding: 0 12px;
+    font-size: 0.84rem;
+    font-family: inherit;
+    color: var(--text-primary);
+    background-color: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    outline: none;
+    transition: border-color var(--duration-fast), box-shadow var(--duration-fast), background-color var(--duration-fast);
+    box-sizing: border-box;
+}
+
+.discover-modal select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    cursor: pointer;
+    padding-right: 36px;
+    background-image: var(--select-arrow-icon);
+    background-position: calc(100% - 12px) center;
+    background-repeat: no-repeat;
+    background-size: 14px 14px;
+}
+
+.discover-modal select:hover,
+.discover-modal input:not([type="checkbox"]):not([type="radio"]):hover {
+    border-color: var(--border-hover);
+    background-color: var(--bg-surface);
+}
+
+.discover-modal select:focus,
+.discover-modal input:not([type="checkbox"]):not([type="radio"]):focus {
+    border-color: var(--primary);
+    background-color: var(--bg-input);
+    box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.discover-modal select option {
+    background-color: var(--bg-surface);
+    color: var(--text-primary);
+    padding: 8px 12px;
+    font-size: 0.84rem;
+}
+
 .discover-modal .modal-footer {
     display: flex;
     justify-content: space-between;
@@ -2169,27 +2272,74 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     border-left: 3px solid var(--primary);
     border-radius: var(--radius-md);
     padding: 12px 14px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 12px;
-}
-
-.preview-field {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 12px;
+    box-shadow: var(--shadow-sm);
+}
+
+.preview-url-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+}
+
+.preview-url-box {
+    display: flex;
+    align-items: center;
+    background: var(--bg-input);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    padding: 7px 11px;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.preview-url-text {
+    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    word-break: break-all;
+    overflow-wrap: anywhere;
+    min-width: 0;
+    line-height: 1.45;
+}
+
+.preview-meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    gap: 10px 14px;
+    align-items: start;
+    width: 100%;
+}
+
+.preview-meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
 }
 
 .preview-label {
     font-size: 0.7rem;
+    font-weight: 600;
     color: var(--text-muted);
     text-transform: uppercase;
     letter-spacing: 0.03em;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
 }
 
 .preview-value {
     font-size: 0.82rem;
     color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    flex-wrap: wrap;
 }
 
 /* Discovering Scanner Animation Banner */
@@ -2302,10 +2452,36 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
 .bulk-config-card input {
     height: 32px;
     font-size: 0.82rem;
-    padding: 4px 8px;
+    padding: 0 8px;
     border-radius: var(--radius-sm);
-    background: var(--bg-surface);
+    background-color: var(--bg-surface);
     border: 1px solid var(--border);
+    color: var(--text-primary);
+    outline: none;
+    transition: all var(--duration-fast);
+}
+
+.bulk-config-card select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    cursor: pointer;
+    padding-right: 28px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+    background-position: calc(100% - 8px) center;
+    background-repeat: no-repeat;
+    background-size: 12px 12px;
+}
+
+.bulk-config-card select:hover,
+.bulk-config-card input:hover {
+    border-color: var(--border-hover);
+}
+
+.bulk-config-card select:focus,
+.bulk-config-card input:focus {
+    border-color: var(--primary);
+    box-shadow: 0 0 0 2px var(--primary-glow);
 }
 
 /* Step 2 Toolbar & Filters */

@@ -488,11 +488,14 @@
                         @if (ModelList.Any(m => m.Enabled))
                         {
                             <div class="form-group" style="margin-bottom: 0;">
-                                <label for="discover-existing-select">选择已配置模型</label>
+                                <label for="discover-existing-select">
+                                    <AppIcon Name="models" Size="14" Class="text-primary" />
+                                    <span>选择已配置模型凭证</span>
+                                </label>
                                 <select id="discover-existing-select" @bind="DiscoverSelectedModelName">
                                     @foreach (var m in ModelList.Where(m => m.Enabled))
                                     {
-                                        <option value="@m.Name">@m.Name (@(m.Provider ?? "OpenAI")) — @Truncate(m.BaseUrl, 38)</option>
+                                        <option value="@m.Name">@m.Name (@(string.IsNullOrEmpty(m.Provider) ? "OpenAI" : m.Provider)) — @Truncate(m.BaseUrl, 42)</option>
                                     }
                                 </select>
                             </div>
@@ -501,32 +504,47 @@
                             if (selectedM != null)
                             {
                                 <div class="source-preview-card">
-                                    <div class="preview-field">
-                                        <span class="preview-label">Base URL</span>
-                                        <span class="preview-value table-mono" title="@selectedM.BaseUrl">@Truncate(selectedM.BaseUrl, 42)</span>
+                                    <div class="preview-url-row">
+                                        <div class="preview-label">
+                                            <AppIcon Name="router" Size="12" Class="text-primary" />
+                                            <span>Base URL (上游端点地址)</span>
+                                        </div>
+                                        <div class="preview-url-box" title="@selectedM.BaseUrl">
+                                            <span class="preview-url-text">@selectedM.BaseUrl</span>
+                                        </div>
                                     </div>
-                                    <div class="preview-field">
-                                        <span class="preview-label">Provider 供应商</span>
-                                        <span class="preview-value">
-                                            <span class="tag tag-info" style="font-size: 0.72rem;">@(string.IsNullOrEmpty(selectedM.Provider) ? "OpenAI" : selectedM.Provider)</span>
-                                        </span>
-                                    </div>
-                                    <div class="preview-field">
-                                        <span class="preview-label">API 凭证状态</span>
-                                        <span class="preview-value" style="display: flex; align-items: center; gap: 4px;">
-                                            @if (selectedM.HasApiKey)
-                                            {
-                                                <span class="tag tag-success" style="font-size: 0.72rem;">🔑 已保存 (安全复用)</span>
-                                            }
-                                            else
-                                            {
-                                                <span class="tag tag-secondary" style="font-size: 0.72rem;">🔓 免鉴权</span>
-                                            }
-                                        </span>
-                                    </div>
-                                    <div class="preview-field">
-                                        <span class="preview-label">部署类型</span>
-                                        <span class="preview-value">@(selectedM.IsLocalOrPrivate ? "🏠 本地/私有" : "☁️ 公有云")</span>
+                                    <div class="preview-meta-grid">
+                                        <div class="preview-meta-item">
+                                            <span class="preview-label">Provider 供应商</span>
+                                            <div class="preview-value">
+                                                <span class="tag tag-info" style="font-size: 0.74rem; font-weight: 600;">@(string.IsNullOrEmpty(selectedM.Provider) ? "OpenAI" : selectedM.Provider)</span>
+                                            </div>
+                                        </div>
+                                        <div class="preview-meta-item">
+                                            <span class="preview-label">API 凭证状态</span>
+                                            <div class="preview-value">
+                                                @if (selectedM.HasApiKey)
+                                                {
+                                                    <span class="tag tag-success" style="font-size: 0.74rem;">🔑 已保存 (安全复用)</span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="tag tag-secondary" style="font-size: 0.74rem;">🔓 免鉴权</span>
+                                                }
+                                            </div>
+                                        </div>
+                                        <div class="preview-meta-item">
+                                            <span class="preview-label">部署类型</span>
+                                            <div class="preview-value">
+                                                <span class="tag @(selectedM.IsLocalOrPrivate ? "tag-purple" : "tag-info")" style="font-size: 0.74rem;">@(selectedM.IsLocalOrPrivate ? "🏠 本地/私有" : "☁️ 公有云")</span>
+                                            </div>
+                                        </div>
+                                        <div class="preview-meta-item">
+                                            <span class="preview-label">路由 Tier</span>
+                                            <div class="preview-value">
+                                                <span class="tag tag-secondary" style="font-size: 0.74rem;">@selectedM.Tier</span>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             }
