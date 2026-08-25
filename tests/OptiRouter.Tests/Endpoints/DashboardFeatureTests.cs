@@ -400,4 +400,23 @@ public class DashboardFeatureTests
         string csv = await response.Content.ReadAsStringAsync();
         Assert.Contains("key_id,key_prefix,tenant_name,daily_budget_usd", csv, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task CircuitOverride_WithSlashInModelName_ProperlyUnescapesAndOverrides()
+    {
+        using var factory = new FeatureFactory();
+        var tracker = factory.Services.GetRequiredService<ModelHealthTracker>();
+        using var client = CreateClient(factory);
+
+        string escapedName = Uri.EscapeDataString("stealth/ox-alpha-01");
+        var content = new StringContent(
+            JsonSerializer.Serialize(new { TargetState = "Open" }),
+            Encoding.UTF8,
+            "application/json");
+
+        using var response = await client.PostAsync($"/api/dashboard/circuits/{escapedName}/override", content);
+        response.EnsureSuccessStatusCode();
+
+        Assert.Equal(CircuitState.Open, tracker.GetState("stealth/ox-alpha-01"));
+    }
 }

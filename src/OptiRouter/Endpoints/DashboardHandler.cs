@@ -672,6 +672,7 @@ public static class DashboardHandler
         // 9. Circuit Breaker Override API
         endpoints.MapPost("/api/dashboard/circuits/{name}/override", (string name, ModelHealthTracker tracker, CircuitOverrideRequest req) =>
         {
+            name = Uri.UnescapeDataString(name);
             if (!Enum.TryParse<CircuitState>(req.TargetState, ignoreCase: true, out var targetState))
             {
                 return Results.BadRequest(new { error = $"Invalid target state '{req.TargetState}'. Options: Closed, Open, HalfOpen." });

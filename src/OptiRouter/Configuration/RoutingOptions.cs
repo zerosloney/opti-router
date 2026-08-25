@@ -560,9 +560,9 @@ public sealed class RoutingOptions
     /// </summary>
     public System.Collections.Generic.Dictionary<ModelTier, double> ThompsonLatencyTargetMsByTier { get; set; } = new()
     {
-        { ModelTier.Strong, 1500.0 },
-        { ModelTier.Medium, 1000.0 },
-        { ModelTier.Cheap, 600.0 }
+        { ModelTier.Strong, 15000.0 },
+        { ModelTier.Medium, 5000.0 },
+        { ModelTier.Cheap, 2000.0 }
     };
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -28,6 +29,7 @@ public sealed class ModelHealthProbeService : BackgroundService
     private readonly UpstreamQuotaStateStore _quotaStore;
     private readonly ILatencyStatsProvider? _latencyStats;
     private readonly ILogger<ModelHealthProbeService> _logger;
+    private readonly ConcurrentDictionary<string, DateTime> _probeBackoffUntil = new(StringComparer.Ordinal);
 
     /// <summary>
     /// 初始化探活服务。
@@ -66,13 +68,11 @@ public sealed class ModelHealthProbeService : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            // intentional-simple: 探活周期独立于指标/延迟聚合周期，固定 5 秒。
-            // 探活是轻量 HEAD/简答请求，5 秒可及时摘除坏模型，避免真实流量撞熔断。
-            // 若需调整，直接改此常量；不要复用 HealthProbeIntervalSeconds，否则会影响 MetricsGaugeUpdater/LatencyStatsAggregator。
-            const int ProbeIntervalSeconds = 5;
+            options = _options.CurrentValue;
+            int probeIntervalSeconds = Math.Max(5, options.Routing.HealthProbeIntervalSeconds);
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(ProbeIntervalSeconds), stoppingToken).ConfigureAwait(false);
+                await Task.Delay(TimeSpan.FromSeconds(probeIntervalSeconds), stoppingToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException)
             {
@@ -110,6 +110,14 @@ public sealed class ModelHealthProbeService : BackgroundService
                 continue;
             }
 
+            // 配额超限/退避门控：跳过退避期内的端点，避免 429 频繁轮询加剧上游限制
+            if (_probeBackoffUntil.TryGetValue(endpoint.Name, out var backoffUntil) && DateTime.UtcNow < backoffUntil)
+            {
+                if (_logger.IsEnabled(LogLevel.Debug))
+                    _logger.LogDebug("Health probe skipped (backoff active until {Backoff:O}): {Name}", backoffUntil, endpoint.Name);
+                continue;
+            }
+
             try
             {
                 var client = _clientProvider.GetClient(endpoint);
@@ -117,6 +125,7 @@ public sealed class ModelHealthProbeService : BackgroundService
 
                 if (result.Healthy)
                 {
+                    _probeBackoffUntil.TryRemove(endpoint.Name, out _);
                     // 主动探活未经 TryBeginProbe 放行：releaseProbe:false，不消耗半开探测槽位
                     _healthTracker.RecordSuccess(endpoint.Name, requiredSuccesses, releaseProbe: false);
                     if (_logger.IsEnabled(LogLevel.Debug))
@@ -127,8 +136,10 @@ public sealed class ModelHealthProbeService : BackgroundService
                     if (result.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
                     {
                         _quotaStore.Record(endpoint.Name, result.Metadata, rateLimited: true);
-                        _logger.LogWarning("Health probe quota limited: {Name} (status {Status})",
-                            endpoint.Name, 429);
+                        int backoffSecs = Math.Max(60, options.Routing.FailoverCooldownSeconds);
+                        _probeBackoffUntil[endpoint.Name] = DateTime.UtcNow.AddSeconds(backoffSecs);
+                        _logger.LogWarning("Health probe quota limited: {Name} (status {Status}), probe backing off for {Seconds}s",
+                            endpoint.Name, 429, backoffSecs);
                         continue;
                     }
                     // 熔断打开期间探活失败持续上报会无限续期冷却，模型永远到不了半开。

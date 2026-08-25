@@ -168,6 +168,60 @@ public sealed class ModelHealthProbeServiceTests
         Assert.Equal(CircuitState.Open, health.GetState(endpoint.Name));
     }
 
+    [Fact]
+    public async Task ProbeAll_AfterTooManyRequests_EntersBackoff()
+    {
+        var endpoint = new ModelEndpointOptions { Name = "rate-limited-model", Enabled = true };
+        var client429 = new RateLimitedCountingProbeClient(endpoint);
+        var options = new RouterOptions();
+        options.Models.Add(endpoint);
+        options.Routing.FailoverCooldownSeconds = 60;
+        var health = new ModelHealthTracker();
+        var quota = new UpstreamQuotaStateStore();
+
+        var service = new ModelHealthProbeService(
+            new ProbeProvider(client429),
+            health,
+            quota,
+            new FakeRouterOptionsMonitor(options),
+            NullLogger<ModelHealthProbeService>.Instance);
+
+        MethodInfo method = typeof(ModelHealthProbeService).GetMethod(
+            "ProbeAllAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+
+        // 第一次探活：返回 429，进入退避
+        await (Task)method.Invoke(service, [CancellationToken.None])!;
+        Assert.Equal(1, client429.ProbeCalls);
+        Assert.Equal(CircuitState.Closed, health.GetState(endpoint.Name));
+
+        // 第二次探活：退避期内被跳过，不发出上游请求
+        await (Task)method.Invoke(service, [CancellationToken.None])!;
+        Assert.Equal(1, client429.ProbeCalls);
+    }
+
+    private sealed class RateLimitedCountingProbeClient(ModelEndpointOptions endpoint) : IModelClient
+    {
+        public int ProbeCalls;
+        public ModelEndpointOptions Endpoint => endpoint;
+        public Task<ModelHealthResult> ProbeAsync(CancellationToken cancellationToken = default, TimeSpan? timeout = null)
+        {
+            ProbeCalls++;
+            return Task.FromResult(new ModelHealthResult(
+                Healthy: false,
+                LatencyMs: 10,
+                Error: "rate-limited",
+                StatusCode: HttpStatusCode.TooManyRequests));
+        }
+        public Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public IAsyncEnumerable<ChatStreamChunk> StreamAsync(ChatRequest request, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public Task<RawChatResponse> CompleteRawAsync(ChatRequest request, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+        public IAsyncEnumerable<RawStreamLine> StreamRawAsync(ChatRequest request, CancellationToken cancellationToken = default)
+            => throw new NotSupportedException();
+    }
+
     private sealed class CancellingProbeClient(ModelEndpointOptions endpoint) : IModelClient
     {
         public ModelEndpointOptions Endpoint => endpoint;

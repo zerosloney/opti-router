@@ -169,10 +169,10 @@ public sealed class QualityRewardTests
     [Fact]
     public void ResolveLatencyTarget_PerTierHit_AndGlobalFallback()
     {
-        var routing = new RoutingOptions(); // 默认 per-tier {Strong:1500, Medium:1000, Cheap:600}, 全局 800
-        Assert.Equal(1500.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Strong, routing));
-        Assert.Equal(1000.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Medium, routing));
-        Assert.Equal(600.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Cheap, routing));
+        var routing = new RoutingOptions(); // 默认 per-tier {Strong:15000, Medium:5000, Cheap:2000}, 全局 800
+        Assert.Equal(15000.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Strong, routing));
+        Assert.Equal(5000.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Medium, routing));
+        Assert.Equal(2000.0, OutcomeRecorder.ResolveLatencyTarget(ModelTier.Cheap, routing));
         // 未传 tier → 回退全局
         Assert.Equal(800.0, OutcomeRecorder.ResolveLatencyTarget(null, routing));
 
@@ -223,11 +223,11 @@ public sealed class QualityRewardTests
         var options = new RouterOptions();
         var tsStore = new ThompsonStateStore();
         var recorder = CreateRecorder(tsStore, options);
-        // Cheap per-tier target=600。1000ms 落在 (600, 1200]：0.7 - 0.4*((1000-600)/600) ≈ 0.4333。
-        // 若误用全局 800：1000 落在 (800,1600]：0.7-0.4*(200/800)=0.6（更宽松，验证 per-tier 确实生效）。
+        // Cheap per-tier target=2000。1000ms 落在 [0, 2000]：1.0 - 0.3*(1000/2000) = 0.85。
+        // 若误用全局 800：1000 落在 (800,1600]：0.7-0.4*(200/800)=0.6（更严格，验证 per-tier 确实生效）。
         recorder.RecordThompsonOutcome("m", elapsedMs: 1000, actualTier: ModelTier.Cheap);
-        const double cheapTarget = 600.0;
-        double expectedReward = 0.7 - 0.4 * ((1000.0 - cheapTarget) / cheapTarget);
+        const double cheapTarget = 2000.0;
+        double expectedReward = 1.0 - 0.3 * (1000.0 / cheapTarget);
         Assert.Equal(0.95 + expectedReward, tsStore.GetOrAdd("m").Alpha, precision: 4);
     }
 }
