@@ -82,6 +82,30 @@ public sealed class ProviderAdapterSandboxTests
         Assert.Null(handler.GeminiApiKey);
     }
 
+    [Fact]
+    public async Task ValidateEndpointAsync_PathVersionedBaseUrl_FallsBackOn404()
+    {
+        // base url 已含非 /v1 版本段（…/plan/v3）：/models 探测首选补 /v1 会 404，应回退 base + /models
+        var handler = new RoutedHandler("/plan/v3/models");
+        using var httpClient = new HttpClient(handler);
+        var sandbox = new ProviderAdapterSandbox(httpClient);
+
+        var endpoint = new ModelEndpointOptions
+        {
+            Id = "m1",
+            Name = "tokenhub",
+            BaseUrl = "https://tokenhub.tencentmaas.com/plan/v3",
+            ApiKey = "sk-test"
+        };
+
+        var result = await sandbox.ValidateEndpointAsync(endpoint);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(2, handler.RequestUrls.Count);
+        Assert.Equal("https://tokenhub.tencentmaas.com/plan/v3/v1/models", handler.RequestUrls[0]);
+        Assert.Equal("https://tokenhub.tencentmaas.com/plan/v3/models", handler.RequestUrls[1]);
+    }
+
     private static ModelEndpointOptions CreateEndpoint(ProviderProtocol protocol) => new()
     {
         Id = "m1",
@@ -109,5 +133,22 @@ public sealed class ProviderAdapterSandboxTests
 
         private static string? GetHeader(HttpRequestMessage request, string name)
             => request.Headers.TryGetValues(name, out var values) ? values.Single() : null;
+    }
+
+    /// <summary>按路径路由的 handler：命中 okPath 返回 200，否则 404；记录全部请求 URL。</summary>
+    private sealed class RoutedHandler : HttpMessageHandler
+    {
+        private readonly string _okPath;
+        public List<string> RequestUrls { get; } = new();
+
+        public RoutedHandler(string okPath) { _okPath = okPath; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            RequestUrls.Add(request.RequestUri!.ToString());
+            return Task.FromResult(request.RequestUri!.AbsolutePath.EndsWith(_okPath, StringComparison.OrdinalIgnoreCase)
+                ? new HttpResponseMessage(HttpStatusCode.OK)
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
     }
 }

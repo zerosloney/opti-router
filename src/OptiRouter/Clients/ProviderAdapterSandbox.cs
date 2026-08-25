@@ -88,16 +88,9 @@ public sealed class ProviderAdapterSandbox : IProviderAdapterSandbox
 
         try
         {
-            // 构造简单的探测请求 URI
             string baseUrl = endpoint.BaseUrl.TrimEnd('/');
-            string probeUrl = baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
-                ? $"{baseUrl}/models"
-                : $"{baseUrl}/v1/models";
-
-            using var request = new HttpRequestMessage(HttpMethod.Get, probeUrl);
-            ModelClientFactory.ConfigureAuthentication(endpoint, request.Headers);
-
-            using var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            // base url 可能已含版本段（…/v1、…/plan/v3）也可能未含，404 时回退下一候选
+            using var response = await ProbeModelsAsync(baseUrl, endpoint, ct).ConfigureAwait(false);
             sw.Stop();
 
             if (response.IsSuccessStatusCode)
@@ -158,6 +151,23 @@ public sealed class ProviderAdapterSandbox : IProviderAdapterSandbox
                 ErrorMessage: ex.Message,
                 Capabilities: capabilities);
         }
+    }
+
+    /// <summary>按候选 URL 依次探测 /models；404（路径猜错）回退下一候选，其余状态码直接返回。</summary>
+    private async Task<HttpResponseMessage> ProbeModelsAsync(string baseUrl, ModelEndpointOptions endpoint, CancellationToken ct)
+    {
+        HttpResponseMessage? resp = null;
+        foreach (var url in UpstreamModelsUrl.OpenAiCandidates(baseUrl))
+        {
+            resp?.Dispose();
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            ModelClientFactory.ConfigureAuthentication(endpoint, request.Headers);
+            resp = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (resp.StatusCode != System.Net.HttpStatusCode.NotFound)
+                break;
+        }
+
+        return resp!;
     }
 
 }

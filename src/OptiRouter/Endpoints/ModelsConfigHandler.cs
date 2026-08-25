@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using OptiRouter.Clients;
@@ -214,21 +215,15 @@ public static class ModelsConfigHandler
                 new { error = "Anthropic does not expose a public /v1/models endpoint; configure upstream model ids manually." },
                 statusCode: StatusCodes.Status501NotImplemented);
 
-        string url = BuildDiscoverUrl(baseUrl.TrimEnd('/'), protocol);
         var client = httpFactory.CreateClient("model-discover");
-        using var msg = new HttpRequestMessage(HttpMethod.Get, url);
-        if (!string.IsNullOrWhiteSpace(apiKey))
-        {
-            if (string.Equals(protocol, "Gemini", StringComparison.OrdinalIgnoreCase))
-                msg.Headers.Add("x-goog-api-key", apiKey.Trim());
-            else
-                msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
-        }
+        var candidates = string.Equals(protocol, "Gemini", StringComparison.OrdinalIgnoreCase)
+            ? new[] { UpstreamModelsUrl.GeminiUrl(baseUrl) }
+            : UpstreamModelsUrl.OpenAiCandidates(baseUrl);
 
         HttpResponseMessage resp;
         try
         {
-            resp = await client.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+            resp = await SendDiscoverAsync(client, candidates, apiKey, protocol);
         }
         catch (Exception ex)
         {
@@ -241,7 +236,7 @@ public static class ModelsConfigHandler
         {
             var errBody = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
             return Results.Json(
-                new { error = $"Upstream returned {(int)resp.StatusCode} {resp.ReasonPhrase}", body = errBody },
+                new { error = $"Upstream returned {(int)resp.StatusCode} {resp.ReasonPhrase} for {resp.RequestMessage?.RequestUri}", body = errBody },
                 statusCode: StatusCodes.Status502BadGateway);
         }
 
@@ -260,15 +255,29 @@ public static class ModelsConfigHandler
         return Results.Ok(items);
     }
 
-    /// <summary>OpenAI 兼容按 baseUrl 是否已含 /v1 决定路径，Gemini 走 /v1beta/models。</summary>
-    private static string BuildDiscoverUrl(string baseUrl, string protocol)
+    /// <summary>按候选 URL 依次请求模型列表；404（路径猜错）回退下一候选，其余状态码（401/5xx 等）直接返回，避免掩盖真实错误与重复发送凭据。</summary>
+    private static async Task<HttpResponseMessage> SendDiscoverAsync(
+        HttpClient client, IReadOnlyList<string> candidateUrls, string? apiKey, string protocol)
     {
-        if (string.Equals(protocol, "Gemini", StringComparison.OrdinalIgnoreCase))
-            return $"{baseUrl}/v1beta/models";
-        var trimmed = baseUrl.TrimEnd('/');
-        return trimmed.EndsWith("/v1", StringComparison.OrdinalIgnoreCase)
-            ? $"{trimmed}/models"
-            : $"{trimmed}/v1/models";
+        HttpResponseMessage? resp = null;
+        foreach (var url in candidateUrls)
+        {
+            resp?.Dispose();
+            using var msg = new HttpRequestMessage(HttpMethod.Get, url);
+            if (!string.IsNullOrWhiteSpace(apiKey))
+            {
+                if (string.Equals(protocol, "Gemini", StringComparison.OrdinalIgnoreCase))
+                    msg.Headers.Add("x-goog-api-key", apiKey.Trim());
+                else
+                    msg.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey.Trim());
+            }
+
+            resp = await client.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+            if (resp.StatusCode != HttpStatusCode.NotFound)
+                break;
+        }
+
+        return resp!;
     }
 
     /// <summary>解析 OpenAI 兼容 / Gemini / Ollama 等上游模型列表响应，未知字段一并透传。</summary>

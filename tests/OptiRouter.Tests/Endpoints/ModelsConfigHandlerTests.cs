@@ -342,6 +342,54 @@ public class ModelsConfigHandlerTests
     }
 
     [Fact]
+    public async Task Discover_OpenAI_PathVersionedBaseUrl_FallsBackToBaseModelsOn404()
+    {
+        // base url 已含非 /v1 版本段（…/plan/v3）：首选补 /v1 会 404，应回退 base + /models
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/plan/v3/models"] = _ => JsonResponse("""{"object":"list","data":[{"id":"deepseek-v3","owned_by":"tokenhub"}]}"""),
+            });
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://tokenhub.tencentmaas.com/plan/v3", apiKey = "sk-test", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal("deepseek-v3", doc.RootElement[0].GetProperty("id").GetString());
+        Assert.Equal(2, fake.Calls.Count);
+        Assert.Equal("https://tokenhub.tencentmaas.com/plan/v3/v1/models", fake.Calls[0].Url.ToString());
+        Assert.Equal("https://tokenhub.tencentmaas.com/plan/v3/models", fake.Calls[1].Url.ToString());
+    }
+
+    [Fact]
+    public async Task Discover_OpenAI_FirstCandidateUnauthorized_DoesNotFallBack()
+    {
+        // 401 说明路径正确而鉴权失败：不应回退，避免掩盖真实错误并重复发送凭据
+        var fake = new FakeUpstreamHandler(
+            new Dictionary<string, Func<FakeUpstreamHandler.RecordedRequest, HttpResponseMessage>>
+            {
+                ["/v1/models"] = _ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+                {
+                    Content = new StringContent("""{"error":"bad key"}""")
+                },
+            },
+            defaultRoute: _ => JsonResponse("""{"object":"list","data":[{"id":"should-not-be-used"}]}"""));
+        using var factory = new DiscoverFactory(fake);
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        var resp = await client.PostAsync("/api/models/discover",
+            DiscoverBody(new { baseUrl = "https://example.com", apiKey = "sk-wrong", protocol = "OpenAI" }));
+
+        Assert.Equal(HttpStatusCode.BadGateway, resp.StatusCode);
+        Assert.Single(fake.Calls);
+    }
+
+    [Fact]
     public async Task Discover_OpenAI_NoApiKey_StillIssuesRequestWithoutAuth()
     {
         var fake = new FakeUpstreamHandler(
