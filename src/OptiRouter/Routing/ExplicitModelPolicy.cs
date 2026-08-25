@@ -7,7 +7,8 @@ namespace OptiRouter.Routing;
 /// 客户端在请求体 <c>model</c> 字段显式指定模型时固定候选资格池：按路由名 <c>Name</c> 命中
 /// 则固定该端点；否则按上游真实模型 <c>Id</c> 命中（同一模型可由多家供应商提供，固定为提供它的
 /// 全部端点，路由器在其中择优与降级）。后续 tier 分类/语义路由/学习型重排只在固定池内工作，
-/// 不会把请求换到未提供该模型的端点；仅硬约束（能力/长输入/数据不出域/配额/预算/熔断）可否决。
+/// 不会把请求换到未提供该模型的端点；仅硬约束（能力/长输入/数据不出域/配额/预算/熔断）可否决，
+/// 或固定池在本请求内全部失败时释放固定、交还智能路由降级。
 /// <c>model</c> 为空或为 <see cref="AutoAlias"/>（忽略大小写）时透传，走智能路由。
 /// </summary>
 public sealed class ExplicitModelPolicy : IRouterPolicy
@@ -41,11 +42,21 @@ public sealed class ExplicitModelPolicy : IRouterPolicy
 
         if (matches.Count > 0)
         {
-            var pinned = previous with { Candidates = matches.ToList() };
+            // 本请求内已失败的 pin 目标剔除；全部失败时释放 pin 交还智能路由降级。
+            // 否则资格池被缩到只剩失败模型，FailoverPolicy 拿不到链中模型（fallbackChain
+            // 解析为空 → 候选清零 → all model candidates failed）。
+            var alive = matches.Where(m => !context.FailedModels.Contains(m.Name)).ToList();
+            if (alive.Count == 0)
+            {
+                return previous.Append("explicit-model",
+                    $"pinned '{requested}' failed in this request, released for failover");
+            }
+
+            var pinned = previous with { Candidates = alive };
             return pinned.Append("explicit-model",
-                matches.Count == 1
-                    ? $"pinned to '{matches[0].Name}'"
-                    : $"pinned to {matches.Count} endpoints offering '{requested}'");
+                alive.Count == 1
+                    ? $"pinned to '{alive[0].Name}'"
+                    : $"pinned to {alive.Count} endpoints offering '{requested}'");
         }
 
         if (string.Equals(requested, AutoAlias, StringComparison.OrdinalIgnoreCase))

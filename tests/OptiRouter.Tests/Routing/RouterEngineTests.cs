@@ -118,6 +118,37 @@ public class RouterEngineTests
     }
 
     [Fact]
+    public void Decide_PinnedModelFailed_FallsBackToConfiguredChain()
+    {
+        // 显式 pin 的模型失败后应走其配置的 fallbackChain，而不是"all candidates failed"：
+        // 单调资格池若被 pin 缩到单元素，FailoverPolicy 将无法从 AllModels 解析出链中模型。
+        var ledger = new CostLedger();
+        var options = TestHelpers.BuildOptions(
+            ("ox-alpha-01", ModelTier.Strong, 200000, 5m),
+            ("ox-alpha", ModelTier.Strong, 200000, 5m),
+            ("ox-alpha-02", ModelTier.Strong, 200000, 5m));
+        options.Models[0].FallbackChain = new List<string> { "ox-alpha", "ox-alpha-02" };
+        options.Routing.EnableFailover = true;
+
+        var engine = new RouterEngine(ledger, new IRouterPolicy[]
+        {
+            new ExplicitModelPolicy(),
+            new FailoverPolicy(new ModelHealthTracker())
+        });
+
+        var request = new ChatRequest
+        {
+            Model = "ox-alpha-01",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hello") }
+        };
+
+        var result = engine.Decide(request, options, new HashSet<string> { "ox-alpha-01" });
+
+        Assert.NotEmpty(result.Candidates);
+        Assert.Contains(result.Candidates, m => m.Name == "ox-alpha");
+    }
+
+    [Fact]
     public void Decide_PrimaryFailed_UsesFallbackChain()
     {
         var ledger = new CostLedger();
