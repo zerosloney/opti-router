@@ -27,6 +27,7 @@ public sealed class ModelHealthProbeService : BackgroundService
     private readonly ModelHealthTracker _healthTracker;
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly UpstreamQuotaStateStore _quotaStore;
+    private readonly ProbeResultStore _probeResultStore;
     private readonly ILatencyStatsProvider? _latencyStats;
     private readonly ILogger<ModelHealthProbeService> _logger;
     private readonly ConcurrentDictionary<string, DateTime> _probeBackoffUntil = new(StringComparer.Ordinal);
@@ -37,6 +38,7 @@ public sealed class ModelHealthProbeService : BackgroundService
     /// <param name="clientProvider">模型客户端提供者，用于按端点取客户端发探测。</param>
     /// <param name="healthTracker">跨请求模型健康跟踪器，探活结果上报至此。</param>
     /// <param name="quotaStore">进程内上游配额状态。</param>
+    /// <param name="probeResultStore">最近探活结果留痕，供模型配置页"连通状态"列展示。</param>
     /// <param name="options">路由配置监视器，读取探活开关/间隔/熔断参数（支持 reload）。</param>
     /// <param name="logger">日志记录器。</param>
     /// <param name="latencyStats">延迟统计快照（可选），按模型平均 TTFT 自适应放宽探活超时。</param>
@@ -44,6 +46,7 @@ public sealed class ModelHealthProbeService : BackgroundService
         IModelClientProvider clientProvider,
         ModelHealthTracker healthTracker,
         UpstreamQuotaStateStore quotaStore,
+        ProbeResultStore probeResultStore,
         IOptionsMonitor<RouterOptions> options,
         ILogger<ModelHealthProbeService> logger,
         ILatencyStatsProvider? latencyStats = null)
@@ -51,6 +54,7 @@ public sealed class ModelHealthProbeService : BackgroundService
         _clientProvider = clientProvider ?? throw new ArgumentNullException(nameof(clientProvider));
         _healthTracker = healthTracker ?? throw new ArgumentNullException(nameof(healthTracker));
         _quotaStore = quotaStore ?? throw new ArgumentNullException(nameof(quotaStore));
+        _probeResultStore = probeResultStore ?? throw new ArgumentNullException(nameof(probeResultStore));
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _latencyStats = latencyStats;
@@ -128,12 +132,17 @@ public sealed class ModelHealthProbeService : BackgroundService
                     _probeBackoffUntil.TryRemove(endpoint.Name, out _);
                     // 主动探活未经 TryBeginProbe 放行：releaseProbe:false，不消耗半开探测槽位
                     _healthTracker.RecordSuccess(endpoint.Name, requiredSuccesses, releaseProbe: false);
+                    RecordProbeResult(endpoint.Name, true, result.LatencyMs,
+                        string.IsNullOrWhiteSpace(result.Reply) ? null : $"回答: {result.Reply.Trim()}", null);
                     if (_logger.IsEnabled(LogLevel.Debug))
                         _logger.LogDebug("Health probe OK: {Name} ({Ms}ms)", endpoint.Name, result.LatencyMs);
                 }
                 else
                 {
-                    if (result.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                    bool quotaLimited = result.StatusCode == System.Net.HttpStatusCode.TooManyRequests;
+                    RecordProbeResult(endpoint.Name, false, result.LatencyMs,
+                        quotaLimited ? "配额受限 (429)" : null, result.Error);
+                    if (quotaLimited)
                     {
                         _quotaStore.Record(endpoint.Name, result.Metadata, rateLimited: true);
                         int backoffSecs = Math.Max(60, options.Routing.FailoverCooldownSeconds);
@@ -163,6 +172,8 @@ public sealed class ModelHealthProbeService : BackgroundService
             }
             catch (Exception ex)
             {
+                // 探活抛异常（网络层/客户端构造失败）：连通状态留痕后走既有失败上报。
+                RecordProbeResult(endpoint.Name, false, 0, null, ex.Message);
                 // 熔断打开期间探活异常持续上报会无限续期冷却，模型永远到不了半开。
                 // 冷却中跳过失败上报，让冷却自然到期。
                 if (_healthTracker.IsCoolingDown(endpoint.Name))
@@ -176,6 +187,15 @@ public sealed class ModelHealthProbeService : BackgroundService
                     endpoint.Name, tripped ? " (circuit tripped)" : "");
             }
         }
+    }
+
+    /// <summary>
+    /// 探活结果留痕到 <see cref="ProbeResultStore"/>（模型配置页"连通状态"列数据源，含后台探活）。
+    /// </summary>
+    private void RecordProbeResult(string modelName, bool success, long latencyMs, string? message, string? error)
+    {
+        if (message is { Length: > 100 }) message = message[..100] + "…";
+        _probeResultStore.Record(modelName, new ProbeStatus(success, latencyMs, DateTime.UtcNow, message, error));
     }
 
     /// <summary>

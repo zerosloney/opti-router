@@ -156,10 +156,14 @@ public static class ModelsConfigHandler
 
         // 7. POST Test Endpoint Connectivity
         // 显示名含 "/"（如 "sensenova/deepseek-chat"），无法作为路由段，另提供 ?name= 查询参数形式。
-        endpoints.MapPost("/api/models/{name}/test", (string name, ModelsConfigService cfg, IModelClientProvider clientProvider)
-            => TestEndpointConnectivity(name, cfg, clientProvider));
-        endpoints.MapPost("/api/models/test", (string name, ModelsConfigService cfg, IModelClientProvider clientProvider)
-            => TestEndpointConnectivity(name, cfg, clientProvider));
+        endpoints.MapPost("/api/models/{name}/test", (string name, ModelsConfigService cfg, IModelClientProvider clientProvider, OptiRouter.Health.ProbeResultStore probeStore)
+            => TestEndpointConnectivity(name, cfg, clientProvider, probeStore));
+        endpoints.MapPost("/api/models/test", (string name, ModelsConfigService cfg, IModelClientProvider clientProvider, OptiRouter.Health.ProbeResultStore probeStore)
+            => TestEndpointConnectivity(name, cfg, clientProvider, probeStore));
+
+        // 7b. GET 最近探活结果（手动 + 后台探活统一留痕）：模型配置页加载时预填"连通状态"列，刷新不丢。
+        endpoints.MapGet("/api/models/probe-results", (OptiRouter.Health.ProbeResultStore probeStore)
+            => Results.Json(probeStore.GetAll()));
 
         // 2b. GET single model ApiKey（管理员按需查看完整密钥；列表只下发遮蔽预览，避免批量泄露面）。
         endpoints.MapGet("/api/models/{name}/apikey", (string name, ModelsConfigService cfg, HttpContext httpContext)
@@ -439,7 +443,7 @@ public static class ModelsConfigHandler
     }
 
     private static async Task<IResult> TestEndpointConnectivity(
-        string name, ModelsConfigService cfg, IModelClientProvider clientProvider)
+        string name, ModelsConfigService cfg, IModelClientProvider clientProvider, OptiRouter.Health.ProbeResultStore probeStore)
     {
         var models = cfg.LoadModels();
         var names = EffectiveNames(models);
@@ -457,14 +461,19 @@ public static class ModelsConfigHandler
         // 探活回答（"你是什么模型"）截断后随 message 回显，管理员可直接核对模型身份。
         string reply = result.Reply?.Trim() ?? "";
         if (reply.Length > 80) reply = reply[..80] + "…";
+        string? sanitizedError = SanitizeProbeError(result.Error);
+        string message = !result.Healthy
+            ? "连接异常"
+            : reply.Length > 0 ? $"连接正常 (OK) · 回答: {reply}" : "连接正常 (OK)";
+        // 留痕到进程内 store：页面刷新后"连通状态"列经 GET /api/models/probe-results 预填。
+        probeStore.Record(name, new OptiRouter.Health.ProbeStatus(
+            result.Healthy, result.LatencyMs, DateTime.UtcNow, message, sanitizedError));
         return Results.Ok(new
         {
             success = result.Healthy,
             latencyMs = (long)result.LatencyMs,
-            message = !result.Healthy
-                ? "连接异常"
-                : reply.Length > 0 ? $"连接正常 (OK) · 回答: {reply}" : "连接正常 (OK)",
-            error = SanitizeProbeError(result.Error)
+            message,
+            error = sanitizedError
         });
     }
 

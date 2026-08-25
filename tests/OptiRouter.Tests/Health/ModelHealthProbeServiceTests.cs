@@ -12,6 +12,31 @@ namespace OptiRouter.Tests.Health;
 
 public sealed class ModelHealthProbeServiceTests
 {
+    [Fact]
+    public async Task ProbeAll_RecordsLatestResultInStore()
+    {
+        // 后台探活结果写入 ProbeResultStore：模型配置页"连通状态"列的数据源之一。
+        var endpoint = new ModelEndpointOptions { Name = "model-a", Enabled = true };
+        var options = new RouterOptions();
+        options.Models.Add(endpoint);
+        var store = new ProbeResultStore();
+        var service = new ModelHealthProbeService(
+            new ProbeProvider(new ProbeClient(endpoint, new ModelHealthResult(Healthy: true, LatencyMs: 42, Reply: "我是模型"))),
+            new ModelHealthTracker(),
+            new UpstreamQuotaStateStore(),
+            store,
+            new FakeRouterOptionsMonitor(options),
+            NullLogger<ModelHealthProbeService>.Instance);
+
+        MethodInfo method = typeof(ModelHealthProbeService).GetMethod(
+            "ProbeAllAsync", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        await (Task)method.Invoke(service, [CancellationToken.None])!;
+
+        var entry = store.GetAll().Single();
+        Assert.Equal(("model-a", true, 42L), (entry.Key, entry.Value.Success, entry.Value.LatencyMs));
+        Assert.Contains("我是模型", entry.Value.Message);
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.TooManyRequests, false)]
     [InlineData(HttpStatusCode.ServiceUnavailable, true)]
@@ -38,6 +63,7 @@ public sealed class ModelHealthProbeServiceTests
             new ProbeProvider(new ProbeClient(endpoint, result)),
             health,
             quota,
+            new ProbeResultStore(),
             new FakeRouterOptionsMonitor(options),
             NullLogger<ModelHealthProbeService>.Instance);
 
@@ -68,6 +94,7 @@ public sealed class ModelHealthProbeServiceTests
             new ProbeProvider(countingClient),
             health,
             new UpstreamQuotaStateStore(),
+            new ProbeResultStore(),
             new FakeRouterOptionsMonitor(options),
             NullLogger<ModelHealthProbeService>.Instance);
 
@@ -83,6 +110,7 @@ public sealed class ModelHealthProbeServiceTests
             new ProbeProvider(countingClient),
             health2,
             new UpstreamQuotaStateStore(),
+            new ProbeResultStore(),
             new FakeRouterOptionsMonitor(options),
             NullLogger<ModelHealthProbeService>.Instance);
         await (Task)method.Invoke(service2, [CancellationToken.None])!;
@@ -105,6 +133,7 @@ public sealed class ModelHealthProbeServiceTests
             new ProbeProvider(cancellingClient),
             health,
             new UpstreamQuotaStateStore(),
+            new ProbeResultStore(),
             new FakeRouterOptionsMonitor(options),
             NullLogger<ModelHealthProbeService>.Instance);
 
@@ -143,6 +172,7 @@ public sealed class ModelHealthProbeServiceTests
             new ProbeProvider(new ProbeClient(endpoint, failingResult)),
             health,
             new UpstreamQuotaStateStore(),
+            new ProbeResultStore(),
             new FakeRouterOptionsMonitor(options),
             NullLogger<ModelHealthProbeService>.Instance);
 
@@ -183,6 +213,7 @@ public sealed class ModelHealthProbeServiceTests
             new ProbeProvider(client429),
             health,
             quota,
+            new ProbeResultStore(),
             new FakeRouterOptionsMonitor(options),
             NullLogger<ModelHealthProbeService>.Instance);
 

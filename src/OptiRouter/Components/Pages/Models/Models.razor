@@ -2,6 +2,7 @@
 @using OptiRouter.Components.Services
 @inject ApiService Api
 @inject ToastService ToastService
+@inject Microsoft.Extensions.Logging.ILogger<Models> Logger
 
 <PageTitle>OptiRouter - 模型配置</PageTitle>
 
@@ -111,20 +112,23 @@
                                 <td>
                                     @if (ProbeResults.TryGetValue(m.Name, out var probe))
                                     {
-                                        @if (probe.Success)
-                                        {
-                                            <span class="tag tag-success" style="font-size: 0.75rem;">
-                                                <AppIcon Name="check" Size="12" />
-                                                <span>@probe.LatencyMs ms</span>
-                                            </span>
-                                        }
-                                        else
-                                        {
-                                            <span class="tag tag-danger" style="font-size: 0.75rem;" title="@probe.Error">
-                                                <AppIcon Name="alert" Size="12" />
-                                                <span>失败</span>
-                                            </span>
-                                        }
+                                        <div>
+                                            @if (probe.Success)
+                                            {
+                                                <span class="tag tag-success" style="font-size: 0.75rem;" title="@probe.Message">
+                                                    <AppIcon Name="check" Size="12" />
+                                                    <span>@probe.LatencyMs ms</span>
+                                                </span>
+                                            }
+                                            else
+                                            {
+                                                <span class="tag tag-danger" style="font-size: 0.75rem;" title="@probe.Error">
+                                                    <AppIcon Name="alert" Size="12" />
+                                                    <span>失败</span>
+                                                </span>
+                                            }
+                                            <span class="text-secondary" style="font-size: 0.68rem; display: block; margin-top: 2px;">@FormatProbeAgo(probe.TimestampUtc)</span>
+                                        </div>
                                     }
                                     else if (ProbingModels.Contains(m.Name))
                                     {
@@ -846,7 +850,10 @@
     private List<ApiService.ModelDto> ModelList = new();
     private string? ErrorMsg;
     private HashSet<string> ProbingModels = new();
-    private Dictionary<string, ApiService.ModelTestResultDto> ProbeResults = new();
+    private Dictionary<string, ProbeView> ProbeResults = new();
+
+    /// <summary>连通状态列视图：探活结果 + 发生时间（手动探活与后台探活留痕共用）。</summary>
+    private sealed record ProbeView(bool Success, long LatencyMs, string? Message, string? Error, DateTime TimestampUtc);
 
     // 列表 ApiKey 显示状态：模型名 → 完整密钥（仅管理员按需 reveal，关闭即移除）。
     private Dictionary<string, string> RevealedKeys = new();
@@ -1076,11 +1083,44 @@
         try
         {
             ModelList = await Api.GetModelsAsync() ?? new();
+            await SeedProbeResultsAsync();
         }
         finally
         {
             IsLoadingModels = false;
         }
+    }
+
+    /// <summary>
+    /// 预填"连通状态"列：服务端留痕的最近探活结果（手动 + 后台探活），
+    /// 页面刷新/电路重建后不丢。仅预填当前列表里的模型，历史残留条目自然忽略。
+    /// </summary>
+    private async Task SeedProbeResultsAsync()
+    {
+        try
+        {
+            var stored = await Api.GetProbeResultsAsync();
+            if (stored is null) return;
+            foreach (var (name, s) in stored)
+            {
+                ProbeResults[name] = new ProbeView(s.Success, s.LatencyMs, s.Message, s.Error, s.TimestampUtc);
+            }
+        }
+        catch (Exception ex)
+        {
+            // 预填失败不阻塞模型列表加载；列回到"未测试"，手动探活仍可用
+            Logger.LogDebug(ex, "Models SeedProbeResults failed");
+        }
+    }
+
+    /// <summary>探活结果的相对时间（"刚刚 / 5 分钟前 / 3 小时前"），提示结果的时效性。</summary>
+    private static string FormatProbeAgo(DateTime timestampUtc)
+    {
+        var delta = DateTime.UtcNow - timestampUtc;
+        if (delta.TotalMinutes < 1) return "刚刚";
+        if (delta.TotalHours < 1) return $"{(int)delta.TotalMinutes} 分钟前";
+        if (delta.TotalDays < 1) return $"{(int)delta.TotalHours} 小时前";
+        return $"{(int)delta.TotalDays} 天前";
     }
 
     private void OpenDiscoverModal()
@@ -1649,7 +1689,7 @@
             var res = await Api.TestModelConnectionAsync(name);
             if (res != null)
             {
-                ProbeResults[name] = res;
+                ProbeResults[name] = new ProbeView(res.Success, res.LatencyMs, res.Message, res.Error, DateTime.UtcNow);
                 if (res.Success)
                 {
                     ToastService.ShowSuccess($"端点「{name}」探活成功，延迟: {res.LatencyMs}ms", "探活成功");
@@ -1663,7 +1703,7 @@
         catch (Exception ex)
         {
             // 探测请求本身失败（网络/序列化）：以失败结果展示，而不是无任何反馈
-            ProbeResults[name] = new ApiService.ModelTestResultDto(false, 0, "探测请求失败", ex.Message);
+            ProbeResults[name] = new ProbeView(false, 0, "探测请求失败", ex.Message, DateTime.UtcNow);
             ToastService.ShowError($"端点「{name}」探测异常: {ex.Message}", "探活异常");
         }
         finally

@@ -590,6 +590,15 @@ public class ApiService
         return new ModelTestResultDto(false, 0, "HTTP Request Failed", null);
     }
 
+    /// <summary>最近探活结果（手动 + 后台探活留痕），模型配置页加载时预填"连通状态"列。</summary>
+    public async Task<Dictionary<string, ProbeStatusDto>?> GetProbeResultsAsync()
+    {
+        using var resp = await SendAsync(HttpMethod.Get, Url("/api/models/probe-results"));
+        if (resp.IsSuccessStatusCode)
+            return await resp.Content.ReadFromJsonAsync<Dictionary<string, ProbeStatusDto>>();
+        return null;
+    }
+
     /// <summary>按需获取单个模型的完整 ApiKey（管理员鉴权；列表接口只返回遮蔽预览）。</summary>
     public async Task<(string? Key, string? Error)> RevealModelApiKeyAsync(string name)
     {
@@ -855,6 +864,13 @@ public class ApiService
     public record ModelTestResultDto(
         bool Success,
         long LatencyMs,
+        string? Message,
+        string? Error);
+
+    public record ProbeStatusDto(
+        bool Success,
+        long LatencyMs,
+        DateTime TimestampUtc,
         string? Message,
         string? Error);
 

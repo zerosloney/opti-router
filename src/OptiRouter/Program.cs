@@ -271,6 +271,9 @@ builder.Services.AddSingleton<AlertEngine>(sp =>
 // 告警历史环形缓冲：告警出现/恢复事件进程内留痕，供 Dashboard 历史查询。
 builder.Services.AddSingleton<OptiRouter.Health.AlertHistory>();
 
+// 最近探活结果留痕：手动 + 后台探活统一写入，模型配置页"连通状态"列刷新后预填。
+builder.Services.AddSingleton<OptiRouter.Health.ProbeResultStore>();
+
 // 审计分析：时间窗全量聚合报告（总览/分模型/分档/级联/Fusion/路由原因/日趋势），供策略调优闭环。
 builder.Services.AddSingleton<AuditAnalysisService>();
 

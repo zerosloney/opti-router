@@ -110,6 +110,33 @@ public class ModelsConfigHandlerTests
     }
 
     [Fact]
+    public async Task Models_ProbeResults_ReturnsServerSideRecords()
+    {
+        // 手动/后台探活留痕经 GET /api/models/probe-results 下发：页面刷新后"连通状态"列预填。
+        using var factory = new ModelsFactory();
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", ModelsFactory.Key);
+
+        using (var empty = await client.GetAsync("/api/models/probe-results"))
+        {
+            empty.EnsureSuccessStatusCode();
+            using var doc = JsonDocument.Parse(await empty.Content.ReadAsStringAsync());
+            Assert.Empty(doc.RootElement.EnumerateObject());
+        }
+
+        // 服务侧写入一条留痕（模拟手动探活完成）后对页面可见
+        factory.Services.GetRequiredService<OptiRouter.Health.ProbeResultStore>()
+            .Record("test-model", new OptiRouter.Health.ProbeStatus(true, 123, DateTime.UtcNow, "连接正常 (OK)", null));
+        using var resp = await client.GetAsync("/api/models/probe-results");
+        resp.EnsureSuccessStatusCode();
+        using var doc2 = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        var entry = doc2.RootElement.GetProperty("test-model");
+        Assert.True(entry.GetProperty("success").GetBoolean());
+        Assert.Equal(123, entry.GetProperty("latencyMs").GetInt64());
+        Assert.Equal("连接正常 (OK)", entry.GetProperty("message").GetString());
+    }
+
+    [Fact]
     public async Task Models_Get_ReturnsMaskedApiKeyHint_WithWhitespaceWarning()
     {
         // ApiKeyHint：前 3 + 后 4 遮蔽预览；首尾空白附加警示（粘贴误差是上游 401 常见根因）；完整密钥不回传。
