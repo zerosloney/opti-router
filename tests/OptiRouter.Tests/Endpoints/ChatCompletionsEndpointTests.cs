@@ -2086,14 +2086,14 @@ public class ChatCompletionsEndpointTests
 
         Assert.Equal("list", doc.RootElement.GetProperty("object").GetString());
         var data = doc.RootElement.GetProperty("data");
-        // 首位是虚拟 auto 模型，其后是启用的真实模型（禁用的 legacy 不出现）。
-        Assert.Equal(2, data.GetArrayLength());
+        // auto + 三模式预设（auto:cost/balanced/intel）+ 启用的真实模型（禁用的 legacy 不出现）。
+        Assert.Equal(5, data.GetArrayLength());
 
         var autoEntry = data[0];
         Assert.Equal("auto", autoEntry.GetProperty("id").GetString());
         Assert.Equal("auto", autoEntry.GetProperty("routing").GetString());
 
-        var entry = data[1];
+        var entry = data[4];
         Assert.Equal("example.com/gpt-4o", entry.GetProperty("id").GetString());
         Assert.Equal("model", entry.GetProperty("object").GetString());
         Assert.Equal("opti-router", entry.GetProperty("owned_by").GetString());

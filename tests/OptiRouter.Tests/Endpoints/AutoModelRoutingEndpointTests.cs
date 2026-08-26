@@ -167,7 +167,8 @@ public class AutoModelRoutingEndpointTests
 
         using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         var data = doc.RootElement.GetProperty("data");
-        Assert.Equal(4, data.GetArrayLength());
+        // auto + 三模式预设 + 3 个真实模型。
+        Assert.Equal(7, data.GetArrayLength());
 
         var first = data[0];
         Assert.Equal("auto", first.GetProperty("id").GetString());
@@ -176,9 +177,20 @@ public class AutoModelRoutingEndpointTests
         Assert.Equal(128000, first.GetProperty("context_length").GetInt32());
         Assert.Equal(128000, first.GetProperty("max_model_len").GetInt32());
 
+        // 三模式预设同为智能路由（routing=auto），context 取目标档最大窗口：
+        // balanced=Medium 档最大（64000）；cost 无 Cheap 模型回落全量最大（128000）。
+        var presets = data.EnumerateArray()
+            .Where(e => e.GetProperty("id").GetString()!.StartsWith("auto:"))
+            .ToDictionary(e => e.GetProperty("id").GetString()!);
+        Assert.Equal(3, presets.Count);
+        Assert.All(presets.Values, e => Assert.Equal("auto", e.GetProperty("routing").GetString()));
+        Assert.Equal(64000, presets["auto:balanced"].GetProperty("context_length").GetInt32());
+        Assert.Equal(128000, presets["auto:cost"].GetProperty("context_length").GetInt32());
+        Assert.Equal(128000, presets["auto:intel"].GetProperty("context_length").GetInt32());
+
         // 真实模型 id 统一 {供应商}/{真实模型 Id}；同供应商同模型多 Key 追加序号。
         var ids = data.EnumerateArray()
-            .Where(e => e.GetProperty("id").GetString() != "auto")
+            .Where(e => !e.GetProperty("id").GetString()!.StartsWith("auto"))
             .Select(e => e.GetProperty("id").GetString())
             .ToList();
         Assert.Equal(new[] { "deepseek/deepseek-chat", "deepseek/deepseek-chat #2", "openai/gpt-4o-2024-11-20" }, ids);

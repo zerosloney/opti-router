@@ -12,9 +12,10 @@ namespace OptiRouter.Endpoints;
 /// </summary>
 /// <remarks>
 /// 受 /v1/* 鉴权与限流中间件保护。仅返回 <c>Enabled=true</c> 的模型，脱敏（不含 ApiKey/BaseUrl）。
-/// 首位固定暴露虚拟模型 <c>auto</c>（智能路由别名）；真实模型的 <c>id</c> 统一为
-/// 「{供应商}/{上游真实模型 Id}」格式（如 "deepseek/deepseek-chat"，同供应商同模型多 Key 追加 #2），
-/// 请求该 id 时自动解析并转换为上游内部模型 ID 发送。
+/// 首位固定暴露虚拟模型 <c>auto</c>（智能路由别名），其后为三模式预设
+/// <c>auto:cost / auto:balanced / auto:intel</c>（同为智能路由，档位偏好不同）；
+/// 真实模型的 <c>id</c> 统一为「{供应商}/{上游真实模型 Id}」格式（如 "deepseek/deepseek-chat"，
+/// 同供应商同模型多 Key 追加 #2），请求该 id 时自动解析并转换为上游内部模型 ID 发送。
 /// </remarks>
 public static class ModelsEndpoint
 {
@@ -52,6 +53,35 @@ public static class ModelsEndpoint
                     max_context_tokens = autoContextTokens
                 }
             };
+
+            // 三模式预设虚拟模型：同为智能路由（RoutingModePolicy 解析预设并过滤到目标档），
+            // 供 agent 端直接配置。context 取目标档启用模型的最大窗口——agent 按它配置压缩
+            // 阈值，若按全量最大值配置而实际只能路由到小窗口档位会提前截断失败；
+            // 目标档无模型时回落全量最大（与该模式的路由兜底行为一致）。
+            var modePresets = new (string Id, string Description, ModelTier Tier)[]
+            {
+                ("auto:cost", "Cost-first smart routing: prefer cheap-tier models, aggressive prompt compression.", ModelTier.Cheap),
+                ("auto:balanced", "Balanced smart routing: cost/quality trade-off on medium tier.", ModelTier.Medium),
+                ("auto:intel", "Quality-first smart routing: prefer strong-tier models, conservative compression.", ModelTier.Strong)
+            };
+            foreach (var preset in modePresets)
+            {
+                int tierContext = enabled.Where(m => m.Tier == preset.Tier)
+                    .Select(m => (int?)m.MaxContextTokens).Max() ?? autoContextTokens;
+                data.Add(new
+                {
+                    id = preset.Id,
+                    @object = "model",
+                    created = 0,
+                    owned_by = "opti-router",
+                    routing = "auto",
+                    description = preset.Description,
+                    candidates = enabled.Count(m => m.Tier == preset.Tier),
+                    context_length = tierContext,
+                    max_model_len = tierContext,
+                    max_context_tokens = tierContext
+                });
+            }
 
             for (int i = 0; i < enabled.Count; i++)
             {

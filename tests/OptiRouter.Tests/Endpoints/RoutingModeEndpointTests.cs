@@ -191,6 +191,29 @@ public class RoutingModeEndpointTests
     }
 
     [Fact]
+    public async Task ModelsList_ExposesThreeModePresets_WithTierContextWindow()
+    {
+        // 三模式预设暴露在 /v1/models，context 取目标档最大窗口：
+        // cost=Cheap(32000) / balanced=Medium(64000) / intel=Strong(128000)。
+        using var factory = new RoutingModeWebApplicationFactory();
+        var client = CreateClient(factory);
+
+        var response = await client.GetAsync("/v1/models");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var doc = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var presets = doc.RootElement.GetProperty("data").EnumerateArray()
+            .Where(e => e.GetProperty("id").GetString()!.StartsWith("auto:"))
+            .ToDictionary(e => e.GetProperty("id").GetString()!);
+
+        Assert.Equal(3, presets.Count);
+        Assert.All(presets.Values, e => Assert.Equal("auto", e.GetProperty("routing").GetString()));
+        Assert.Equal(32000, presets["auto:cost"].GetProperty("context_length").GetInt32());
+        Assert.Equal(64000, presets["auto:balanced"].GetProperty("context_length").GetInt32());
+        Assert.Equal(128000, presets["auto:intel"].GetProperty("context_length").GetInt32());
+    }
+
+    [Fact]
     public async Task PinnedStrongFails_CascadesToSameTierStrong()
     {
         // 核心闭环：pin strong-a → 上游 502 → 不直接报错，同档级联切 strong-b。
