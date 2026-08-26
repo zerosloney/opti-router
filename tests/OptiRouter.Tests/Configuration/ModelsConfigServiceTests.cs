@@ -280,6 +280,49 @@ public sealed class ModelsConfigServiceTests
         Assert.False(service.DeleteModel("does-not-exist"));
     }
 
+    /// <summary>
+    /// 2026-08-26 生产事故回归保护：删除模型后其他模型 FallbackChain 残留对它的引用，
+    /// 启动期 RouterOptionsValidator 校验失败 → 服务重启崩溃循环。删除必须联动清理。
+    /// </summary>
+    [Fact]
+    public void DeleteModel_PrunesDanglingFallbackChainReferences()
+    {
+        using var store = CreateStore(out var service);
+        var a = CreateModel("model-a");
+        a.FallbackChain = new List<string> { "model-b", "model-c" };
+        var b = CreateModel("model-b");
+        b.FallbackChain = new List<string> { "model-a", "model-c" };
+        var c = CreateModel("model-c");
+        service.SaveModels(new[] { a, b, c });
+
+        Assert.True(service.DeleteModel("model-c"));
+
+        var reloaded = service.LoadModels();
+        Assert.Equal(2, reloaded.Count);
+        var reloadedA = reloaded.Single(m => m.Name == "model-a");
+        var reloadedB = reloaded.Single(m => m.Name == "model-b");
+        Assert.Equal(new[] { "model-b" }, reloadedA.FallbackChain);
+        Assert.Equal(new[] { "model-a" }, reloadedB.FallbackChain);
+    }
+
+    [Fact]
+    public void SaveModels_RemovingModel_PrunesDanglingFallbackChainReferences()
+    {
+        // 整体替换少掉模型（管理台批量保存路径）同样联动收敛，不留悬空引用到下次重启。
+        using var store = CreateStore(out var service);
+        var a = CreateModel("model-a");
+        a.FallbackChain = new List<string> { "model-b", "model-c" };
+        service.SaveModels(new[] { a, CreateModel("model-b"), CreateModel("model-c") });
+
+        // 整体保存时去掉 model-c（模拟删除），a 的链引用需被清理。
+        var kept = service.LoadModels().Where(m => m.Name != "model-c").ToList();
+        service.SaveModels(kept);
+
+        var reloaded = service.LoadModels();
+        var reloadedA = reloaded.Single(m => m.Name == "model-a");
+        Assert.Equal(new[] { "model-b" }, reloadedA.FallbackChain);
+    }
+
     [Fact]
     public void IdOnlyModels_GetStableRowKeys()
     {

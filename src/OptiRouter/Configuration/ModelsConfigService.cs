@@ -83,6 +83,8 @@ public sealed class ModelsConfigService
         {
             var snapshot = models.ToList();
             RestoreEnvLiterals(snapshot);
+            // 整体替换可能移除了模型，链引用同步收敛（与 DeleteModel 联动清理同源）。
+            PruneDanglingFallbackChains(snapshot);
             _store.SaveModels(snapshot);
             _logger.LogInformation("Saved {Count} models to config database", snapshot.Count);
         }
@@ -133,8 +135,13 @@ public sealed class ModelsConfigService
     }
 
     /// <summary>
-    /// 删除指定名称的模型。
+    /// 删除指定名称的模型，并联动清理其他模型 FallbackChain 中对它的引用。
     /// </summary>
+    /// <remarks>
+    /// 悬空引用会让启动期 <see cref="RouterOptionsValidator"/> 校验失败 → 服务重启即崩
+    /// （2026-08-26 生产事故根因：删除 deepseek-v4-flash-004 后三条链残留引用）。
+    /// 删除时同步清理，坏引用不存活到下次重启。
+    /// </remarks>
     public bool DeleteModel(string name)
     {
         bool deleted;
@@ -145,6 +152,11 @@ public sealed class ModelsConfigService
             {
                 _rawApiKeys.Remove(name);
                 _logger.LogInformation("Deleted model {ModelName} from config database", name);
+
+                // 联动清理：加载剩余模型，移除指向已删除模型的链引用，有改动则写回。
+                var remaining = _store.LoadModelsRaw();
+                if (PruneDanglingFallbackChains(remaining) > 0)
+                    _store.SaveModels(remaining);
             }
         }
 
@@ -176,6 +188,33 @@ public sealed class ModelsConfigService
 
     private static string KeyOf(ModelEndpointOptions model)
         => !string.IsNullOrWhiteSpace(model.Name) ? model.Name : model.Id;
+
+    /// <summary>
+    /// 原地清理 FallbackChain 中对列表内不存在模型的引用（删除模型联动），
+    /// 返回被清理的模型数。比较语义与启动校验一致（OrdinalIgnoreCase）。
+    /// </summary>
+    private int PruneDanglingFallbackChains(IList<ModelEndpointOptions> models)
+    {
+        var names = new HashSet<string>(
+            models.Select(m => m.Name), StringComparer.OrdinalIgnoreCase);
+        int pruned = 0;
+
+        foreach (var model in models)
+        {
+            if (model.FallbackChain is null || model.FallbackChain.Count == 0) continue;
+
+            var kept = model.FallbackChain.Where(c => names.Contains(c)).ToList();
+            if (kept.Count == model.FallbackChain.Count) continue;
+
+            _logger.LogWarning(
+                "模型 {ModelName} 的 FallbackChain 引用了不存在的模型 [{Missing}]，已联动移除",
+                model.Name, string.Join(", ", model.FallbackChain.Where(c => !names.Contains(c))));
+            model.FallbackChain = kept;
+            pruned++;
+        }
+
+        return pruned;
+    }
 
     private void ReloadConfiguration()
     {
