@@ -71,14 +71,40 @@ public sealed class FailoverPolicy : IRouterPolicy
         }
 
         // 全部排除，需要补充降级链。
-        // 优先用失败首选模型配置的显式 FallbackChain（确定性）；未配则回退自动 tier 降级。
-        var originalTier = previous.Candidates.Count > 0 ? previous.Candidates[0].Tier : ModelTier.Medium;
-        var fallback = TryExplicitFallback(context.AllModels, previous.Candidates, excluded);
+        // 级联原料必须用全量配置（options.Models），不能用 context.AllModels——那是
+        // Filter 组的资格池，上游策略（tier 过滤/pin）已收缩，跨档级联在收缩池里
+        // 找不到其他档位 → fallback 空 → all model candidates failed（503）。
+        // 但硬约束（数据主权/能力过滤）排除的模型（HardExcludedModels 留痕）补链也不可用：
+        // 补链可越过 tier 偏好/pin 等软过滤，不能绕过合规与能力正确性。
+        // 优先级：显式链 $\rightarrow$ 同档级联 $\rightarrow$ 跨档下沉。
+        var originalTier = previous.TargetTier ?? (previous.Candidates.Count > 0 ? previous.Candidates[0].Tier : ModelTier.Medium);
+        var hardExcluded = new HashSet<string>(previous.HardExcludedModels, StringComparer.Ordinal);
+        var allEnabled = context.Options.Models
+            .Where(m => m.Enabled && !hardExcluded.Contains(m.Name))
+            .ToList();
+        var fallback = TryExplicitFallback(allEnabled, previous.Candidates, excluded);
         string source = "explicit";
+
         if (fallback.Count == 0)
         {
-            fallback = BuildFallbackChain(context.AllModels, previous.Candidates, excluded, originalTier);
-            source = "auto-tier";
+            // 新增：同档级联 (Same-Tier Cascade)
+            // 如果原目标档位有其他可用的模型，优先尝试同档，保证质量不掉档。
+            var sameTierFallback = allEnabled
+                .Where(m => m.Enabled && m.Tier == originalTier && !excluded.Contains(m.Name))
+                .OrderByDescending(m => m.MaxContextTokens)
+                .ToList();
+
+            if (sameTierFallback.Count > 0)
+            {
+                fallback = sameTierFallback;
+                source = "same-tier";
+            }
+            else
+            {
+                // 最后：跨档下沉
+                fallback = BuildFallbackChain(allEnabled, previous.Candidates, excluded, originalTier);
+                source = "auto-tier";
+            }
         }
         var withFallback = previous with { Candidates = fallback };
         return withFallback.Append("failover", $"all candidates failed, {source} fallback to [{string.Join(", ", fallback.Select(m => m.Name))}]");

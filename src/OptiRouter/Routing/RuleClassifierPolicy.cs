@@ -172,6 +172,37 @@ public sealed class RuleClassifierPolicy : IRouterPolicy
 
         var (targetTier, targetReason, complexity) = ClassifyRequest(context);
 
+        // 档位意图守卫：TargetTier 已携带显式意图（ExplicitModelPolicy pin 锁定/释放留痕、
+        // RoutingModePolicy 模式预设）时按意图档过滤，不做内容分类——pin strong-a 失败释放后
+        // 意图仍是 Strong 档，内容分类 simple-qa 筛 Cheap 会让降级跳档到与用户意图不符的模型。
+        // 意图档在当前候选中无匹配时保留原候选（与下方兜底语义一致，不让意图清空候选）。
+        if (previous.TargetTier is { } intentTier)
+        {
+            var intentCandidates = FilterByTier(previous.Candidates, intentTier);
+            if (intentCandidates.Count == 0)
+            {
+                var keptMeta = previous with
+                {
+                    RequestComplexity = complexity,
+                    ClassificationSignal = targetReason,
+                    ClassificationTargetTier = intentTier
+                };
+                return keptMeta.Append("rule-classifier",
+                    $"intent={intentTier} no candidates, keeping original {previous.Candidates.Count}");
+            }
+
+            intentCandidates = intentCandidates.OrderByDescending(m => m.MaxContextTokens).ToList();
+            var intentDecision = previous with
+            {
+                Candidates = intentCandidates,
+                RequestComplexity = complexity,
+                ClassificationSignal = targetReason,
+                ClassificationTargetTier = intentTier
+            };
+            return intentDecision.Append("rule-classifier",
+                $"intent={intentTier} (classified {targetReason}), {intentCandidates.Count} candidates");
+        }
+
         if (context.Options.Routing.EnableMultiDimensionalRouting)
         {
             var weights = GetWeightsForClassification(targetReason);

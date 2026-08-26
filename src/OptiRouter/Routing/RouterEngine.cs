@@ -105,7 +105,27 @@ public sealed class RouterEngine
 
                 if (isFilterGroup)
                 {
-                    eligibleModels = candidates;
+                    if (candidates.Count == 0 && policyDecision.Candidates.Count > 0)
+                    {
+                        // 全灭补链逃生门：池内候选已被本策略全部替换为池外降级链
+                        // （FailoverPolicy 全灭时从全量配置补链）。此时接受补链结果并同步
+                        // 扩展池——否则交集清零 → all model candidates failed（503）。
+                        // 这与资格池初衷不冲突：池防的是"有存活候选时降级策略重建大集合
+                        // undo 硬过滤"；全灭时无可 undo，活命优先。注意补链未重放
+                        // Capability/Sovereignty 硬过滤（两者默认关，启用方须知此窗口）。
+                        candidates = policyDecision.Candidates.ToList();
+                        eligibleModels = candidates;
+                    }
+                    else
+                    {
+                        // 资格池保持集合语义：收缩时按池内原（配置）顺序保留，不能用 candidates
+                        // 的顺序——候选链按 tier 排序，泄漏进池会改变 ModelDisplayIds #N 编号的
+                        // 基准（配置顺序，与 /v1/models 一致），导致 "provider/id #2" 解析错位
+                        // （同 tier 并列端点被不稳定排序互换）。
+                        var kept = new HashSet<string>(
+                            candidates.Select(c => c.Name), StringComparer.Ordinal);
+                        eligibleModels = eligibleModels.Where(m => kept.Contains(m.Name)).ToList();
+                    }
                 }
 
                 decision = policyDecision with { Candidates = candidates };

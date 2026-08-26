@@ -58,7 +58,12 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
         if (filtered.Count == 0)
         {
             string noCandidateReason = $"required {string.Join("/", required)}; no eligible candidate supports all required capabilities";
-            var rejected = previous with { Candidates = Array.Empty<ModelEndpointOptions>() };
+            // 能力是正确性硬约束：排除留痕，全灭补链也不得拉回（拉回上游必失败）。
+            var rejected = previous with
+            {
+                Candidates = Array.Empty<ModelEndpointOptions>(),
+                HardExcludedModels = previous.Candidates.Select(m => m.Name).ToList()
+            };
             return rejected.Append("capability-filter", noCandidateReason);
         }
 
@@ -68,8 +73,13 @@ public sealed class CapabilityFilterPolicy : IRouterPolicy
         }
 
         int removed = previous.Candidates.Count - filtered.Count;
+        // 能力硬排除留痕（同上）：FailoverPolicy 补链原料据此过滤。
+        var hardExcluded = new List<string>(previous.HardExcludedModels);
+        hardExcluded.AddRange(previous.Candidates
+            .Where(m => !filtered.Contains(m))
+            .Select(m => m.Name));
         string reason = $"required {string.Join("/", required)}, removed {removed}, {filtered.Count} remaining";
-        var filteredDecision = previous with { Candidates = filtered };
+        var filteredDecision = previous with { Candidates = filtered, HardExcludedModels = hardExcluded };
         return filteredDecision.Append("capability-filter", reason);
     }
 

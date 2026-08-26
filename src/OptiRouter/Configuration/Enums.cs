@@ -69,3 +69,13 @@ public enum ProviderProtocol
     /// <summary>Google Gemini generateContent API。</summary>
     Gemini = 2
 }
+
+/// <summary>
+/// 路由预设模式，决定成本与智能的取舍优先级。
+/// </summary>
+public enum RoutingMode
+{
+    Balanced = 0,
+    Cost = 1,
+    Intelligence = 2
+}

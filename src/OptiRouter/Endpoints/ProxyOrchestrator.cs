@@ -175,7 +175,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         if (options.Routing.EnablePromptCompression)
         {
-            var compResult = _promptPruner.Compress(request, options.Routing.PromptCompression);
+            // 模式联动：压缩先于路由决策，decision 还未产生，用静态解析拿模式预设
+            // （auto:cost 激进 / auto:intel 保守 / 其余配置原值）。
+            var compression = RoutingModePolicy.AdjustCompression(
+                options.Routing.PromptCompression, RoutingModePolicy.TryResolveMode(request.Model));
+            var compResult = _promptPruner.Compress(request, compression);
             if (compResult.WasCompressed)
             {
                 request = compResult.CompressedRequest;
@@ -710,7 +714,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
         if (options.Routing.EnablePromptCompression)
         {
-            var compResult = _promptPruner.Compress(request, options.Routing.PromptCompression);
+            // 模式联动与非流式路径一致（压缩先于路由决策，静态解析模式预设）。
+            var compression = RoutingModePolicy.AdjustCompression(
+                options.Routing.PromptCompression, RoutingModePolicy.TryResolveMode(request.Model));
+            var compResult = _promptPruner.Compress(request, compression);
             if (compResult.WasCompressed)
             {
                 request = compResult.CompressedRequest;

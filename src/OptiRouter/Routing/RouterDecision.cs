@@ -89,4 +89,23 @@ public sealed record RouterDecision
     /// 请求是否携带工具调用。由 <c>RouterEngine</c> 填充。
     /// </summary>
     public bool HasTools { get; init; }
-}
+    
+    /// <summary>
+    /// 本次路由请求选定的预设模式：Cost (省钱) / Balanced (平衡) / Intelligence (质量)。
+    /// null = 默认或未指定模式。
+    /// </summary>
+    public RoutingMode? RoutingMode { get; init; }
+    
+    /// <summary>
+    /// 路由决定最终锚定的目标档位。
+    /// 若请求显式 pin 模型，则为该模型的档位；若走 auto 模式，则为模式对应的预设档位。
+    /// </summary>
+    public ModelTier? TargetTier { get; init; }
+
+    /// <summary>
+    /// 本请求被硬约束（数据主权/能力过滤）排除、全灭补链也不可用的模型名。
+    /// 硬约束 Filter 策略排除时留痕；FailoverPolicy 补链原料据此过滤——
+    /// 补链可以越过 tier 偏好/pin 等软过滤（全灭逃生门），但不能绕过合规与能力正确性。
+    /// </summary>
+    public IReadOnlyList<string> HardExcludedModels { get; init; } = Array.Empty<string>();
+}    

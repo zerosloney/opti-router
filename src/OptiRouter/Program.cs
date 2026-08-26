@@ -493,8 +493,8 @@ builder.Services.AddSingleton<RouterEngine>(sp =>
     // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
     var policies = new List<IRouterPolicy>
     {
-        // 显式模型固定必须最先执行：把资格池缩到指定模型后，
-        // 后续 Filter/Classify/Order 策略只能在单元素池内工作，不会换模型。
+        new RoutingModePolicy(),
+        // 显式模型固定必须在 ModePolicy 之后执行：若用户指定了模型，则覆盖 ModePolicy 的预设档位。
         new ExplicitModelPolicy(),
         new DataSovereigntyPolicy(),
         new CapabilityFilterPolicy(),

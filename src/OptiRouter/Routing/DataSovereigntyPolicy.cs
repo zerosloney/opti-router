@@ -17,7 +17,7 @@ public sealed class DataSovereigntyPolicy : IRouterPolicy
             return previous;
 
         var viableLocalCandidates = new List<ModelEndpointOptions>();
-        int excludedCloudCandidates = 0;
+        var hardExcluded = new List<string>(previous.HardExcludedModels);
 
         foreach (var candidate in previous.Candidates)
         {
@@ -27,15 +27,16 @@ public sealed class DataSovereigntyPolicy : IRouterPolicy
             }
             else
             {
-                excludedCloudCandidates++;
+                // 合规硬排除留痕：FailoverPolicy 全灭补链也不得拉回云模型（数据不出域）。
+                hardExcluded.Add(candidate.Name);
             }
         }
 
         // 如果配置了数据不出域但无任何可用本地模型，清空 Candidates 以安全阻断请求，不向云端外泄
-        var updatedDecision = previous with { Candidates = viableLocalCandidates };
+        var updatedDecision = previous with { Candidates = viableLocalCandidates, HardExcludedModels = hardExcluded };
         return updatedDecision.Append(
             "data-sovereignty",
-            $"retained_local={viableLocalCandidates.Count}, excluded_cloud={excludedCloudCandidates}");
+            $"retained_local={viableLocalCandidates.Count}, excluded_cloud={hardExcluded.Count - previous.HardExcludedModels.Count}");
     }
 
     private static bool IsLocalOrPrivateCandidate(ModelEndpointOptions candidate)

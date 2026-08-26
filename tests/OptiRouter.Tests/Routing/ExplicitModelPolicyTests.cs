@@ -79,6 +79,36 @@ public class ExplicitModelPolicyTests
         Assert.True(ExplicitModelPolicy.IsAutoRouting(model));
     }
 
+    [Theory]
+    [InlineData("auto:cost")]
+    [InlineData("auto:balanced")]
+    [InlineData("auto:intel")]
+    [InlineData("auto:intelligence")]
+    [InlineData("AUTO:COST")]
+    [InlineData(" Auto:Intel ")]
+    public void ModePreset_IsAutoRouting_AndPassthrough(string model)
+    {
+        // P0 回归保护：auto:* 前缀若不被识别为智能路由，
+        // 三协议入口 IsKnownModel 会 404 model_not_found 拒绝，模式预设完全不可用。
+        Assert.True(ExplicitModelPolicy.IsAutoRouting(model));
+
+        var result = new ExplicitModelPolicy().Apply(Context(model), Previous());
+
+        Assert.Equal(3, result.Candidates.Count);
+        Assert.Contains("smart routing", result.Reason);
+    }
+
+    [Fact]
+    public void Pin_LocksTargetTierToPinnedModelTier()
+    {
+        // P1 回归保护：pin 不同步锁 TargetTier 时，FailoverPolicy 同档级联会从
+        // Candidates[0]（Strong 优先初始链首）推断锚点——pin 便宜模型失败会跳到 Strong 档。
+        var result = new ExplicitModelPolicy().Apply(Context("cheap-a"), Previous());
+
+        Assert.Equal("cheap-a", Assert.Single(result.Candidates).Name);
+        Assert.Equal(ModelTier.Cheap, result.TargetTier);
+    }
+
     [Fact]
     public void ConfiguredModelNamedAuto_WinsOverAlias()
     {

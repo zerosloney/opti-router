@@ -11,7 +11,8 @@ public class FailoverPolicyTests
         FailoverPolicy policy,
         RouterOptions options,
         IReadOnlyList<ModelEndpointOptions> candidates,
-        IReadOnlySet<string>? failedModels = null)
+        IReadOnlySet<string>? failedModels = null,
+        ModelTier? targetTier = null)
     {
         failedModels ??= new HashSet<string>();
         var context = new RouterContext
@@ -26,7 +27,8 @@ public class FailoverPolicyTests
         {
             Candidates = candidates,
             Reason = "initial",
-            EstimatedInputTokens = 0
+            EstimatedInputTokens = 0,
+            TargetTier = targetTier
         };
         return policy.Apply(context, decision);
     }
@@ -204,5 +206,45 @@ public class FailoverPolicyTests
         Assert.Single(result.Candidates);
         Assert.Equal("gpt-4o-mini", result.Candidates[0].Name);
         Assert.Equal(ModelTier.Medium, result.Candidates[0].Tier);
+    }
+
+    [Fact]
+    public void Apply_PinnedCheapFailed_CascadesToSameTierBeforeCrossTier()
+    {
+        // L2 同档级联：pin 的 Cheap 失败（候选链只剩它，TargetTier 由 pin 锁定），
+        // 优先取同档 cheap-b，而不是跳到 Medium/Strong——"同档保质量不掉档、不越级"。
+        var options = TestHelpers.BuildOptions(
+            ("strong-a", ModelTier.Strong, 128000, 10m),
+            ("medium-a", ModelTier.Medium, 64000, 1m),
+            ("cheap-a", ModelTier.Cheap, 32000, 0.01m),
+            ("cheap-b", ModelTier.Cheap, 16000, 0.005m));
+
+        var policy = NewPolicy();
+        var candidates = options.Models.Where(m => m.Name == "cheap-a").ToList();
+        var failed = new HashSet<string> { "cheap-a" };
+        var result = Apply(policy, options, candidates, failed, targetTier: ModelTier.Cheap);
+
+        Assert.Equal("cheap-b", Assert.Single(result.Candidates).Name);
+        Assert.Equal(ModelTier.Cheap, result.Candidates[0].Tier);
+        Assert.Contains("same-tier", result.Reason);
+    }
+
+    [Fact]
+    public void Apply_SameTierAllFailed_CrossTierUsesLockedTargetTier()
+    {
+        // L2 空后 L3 跨档下沉：锚点是锁定的 TargetTier(Cheap)，按档位距离先 Medium 再 Strong。
+        var options = TestHelpers.BuildOptions(
+            ("strong-a", ModelTier.Strong, 128000, 10m),
+            ("medium-a", ModelTier.Medium, 64000, 1m),
+            ("cheap-a", ModelTier.Cheap, 32000, 0.01m),
+            ("cheap-b", ModelTier.Cheap, 16000, 0.005m));
+
+        var policy = NewPolicy();
+        var candidates = options.Models.Where(m => m.Tier == ModelTier.Cheap).ToList();
+        var failed = new HashSet<string> { "cheap-a", "cheap-b" };
+        var result = Apply(policy, options, candidates, failed, targetTier: ModelTier.Cheap);
+
+        Assert.Equal("medium-a", Assert.Single(result.Candidates).Name);
+        Assert.Contains("auto-tier", result.Reason);
     }
 }

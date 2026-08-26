@@ -9,23 +9,32 @@ namespace OptiRouter.Routing;
 /// 全部端点，路由器在其中择优与降级）。后续 tier 分类/语义路由/学习型重排只在固定池内工作，
 /// 不会把请求换到未提供该模型的端点；仅硬约束（能力/长输入/数据不出域/配额/预算/熔断）可否决，
 /// 或固定池在本请求内全部失败时释放固定、交还智能路由降级。
-/// <c>model</c> 为空或为 <see cref="AutoAlias"/>（忽略大小写）时透传，走智能路由。
+/// 固定时同步锁定 <see cref="RouterDecision.TargetTier"/> 为固定模型档位，供 FailoverPolicy
+/// 同档级联锚定——pin 的 Cheap 模型失败后仍在 Cheap 档找同级替代，不跳档。
+/// <c>model</c> 为空、为 <see cref="AutoAlias"/>（忽略大小写）或带 <see cref="AutoModePrefix"/>
+/// 模式预设（auto:cost/balanced/intel）时透传，走智能路由（预设档位由 RoutingModePolicy 解析）。
 /// </summary>
 public sealed class ExplicitModelPolicy : IRouterPolicy
 {
     /// <summary>智能路由别名，即 /v1/models 中暴露的虚拟模型 id；也是 model 缺省时的语义。</summary>
     public const string AutoAlias = "auto";
 
+    /// <summary>模式预设前缀（auto:cost / auto:balanced / auto:intel），档位由 RoutingModePolicy 解析。</summary>
+    public const string AutoModePrefix = "auto:";
+
     /// <inheritdoc />
     public PolicyGroup Group => PolicyGroup.Filter;
 
     /// <summary>
     /// 判断请求的 model 字段是否表示「交给路由器智能选择」：
-    /// 空/空白或 <see cref="AutoAlias"/>（忽略大小写）均为是。
+    /// 空/空白、<see cref="AutoAlias"/>（忽略大小写）或 <see cref="AutoModePrefix"/> 模式预设
+    /// （auto:cost/balanced/intel）均为是。三协议入口（OpenAI/Anthropic/Gemini）的模型校验
+    /// 共用本判定——不识别前缀时 auto:cost 会在入口被 404 model_not_found 拒绝。
     /// </summary>
     public static bool IsAutoRouting(string? requestedModel) =>
         string.IsNullOrWhiteSpace(requestedModel) ||
-        string.Equals(requestedModel, AutoAlias, StringComparison.OrdinalIgnoreCase);
+        string.Equals(requestedModel, AutoAlias, StringComparison.OrdinalIgnoreCase) ||
+        requestedModel.Trim().StartsWith(AutoModePrefix, StringComparison.OrdinalIgnoreCase);
 
     /// <inheritdoc />
     public RouterDecision Apply(RouterContext context, RouterDecision previous)
@@ -48,20 +57,26 @@ public sealed class ExplicitModelPolicy : IRouterPolicy
             var alive = matches.Where(m => !context.FailedModels.Contains(m.Name)).ToList();
             if (alive.Count == 0)
             {
-                return previous.Append("explicit-model",
-                    $"pinned '{requested}' failed in this request, released for failover");
+                // 释放时同样留下档位意图（pin 模型的档位）：下游 RuleClassifier 据此
+                // 在同档内过滤降级候选，而不是按请求内容重新分类跳档。
+                var released = previous with { TargetTier = matches[0].Tier };
+                return released.Append("explicit-model",
+                    $"pinned '{requested}' failed in this request, released for failover (tier={matches[0].Tier})");
             }
 
-            var pinned = previous with { Candidates = alive };
+            // 同步锁定 TargetTier 为固定模型档位：FailoverPolicy 同档级联据此在原档位内
+            // 找替代。不锁时会回退推断 Candidates[0].Tier——那是 Strong 优先的初始链首，
+            // pin 便宜模型失败释放后级联会跳到 Strong 档，违背"同档保质量不掉档"语义。
+            var pinned = previous with { Candidates = alive, TargetTier = alive[0].Tier };
             return pinned.Append("explicit-model",
                 alive.Count == 1
                     ? $"pinned to '{alive[0].Name}'"
                     : $"pinned to {alive.Count} endpoints offering '{requested}'");
         }
 
-        if (string.Equals(requested, AutoAlias, StringComparison.OrdinalIgnoreCase))
+        if (IsAutoRouting(requested))
         {
-            return previous.Append("explicit-model", "auto alias, smart routing");
+            return previous.Append("explicit-model", "auto alias or mode preset, smart routing");
         }
 
         // 未知模型名：端点层已按 404 拒绝；策略侧防御性透传，不清空候选。
