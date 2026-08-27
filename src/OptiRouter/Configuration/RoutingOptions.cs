@@ -185,6 +185,28 @@ public sealed class RoutingOptions
     public int RegenerateFeedbackWindowSeconds { get; set; } = 600;
 
     /// <summary>
+    /// 是否启用 LLM-as-judge 采样质量打分。开启后按 <see cref="QualityJudgeSampleRate"/> 采样
+    /// 非流式成功响应，用 <see cref="QualityJudgeModel"/> 指定的模型对"问题-回答"打分 ∈ [0,1]，
+    /// 经显式质量入口回灌 Thompson/LinUCB——语义级"答得对不对"信号，补启发式规则
+    /// （截断/空答/JSON 违约）覆盖不到的质量盲区。judge 调用真实计费并记审计（reason 含 llm-judge）。
+    /// 注意：judge 会把用户问题与模型回答原文发给打分模型；隐私敏感部署保持关闭。默认 false。
+    /// </summary>
+    public bool EnableQualityJudge { get; set; } = false;
+
+    /// <summary>
+    /// LLM-as-judge 采样率 ∈ [0.0, 1.0]，由 RouterOptionsValidator 强制。
+    /// 每次/秒判定（非按租户），1.0 = 全部非流式成功请求都送审。默认 0.2 控制额外上游成本。
+    /// </summary>
+    public double QualityJudgeSampleRate { get; set; } = 0.2;
+
+    /// <summary>
+    /// LLM-as-judge 打分模型：路由名 / "{供应商}/{Id}" 显示名 / 裸上游 Id 均可
+    /// （与其他编排模型寻址一致）。留空或解析不到时静默跳过采样，不影响主流程。
+    /// 建议配 Strong 档且与被评模型不同源，避免同源自评偏置。
+    /// </summary>
+    public string? QualityJudgeModel { get; set; }
+
+    /// <summary>
     /// 是否启用后台主动健康探活（定时对所有启用模型发探测请求，结果上报断路器）。
     /// 默认 true。关闭则熔断恢复纯靠真实流量半开探测。
     /// </summary>

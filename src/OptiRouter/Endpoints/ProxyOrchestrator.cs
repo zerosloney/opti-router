@@ -38,6 +38,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly OptiRouter.Mcp.McpToolOrchestrator? _mcpToolOrchestrator;
     private readonly OptiRouter.Compliance.IContentModerator? _contentModerator;
     private readonly IHttpContextAccessor? _httpContextAccessor;
+    private readonly LlmQualityJudge? _qualityJudge;
     private bool _disposed;
 
     /// <summary>
@@ -61,7 +62,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         OptiRouter.Compression.IPromptPruner? promptPruner = null,
         OptiRouter.Mcp.McpToolOrchestrator? mcpToolOrchestrator = null,
         OptiRouter.Compliance.IContentModerator? contentModerator = null,
-        IHttpContextAccessor? httpContextAccessor = null)
+        IHttpContextAccessor? httpContextAccessor = null,
+        LlmQualityJudge? qualityJudge = null)
     {
         ArgumentNullException.ThrowIfNull(clientProvider);
         ArgumentNullException.ThrowIfNull(engine);
@@ -92,6 +94,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _mcpToolOrchestrator = mcpToolOrchestrator;
         _contentModerator = contentModerator;
         _httpContextAccessor = httpContextAccessor;
+        _qualityJudge = qualityJudge;
         _logger = logger;
     }
 
@@ -490,6 +493,15 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     _recorder.RecordQuota(candidate.Name, response.Metadata);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
 
+                    // LLM-as-judge 采样：按配置采样率把"问题-回答"送打分模型，score 回灌学习状态。
+                    // 旁路 fire-and-forget；用 PII 还原前的原文（占位符语义略降但默认脱敏关闭）。
+                    if (_qualityJudge is not null)
+                    {
+                        string judgedAnswer = ResponseConfidenceChecker.ExtractAssistantText(response);
+                        if (!string.IsNullOrWhiteSpace(judgedAnswer))
+                            _qualityJudge.TryJudge(request, judgedAnswer, candidate.Name, decision, routedTier, sessionId);
+                    }
+
                     // 级联自校验：Cheap 首选 + 启用 + 采样命中 → 自校验，低置信升级 Strong。
                     // 仅非流式（流式首 chunk 已透传无法切模型）。失败不影响主流程，返回原 Cheap 答案。
                     if (candidate.Tier == ModelTier.Cheap)
@@ -844,6 +856,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 var client = _clientProvider.GetClient(candidate);
                 IAsyncEnumerator<RawStreamLine>? enumerator = null;
                 RawStreamLine firstLine = default!;
+                // LLM-as-judge 流式质量采样：逐行累积 delta 文本，流正常结束后送审（旁路 fire-and-forget）。
+                var judgeTextSb = new System.Text.StringBuilder();
                 ChatUsage? finalUsage = null;
                 Exception? preStreamFailure = null;
                 bool hasFirstLine = false;
@@ -878,6 +892,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                 if (firstLine.Usage is not null)
                                     finalUsage = firstLine.Usage;
                                 hasFirstLine = true;
+                                if (_qualityJudge is not null)
+                                {
+                                    string? firstDelta = ExtractDeltaText(firstLine.Data);
+                                    if (!string.IsNullOrEmpty(firstDelta))
+                                        judgeTextSb.Append(firstDelta);
+                                }
                             }
                             else
                             {
@@ -1035,6 +1055,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             var line = enumerator.Current;
                             if (line.Usage is not null)
                                 finalUsage = line.Usage;
+                            if (_qualityJudge is not null && !string.IsNullOrEmpty(line.Data))
+                            {
+                                string? judgeDelta = ExtractDeltaText(line.Data);
+                                if (!string.IsNullOrEmpty(judgeDelta))
+                                    judgeTextSb.Append(judgeDelta);
+                            }
 
                             var restored = ProcessCompliance(RestorePii(line, piiMap), complianceBuffer, options.Routing);
                             totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(restored.Data ?? "");
@@ -1071,7 +1097,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (!isEstimated || cost > 0m)
                         _recorder.RecordCost(cost, sessionId);
                     _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
-                    // 流式未累积完整 content/finish_reason，质量因子不接入（默认 1.0）；仅传 actualTier 启用 per-tier 目标。
+                    // 流式质量采样：累积全文非空才派发（与融合 patch chunk 一样，judge 只看正文）。
+                    if (_qualityJudge is not null && judgeTextSb.Length > 0)
+                        _qualityJudge.TryJudge(request, judgeTextSb.ToString(), candidate.Name, decision, routedTier, sessionId);
                     double reward = _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
                         actualTier: candidate.Tier, completionTokens: finalUsage?.CompletionTokens ?? 0, timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
                     _recorder.RecordAffinity(sessionId, candidate.Name, AffinitySignal.Strong, attemptSw.ElapsedMilliseconds);

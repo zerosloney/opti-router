@@ -1033,6 +1033,9 @@ public class ApiService
         public bool EnableCascadeUpgrade { get; init; }
         public double CascadeUpgradeSampleRate { get; init; } = 0.1;
         public bool EnableRegenerateFeedback { get; init; }
+        public bool EnableQualityJudge { get; init; }
+        public double QualityJudgeSampleRate { get; init; } = 0.2;
+        public string? QualityJudgeModel { get; init; }
         // ④ 合规与安全
         public bool EnablePiiAnonymization { get; init; }
         public bool EnableDataSovereignty { get; init; }
@@ -1110,6 +1113,9 @@ public class ApiService
         public bool? EnableCascadeUpgrade { get; init; }
         public double? CascadeUpgradeSampleRate { get; init; }
         public bool? EnableRegenerateFeedback { get; init; }
+        public bool? EnableQualityJudge { get; init; }
+        public double? QualityJudgeSampleRate { get; init; }
+        public string? QualityJudgeModel { get; init; }
         // ④ 合规与安全
         public bool? EnablePiiAnonymization { get; init; }
         public bool? EnableDataSovereignty { get; init; }

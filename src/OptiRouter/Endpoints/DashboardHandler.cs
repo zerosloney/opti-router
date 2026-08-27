@@ -477,6 +477,9 @@ public static class DashboardHandler
                     opt.Routing.EnableCascadeUpgrade,
                     opt.Routing.CascadeUpgradeSampleRate,
                     opt.Routing.EnableRegenerateFeedback,
+                    opt.Routing.EnableQualityJudge,
+                    opt.Routing.QualityJudgeSampleRate,
+                    QualityJudgeModel = opt.Routing.QualityJudgeModel,
                     // ④ 合规与安全
                     opt.Routing.EnablePiiAnonymization,
                     opt.Routing.EnableDataSovereignty,
@@ -610,6 +613,9 @@ public static class DashboardHandler
                 if (req.EnableCascadeUpgrade is not null) routing["EnableCascadeUpgrade"] = req.EnableCascadeUpgrade.Value;
                 if (req.CascadeUpgradeSampleRate is > 0 and <= 1) routing["CascadeUpgradeSampleRate"] = req.CascadeUpgradeSampleRate.Value;
                 if (req.EnableRegenerateFeedback is not null) routing["EnableRegenerateFeedback"] = req.EnableRegenerateFeedback.Value;
+                if (req.EnableQualityJudge is not null) routing["EnableQualityJudge"] = req.EnableQualityJudge.Value;
+                if (req.QualityJudgeSampleRate is >= 0 and <= 1) routing["QualityJudgeSampleRate"] = req.QualityJudgeSampleRate.Value;
+                if (req.QualityJudgeModel is not null) routing["QualityJudgeModel"] = req.QualityJudgeModel.Trim();
 
                 // ④ 合规与安全
                 if (req.EnablePiiAnonymization is not null) routing["EnablePiiAnonymization"] = req.EnablePiiAnonymization.Value;
@@ -930,6 +936,9 @@ public static class DashboardHandler
         public bool? EnableCascadeUpgrade { get; init; }
         public double? CascadeUpgradeSampleRate { get; init; }
         public bool? EnableRegenerateFeedback { get; init; }
+        public bool? EnableQualityJudge { get; init; }
+        public double? QualityJudgeSampleRate { get; init; }
+        public string? QualityJudgeModel { get; init; }
 
         // ④ 合规与安全
         public bool? EnablePiiAnonymization { get; init; }
@@ -1017,6 +1026,9 @@ public static class DashboardHandler
         if (req.EnableCascadeUpgrade is not null) routing.EnableCascadeUpgrade = req.EnableCascadeUpgrade.Value;
         if (req.CascadeUpgradeSampleRate is > 0 and <= 1) routing.CascadeUpgradeSampleRate = req.CascadeUpgradeSampleRate.Value;
         if (req.EnableRegenerateFeedback is not null) routing.EnableRegenerateFeedback = req.EnableRegenerateFeedback.Value;
+        if (req.EnableQualityJudge is not null) routing.EnableQualityJudge = req.EnableQualityJudge.Value;
+        if (req.QualityJudgeSampleRate is not null) routing.QualityJudgeSampleRate = req.QualityJudgeSampleRate.Value;
+        if (req.QualityJudgeModel is not null) routing.QualityJudgeModel = req.QualityJudgeModel.Trim();
 
         // ④ 合规与安全
         if (req.EnablePiiAnonymization is not null) routing.EnablePiiAnonymization = req.EnablePiiAnonymization.Value;

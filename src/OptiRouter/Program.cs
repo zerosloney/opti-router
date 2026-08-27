@@ -564,6 +564,8 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
+// LLM-as-judge 采样质量打分：旁路后台任务，按采样率把成功响应送打分模型并回灌学习状态。
+builder.Services.AddSingleton<LlmQualityJudge>();
 // regenerate 负反馈跟踪器：进程内状态，供 ProxyOrchestrator 在同键请求重发时注入惩罚 reward。
 builder.Services.AddSingleton<RegenerateFeedbackTracker>();
 builder.Services.AddSingleton<ProxyOrchestrator>();

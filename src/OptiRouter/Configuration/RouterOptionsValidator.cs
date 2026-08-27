@@ -149,6 +149,10 @@ public sealed class RouterOptionsValidator : IValidateOptions<RouterOptions>
         if (options.Routing.QualityPenaltyFactor < 0.0 || options.Routing.QualityPenaltyFactor > 1.0)
             return ValidateOptionsResult.Fail("Routing.QualityPenaltyFactor 必须在 [0.0, 1.0] 范围内。");
 
+        // LLM-as-judge：采样率越界同样扭曲 reward 与成本预算（>1 无意义，<0 视为配置错误而非关闭）。
+        if (options.Routing.QualityJudgeSampleRate < 0.0 || options.Routing.QualityJudgeSampleRate > 1.0)
+            return ValidateOptionsResult.Fail("Routing.QualityJudgeSampleRate 必须在 [0.0, 1.0] 范围内。");
+
         // regenerate 负反馈：注入的 reward 必须落在 [0,1]；窗口 <=0 会让所有同键请求都判为 regenerate。
         if (options.Routing.EnableRegenerateFeedback)
         {

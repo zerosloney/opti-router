@@ -429,6 +429,34 @@
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
                     </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.EnableQualityJudge)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">LLM-as-judge 质量打分</span>
+                            <span class="item-desc">按采样率把成功问答送评审模型打 0~1 分回灌学习——语义级质量信号，补启发式盲区；judge 调用真实计费并留审计。默认关。</span>
+                        </div>
+                        <label class="toggle-switch" title="采样成功问答送打分模型回灌 Thompson/LinUCB。judge 调用真实计费。">
+                            <input type="checkbox" @bind="Cfg.EnableQualityJudge" />
+                            <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                        </label>
+                    </div>
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.QualityJudgeSampleRate)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.QualityJudgeModel)) ? "dirty-field" : "")">
+                        <div class="item-text">
+                            <span class="item-title">打分采样与评审模型</span>
+                            <span class="item-desc">采样率 1.0 = 全部非流式成功请求送审（成本线性放大）；建议选与主候选不同源的 Strong 模型，避免同源自评偏置。</span>
+                        </div>
+                        <div class="config-row">
+                            <span class="config-row-label">采样率:</span>
+                            <input type="number" step="0.05" min="0" max="1" @bind="Cfg.QualityJudgeSampleRate" class="form-control" style="width: 80px;" />
+                            <span class="config-row-label">Judge:</span>
+                            <select @bind="Cfg.QualityJudgeModel" class="form-control" style="width: auto; min-width: 170px;">
+                                <option value="">未设置（不送审）</option>
+                                @foreach (var m in FusionModelOptions)
+                                {
+                                    <option value="@m">@m</option>
+                                }
+                            </select>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -1289,6 +1317,9 @@
         public bool EnableCascadeUpgrade { get; set; }
         public double CascadeUpgradeSampleRate { get; set; } = 0.1;
         public bool EnableRegenerateFeedback { get; set; }
+        public bool EnableQualityJudge { get; set; }
+        public double QualityJudgeSampleRate { get; set; } = 0.2;
+        public string QualityJudgeModel { get; set; } = "";
         // ④ 合规与安全
         public bool EnablePiiAnonymization { get; set; }
         public bool EnableDataSovereignty { get; set; }
@@ -1593,6 +1624,9 @@
                     EnableCascadeUpgrade = r.EnableCascadeUpgrade,
                     CascadeUpgradeSampleRate = r.CascadeUpgradeSampleRate,
                     EnableRegenerateFeedback = r.EnableRegenerateFeedback,
+                    EnableQualityJudge = r.EnableQualityJudge,
+                    QualityJudgeSampleRate = r.QualityJudgeSampleRate,
+                    QualityJudgeModel = r.QualityJudgeModel ?? "",
                     // ④ 合规与安全
                     EnablePiiAnonymization = r.EnablePiiAnonymization,
                     EnableDataSovereignty = r.EnableDataSovereignty,
@@ -1688,6 +1722,9 @@
                 EnableCascadeUpgrade = Dirty(nameof(ConfigForm.EnableCascadeUpgrade), Cfg.EnableCascadeUpgrade),
                 CascadeUpgradeSampleRate = Dirty(nameof(ConfigForm.CascadeUpgradeSampleRate), Cfg.CascadeUpgradeSampleRate),
                 EnableRegenerateFeedback = Dirty(nameof(ConfigForm.EnableRegenerateFeedback), Cfg.EnableRegenerateFeedback),
+                EnableQualityJudge = Dirty(nameof(ConfigForm.EnableQualityJudge), Cfg.EnableQualityJudge),
+                QualityJudgeSampleRate = Dirty(nameof(ConfigForm.QualityJudgeSampleRate), Cfg.QualityJudgeSampleRate),
+                QualityJudgeModel = Dirty(nameof(ConfigForm.QualityJudgeModel), Cfg.QualityJudgeModel),
                 EnablePiiAnonymization = Dirty(nameof(ConfigForm.EnablePiiAnonymization), Cfg.EnablePiiAnonymization),
                 EnableDataSovereignty = Dirty(nameof(ConfigForm.EnableDataSovereignty), Cfg.EnableDataSovereignty),
                 EnableContentModeration = Dirty(nameof(ConfigForm.EnableContentModeration), Cfg.EnableContentModeration),
