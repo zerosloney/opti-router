@@ -575,6 +575,78 @@ public class OpenAICompatibleModelClientTests
     }
 
     [Fact]
+    public async Task StreamRawAsync_WhenUpstreamClosesWithoutDone_ThrowsBadGateway()
+    {
+        // 上游连接关闭但从未发 [DONE]（协议违约断流）：必须抛异常走失败路径（failover/审计/熔断），
+        // 此前静默结束被当成功——客户端收断头流报 "Stream ended without finish_reason" 而审计 OK。
+        var endpoint = CreateEndpoint();
+        var sse = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(sse, Encoding.UTF8, "text/event-stream")
+        };
+        var client = CreateClient(endpoint, CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(new ChatRequest { Model = "m", Messages = new List<ChatMessage>(), Stream = true }))
+            {
+            }
+        });
+
+        Assert.Equal(502, (int)ex.StatusCode);
+        Assert.Contains("without [DONE]", ex.ResponseBody);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_TailDoneWithoutTrailingNewline_YieldsDone()
+    {
+        // 防误伤：部分上游最后一个 [DONE] 不带尾换行直接关流，残行处理须识别为正常终止。
+        var endpoint = CreateEndpoint();
+        var sse = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]";
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(sse, Encoding.UTF8, "text/event-stream")
+        };
+        var client = CreateClient(endpoint, CreateHandler(response));
+
+        var lines = new List<RawStreamLine>();
+        await foreach (var line in client.StreamRawAsync(new ChatRequest { Model = "m", Messages = new List<ChatMessage>(), Stream = true }))
+        {
+            lines.Add(line);
+        }
+
+        Assert.Equal(2, lines.Count); // 内容行 + [DONE]
+        Assert.Equal("[DONE]", lines[1].Data);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_TailDataLineWithoutNewline_RelaysThenThrows()
+    {
+        // 残行是普通 data 行（无 [DONE] 结尾）：半行先转发，随后仍判断流抛 502。
+        var endpoint = CreateEndpoint();
+        var sse = "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"b\"";
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(sse, Encoding.UTF8, "text/event-stream")
+        };
+        var client = CreateClient(endpoint, CreateHandler(response));
+
+        var lines = new List<RawStreamLine>();
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var line in client.StreamRawAsync(new ChatRequest { Model = "m", Messages = new List<ChatMessage>(), Stream = true }))
+            {
+                lines.Add(line);
+            }
+        });
+
+        Assert.Equal(502, (int)ex.StatusCode);
+        Assert.Equal(2, lines.Count); // 完整内容行 + 转发的残行
+        Assert.Contains("\"content\":\"b\"", lines[1].Data);
+    }
+
+    [Fact]
     public void ExtractInBandError_NormalizesOutOfRangeCode()
     {
         // 业务码（如 MiniMax 1000）越出 [400,599] → 回退 500，避免伪造怪异 HTTP 状态。

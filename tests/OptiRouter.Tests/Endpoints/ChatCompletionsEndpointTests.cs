@@ -1549,6 +1549,62 @@ public class ChatCompletionsEndpointTests
     }
 
     [Fact]
+    public async Task Post_Streaming_UpstreamNeverSendsFinishReason_SynthesizesStopChunk()
+    {
+        // 部分聚合网关的流从不携带 finish_reason 就 [DONE]：AI SDK 系客户端判定
+        // "Stream ended without finish_reason" 整个响应失败。网关出口必须合成 stop 兜底。
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        var endpoint = CreateEndpoint("model-a");
+        factory.MockClients["model-a"] = new MockModelClient(endpoint, streamRawFunc: (req, ct) =>
+            NoFinishStream(ct));
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("auto", stream: true);
+        var json = JsonSerializer.Serialize(request);
+        using var httpContent = new StringContent(json, Encoding.UTF8, "application/json");
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions") { Content = httpContent };
+
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("[DONE]", body);
+
+        // [DONE] 前最后一个数据 chunk 必带 finish_reason:"stop"（合成）。
+        var dataLines = body.Split('\n')
+            .Where(l => l.StartsWith("data: ", StringComparison.Ordinal))
+            .Select(l => l.Substring("data: ".Length).Trim())
+            .ToList();
+        Assert.Equal("[DONE]", dataLines[^1]);
+        using var lastDoc = JsonDocument.Parse(dataLines[^2]);
+        Assert.Equal("stop", lastDoc.RootElement.GetProperty("choices")[0].GetProperty("finish_reason").GetString());
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> NoFinishStream(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-nofinish\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}",
+            null);
+        await Task.Yield();
+        yield return new RawStreamLine("[DONE]", null);
+    }
+
+    [Fact]
     public async Task Post_Streaming_AllCandidatesFail_ReturnsErrorEventInStream()
     {
         // Arrange

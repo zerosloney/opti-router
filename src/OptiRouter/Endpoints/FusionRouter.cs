@@ -288,7 +288,7 @@ public sealed class FusionRouter
                         reward: null, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
 
                     // 记录亲和性信号（与 outer 成功路径对齐——用户实际看到的答案）
-                    _recorder.RecordAffinity(sessionId, winnerModel.Name, AffinitySignal.Weak);
+                    _recorder.RecordAffinity(sessionId, winnerModel.Name, AffinitySignal.Weak, winnerElapsedMs);
                     _recorder.RecordPromptCacheAffinity(request, winnerModel.Name);
 
                     _logger.LogInformation("Fusion router: Byzantine consensus achieved (group {GroupId}), winner={Winner}, score={Score:F3}, outliers={Outliers}",
@@ -494,7 +494,7 @@ public sealed class FusionRouter
             _recorder.RecordQuota(outerModel.Name, outerResponse.Metadata);
             _healthTracker.RecordSuccess(outerModel.Name, requiredSuccesses, releaseProbe: false);
             double outerReward = _recorder.RecordThompsonOutcome(outerModel.Name, outerSw.ElapsedMilliseconds, decision, completionTokens: outerUsage?.CompletionTokens ?? 0);
-            _recorder.RecordAffinity(sessionId, outerModel.Name, AffinitySignal.Weak);
+            _recorder.RecordAffinity(sessionId, outerModel.Name, AffinitySignal.Weak, outerSw.ElapsedMilliseconds);
             _recorder.RecordPromptCacheAffinity(request, outerModel.Name);
             _recorder.RecordAudit(null, outerModel.Name, estimatedTokens, outerUsage, outerCost, outerSw.ElapsedMilliseconds, sessionId,
                 decision.Reason + "; fusion-router: outer", true, null, false, routedTier,
@@ -699,14 +699,33 @@ public sealed class FusionRouter
         long anchorElapsedMs = 0;
         bool anchorStreamCompleted = false;
         ChatUsage? anchorUsage = null;
+        Exception? anchorFault = null;
 
-        // 3. 实时流式输出 Anchor 模型内容（try-finally：IAsyncEnumerable 禁止 try-catch 含 yield，
-        //    但允许 try-finally。finally 内同步记 audit/health，让融合流请求进入审计与断路器统计）。
+        // 3. 实时流式输出 Anchor 模型内容。外层 try-finally（IAsyncEnumerable 允许 try-finally 含
+        //    yield、禁止 try-catch 含 yield），anchor 故障用内层 try-catch 包 MoveNextAsync（无 yield）
+        //    捕获；finally 内记 audit/health，让融合流请求进入审计与断路器统计。
         var anchorSw = System.Diagnostics.Stopwatch.StartNew();
+        var anchorEnumerator = anchorStream.WithCancellation(ct).GetAsyncEnumerator();
         try
         {
-            await foreach (var line in anchorStream.WithCancellation(ct))
+            while (true)
             {
+                bool hasNext;
+                try
+                {
+                    hasNext = await anchorEnumerator.MoveNextAsync();
+                }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    // anchor 中途故障（断流/in-band error/超时）：捕获转合成收尾（下方 error + [DONE]）。
+                    // 客户端主动断开（ct 取消）仍传播——连接已不可写，发什么都无意义。
+                    anchorFault = ex;
+                    break;
+                }
+                if (!hasNext)
+                    break;
+
+                var line = anchorEnumerator.Current;
                 // 捕获末次 usage（OpenAI 通常在末块或 [DONE] 前一块携带），用于成本入账（此前被丢弃导致日预算低估）。
                 if (line.Usage is not null)
                     anchorUsage = line.Usage;
@@ -721,10 +740,11 @@ public sealed class FusionRouter
                 }
                 yield return line;
             }
-            anchorStreamCompleted = true;
+            anchorStreamCompleted = anchorFault is null;
         }
         finally
         {
+            await anchorEnumerator.DisposeAsync();
             anchorSw.Stop();
             anchorElapsedMs = anchorSw.ElapsedMilliseconds;
             if (anchorStreamCompleted)
@@ -773,6 +793,20 @@ public sealed class FusionRouter
                     // secondary tasks 内部已 try-catch 并始终返回元组，不应抛；防御性吞掉。
                 }
             }
+        }
+
+        // anchor 中途故障：客户端已收部分内容，静默终止 = 断头流（客户端报
+        // Stream ended without finish_reason 且无法区分部分成功）。补发 error 事件 + [DONE]，
+        // 客户端 SDK 感知失败可自行重试（级联由服务端熔断/重决策接续）。
+        if (anchorFault is not null)
+        {
+            bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(anchorFault);
+            string faultMessage = UpstreamFailureClassifier.SafeMessage(anchorFault, quotaLimited);
+            string errorJson = JsonSerializer.Serialize(
+                ProtocolErrorHelper.CreateOpenAiErrorPayload($"fusion anchor stream faulted: {faultMessage}", "UPSTREAM_ERROR"));
+            yield return new RawStreamLine(errorJson, null);
+            yield return new RawStreamLine("[DONE]", null);
+            yield break;
         }
 
         // 4. Anchor 流式完成后，收集 Secondary Panel 回答并执行轻量 Analyst 评估

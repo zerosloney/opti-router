@@ -77,12 +77,31 @@ public static class ChatCompletionsEndpoint
                     var streamEnumerator = enumerator;
                     return Results.Stream(async stream =>
                     {
+                        bool sawFinishReason = false;
+
+                        // 单行转发守卫：[DONE] 前流内从未出现非 null finish_reason（部分聚合网关
+                        // 的流从不发终结 chunk），合成 stop 兜底——否则 OpenAI 系客户端（AI SDK）
+                        // 判定 "Stream ended without finish_reason" 整个响应失败。
+                        async Task RelayLineAsync(RawStreamLine line)
+                        {
+                            if (line.Data == "[DONE]" && !sawFinishReason)
+                            {
+                                await WriteLineAsync(stream, CreateFinishStopLine(), ct).ConfigureAwait(false);
+                                sawFinishReason = true;
+                            }
+                            else if (!sawFinishReason && HasFinishReason(line.Data))
+                            {
+                                sawFinishReason = true;
+                            }
+                            await WriteLineAsync(stream, line, ct).ConfigureAwait(false);
+                        }
+
                         try
                         {
-                            await WriteLineAsync(stream, firstLine, ct).ConfigureAwait(false);
+                            await RelayLineAsync(firstLine).ConfigureAwait(false);
                             while (await streamEnumerator.MoveNextAsync().ConfigureAwait(false))
                             {
-                                await WriteLineAsync(stream, streamEnumerator.Current, ct).ConfigureAwait(false);
+                                await RelayLineAsync(streamEnumerator.Current).ConfigureAwait(false);
                             }
                         }
                         catch (BudgetExhaustedException)
@@ -343,6 +362,15 @@ public static class ChatCompletionsEndpoint
     {
         await stream.WriteAsync(Encoding.UTF8.GetBytes($"data: {line.Data}\n\n"), ct).ConfigureAwait(false);
     }
+
+    // finish_reason 检测：JSON 转义下 content 内字面引号必为 \"，裸 "finish_reason":" 只能
+    // 来自结构字段，模型输出里讨论该字段也不会误报。
+    private static bool HasFinishReason(string? data)
+        => data is not null && data.Contains("\"finish_reason\":\"", StringComparison.Ordinal);
+
+    // 合成终结 chunk：无上游终结行时保证客户端收到的最后一个数据 chunk 带 finish_reason。
+    private static RawStreamLine CreateFinishStopLine()
+        => new($"{{\"id\":\"optirouter-finish\",\"object\":\"chat.completion.chunk\",\"created\":{DateTimeOffset.UtcNow.ToUnixTimeSeconds()},\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}", null);
 
     private static async Task WriteErrorAsync(Stream stream, string message, string code, CancellationToken ct)
     {

@@ -892,6 +892,56 @@ public class FusionRouterTests
     }
 
     [Fact]
+    public async Task FusionRouter_Streaming_AnchorFaultEmitsErrorEventAndDone()
+    {
+        // anchor 中途断流：此前异常传播使融合流静默终止（客户端断头流，报
+        // Stream ended without finish_reason 且无法区分部分成功）。现在必须补发
+        // error 事件 + [DONE]，且审计记 anchor-stream-faulted 失败行。
+        using var factory = new FusionRouterFactory();
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-a", 1, 1, "secondary")),
+            streamRawFunc: (req, ct) => FaultingAnchorStream(ct));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-b", 1, 1, "secondary")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-c", 1, 1, "secondary")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"content\":\"partial\"", body, StringComparison.Ordinal);
+        Assert.Contains("fusion anchor stream faulted", body, StringComparison.Ordinal);
+        Assert.Contains("UPSTREAM_ERROR", body, StringComparison.Ordinal);
+        // 以 [DONE] 收尾，客户端流完整终止。
+        Assert.True(body.TrimEnd().EndsWith("data: [DONE]", StringComparison.Ordinal), body[^60..]);
+
+        var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+        var anchorFault = auditStore.GetRecent(20)
+            .SingleOrDefault(r => r.RoutingReason == "fusion-stream-anchor");
+        Assert.NotNull(anchorFault);
+        Assert.False(anchorFault!.Success);
+        Assert.Equal("anchor-stream-faulted", anchorFault.ErrorMessage);
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> FaultingAnchorStream(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return new RawStreamLine(
+            "{\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}", null);
+        await Task.Yield();
+        throw new ModelClientException(HttpStatusCode.BadGateway, "Upstream stream closed without [DONE] sentinel.");
+    }
+
+    [Fact]
     public async Task FusionRouter_PanelLessThan2_FallsBackToSerial()
     {
         // 候选链不足 2 个 panel 候选（<2），回退串行。

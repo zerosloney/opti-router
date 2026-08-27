@@ -301,37 +301,6 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         }
     }
 
-    /// <summary>
-    /// 从原始响应体提取首条回答文本：标准格式 choices 在根节点；
-    /// 部分聚合上游（如 cline/stealth 的 ox-alpha）把 choices 包在 data 字段下。
-    /// </summary>
-    private static string? ExtractReplyText(string body)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(body);
-            var root = doc.RootElement;
-            if (root.ValueKind != JsonValueKind.Object) return null;
-
-            JsonElement choices = root.TryGetProperty("choices", out var standard) ? standard
-                : root.TryGetProperty("data", out var wrapped)
-                  && wrapped.ValueKind == JsonValueKind.Object
-                  && wrapped.TryGetProperty("choices", out var nested) ? nested
-                : default;
-            if (choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0) return null;
-
-            return choices[0].TryGetProperty("message", out var message)
-                && message.TryGetProperty("content", out var content)
-                && content.ValueKind == JsonValueKind.String
-                ? content.GetString()
-                : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
     /// <inheritdoc />
     public async Task<RawChatResponse> CompleteRawAsync(ChatRequest request, CancellationToken cancellationToken = default)
     {
@@ -498,6 +467,16 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                 return System.Text.Encoding.UTF8.GetString(dataSpan);
             }
 
+            // 首条数据行附 TTFB 元数据（响应头耗时 + 到首字节总耗时），仅一次。
+            UpstreamResponseMetadata? TakeFirstLineMetadata()
+            {
+                if (!isFirstDataItem || responseMetadata is null)
+                    return null;
+                responseSw?.Stop();
+                isFirstDataItem = false;
+                return responseMetadata with { TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds };
+            }
+
             while (true)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -529,17 +508,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                         if (data == "[DONE]")
                         {
                             await reader.CompleteAsync().ConfigureAwait(false);
-                            UpstreamResponseMetadata? firstMetadata = null;
-                            if (isFirstDataItem && responseMetadata is not null)
-                            {
-                                responseSw?.Stop();
-                                firstMetadata = responseMetadata with
-                                {
-                                    TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds
-                                };
-                                isFirstDataItem = false;
-                            }
-                            yield return new RawStreamLine("[DONE]", null, firstMetadata);
+                            yield return new RawStreamLine("[DONE]", null, TakeFirstLineMetadata());
                             yield break;
                         }
 
@@ -552,17 +521,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                             await reader.CompleteAsync().ConfigureAwait(false);
                             throw rawInBand;
                         }
-                        UpstreamResponseMetadata? lineMetadata = null;
-                        if (isFirstDataItem && responseMetadata is not null)
-                        {
-                            responseSw?.Stop();
-                            lineMetadata = responseMetadata with
-                            {
-                                TimeToFirstTokenMs = responseSw?.ElapsedMilliseconds
-                            };
-                            isFirstDataItem = false;
-                        }
-                        yield return new RawStreamLine(data, TryExtractUsage(data), lineMetadata);
+                        yield return new RawStreamLine(data, TryExtractUsage(data), TakeFirstLineMetadata());
                     }
                     finally
                     {
@@ -582,13 +541,52 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                         $"Upstream stream line exceeded {MaxStreamLineBytes} bytes; aborting to prevent OOM.");
                 }
 
-                reader.AdvanceTo(buffer.Start, buffer.End);
-
                 if (result.IsCompleted)
                 {
+                    // 尾部无换行的残行按最后一行处理（部分上游最后一行 data/[DONE] 不带尾换行直接关流，
+                    // 丢弃会把正常流误判为断流）。buffer 在 AdvanceTo 前有效。
+                    byte[]? tailRented = null;
+                    try
+                    {
+                        var tailData = ProcessLineData(buffer, ref tailRented);
+                        if (tailData is not null)
+                        {
+                            if (tailData == "[DONE]")
+                            {
+                                reader.AdvanceTo(buffer.End);
+                                await reader.CompleteAsync().ConfigureAwait(false);
+                                yield return new RawStreamLine("[DONE]", null, TakeFirstLineMetadata());
+                                yield break;
+                            }
+                            var tailInBand = ExtractInBandError(tailData, response!.StatusCode, responseMetadata);
+                            if (tailInBand is not null)
+                            {
+                                reader.AdvanceTo(buffer.End);
+                                await reader.CompleteAsync().ConfigureAwait(false);
+                                throw tailInBand;
+                            }
+                            yield return new RawStreamLine(tailData, TryExtractUsage(tailData), TakeFirstLineMetadata());
+                        }
+                    }
+                    finally
+                    {
+                        if (tailRented is not null)
+                        {
+                            System.Buffers.ArrayPool<byte>.Shared.Return(tailRented);
+                        }
+                    }
+
+                    reader.AdvanceTo(buffer.End);
                     await reader.CompleteAsync().ConfigureAwait(false);
-                    yield break;
+                    // 上游关流但从未发出 [DONE]：协议违约断流。此前静默结束被当成功（审计 OK、
+                    // 熔断无感、客户端收断头流报 Stream ended without finish_reason），改抛异常
+                    // 走统一失败路径（failover/审计/熔断）。诊断信息放 ResponseBody 进审计展示。
+                    throw new ModelClientException(System.Net.HttpStatusCode.BadGateway,
+                        "Upstream stream closed without [DONE] sentinel.",
+                        metadata: responseMetadata);
                 }
+
+                reader.AdvanceTo(buffer.Start, buffer.End);
             }
         }
         finally
