@@ -716,12 +716,15 @@
     private ElementReference AnalysisModelCanvas;
     private ElementReference AnalysisProviderCanvas;
     private string ProviderMetricKey = "tokens";
-    /// <summary>模型路由名 → 供应商（随分析加载刷新，用于模型用量表；缺失与后端同规则归"(未配置)"）。</summary>
-    private Dictionary<string, string> _providerByModel = new(StringComparer.Ordinal);
-
-    /// <summary>模型用量表的供应商列；配置缺失时与后端聚合口径一致。</summary>
+    /// <summary>模型用量表的供应商列：直接读后端报告内置映射（当前配置显式/推断 + 已删除模型墓碑，
+    /// 与 ByProvider 聚合同源同口径）；映射缺失时归"(未配置)"。</summary>
     private string ProviderOf(string model)
-        => _providerByModel.TryGetValue(model, out var p) && !string.IsNullOrEmpty(p) ? p : "(未配置)";
+    {
+        var map = Analysis?.ProviderByModel;
+        return map is not null && map.TryGetValue(model, out var p) && !string.IsNullOrEmpty(p)
+            ? p
+            : "(未配置)";
+    }
 
     /// <summary>缓存命中占输入 Token 比例；无输入样本时显示 "-"。</summary>
     private static string CacheSharePct(long cached, long prompt)
@@ -853,11 +856,9 @@
     {
         AnalysisLoading = true;
         var (from, to) = AnalysisWindow(AnalysisWindowKey);
+        // 供应商归属由后端随报告下发（ProviderByModel，含已删除模型墓碑）——前端不再自建
+        // 联表：旧实现只认显式 Provider 且不含下线模型，导致删除模型后历史用量归"(未配置)"。
         Analysis = await Api.GetAuditAnalysisAsync(from, to);
-        // 供应商映射与模型配置同步刷新（管理台可能改配）；失败降级为空表，模型表归"(未配置)"。
-        _providerByModel = (await Api.GetModelsAsync())
-            .Where(m => !string.IsNullOrWhiteSpace(m.Provider))
-            .ToDictionary(m => m.Name, m => m.Provider.Trim(), StringComparer.Ordinal);
         AnalysisLoading = false;
         await InvokeAsync(StateHasChanged);
         await RenderAnalysisChartsAsync();

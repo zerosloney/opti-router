@@ -306,6 +306,40 @@ public sealed class ModelsConfigServiceTests
     }
 
     [Fact]
+    public void DeleteModel_RecordsProviderTombstone_ForHistoricalUsageAttribution()
+    {
+        // 删除后历史审计的供应商归组依据：显式 Provider 与 BaseUrl 推断两种口径都要留痕。
+        using var store = CreateStore(out var service);
+        var explicitProvider = CreateModel("model-a");
+        explicitProvider.Provider = "acme";
+        var inferredProvider = CreateModel("model-b");
+        inferredProvider.BaseUrl = "https://api.deepseek.com/v1";
+        service.SaveModels(new[] { explicitProvider, inferredProvider });
+
+        service.DeleteModel("model-a");
+        service.DeleteModel("model-b");
+
+        var tombstones = service.LoadProviderTombstones();
+        Assert.Equal("acme", tombstones["model-a"]);
+        Assert.Equal("deepseek", tombstones["model-b"]);
+    }
+
+    [Fact]
+    public void SaveModels_RemovedModels_GetProviderTombstones()
+    {
+        // 管理台批量保存少掉模型（整体替换路径）与逐个删除同样留痕。
+        using var store = CreateStore(out var service);
+        var a = CreateModel("model-a");
+        a.Provider = "acme";
+        service.SaveModels(new[] { a, CreateModel("model-b") });
+
+        var kept = service.LoadModels().Where(m => m.Name != "model-a").ToList();
+        service.SaveModels(kept);
+
+        Assert.Equal("acme", service.LoadProviderTombstones()["model-a"]);
+    }
+
+    [Fact]
     public void SaveModels_RemovingModel_PrunesDanglingFallbackChainReferences()
     {
         // 整体替换少掉模型（管理台批量保存路径）同样联动收敛，不留悬空引用到下次重启。

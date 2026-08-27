@@ -234,7 +234,9 @@ public class ApiService
         AuditCascadeDto Cascade,
         AuditFusionDto Fusion,
         List<AuditReasonDto> ByReason,
-        List<AuditDayDto> DailyTrend);
+        List<AuditDayDto> DailyTrend,
+        // 模型路由名 → 供应商（后端合并解析含已删除模型墓碑）；旧版本响应无此字段时为 null。
+        Dictionary<string, string>? ProviderByModel = null);
 
     public sealed record AuditAnalysisSummaryDto(
         int Successes, int Failures, double SuccessRatePct, double TotalCostUsd,

@@ -201,4 +201,39 @@ public class AuditAnalysisServiceTests
         Assert.Equal(60, report.ByModel.Single(m => m.Model == "alpha-1").CachedInputTokens);
         Assert.Equal(0, report.ByModel.Single(m => m.Model == "alpha-2").CachedInputTokens);
     }
+
+    [Fact]
+    public void Analyze_DeletedModel_AttributesViaTombstones_AndReportCarriesMap()
+    {
+        // 回归保护：删除模型后其历史审计行不能降级"(未配置)"——
+        // 墓碑（provider-tombstones 文档）兜底归组，报告同时下发映射供前端同口径渲染。
+        var auditStore = new InMemoryRequestAuditStore();
+        var ts = new DateTime(2026, 8, 20, 10, 0, 0, DateTimeKind.Utc);
+        auditStore.Append(Rec(ts, "deleted-a", success: true, cost: 0.1m, latency: 100));
+        auditStore.Append(Rec(ts, "live-a", success: true, cost: 0.2m, latency: 100));
+
+        string dbPath = Path.Combine(Path.GetTempPath(), $"optirouter-tomb-{Guid.NewGuid():N}.db");
+        using var configDb = new AppConfigDbStore(dbPath);
+        configDb.SaveDocument(AppConfigDbStore.ProviderTombstoneScope,
+            System.Text.Json.JsonSerializer.Serialize(
+                new Dictionary<string, string> { ["deleted-a"] = "deepseek" }));
+
+        // 当前配置只剩 live-a；deleted-a 仅墓碑可归组。
+        var options = new RouterOptions();
+        options.Models.Add(new ModelEndpointOptions { Name = "live-a", Provider = "acme" });
+
+        var analyzer = new AuditAnalysisService(auditStore, new FixedOptionsMonitor(options), configDb);
+        var report = analyzer.Analyze(ts.AddHours(-1), ts.AddHours(1));
+
+        Assert.Equal(2, report.ByProvider.Count);
+        Assert.Equal(1, report.ByProvider.Single(p => p.Provider == "acme").Requests);
+        var deepseek = report.ByProvider.Single(p => p.Provider == "deepseek");
+        Assert.Equal(1, deepseek.Requests);
+        Assert.Equal(1, deepseek.ModelCount);
+        Assert.DoesNotContain(report.ByProvider, p => p.Provider == AuditAnalysisService.UnknownProvider);
+
+        // 报告内置映射与 ByProvider 同源：前端明细列直接消费。
+        Assert.Equal("deepseek", report.ProviderByModel["deleted-a"]);
+        Assert.Equal("acme", report.ProviderByModel["live-a"]);
+    }
 }

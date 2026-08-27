@@ -26,6 +26,13 @@ public sealed class AppConfigDbStore : IDisposable
     public const string RoutingScope = "routing";
     public const string BudgetScope = "budget";
     public const string ModelScope = "model";
+
+    /// <summary>
+    /// 模型→供应商墓碑文档（JSON dict：路由名 → 显示供应商）。模型被删除/替换/改名时由
+    /// <see cref="ModelsConfigService"/> 记录，历史审计的供应商归组（用量分析）不随配置丢失。
+    /// </summary>
+    public const string ProviderTombstoneScope = "provider-tombstones";
+
     private const string DocumentKey = "document";
 
     // MariaDB 后端时保持 null（null! 以免全部 SQLite 代码路径逐处判空；公共方法均先委托 MariaDb 后端）。

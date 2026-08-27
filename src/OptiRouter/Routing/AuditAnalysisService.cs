@@ -16,7 +16,15 @@ public sealed record AuditAnalysisReport(
     AuditCascadeStats Cascade,
     AuditFusionStats Fusion,
     IReadOnlyList<AuditReasonStats> ByReason,
-    IReadOnlyList<AuditDayStats> DailyTrend);
+    IReadOnlyList<AuditDayStats> DailyTrend)
+{
+    /// <summary>
+    /// 模型路由名 → 供应商（本报告聚合所用的完整解析结果：当前配置显式/推断 + 已删除模型墓碑）。
+    /// 供前端"模型用量明细"供应商列与后端 ByProvider 同口径渲染，不再各自联表。
+    /// </summary>
+    public IReadOnlyDictionary<string, string> ProviderByModel { get; init; } =
+        new Dictionary<string, string>();
+}
 
 /// <summary>窗口总览：总量/成败/成本/Token/成功请求延迟分位。</summary>
 public sealed record AuditAnalysisSummary(
@@ -114,13 +122,64 @@ public sealed class AuditAnalysisService
 
     private readonly IRequestAuditStore _store;
     private readonly IOptionsMonitor<RouterOptions> _options;
+    private readonly Configuration.AppConfigDbStore? _configDb;
 
-    public AuditAnalysisService(IRequestAuditStore store, IOptionsMonitor<RouterOptions> options)
+    public AuditAnalysisService(IRequestAuditStore store, IOptionsMonitor<RouterOptions> options,
+        Configuration.AppConfigDbStore? configDb = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(options);
         _store = store;
         _options = options;
+        _configDb = configDb;
+    }
+
+    /// <summary>
+    /// 模型路由名 → 供应商合并映射，覆盖优先级：当前配置显式 Provider &gt; 当前配置 BaseUrl
+    /// 推断（与 /v1/models 口径一致）&gt; 已删除模型墓碑。删除/改名不再让历史审计归组降级为
+    /// "(未配置)"——2026-08 用量分析供应商归属丢失事故的根因是分析时对当前配置实时联表。
+    /// </summary>
+    private Dictionary<string, string> BuildProviderMap()
+    {
+        var map = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        // 墓碑层（最低）：模型已下线后唯一的归组依据。
+        if (_configDb is not null)
+        {
+            foreach (var (name, provider) in LoadProviderTombstones())
+                map[name] = provider;
+        }
+
+        // 当前配置层：EffectiveProvider 显式优先、推断兜底；"unknown" 端点保留墓碑或归未知桶。
+        foreach (var model in _options.CurrentValue.Models)
+        {
+            var provider = ModelDisplayIds.EffectiveProvider(model);
+            if (!string.IsNullOrWhiteSpace(provider)
+                && !string.Equals(provider, "unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                map[model.Name] = provider;
+            }
+        }
+
+        return map;
+    }
+
+    private IReadOnlyDictionary<string, string> LoadProviderTombstones()
+    {
+        try
+        {
+            string? json = _configDb?.LoadDocument(Configuration.AppConfigDbStore.ProviderTombstoneScope);
+            if (string.IsNullOrWhiteSpace(json))
+                return new Dictionary<string, string>(StringComparer.Ordinal);
+
+            return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, string>>(json)
+                   ?? new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // 墓碑文档损坏降级空表：该批历史归组回退"(未配置)"，不阻断分析。
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
     }
 
     /// <summary>聚合 [fromUtc, toUtc] 闭区间窗口的审计记录。</summary>
@@ -144,10 +203,8 @@ public sealed class AuditAnalysisService
         var fusionRoles = new Dictionary<string, int>(StringComparer.Ordinal);
         int cascadeTriggered = 0, fusionRequests = 0;
 
-        // 模型路由名 → 供应商（当前配置快照）；Provider 为空或模型已下线的归未知桶。
-        var providerByModel = _options.CurrentValue.Models
-            .Where(m => !string.IsNullOrWhiteSpace(m.Provider))
-            .ToDictionary(m => m.Name, m => m.Provider.Trim(), StringComparer.Ordinal);
+        // 模型路由名 → 供应商：当前配置（显式/推断）+ 已删除模型墓碑的合并映射。
+        var providerByModel = BuildProviderMap();
 
         int offset = 0;
         while (true)
@@ -302,7 +359,10 @@ public sealed class AuditAnalysisService
             .OrderBy(d => d.Day)
             .ToList();
 
-        return new AuditAnalysisReport(fromUtc, toUtc, total, summary, modelRows, providerRows, tierRows, cascade, fusion, reasonRows, dayRows);
+        return new AuditAnalysisReport(fromUtc, toUtc, total, summary, modelRows, providerRows, tierRows, cascade, fusion, reasonRows, dayRows)
+        {
+            ProviderByModel = providerByModel
+        };
     }
 
     private static double Avg(List<double> values)

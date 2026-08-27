@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using OptiRouter.Routing;
@@ -82,7 +83,14 @@ public sealed class ModelsConfigService
         lock (_rawApiKeys)
         {
             var snapshot = models.ToList();
+            // 先取存量再覆盖：整体替换少掉的模型记供应商墓碑（与删除联动清理同源——
+            // 历史审计的供应商归组不随模型下线丢失，用量分析/供应商汇总保持完整）。
+            var previous = _store.LoadModelsRaw();
             RestoreEnvLiterals(snapshot);
+            var removed = previous
+                .Where(p => !snapshot.Any(m => string.Equals(KeyOf(m), KeyOf(p), StringComparison.Ordinal)))
+                .ToList();
+            RecordProviderTombstones(removed);
             // 整体替换可能移除了模型，链引用同步收敛（与 DeleteModel 联动清理同源）。
             PruneDanglingFallbackChains(snapshot);
             _store.SaveModels(snapshot);
@@ -113,6 +121,10 @@ public sealed class ModelsConfigService
 
             if (existing is not null)
             {
+                // 改名（含 blank-name 归一化变化）：旧路由名记供应商墓碑，历史审计归组不断链。
+                if (!string.Equals(KeyOf(existing), KeyOf(model), StringComparison.Ordinal))
+                    RecordProviderTombstones(new[] { existing });
+
                 // 保留 ApiKey 不被空字符串覆盖
                 if (string.IsNullOrEmpty(model.ApiKey) && !string.IsNullOrEmpty(existing.ApiKey))
                     model.ApiKey = existing.ApiKey;
@@ -147,11 +159,18 @@ public sealed class ModelsConfigService
         bool deleted;
         lock (_rawApiKeys)
         {
+            // 删除前取目标行：供应商墓碑要在行消失前解析（含 BaseUrl 推断）。
+            var targets = _store.LoadModelsRaw()
+                .Where(m => string.Equals(KeyOf(m), name, StringComparison.Ordinal))
+                .ToList();
+
             deleted = _store.DeleteModel(name);
             if (deleted)
             {
                 _rawApiKeys.Remove(name);
                 _logger.LogInformation("Deleted model {ModelName} from config database", name);
+
+                RecordProviderTombstones(targets);
 
                 // 联动清理：加载剩余模型，移除指向已删除模型的链引用，有改动则写回。
                 var remaining = _store.LoadModelsRaw();
@@ -190,12 +209,74 @@ public sealed class ModelsConfigService
         => !string.IsNullOrWhiteSpace(model.Name) ? model.Name : model.Id;
 
     /// <summary>
+    /// 加载模型→供应商墓碑映射（配置库文档，缺/坏返回空表）。
+    /// 供 AuditAnalysisService 解析已删除模型的历史审计供应商归组。
+    /// </summary>
+    public IReadOnlyDictionary<string, string> LoadProviderTombstones()
+    {
+        try
+        {
+            string? json = _store.LoadDocument(AppConfigDbStore.ProviderTombstoneScope);
+            if (string.IsNullOrWhiteSpace(json))
+                return new Dictionary<string, string>(StringComparer.Ordinal);
+
+            return JsonSerializer.Deserialize<Dictionary<string, string>>(json,
+                       new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip })
+                   ?? new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+        catch (JsonException ex)
+        {
+            // 墓碑损坏降级为空表：该批删除模型的历史归组回退"(未配置)"，不阻断分析。
+            _logger.LogWarning(ex, "Provider tombstones document corrupted; treating as empty");
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// 记录（合并写入）给定模型的供应商墓碑。解析口径与展示层一致：
+    /// 显式 Provider 优先、BaseUrl 推断兜底（<see cref="ModelDisplayIds.EffectiveProvider"/>）；
+    /// 两者皆空（"unknown"）的端点跳过。失败仅告警，不阻断保存/删除主流程。
+    /// </summary>
+    internal void RecordProviderTombstones(IEnumerable<ModelEndpointOptions> models)
+    {
+        var tombstones = new Dictionary<string, string>(LoadProviderTombstones(), StringComparer.Ordinal);
+        bool changed = false;
+
+        foreach (var model in models)
+        {
+            if (string.IsNullOrWhiteSpace(model.Name) && string.IsNullOrWhiteSpace(model.Id)) continue;
+
+            var provider = ModelDisplayIds.EffectiveProvider(model);
+            if (string.IsNullOrWhiteSpace(provider)
+                || string.Equals(provider, "unknown", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            tombstones[KeyOf(model)] = provider;
+            changed = true;
+        }
+
+        if (!changed) return;
+
+        try
+        {
+            _store.SaveDocument(AppConfigDbStore.ProviderTombstoneScope, JsonSerializer.Serialize(tombstones));
+            _logger.LogInformation("Recorded {Total} provider tombstone(s); batch added {Added}",
+                tombstones.Count, models.Count());
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist provider tombstones; historical usage may fall back to unknown provider");
+        }
+    }
+
+    /// <summary>
     /// 原地清理 FallbackChain 中对列表内不存在模型的引用（删除模型联动），
     /// 返回被清理的模型数。比较语义与启动校验一致（OrdinalIgnoreCase）。
     /// </summary>
     private int PruneDanglingFallbackChains(IList<ModelEndpointOptions> models)
-    {
-        var names = new HashSet<string>(
+    {        var names = new HashSet<string>(
             models.Select(m => m.Name), StringComparer.OrdinalIgnoreCase);
         int pruned = 0;
 
