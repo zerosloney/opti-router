@@ -33,6 +33,11 @@ public class OpenAICompatibleModelClientTests
         return ModelClientFactory.CreateForEndpoint(endpoint, handler);
     }
 
+    private static IModelClient CreateClient(ModelEndpointOptions endpoint, HttpMessageHandler handler)
+    {
+        return ModelClientFactory.CreateForEndpoint(endpoint, handler);
+    }
+
     #region CompleteAsync tests
 
     [Fact]
@@ -372,17 +377,27 @@ public class OpenAICompatibleModelClientTests
 
     #region ProbeAsync tests
 
+    /// <summary>构造探活流式 SSE 响应（探活自 2026-08 起走流式：部分网关非流式补全会挂死）。</summary>
+    private static HttpResponseMessage SseResponse(params string[] dataLines)
+    {
+        var sse = new StringBuilder();
+        foreach (var line in dataLines)
+            sse.Append($"data: {line}\n\n");
+        sse.Append("data: [DONE]\n\n");
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(sse.ToString(), Encoding.UTF8, "text/event-stream")
+        };
+    }
+
     [Fact]
     public async Task ProbeAsync_DoesNotCapMaxTokens_ReasoningModelsRejectTinyBudget()
     {
         // reasoning 模型（如 ox-alpha）思考会耗尽小额度导致内容为空，上游直接
         // 500 "empty response content"（实测 max_tokens 1~32 均 500）。
-        // 探活不设上限（null 不序列化），由上游取默认值。
+        // 探活不设上限（null 不序列化），由上游取默认值；探活走流式（stream:true）。
         var endpoint = CreateEndpoint();
-        var response = new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent("{}", Encoding.UTF8, "application/json")
-        };
+        var response = SseResponse("{\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}");
         var handler = CreateHandler(response);
         var client = CreateClient(endpoint, handler);
 
@@ -392,19 +407,16 @@ public class OpenAICompatibleModelClientTests
         Assert.NotNull(sentBody);
         using var doc = JsonDocument.Parse(sentBody);
         Assert.False(doc.RootElement.TryGetProperty("max_tokens", out _));
+        Assert.True(doc.RootElement.TryGetProperty("stream", out var stream) && stream.GetBoolean());
     }
 
     [Fact]
-    public async Task ProbeAsync_ExtractsIdentityReply_FromStandardShape()
+    public async Task ProbeAsync_ExtractsIdentityReply_FromStreamedDeltas()
     {
         var endpoint = CreateEndpoint();
-        var response = new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(JsonSerializer.Serialize(new
-            {
-                choices = new[] { new { message = new { role = "assistant", content = "我是 DeepSeek" } } }
-            }), Encoding.UTF8, "application/json")
-        };
+        var response = SseResponse(
+            "{\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}",
+            "{\"choices\":[{\"delta\":{\"content\":\"我是 DeepSeek\"}}]}");
         var client = CreateClient(endpoint, CreateHandler(response));
 
         var result = await client.ProbeAsync();
@@ -414,23 +426,25 @@ public class OpenAICompatibleModelClientTests
     }
 
     [Fact]
-    public async Task ProbeAsync_ExtractsIdentityReply_FromDataWrappedShape()
+    public async Task ProbeAsync_SkipsSseCommentLines_OpenRouterKeepalive()
     {
-        // 部分聚合上游（cline/stealth ox-alpha）非流式响应把 choices 包在 data 下。
+        // 聚合网关（commandcode.ai → OpenRouter）流式首部刷 ": OPENROUTER PROCESSING" 注释行；
+        // SSE 注释不是 data 行，探活必须忽略而非误判失败。
         var endpoint = CreateEndpoint();
+        var sse = ": OPENROUTER PROCESSING\n\n" +
+                  ": OPENROUTER PROCESSING\n\n" +
+                  "data: {\"choices\":[{\"delta\":{\"content\":\"我是 GLM\"}}]}\n\n" +
+                  "data: [DONE]\n\n";
         var response = new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(JsonSerializer.Serialize(new
-            {
-                data = new { choices = new[] { new { message = new { role = "assistant", content = "我是 ox-alpha" } } } }
-            }), Encoding.UTF8, "application/json")
+            Content = new StringContent(sse, Encoding.UTF8, "text/event-stream")
         };
         var client = CreateClient(endpoint, CreateHandler(response));
 
         var result = await client.ProbeAsync();
 
         Assert.True(result.Healthy);
-        Assert.Equal("我是 ox-alpha", result.Reply);
+        Assert.Equal("我是 GLM", result.Reply);
     }
 
     [Fact]
@@ -438,17 +452,7 @@ public class OpenAICompatibleModelClientTests
     {
         // Arrange
         var endpoint = CreateEndpoint();
-        var response = new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(JsonSerializer.Serialize(new
-            {
-                id = "chatcmpl-p",
-                model = "gpt-4o",
-                choices = new[] { new { index = 0, message = new { role = "assistant", content = "pong" }, finish_reason = "stop" } },
-                usage = new { prompt_tokens = 1, completion_tokens = 1, total_tokens = 2 }
-            }), Encoding.UTF8, "application/json")
-        };
-        var handler = CreateHandler(response);
+        var handler = CreateHandler(SseResponse("{\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}"));
         var client = CreateClient(endpoint, handler);
 
         // Act
@@ -479,6 +483,34 @@ public class OpenAICompatibleModelClientTests
         Assert.False(result.Healthy);
         Assert.True(result.LatencyMs >= 0);
         Assert.NotNull(result.Error);
+    }
+
+    [Fact]
+    public async Task ProbeAsync_WhenUpstreamStalls_TimesOut()
+    {
+        // 上游挂住（不回响应头，非流式挂死网关的真实形态）：探活必须在窗口内放弃并返回
+        // "Probe timed out."，而非无限等待。Handler 层模拟挂起——SendAsync 永不完成、随令牌取消。
+        var endpoint = CreateEndpoint();
+        var client = CreateClient(endpoint, new StallingHandler());
+
+        var result = await client.ProbeAsync(timeout: TimeSpan.FromMilliseconds(400));
+
+        Assert.False(result.Healthy);
+        Assert.Equal("Probe timed out.", result.Error);
+    }
+
+    /// <summary>SendAsync 永不完成、随取消令牌立即结束的 Handler：模拟挂死上游。</summary>
+    private sealed class StallingHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var tcs = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using (cancellationToken.Register(() => tcs.TrySetCanceled(cancellationToken)).ConfigureAwait(false))
+            {
+                await tcs.Task.ConfigureAwait(false);
+            }
+            throw new System.Diagnostics.UnreachableException();
+        }
     }
 
     #endregion

@@ -456,8 +456,11 @@ public static class ModelsConfigHandler
             return Results.NotFound(new { success = false, error = $"Model '{name}' not found" });
 
         var client = clientProvider.GetClient(model);
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Min(10, model.TimeoutSeconds)));
-        var result = await client.ProbeAsync(cts.Token).ConfigureAwait(false);
+        // 探活窗口 10s（模型超时更短则从短）；外层硬上限再多 5s 缓冲——保证内层探活超时
+        // 先触发（返回 "Probe timed out."），外层取消不会以未捕获 OCE 逃逸成 500。
+        var probeTimeout = TimeSpan.FromSeconds(Math.Min(10, model.TimeoutSeconds));
+        using var cts = new CancellationTokenSource(probeTimeout + TimeSpan.FromSeconds(5));
+        var result = await client.ProbeAsync(cts.Token, probeTimeout).ConfigureAwait(false);
         // 探活回答（"你是什么模型"）截断后随 message 回显，管理员可直接核对模型身份。
         string reply = result.Reply?.Trim() ?? "";
         if (reply.Length > 80) reply = reply[..80] + "…";

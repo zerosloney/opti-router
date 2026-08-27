@@ -226,20 +226,30 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             // 不设 max_tokens（null 不序列化）：reasoning 模型（如 ox-alpha）思考会耗尽
             // 小额度导致内容为空，上游直接 500 "empty response content"（实测 1~32 均 500）。
             // 不限额由上游取默认，探活回复本身极短，成本可忽略。
+            // 流式探活：部分网关非流式补全会无限挂起（commandcode.ai 的 GLM-5.3-Flash 实测
+            // 60s+ 不回响应头，流式正常）——探活走流式并消费到 [DONE]/流结束即判成功。
             MaxTokens = null,
-            Stream = false
+            Stream = true
         };
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(5));
+            cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(10));
 
-            var raw = await CompleteRawAsync(probeRequest, cts.Token).ConfigureAwait(false);
+            var replyBuilder = new System.Text.StringBuilder();
+            await foreach (var line in StreamRawAsync(probeRequest, cts.Token).ConfigureAwait(false))
+            {
+                if (line.Data == "[DONE]")
+                    break;
+                string? delta = ExtractProbeDelta(line.Data);
+                if (!string.IsNullOrEmpty(delta))
+                    replyBuilder.Append(delta);
+            }
             sw.Stop();
 
-            string? reply = ExtractReplyText(raw.Body);
+            string? reply = replyBuilder.ToString().Trim();
             return new ModelHealthResult(true, (int)sw.Elapsed.TotalMilliseconds, Reply: string.IsNullOrWhiteSpace(reply) ? null : reply);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -259,6 +269,22 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         }
         // 外部取消（cancellationToken 已取消）：异常向上传播，由探活服务识别为关停信号，
         // 不计失败——曾在此被转成 Healthy=false，导致关停噪声熔断健康模型。
+    }
+
+    /// <summary>探活流式 data 行 → 增量文本。解析失败静默跳过；SSE 注释行在 ProcessLineData 已过滤。</summary>
+    private string? ExtractProbeDelta(string? data)
+    {
+        if (string.IsNullOrWhiteSpace(data) || data == "[DONE]")
+            return null;
+        try
+        {
+            var raw = JsonSerializer.Deserialize<RawStreamChunk>(data, _deserializeOptions);
+            return raw is { Choices.Count: > 0 } ? raw.Choices[0].Delta.Content : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     /// <summary>
