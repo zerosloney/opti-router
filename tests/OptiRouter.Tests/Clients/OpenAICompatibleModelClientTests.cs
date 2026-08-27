@@ -499,6 +499,104 @@ public class OpenAICompatibleModelClientTests
         Assert.Equal("Probe timed out.", result.Error);
     }
 
+    [Fact]
+    public async Task ProbeAsync_WhenInBandError_ReturnsUnhealthyWithUpstreamMessage()
+    {
+        // Zen 排队 79s 后吐流内 error 事件的形态：探活必须判不健康且带上游原话，
+        // 而非把 error 行当内容中继后记健康。
+        var endpoint = CreateEndpoint();
+        var handler = CreateHandler(SseResponse(
+            "{\"error\":{\"message\":\"An internal error occurred. Retry once; if it persists, contact support with your request_id.\",\"code\":524}}"));
+        var client = CreateClient(endpoint, handler);
+
+        var result = await client.ProbeAsync();
+
+        Assert.False(result.Healthy);
+        Assert.Contains("An internal error occurred", result.Error);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_WhenInBandErrorEvent_ThrowsWithUpstreamMessage()
+    {
+        // 流内 error 事件必须抛 ModelClientException（失败信号 → 编排器 failover/审计/熔断接管），
+        // 而非原样中继成内容行导致审计假成功。
+        var endpoint = CreateEndpoint();
+        var handler = CreateHandler(SseResponse(
+            "{\"error\":{\"message\":\"An internal error occurred.\",\"code\":524}}"));
+        var client = CreateClient(endpoint, handler);
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(new ChatRequest { Model = "m", Messages = new List<ChatMessage>(), Stream = true }))
+            {
+            }
+        });
+
+        Assert.Contains("An internal error occurred.", ex.Message);
+        Assert.Equal(524, (int)ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_When200BodyCarriesError_ThrowsWithUpstreamMessage()
+    {
+        // 非流式 200 + body 带 error 字段（OpenRouter 系聚合网关形态）：同样视为上游失败。
+        var endpoint = CreateEndpoint();
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"error":{"message":"upstream unavailable","code":502}}""", Encoding.UTF8, "application/json")
+        };
+        var client = CreateClient(endpoint, CreateHandler(response));
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+            await client.CompleteRawAsync(new ChatRequest { Model = "m", Messages = new List<ChatMessage>() }));
+
+        Assert.Contains("upstream unavailable", ex.Message);
+        Assert.Equal(502, (int)ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task StreamRawAsync_WhenErrorFieldNull_NormalContentPasses()
+    {
+        // 防误伤："error": null 是合法内容块字段，不得触发失败路径。
+        var endpoint = CreateEndpoint();
+        var handler = CreateHandler(SseResponse(
+            "{\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"error\":null}"));
+        var client = CreateClient(endpoint, handler);
+
+        var lines = new List<RawStreamLine>();
+        await foreach (var line in client.StreamRawAsync(new ChatRequest { Model = "m", Messages = new List<ChatMessage>(), Stream = true }))
+        {
+            lines.Add(line);
+        }
+
+        Assert.Equal(2, lines.Count); // 内容行 + [DONE]
+        Assert.Contains("\"content\":\"hi\"", lines[0].Data);
+    }
+
+    [Fact]
+    public void ExtractInBandError_NormalizesOutOfRangeCode()
+    {
+        // 业务码（如 MiniMax 1000）越出 [400,599] → 回退 500，避免伪造怪异 HTTP 状态。
+        var ex = OpenAICompatibleModelClient.ExtractInBandError(
+            """{"error":{"message":"biz fail","code":1000}}""", System.Net.HttpStatusCode.OK, null);
+        Assert.NotNull(ex);
+        Assert.Equal(500, (int)ex!.StatusCode);
+        Assert.Contains("biz fail", ex.Message);
+
+        // error 为字符串形态（部分网关）也能提取。
+        var ex2 = OpenAICompatibleModelClient.ExtractInBandError(
+            """{"error":"boom"}""", System.Net.HttpStatusCode.OK, null);
+        Assert.NotNull(ex2);
+        Assert.Equal("boom", ex2!.Message);
+
+        // 正常内容不误判。
+        Assert.Null(OpenAICompatibleModelClient.ExtractInBandError(
+            """{"choices":[{"delta":{"content":"ok"}}]}""", System.Net.HttpStatusCode.OK, null));
+        Assert.Null(OpenAICompatibleModelClient.ExtractInBandError("[DONE]", System.Net.HttpStatusCode.OK, null));
+        Assert.Null(OpenAICompatibleModelClient.ExtractInBandError(null, System.Net.HttpStatusCode.OK, null));
+    }
+
     /// <summary>SendAsync 永不完成、随取消令牌立即结束的 Handler：模拟挂死上游。</summary>
     private sealed class StallingHandler : HttpMessageHandler
     {

@@ -77,6 +77,12 @@ public sealed class OpenAICompatibleModelClient : IModelClient
             throw new ModelClientException(response.StatusCode, responseBody, metadata: metadata);
         }
 
+        // 200 但 body 携带 error 字段（OpenRouter/Zen 类聚合网关形态）：视为上游失败而非内容，
+        // 让消费方走既有失败路径（failover/审计/熔断），不再假成功。
+        var typedInBand = ExtractInBandError(responseBody, response.StatusCode, metadata);
+        if (typedInBand is not null)
+            throw typedInBand;
+
         return JsonSerializer.Deserialize<ChatResponse>(responseBody, _deserializeOptions)
             ?? throw new ModelClientException(response.StatusCode, responseBody, "Empty response body.");
     }
@@ -158,6 +164,14 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     {
                         await reader.CompleteAsync().ConfigureAwait(false);
                         yield break;
+                    }
+
+                    // 流内 error 事件：200 流里直接推 {"error":{...}}，抛异常走失败路径而非当内容中继。
+                    var typedInBand = ExtractInBandError(data, response.StatusCode, metadata);
+                    if (typedInBand is not null)
+                    {
+                        await reader.CompleteAsync().ConfigureAwait(false);
+                        throw typedInBand;
                     }
 
                     // 解析 JSON，失败则跳过该行并继续。
@@ -360,6 +374,12 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     throw new ModelClientException(status, responseBody, metadata: metadata);
                 }
 
+                // 200 但 body 携带 error 字段（聚合网关排队后吐错误的形态）：抛异常走失败路径，
+                // 此前被当成功返回，编排器审计假成功、熔断器无感。
+                var rawInBand = ExtractInBandError(responseBody, status, metadata);
+                if (rawInBand is not null)
+                    throw rawInBand;
+
                 return new RawChatResponse(responseBody, TryExtractUsage(responseBody), metadata);
             }
             catch (Exception ex) when (ModelClientRetry.IsExceptionRetryable(ex) && attempt < maxRetries)
@@ -522,6 +542,16 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                             yield return new RawStreamLine("[DONE]", null, firstMetadata);
                             yield break;
                         }
+
+                        // 流内 error 事件：200 流里直接推 {"error":{...}}（Zen/OpenRouter 排队后吐错误
+                        // 的形态），抛异常交由消费方既有失败机器接管（failover/审计/熔断/探活），
+                        // 此前被当普通数据行原样中继，客户端渲染成错误而审计假成功。
+                        var rawInBand = ExtractInBandError(data, response!.StatusCode, responseMetadata);
+                        if (rawInBand is not null)
+                        {
+                            await reader.CompleteAsync().ConfigureAwait(false);
+                            throw rawInBand;
+                        }
                         UpstreamResponseMetadata? lineMetadata = null;
                         if (isFirstDataItem && responseMetadata is not null)
                         {
@@ -605,6 +635,60 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     /// 从 OpenAI 兼容 JSON 中提取 token 用量（usage.prompt_tokens 等）。
     /// 字段缺失或非 JSON 时返回 null。
     /// </summary>
+    /// <summary>
+    /// 流内/体内 error 事件检测：200 响应中直接携带 {"error":{...}}（Zen/OpenRouter 类聚合网关
+    /// 排队或上游故障时的形态，如 hy3 队列 79s 后吐 "An internal error occurred..."）。
+    /// 命中则构造 ModelClientException——消息取上游原文、code 归一到 [400,599]（越界回退 500），
+    /// 让既有失败机器（failover/审计/熔断/探活）接管。此前被当普通内容中继，审计假成功、熔断器无感。
+    /// </summary>
+    internal static ModelClientException? ExtractInBandError(string? payload, System.Net.HttpStatusCode fallbackStatus, UpstreamResponseMetadata? metadata)
+    {
+        if (string.IsNullOrWhiteSpace(payload) || payload.Trim() == "[DONE]")
+            return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("error", out var err) || err.ValueKind == JsonValueKind.Null)
+                return null;
+
+            string? message;
+            int? code = null;
+            if (err.ValueKind == JsonValueKind.String)
+            {
+                message = err.GetString();
+            }
+            else if (err.ValueKind == JsonValueKind.Object)
+            {
+                message = err.TryGetProperty("message", out var m) && m.ValueKind == JsonValueKind.String
+                    ? m.GetString()
+                    : err.GetRawText();
+                if (err.TryGetProperty("code", out var c))
+                {
+                    if (c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out var n))
+                        code = n;
+                    else if (c.ValueKind == JsonValueKind.String && int.TryParse(c.GetString(), out var parsed))
+                        code = parsed;
+                }
+            }
+            else
+            {
+                message = err.GetRawText();
+            }
+            if (string.IsNullOrWhiteSpace(message))
+                message = err.GetRawText();
+
+            int resolved = code is >= 400 and <= 599 ? code.Value
+                : (int)fallbackStatus is >= 400 and <= 599 ? (int)fallbackStatus
+                : 500;
+            return new ModelClientException((System.Net.HttpStatusCode)resolved, payload, message: message, metadata: metadata);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     private static ChatUsage? TryExtractUsage(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return null;
