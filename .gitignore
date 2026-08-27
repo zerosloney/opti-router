@@ -172,3 +172,6 @@ cleanup_handler.py
 # 本地 AI CLI 工具会话状态（内含指向用户目录的符号链接）
 .antigravitycli/
 reports/
+
+# 生产库诊断工具（连真实 DB，含取 key 模式，不进仓库）
+tools/
