@@ -531,9 +531,9 @@
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnableFusionRouter)) ? "dirty-field" : "")">
                         <div class="item-text">
                             <span class="item-title">Fusion MoA 融合路由</span>
-                            <span class="item-desc">多模型并行作答 + 仲裁 + 合成，质量最高但成本 ×N。需 ≥2 个启用模型，仅非流式。</span>
+                            <span class="item-desc">多模型并行作答 + 仲裁 + 合成，质量最高但成本 ×N。需 ≥2 个启用模型；流式为渐进模式：Anchor 先行推流，面板后台并行，结尾追加融合增强分析。</span>
                         </div>
-                        <label class="toggle-switch" title="多模型并行作答 + 仲裁 + 合成。需 ≥2 个启用模型，仅非流式。">
+                        <label class="toggle-switch" title="多模型并行作答 + 仲裁 + 合成；流式：Anchor 先行推流 + 后台面板融合补丁。需 ≥2 个启用模型。">
                             <input type="checkbox" @bind="Cfg.EnableFusionRouter" />
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
