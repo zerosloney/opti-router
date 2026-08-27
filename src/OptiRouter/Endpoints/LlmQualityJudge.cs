@@ -18,9 +18,14 @@ namespace OptiRouter.Endpoints;
 /// </summary>
 public sealed class LlmQualityJudge
 {
-    /// <summary>judge prompt 常量。强制 JSON 契约：score 数值 ∈ [0,1]，reason 一句话。</summary>
+    /// <summary>judge prompt 常量。强制 JSON 契约：score 数值 ∈ [0,1]，reason 一句话。
+    /// 按任务类型分档评审 + 幻觉硬扣分；judge 知识有截止，编造判定仅限其确定不存在/签名明显错误的 API。</summary>
     public const string DefaultJudgePrompt =
-        "你是严格的回答质量评审员。下面是一道用户问题与一个模型的回答。请评估回答的正确性、完整性与相关性，" +
+        "你是严格的回答质量评审员。下面是一道用户问题与一个模型的回答。先判断任务类型，再按对应基准评估：" +
+        "编码/运维类——代码应逻辑完整、可直接运行；不改变需求语义、不删减用户既有功能；错误处理与边界覆盖；使用的 API 真实存在且用法正确。" +
+        "事实/问答类——事实准确、有依据；不编造数据、引用、链接或出处。" +
+        "创作/其他类——切题、结构清晰、无明显遗漏。" +
+        "硬性扣分：回答明显编造 API/函数/参数、虚构引用或数据、或答非所问，任一出现 score ≤ 0.3。" +
         "只输出一个 JSON 对象：{\"score\": <0到1的小数，1=完全正确且切题，0=完全错误或无关>, \"reason\": \"<一句话理由>\"}。" +
         "不要输出 JSON 之外的任何文字。";
 
