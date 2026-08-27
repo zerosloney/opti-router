@@ -31,12 +31,18 @@ public class LlmQualityJudgeTests
     private sealed class JudgeStubClient : IModelClient
     {
         private readonly ConcurrentQueue<string> _calls;
+        private readonly TaskCompletionSource<bool>? _judgeRelease;
+        private readonly ConcurrentQueue<string>? _completedCalls;
 
         public JudgeStubClient(ModelEndpointOptions endpoint, ConcurrentQueue<string> calls,
-            string judgeContent = ScoreJson, bool failJudge = false)
+            string judgeContent = ScoreJson, bool failJudge = false,
+            TaskCompletionSource<bool>? judgeRelease = null,
+            ConcurrentQueue<string>? completedCalls = null)
         {
             Endpoint = endpoint;
             _calls = calls;
+            _judgeRelease = judgeRelease;
+            _completedCalls = completedCalls;
             _content = endpoint.Name == "judge-x" ? judgeContent : "ok";
             _failJudge = failJudge && endpoint.Name == "judge-x";
         }
@@ -56,7 +62,16 @@ public class LlmQualityJudgeTests
                     responseBody: null,
                     message: $"simulated judge failure of {Endpoint.Name}");
             }
+            if (Endpoint.Name == "judge-x" && _judgeRelease is not null)
+                return WaitForReleaseAsync(cancellationToken);
             return Task.FromResult(new RawChatResponse(AssistantBody(_content), null));
+        }
+
+        private async Task<RawChatResponse> WaitForReleaseAsync(CancellationToken cancellationToken)
+        {
+            await _judgeRelease!.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            _completedCalls?.Enqueue(Endpoint.Name);
+            return new RawChatResponse(AssistantBody(_content), null);
         }
 
         public IAsyncEnumerable<RawStreamLine> StreamRawAsync(ChatRequest request, CancellationToken cancellationToken = default)
@@ -76,11 +91,14 @@ public class LlmQualityJudgeTests
     private sealed class QualityJudgeFactory : WebApplicationFactory<Program>
     {
         public ConcurrentQueue<string> CalledModels { get; } = new();
+        public ConcurrentQueue<string> CompletedModels { get; } = new();
         public bool EnableQualityJudge = true;
+        public bool EnableDataSovereignty;
         public string QualityJudgeModel = "judge-x";
         public double SampleRate = 1.0;
         public string JudgeContent = ScoreJson;
         public bool FailJudge;
+        public TaskCompletionSource<bool>? JudgeRelease;
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
@@ -95,15 +113,18 @@ public class LlmQualityJudgeTests
                     options.Models.Add(new ModelEndpointOptions
                     {
                         Name = "target-a", Id = "m-target", BaseUrl = "https://api.t.com/v1",
-                        ApiKey = "k", Tier = ModelTier.Medium, MaxContextTokens = 64000, Enabled = true
+                        ApiKey = "k", Tier = ModelTier.Medium, MaxContextTokens = 64000, Enabled = true,
+                        IsLocalOrPrivate = true
                     });
                     options.Models.Add(new ModelEndpointOptions
                     {
                         Name = "judge-x", Id = "m-judge", BaseUrl = "https://api.j.com/v1",
-                        ApiKey = "k", Tier = ModelTier.Strong, MaxContextTokens = 128000, Enabled = true
+                        ApiKey = "k", Tier = ModelTier.Strong, MaxContextTokens = 128000, Enabled = true,
+                        IsLocalOrPrivate = false
                     });
                     options.Routing.EnableThompsonSampling = true;
                     options.Routing.EnableQualityJudge = EnableQualityJudge;
+                    options.Routing.EnableDataSovereignty = EnableDataSovereignty;
                     options.Routing.QualityJudgeSampleRate = SampleRate;
                     options.Routing.QualityJudgeModel = QualityJudgeModel;
                 });
@@ -119,7 +140,8 @@ public class LlmQualityJudgeTests
                     var models = sp.GetRequiredService<IOptions<RouterOptions>>().Value.Models;
                     var clients = models.ToDictionary(
                         m => m.Name,
-                        m => (IModelClient)new JudgeStubClient(m, CalledModels, JudgeContent, FailJudge));
+                        m => (IModelClient)new JudgeStubClient(
+                            m, CalledModels, JudgeContent, FailJudge, JudgeRelease, CompletedModels));
                     return new AutoRoutingClientProvider(clients);
                 });
             });
@@ -211,6 +233,19 @@ public class LlmQualityJudgeTests
     }
 
     [Fact]
+    public async Task DataSovereignty_ExternalJudgeNeverCalled()
+    {
+        using var factory = new QualityJudgeFactory { EnableDataSovereignty = true };
+        var client = CreateClient(factory);
+
+        var response = await PostChatAsync(client);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await Task.Delay(600);
+        Assert.Equal(new[] { "target-a" }, factory.CalledModels.ToArray());
+    }
+
+    [Fact]
     public async Task ZeroSampleRate_NeverCallsJudge()
     {
         using var factory = new QualityJudgeFactory { SampleRate = 0.0 };
@@ -221,6 +256,50 @@ public class LlmQualityJudgeTests
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await Task.Delay(600);
         Assert.DoesNotContain("judge-x", factory.CalledModels);
+    }
+
+    [Fact]
+    public async Task JudgeConcurrencyLimit_DropsFifthSampleWhenFourCallsAreInFlight()
+    {
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var factory = new QualityJudgeFactory { JudgeRelease = release };
+        using var client = CreateClient(factory);
+
+        try
+        {
+            var responses = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => PostChatAsync(client)));
+            try
+            {
+                Assert.All(responses, response => Assert.Equal(HttpStatusCode.OK, response.StatusCode));
+            }
+            finally
+            {
+                foreach (var response in responses)
+                    response.Dispose();
+            }
+
+            Assert.True(await UntilAsync(
+                () => factory.CalledModels.Count(model => model == "judge-x") == 4),
+                "the first four sampled judge calls should be in flight");
+
+            using var fifthResponse = await PostChatAsync(client);
+            Assert.Equal(HttpStatusCode.OK, fifthResponse.StatusCode);
+
+            Assert.False(await UntilAsync(
+                () => factory.CalledModels.Count(model => model == "judge-x") > 4, timeoutMs: 1000),
+                "the fifth sampled request must not start another judge call while the limit is full");
+
+            release.TrySetResult(true);
+            Assert.True(await UntilAsync(
+                () => factory.CompletedModels.Count(model => model == "judge-x") == 4),
+                "all four in-flight judge calls should complete after release");
+            await Task.Delay(200);
+            Assert.Equal(4, factory.CalledModels.Count(model => model == "judge-x"));
+        }
+        finally
+        {
+            release.TrySetResult(true);
+        }
     }
 
     [Fact]

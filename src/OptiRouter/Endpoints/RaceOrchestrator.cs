@@ -187,7 +187,7 @@ public sealed class RaceOrchestrator
                 // 质量因子与串行路径对齐：截断/空答/JSON 契约违约折减 reward，避免"快而差"的模型被系统性偏爱。
                 double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, options.Routing.QualityPenaltyFactor, request);
                 double reward = _recorder.RecordThompsonOutcome(model.Name, elapsedMs, decision, cost, actualTier: model.Tier, qualityFactor: qualityFactor, completionTokens: usage?.CompletionTokens ?? 0);
-                _recorder.RecordAffinity(sessionId, model.Name, AffinitySignal.Weak);
+                _recorder.RecordAffinity(sessionId, model.Name, AffinitySignal.Weak, elapsedMs);
                 _recorder.RecordPromptCacheAffinity(request, model.Name);
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, usage, cost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,

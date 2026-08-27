@@ -176,6 +176,25 @@ public class SessionAffinityPolicyTests
     }
 
     [Fact]
+    public void LatencyTracker_CleansUpExpiredEntriesOnLaterRecord_AndRetainsActive()
+    {
+        var clock = new MutableTimeProvider();
+        var tracker = new SessionLatencyTracker(clock);
+
+        tracker.Record("sess-expired", 1000, 16, TimeSpan.FromMinutes(1));
+        tracker.Record("sess-active", 2000, 16, TimeSpan.FromMinutes(10));
+        Assert.Equal(2, tracker.EntryCount);
+
+        clock.Now = clock.Now.AddMinutes(2);
+        tracker.Record("sess-trigger", 3000, 16, TimeSpan.FromMinutes(10));
+
+        Assert.Equal(2, tracker.EntryCount);
+        Assert.False(tracker.TryGetRecentAverage("sess-expired", out _));
+        Assert.True(tracker.TryGetRecentAverage("sess-active", out double activeAverage));
+        Assert.Equal(2000.0, activeAverage, 0);
+    }
+
+    [Fact]
     public void LatencyTracker_IgnoresInvalidInput()
     {
         var tracker = new SessionLatencyTracker();
@@ -246,6 +265,75 @@ public class SessionAffinityPolicyTests
 
         Assert.Equal("medium-b", result.Candidates[0].Name);
         Assert.Contains("promoted 'medium-b' to primary", result.Reason);
+    }
+
+    [Fact]
+    public void Affinity_LatencyEscape_UsesRecentWindowAfterLatencyRecovers()
+    {
+        // 最近 5 次慢请求触发逃生；随后 5 次较快请求应让最近窗口恢复到阈值以下。
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var tracker = new SessionLatencyTracker();
+        for (int i = 0; i < 5; i++) tracker.Record("sess-recovered", 50_000);
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess-recovered",
+            new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
+
+        var opts = new RouterOptions
+        {
+            Routing = {
+                EnableSessionAffinity = true,
+                SessionAffinityTtlSeconds = 600,
+                SessionAffinityEscapeAvgLatencyMs = 30_000,
+                SessionAffinityEscapeWindowSize = 5
+            }
+        };
+        var policy = new SessionAffinityPolicy(cache, tracker);
+        var previous = new RouterDecision
+        {
+            Candidates = new List<ModelEndpointOptions> { GetModels()[0], GetModels()[1], GetModels()[2] },
+            Reason = "init"
+        };
+
+        var escaped = policy.Apply(Context(opts, "sess-recovered"), previous);
+        Assert.NotEqual("medium-b", escaped.Candidates[0].Name);
+        Assert.Contains("escape: avg-latency", escaped.Reason);
+
+        for (int i = 0; i < 5; i++) tracker.Record("sess-recovered", 20_000);
+
+        var recovered = policy.Apply(Context(opts, "sess-recovered"), previous);
+        Assert.Equal("medium-b", recovered.Candidates[0].Name);
+        Assert.Contains("promoted 'medium-b' to primary", recovered.Reason);
+    }
+
+    [Fact]
+    public void Affinity_LatencyEscape_WindowLargerThanSixteenCanTrigger()
+    {
+        const int windowSize = 20;
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var tracker = new SessionLatencyTracker();
+        for (int i = 0; i < windowSize; i++) tracker.Record("sess-large-window", 50_000, windowSize, TimeSpan.FromMinutes(10));
+        cache.Set(SessionAffinityPolicy.CacheKeyPrefix + "sess-large-window",
+            new AffinityRecord("medium-b", DateTimeOffset.UtcNow));
+
+        var opts = new RouterOptions
+        {
+            Routing = {
+                EnableSessionAffinity = true,
+                SessionAffinityTtlSeconds = 600,
+                SessionAffinityEscapeAvgLatencyMs = 30_000,
+                SessionAffinityEscapeWindowSize = windowSize
+            }
+        };
+        var policy = new SessionAffinityPolicy(cache, tracker);
+        var previous = new RouterDecision
+        {
+            Candidates = new List<ModelEndpointOptions> { GetModels()[0], GetModels()[1], GetModels()[2] },
+            Reason = "init"
+        };
+
+        var result = policy.Apply(Context(opts, "sess-large-window"), previous);
+
+        Assert.NotEqual("medium-b", result.Candidates[0].Name);
+        Assert.Contains("escape: avg-latency", result.Reason);
     }
 
     [Fact]
@@ -330,9 +418,13 @@ public sealed class StubOptionsMonitor : IOptionsMonitor<RouterOptions>
 
 public sealed class RecordAffinityTests
 {
-    private static OutcomeRecorder MakeRecorder(IMemoryCache cache, MutableTimeProvider clock, RouterOptions opts)
+    private static OutcomeRecorder MakeRecorder(
+        IMemoryCache cache,
+        MutableTimeProvider clock,
+        RouterOptions opts,
+        SessionLatencyTracker? sessionLatencyTracker = null)
     {
-        // RecordAffinity 只触碰 _options/_affinityCache/_timeProvider，其余依赖传 null?。
+        // RecordAffinity 只触碰与测试相关的依赖，其余依赖传 null。
         return new OutcomeRecorder(
             auditStore: null!,
             metrics: null!,
@@ -343,7 +435,8 @@ public sealed class RecordAffinityTests
             promptAffinityStore: null!,
             quotaStore: null!,
             logger: null!,
-            timeProvider: clock);
+            timeProvider: clock,
+            sessionLatencyTracker: sessionLatencyTracker);
     }
 
     private static RouterOptions AffinityOpts(int ttlSeconds = 600) => new()
@@ -365,6 +458,24 @@ public sealed class RecordAffinityTests
         var stored = cache.Get<AffinityRecord>(SessionAffinityPolicy.CacheKeyPrefix + "sess1");
         Assert.NotNull(stored);
         Assert.Equal("main-model", stored!.ModelName);
+    }
+
+    [Fact]
+    public void WeakSignal_DoesNotOverrideFreshStrong_ButRecordsLatency()
+    {
+        var cache = new MemoryCache(new MemoryCacheOptions());
+        var clock = new MutableTimeProvider();
+        var tracker = new SessionLatencyTracker(clock);
+        var recorder = MakeRecorder(cache, clock, AffinityOpts(), tracker);
+
+        recorder.RecordAffinity("sess1", "main-model", AffinitySignal.Strong);
+        recorder.RecordAffinity("sess1", "side-model", AffinitySignal.Weak, latencyMs: 12_345);
+
+        var stored = cache.Get<AffinityRecord>(SessionAffinityPolicy.CacheKeyPrefix + "sess1");
+        Assert.NotNull(stored);
+        Assert.Equal("main-model", stored!.ModelName);
+        Assert.True(tracker.TryGetRecentAverage("sess1", out double average));
+        Assert.Equal(12_345d, average, 0);
     }
 
     [Fact]

@@ -27,6 +27,9 @@ public sealed class LlmQualityJudge
     internal const int MaxQuestionChars = 4000;
     internal const int MaxAnswerChars = 8000;
     private static readonly TimeSpan JudgeTimeout = TimeSpan.FromSeconds(60);
+    private const int MaxConcurrentJudges = 4;
+    // intentional-simple: fixed process-wide cap of 4; upgrade to a configurable bounded queue if judge throughput needs to grow.
+    private static readonly SemaphoreSlim JudgeConcurrency = new(MaxConcurrentJudges, MaxConcurrentJudges);
 
     private readonly IOptionsMonitor<RouterOptions> _options;
     private readonly OutcomeRecorder _recorder;
@@ -76,14 +79,47 @@ public sealed class LlmQualityJudge
                 _logger.LogDebug("Quality judge model '{Model}' not resolved, sampling skipped", routing.QualityJudgeModel);
                 return;
             }
+            if (routing.EnableDataSovereignty && !DataSovereigntyPolicy.IsLocalOrPrivateCandidate(judgeModel))
+            {
+                _logger.LogDebug("Quality judge model '{Model}' skipped by data sovereignty", judgeModel.Name);
+                return;
+            }
             // 自评偏置：judge 与被评模型同源时得分无信息量，跳过。
             if (judgeModel.Name.Equals(judgedModelName, StringComparison.OrdinalIgnoreCase))
                 return;
 
+            if (!JudgeConcurrency.Wait(0))
+            {
+                _logger.LogDebug("Quality judge concurrency limit ({Limit}) reached, sampling skipped for '{Model}'",
+                    MaxConcurrentJudges, judgeModel.Name);
+                return;
+            }
+
             // 后台执行：不 await，异常自兜底；TimeoutToken 防慢 judge 无界占用。
             var judgeModelCaptured = judgeModel;
-            Task.Run(() => JudgeCoreAsync(originalRequest, answerText, judgedModelName, judgeModelCaptured,
-                decision, routedTier, sessionId));
+            var permitTransferred = false;
+            try
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await JudgeCoreAsync(originalRequest, answerText, judgedModelName, judgeModelCaptured,
+                            decision, routedTier, sessionId).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        JudgeConcurrency.Release();
+                    }
+                });
+                permitTransferred = true;
+            }
+            catch
+            {
+                if (!permitTransferred)
+                    JudgeConcurrency.Release();
+                throw;
+            }
         }
         catch (Exception ex)
         {

@@ -39,7 +39,7 @@ public sealed class DataSovereigntyPolicy : IRouterPolicy
             $"retained_local={viableLocalCandidates.Count}, excluded_cloud={hardExcluded.Count - previous.HardExcludedModels.Count}");
     }
 
-    private static bool IsLocalOrPrivateCandidate(ModelEndpointOptions candidate)
+    internal static bool IsLocalOrPrivateCandidate(ModelEndpointOptions candidate)
     {
         if (candidate.IsLocalOrPrivate)
             return true;

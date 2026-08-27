@@ -19,7 +19,14 @@
                 <AppIcon Name="models" Size="18" Class="text-primary" />
                 <span>模型配置</span>
             </div>
-            <div style="display: flex; gap: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <label for="model-sort" class="text-secondary" style="font-size: 0.8rem; margin: 0;">排序</label>
+                <select id="model-sort" class="form-control" @bind="ModelSortOrder" aria-label="模型排序方式" style="width: auto; min-width: 138px;">
+                    <option value="default">配置顺序</option>
+                    <option value="tier">按档位（Strong → Medium → Cheap）</option>
+                    <option value="name">按名称（A → Z）</option>
+                    <option value="provider">按供应商（A → Z）</option>
+                </select>
                 <button class="btn-ghost" @onclick="OpenDiscoverModal" title="拉取上游 provider 可订阅模型">
                     <AppIcon Name="download" Size="14" />
                     <span>从上游拉取模型</span>
@@ -48,7 +55,7 @@
                         </tr>
                     </thead>
                     <tbody>
-                        @foreach (var m in ModelList)
+                        @foreach (var m in SortedModelList)
                         {
                             <tr>
                                 <td>
@@ -270,6 +277,32 @@
 
             <div class="form-grid">
                 <div class="form-field full">
+                    <label for="nm-baseurl">BaseUrl *</label>
+                    <input type="text" id="nm-baseurl" @bind="Form.BaseUrl" placeholder="https://api.openai.com/v1" />
+                </div>
+                <div class="form-field full">
+                    <label for="nm-apikey">ApiKey @(IsEditing ? "（不变更则留空）" : "")</label>
+                    <div class="secret-input">
+                        <input type="@(ShowModalApiKey ? "text" : "password")" id="nm-apikey" @bind="Form.ApiKey" placeholder="sk-..." />
+                        <button type="button" class="secret-toggle" @onclick="() => ShowModalApiKey = !ShowModalApiKey"
+                                aria-label="切换 ApiKey 明文显示" aria-pressed="@(ShowModalApiKey ? "true" : "false")"
+                                title="@(ShowModalApiKey ? "隐藏" : "显示") ApiKey">
+                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                                @if (ShowModalApiKey)
+                                {
+                                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                                    <line x1="1" y1="1" x2="23" y2="23" />
+                                }
+                                else
+                                {
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                                    <circle cx="12" cy="12" r="3" />
+                                }
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="form-field full">
                     <label for="nm-name">名称 *</label>
                     <input type="text" id="nm-name" @bind="Form.Name" placeholder="@(CopySourceName is null ? "路由名，需唯一，如 gpt-4o / deepseek-chat" : "必填：新模型的路由名（其余字段已自源模型复制）")" disabled="@IsEditing" />
                 </div>
@@ -323,32 +356,6 @@
                             </div>
                         </div>
                     }
-                </div>
-                <div class="form-field full">
-                    <label for="nm-baseurl">BaseUrl *</label>
-                    <input type="text" id="nm-baseurl" @bind="Form.BaseUrl" placeholder="https://api.openai.com/v1" />
-                </div>
-                <div class="form-field full">
-                    <label for="nm-apikey">ApiKey @(IsEditing ? "（不变更则留空）" : "")</label>
-                    <div class="secret-input">
-                        <input type="@(ShowModalApiKey ? "text" : "password")" id="nm-apikey" @bind="Form.ApiKey" placeholder="sk-..." />
-                        <button type="button" class="secret-toggle" @onclick="() => ShowModalApiKey = !ShowModalApiKey"
-                                aria-label="切换 ApiKey 明文显示" aria-pressed="@(ShowModalApiKey ? "true" : "false")"
-                                title="@(ShowModalApiKey ? "隐藏" : "显示") ApiKey">
-                            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-                                @if (ShowModalApiKey)
-                                {
-                                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
-                                    <line x1="1" y1="1" x2="23" y2="23" />
-                                }
-                                else
-                                {
-                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                                    <circle cx="12" cy="12" r="3" />
-                                }
-                            </svg>
-                        </button>
-                    </div>
                 </div>
                 <div class="form-field">
                     <label for="nm-tier">Tier</label>
@@ -848,6 +855,30 @@
 
 @code {
     private List<ApiService.ModelDto> ModelList = new();
+    private string ModelSortOrder = "default";
+
+    private IEnumerable<ApiService.ModelDto> SortedModelList => ModelSortOrder switch
+    {
+        "tier" => ModelList
+            .OrderBy(m => TierSortRank(m.Tier))
+            .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase),
+        "name" => ModelList
+            .OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase),
+        "provider" => ModelList
+            .OrderBy(m => string.IsNullOrWhiteSpace(m.Provider))
+            .ThenBy(m => m.Provider ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase),
+        _ => ModelList
+    };
+
+    private static int TierSortRank(string? tier) => tier?.Trim().ToLowerInvariant() switch
+    {
+        "strong" => 0,
+        "medium" => 1,
+        "cheap" => 2,
+        _ => 3
+    };
+
     private string? ErrorMsg;
     private HashSet<string> ProbingModels = new();
     private Dictionary<string, ProbeView> ProbeResults = new();

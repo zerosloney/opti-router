@@ -357,19 +357,18 @@ public sealed class OutcomeRecorder
         try
         {
             // 弱信号：若已存在新鲜的主链偏好则保留，不覆盖。
-            if (signal == AffinitySignal.Weak
+            bool keepExistingAffinity = signal == AffinitySignal.Weak
                 && _affinityCache.TryGetValue<AffinityRecord>(key, out var existing)
                 && existing is not null
-                && now - existing.UpdatedAt < TimeSpan.FromSeconds(ttl))
+                && now - existing.UpdatedAt < TimeSpan.FromSeconds(ttl);
+            if (!keepExistingAffinity)
             {
-                return;
+                _affinityCache.Set(key, new AffinityRecord(modelName, now), new MemoryCacheEntryOptions
+                {
+                    AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(ttl),
+                    Size = 1
+                });
             }
-
-            _affinityCache.Set(key, new AffinityRecord(modelName, now), new MemoryCacheEntryOptions
-            {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(ttl),
-                Size = 1
-            });
         }
         catch
         {
@@ -381,7 +380,8 @@ public sealed class OutcomeRecorder
         try
         {
             if (latencyMs > 0)
-                _sessionLatencyTracker?.Record(sessionId, latencyMs);
+                _sessionLatencyTracker?.Record(sessionId, latencyMs, routing.SessionAffinityEscapeWindowSize,
+                    TimeSpan.FromSeconds(ttl));
         }
         catch
         {

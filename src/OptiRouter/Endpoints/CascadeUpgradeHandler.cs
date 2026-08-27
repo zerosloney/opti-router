@@ -175,7 +175,7 @@ public sealed class CascadeUpgradeHandler
                     strongSw.ElapsedMilliseconds,
                     decision,
                     completionTokens: strongResponse.Usage?.CompletionTokens ?? 0);
-                _recorder.RecordAffinity(sessionId, upgradeTarget.Name, AffinitySignal.Weak);
+                _recorder.RecordAffinity(sessionId, upgradeTarget.Name, AffinitySignal.Weak, strongSw.ElapsedMilliseconds);
                 _recorder.RecordPromptCacheAffinity(originalRequest, upgradeTarget.Name);
 
                 _recorder.RecordAudit(null, upgradeTarget.Name, estimatedTokens, strongResponse.Usage,
