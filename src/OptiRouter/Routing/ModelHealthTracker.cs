@@ -55,6 +55,19 @@ public sealed class ModelHealthTracker
     private readonly ICircuitStateStore? _store;
 
     /// <summary>
+    /// 真实流量/探活成败观察回调（模型名, 是否成功）。每次 <see cref="RecordSuccess"/>/
+    /// <see cref="RecordFailure"/> 的终态路径触发一次。订阅方契约：必须快速非阻塞
+    /// （回调在熔断锁内被调用，当前唯一订阅方是 <see cref="Health.ProbeResultStore"/>
+    /// 的 ConcurrentDictionary 写），且自行兜底异常——回调抛出会沿调用栈打断上报方热路径。
+    /// 用途：探活关闭时模型配置页"连通状态"列仍由真实流量成败驱动。
+    /// </summary>
+    public Action<string, bool>? OutcomeObserved { get; set; }
+
+    /// <summary>终态路径统一触发观察回调；早退/空名等无意义信号不触发。</summary>
+    private void NotifyOutcome(string modelName, bool success) =>
+        OutcomeObserved?.Invoke(modelName, success);
+
+    /// <summary>
     /// 用系统 UTC 时钟构造。
     /// </summary>
     public ModelHealthTracker() : this(null, () => DateTime.UtcNow) { }
@@ -283,6 +296,7 @@ public sealed class ModelHealthTracker
             }
 
             _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
+            NotifyOutcome(modelName, success: false);
             return result;
         }
     }
@@ -305,6 +319,7 @@ public sealed class ModelHealthTracker
             {
                 // 未知模型的成功也记录时间戳（探活新鲜窗口依赖它），熔断状态保持默认 Closed。
                 _circuits[modelName] = new CircuitInfo { LastSuccessUtc = _nowProvider() };
+                NotifyOutcome(modelName, success: true);
                 return;
             }
 
@@ -321,6 +336,7 @@ public sealed class ModelHealthTracker
                 {
                     // 未达闭合阈值：保持半开，等下一轮探测。槽位已释放。
                     _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
+                    NotifyOutcome(modelName, success: true);
                     return;
                 }
             }
@@ -331,6 +347,7 @@ public sealed class ModelHealthTracker
             info.HalfOpenSuccesses = 0;
             info.CoolDownUntil = default;
             _store?.SaveCircuitState(modelName, info.State, info.FailureCount, info.CoolDownUntil);
+            NotifyOutcome(modelName, success: true);
         }
     }
 

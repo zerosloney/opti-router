@@ -252,7 +252,30 @@ builder.Services.AddSingleton<CostLedger>(sp =>
 builder.Services.AddSingleton<ModelHealthTracker>(sp =>
 {
     var store = sp.GetRequiredService<ICostLedgerStore>();
-    return new ModelHealthTracker(store);
+    var tracker = new ModelHealthTracker(store);
+
+    // 真实流量成败同步到连通状态留痕：探活（EnableHealthProbe）关闭时，模型配置页
+    // "连通状态"列不再只靠手动测试，而由真实请求的成败持续驱动。回调在熔断锁内触发，
+    // 须快速非阻塞；异常自行兜底（记日志不上抛），不拖垮路由热路径。
+    var probeResults = sp.GetRequiredService<OptiRouter.Health.ProbeResultStore>();
+    var syncLogger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("OptiRouter.Routing.ModelHealthTracker");
+    tracker.OutcomeObserved += (modelName, success) =>
+    {
+        try
+        {
+            // latencyMs 记 0：tracker 收敛点无耗时上下文（串行/Fusion/Race 各自持有计时器），
+            // 消息文案与探活区分；如需精确延迟可升级为 Record* 带 latency 参数。
+            probeResults.Record(modelName, new OptiRouter.Health.ProbeStatus(
+                success, 0, DateTime.UtcNow,
+                success ? "真实请求成功（自动同步）" : "真实请求失败（自动同步）", null));
+        }
+        catch (Exception ex)
+        {
+            syncLogger.LogWarning(ex, "连通状态留痕同步失败: {Model}", modelName);
+        }
+    };
+
+    return tracker;
 });
 
 // 延迟统计缓存：后台聚合服务写入，路由策略零 I/O 读快照。

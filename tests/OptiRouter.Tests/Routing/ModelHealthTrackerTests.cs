@@ -374,6 +374,54 @@ public class ModelHealthTrackerTests
         Assert.DoesNotContain(store.Saved, kv => kv.Key == "model-a" && kv.Value.State == CircuitState.Closed);
     }
 
+    [Fact]
+    public void OutcomeObserved_FiresOnFailureAndSuccess()
+    {
+        // 真实流量成败驱动连通状态留痕：Record*/终态路径各触发一次观察回调。
+        var tracker = new ModelHealthTracker();
+        var observed = new List<(string Name, bool Success)>();
+        tracker.OutcomeObserved += (name, success) => observed.Add((name, success));
+
+        tracker.RecordFailure("model-a", threshold: 3, cooldownSeconds: 60);
+        tracker.RecordSuccess("model-a");
+        tracker.RecordSuccess("never-seen-model");
+
+        Assert.Equal(new[] { ("model-a", false), ("model-a", true), ("never-seen-model", true) }, observed);
+    }
+
+    [Fact]
+    public void OutcomeObserved_HalfOpenBelowThresholdStillNotifiesSuccess()
+    {
+        var now = DateTime.UtcNow;
+        var tracker = new ModelHealthTracker(() => now);
+        tracker.RecordFailure("model-a", threshold: 1, cooldownSeconds: 60);
+        Assert.Equal(CircuitState.Open, tracker.GetState("model-a"));
+
+        var observed = new List<(string Name, bool Success)>();
+        tracker.OutcomeObserved += (name, success) => observed.Add((name, success));
+
+        // 冷却到期转半开，探测成功但未达闭合阈值（requiredSuccesses=2）：早退路径仍须通知。
+        now = now.AddSeconds(61);
+        tracker.TryBeginProbe("model-a", maxProbes: 1);
+        tracker.RecordSuccess("model-a", requiredSuccesses: 2);
+
+        _ = Assert.Single(observed);
+        Assert.Equal(("model-a", true), observed[0]);
+    }
+
+    [Fact]
+    public void OutcomeObserved_EmptyModelName_DoesNotNotify()
+    {
+        var tracker = new ModelHealthTracker();
+        int count = 0;
+        tracker.OutcomeObserved += (_, _) => count++;
+
+        tracker.RecordFailure("", threshold: 1, cooldownSeconds: 60);
+        tracker.RecordSuccess("");
+
+        Assert.Equal(0, count);
+    }
+
     private sealed class CaptureCircuitStore : ICircuitStateStore
     {
         public List<KeyValuePair<string, (CircuitState State, int FailureCount, DateTime CooldownUntil)>> Saved { get; } = new();
