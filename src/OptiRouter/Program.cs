@@ -678,6 +678,13 @@ builder.Services.AddSwaggerGen(c =>
 // 需 AddRazorPages 提供 PersistentComponentState 等预渲染服务，否则 AntiforgeryStateProvider 解析失败。
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
+// 后台标签页节流治理：Chrome/Edge 对后台 >5 分钟的标签页把 JS 定时器压到 1 次/分钟，
+// Blazor 客户端 15s 心跳 ping 实际被拉长到 ~60s，超过默认 ClientTimeoutInterval(30s)
+// 即被服务端判死掐断电路——切回 /requests 等管理台页面必现"正在重试连接"横幅。
+// 放宽到 90s 容下一个完整节流周期；客户端侧 serverTimeout 不受影响（WS 消息事件
+// 不被节流，服务端 ping 到达即处理），无需动前端。全局无其他 SignalR Hub，仅 Blazor 电路。
+builder.Services.Configure<Microsoft.AspNetCore.SignalR.HubOptions>(o =>
+    o.ClientTimeoutInterval = TimeSpan.FromSeconds(90));
 // ApiService 必须 Scoped（circuit 内共享）：Blazor Server 页面间 NavLink 导航后保持同一实例。
 // Cookie 注入在 ApiService 内部按请求执行（构造时捕获 Cookie 存于 Scoped 实例、HttpContext 可用时刷新）。
 // 不用 DelegatingHandler：HttpClientFactory 的 handler 管道跨 circuit 缓存共享，
