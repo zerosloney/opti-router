@@ -1605,6 +1605,57 @@ public class ChatCompletionsEndpointTests
     }
 
     [Fact]
+    public async Task Post_Streaming_MidStreamModelClientException_ReturnsUpstreamErrorNotInternal()
+    {
+        // 回归：断流检测（无 [DONE] 抛 502）在流中途抛 ModelClientException，此前被
+        // ClassifyMidStreamError 落进 INTERNAL_ERROR 兜底桶，客户端只见不可读的
+        // "An unexpected internal error occurred"；必须归类 UPSTREAM_ERROR 并外发真实原因。
+        using var factory = new TestWebApplicationFactory();
+        factory.ConfigureTestServicesAction = services =>
+        {
+            services.Configure<RouterOptions>(opt =>
+            {
+                opt.Models.Clear();
+                opt.Models.Add(CreateEndpoint("model-a"));
+                opt.Routing.EnableRuleClassifier = false;
+                opt.Routing.EnableTokenEstimator = false;
+                opt.Routing.EnableBudgetGuard = false;
+                opt.Routing.EnableFailover = false;
+            });
+        };
+
+        var endpoint = CreateEndpoint("model-a");
+        factory.MockClients["model-a"] = new MockModelClient(endpoint, streamRawFunc: (req, ct) =>
+            FaultAfterFirstChunk(ct));
+
+        using var client = factory.CreateClient();
+        var request = BuildRequest("auto", stream: true);
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "/v1/chat/completions")
+        {
+            Content = new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json")
+        };
+
+        var response = await client.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Contains("UPSTREAM_ERROR", body, StringComparison.Ordinal);
+        Assert.Contains("502", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("An unexpected internal error occurred", body, StringComparison.Ordinal);
+        Assert.Contains("[DONE]", body);
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> FaultAfterFirstChunk(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-fault\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}", null);
+        await Task.Yield();
+        throw new ModelClientException(HttpStatusCode.BadGateway, "Upstream stream closed without [DONE] sentinel.");
+    }
+
+    [Fact]
     public async Task Post_Streaming_AllCandidatesFail_ReturnsErrorEventInStream()
     {
         // Arrange

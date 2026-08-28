@@ -153,10 +153,12 @@ public static class AnthropicMessagesEndpoint
                 }
                 catch (Exception ex)
                 {
-                    // 与 OpenAI 端点同一分类思路：取消/超时 → timeout_error 可重试；其余 → api_error。
-                    // api_error 桶为未预见异常：不外发 ex.Message，细节进服务端日志。
+                    // 与 OpenAI 端点同一分类思路：取消/超时 → timeout_error 可重试；上游故障
+                    // （断流 502 检测/流内 error/连接失败）→ api_error 外发真实原因；其余 →
+                    // api_error 兜底桶：不外发 ex.Message，细节进服务端日志。
+                    bool upstreamFault = ex is ModelClientException or HttpRequestException or IOException;
                     string type = ex is OperationCanceledException ? "timeout_error" : "api_error";
-                    if (type == "api_error")
+                    if (type == "api_error" && !upstreamFault)
                     {
                         ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "anthropic.messages");
                         await WriteStreamErrorAsync(stream, type, ProtocolErrorHelper.InternalErrorMessage, ct).ConfigureAwait(false);

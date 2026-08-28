@@ -390,7 +390,9 @@ public static class ChatCompletionsEndpoint
         // OperationCanceledException：HttpClient 内部超时（外部 ct 取消时连接已不可写，理论不进 catch）。
         if (ex is OperationCanceledException)
             return "TIMEOUT";
-        if (ex is HttpRequestException or IOException)
+        // ModelClientException 流中途抛出 = 上游故障（断流 502 检测 / 流内 error），外发真实原因
+        // 供客户端判断重试——此前落 INTERNAL_ERROR 兜底桶，客户端只见不可读的内部错误文案。
+        if (ex is HttpRequestException or IOException or ModelClientException)
             return "UPSTREAM_ERROR";
         // size limit（MaxResponseStreamBytes / MaxStreamLineBytes）专用异常，精确分类。
         if (ex is ResponseSizeLimitExceededException)

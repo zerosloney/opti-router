@@ -180,10 +180,18 @@ public static class GeminiGenerateContentEndpoint
                 }
                 catch (Exception ex)
                 {
-                    // 未预见异常不外发 ex.Message，细节进服务端日志。
-                    ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
-                    await WriteStreamErrorAsync(stream, StatusCodes.Status500InternalServerError, "INTERNAL",
-                        ProtocolErrorHelper.InternalErrorMessage, ct).ConfigureAwait(false);
+                    // 上游故障（断流 502 检测/流内 error/连接失败）外发真实原因（可重试信号）；
+                    // 其余未预见异常不外发 ex.Message，细节进服务端日志。
+                    if (ex is ModelClientException or HttpRequestException or IOException)
+                    {
+                        await WriteStreamErrorAsync(stream, StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", ex.Message, ct).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
+                        await WriteStreamErrorAsync(stream, StatusCodes.Status500InternalServerError, "INTERNAL",
+                            ProtocolErrorHelper.InternalErrorMessage, ct).ConfigureAwait(false);
+                    }
                 }
                 finally
                 {
@@ -225,18 +233,32 @@ public static class GeminiGenerateContentEndpoint
         }
         catch (Exception ex)
         {
-            // 流式首 MoveNextAsync 期间的未预见异常兜底：返回 SSE 错误流而非逃逸为框架 500。
+            // 流式首 MoveNextAsync 期间的异常兜底：返回 SSE 错误流而非逃逸为框架 500。
+            // 上游故障外发真实原因；取消 → 超时；其余未预见不外发 ex.Message，细节进服务端日志。
             if (enumerator is not null)
                 await enumerator.DisposeAsync().ConfigureAwait(false);
-            int code = ex is OperationCanceledException
-                ? StatusCodes.Status504GatewayTimeout
-                : StatusCodes.Status500InternalServerError;
-            string status = ex is OperationCanceledException ? "DEADLINE_EXCEEDED" : "INTERNAL";
-            string message = status == "INTERNAL"
-                ? ProtocolErrorHelper.InternalErrorMessage  // 未预见异常不外发 ex.Message，细节进服务端日志。
-                : ex.Message;
-            if (status == "INTERNAL")
+            int code;
+            string status;
+            string message;
+            if (ex is ModelClientException or HttpRequestException or IOException)
+            {
+                code = StatusCodes.Status503ServiceUnavailable;
+                status = "UNAVAILABLE";
+                message = ex.Message;
+            }
+            else if (ex is OperationCanceledException)
+            {
+                code = StatusCodes.Status504GatewayTimeout;
+                status = "DEADLINE_EXCEEDED";
+                message = ex.Message;
+            }
+            else
+            {
+                code = StatusCodes.Status500InternalServerError;
+                status = "INTERNAL";
+                message = ProtocolErrorHelper.InternalErrorMessage;
                 ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
+            }
             return Results.Stream(
                 stream => WriteStreamErrorAsync(stream, code, status, message, ct),
                 "text/event-stream");
