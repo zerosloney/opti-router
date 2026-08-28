@@ -239,7 +239,7 @@ public class ApiService
         Dictionary<string, string>? ProviderByModel = null);
 
     public sealed record AuditAnalysisSummaryDto(
-        int Successes, int Failures, double SuccessRatePct, double TotalCostUsd,
+        int Successes, int Failures, double SuccessRatePct, double RequestSuccessRatePct, double TotalCostUsd,
         long PromptTokens, long CompletionTokens, long CachedInputTokens,
         double AvgLatencyMs, double P50LatencyMs, double P95LatencyMs, double P99LatencyMs, int LatencySamples);
 

@@ -26,11 +26,14 @@ public sealed record AuditAnalysisReport(
         new Dictionary<string, string>();
 }
 
-/// <summary>窗口总览：总量/成败/成本/Token/成功请求延迟分位。</summary>
+/// <summary>窗口总览：总量/成败/成本/Token/成功请求延迟分位。
+/// SuccessRatePct 为行级（含级联/fusion/judge 中间行）；RequestSuccessRatePct 为请求级
+/// （按 request_id 去重，同请求任一行成功即算成功）——用户体感口径，用于稳定性判定。</summary>
 public sealed record AuditAnalysisSummary(
     int Successes,
     int Failures,
     double SuccessRatePct,
+    double RequestSuccessRatePct,
     double TotalCostUsd,
     long PromptTokens,
     long CompletionTokens,
@@ -208,6 +211,11 @@ public sealed class AuditAnalysisService
         int fusionRowsWithoutId = 0;
         int cascadeTriggered = 0;
 
+        // 请求级成功率：同 request_id 任一行成功即算成功（级联中间失败不扣用户体感分）；
+        // 无 request_id 的旧记录逐行计。
+        var requestOk = new Dictionary<string, bool>(StringComparer.Ordinal);
+        int requestsWithoutId = 0, requestsWithoutIdOk = 0;
+
         // 模型路由名 → 供应商：当前配置（显式/推断）+ 已删除模型墓碑的合并映射。
         var providerByModel = BuildProviderMap();
 
@@ -288,6 +296,16 @@ public sealed class AuditAnalysisService
                     else
                         fusionRowsWithoutId++;
                 }
+
+                if (!string.IsNullOrEmpty(r.RequestId))
+                {
+                    requestOk[r.RequestId] = requestOk.TryGetValue(r.RequestId, out var prevOk) && prevOk || ok;
+                }
+                else
+                {
+                    requestsWithoutId++;
+                    if (ok) requestsWithoutIdOk++;
+                }
             }
 
             offset += items.Count;
@@ -297,10 +315,16 @@ public sealed class AuditAnalysisService
         latencies.Sort();
         double avg = latencies.Count == 0 ? 0 : latencies.Sum() / latencies.Count;
         double successRatePct = total == 0 ? 0 : 100.0 * successes / total;
+        int requestSuccesses = requestsWithoutIdOk;
+        foreach (var v in requestOk.Values)
+            if (v) requestSuccesses++;
+        int requestTotal = requestOk.Count + requestsWithoutId;
+        double requestSuccessRatePct = requestTotal == 0 ? 0 : 100.0 * requestSuccesses / requestTotal;
         var summary = new AuditAnalysisSummary(
             Successes: successes,
             Failures: total - successes,
             SuccessRatePct: Math.Round(successRatePct, 2),
+            RequestSuccessRatePct: Math.Round(requestSuccessRatePct, 2),
             TotalCostUsd: Math.Round(totalCost, 6),
             PromptTokens: promptTokens,
             CompletionTokens: completionTokens,

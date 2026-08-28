@@ -142,13 +142,14 @@
                 <div class="audit-kpi-card">
                     <div class="audit-kpi-label">
                         <span>综合成功率</span>
-                        <AppIcon Name="check" Size="13" Class="@(s.SuccessRatePct >= 95 ? "text-success" : s.SuccessRatePct >= 80 ? "text-warning" : "text-danger")" />
+                        <AppIcon Name="check" Size="13" Class="@(s.RequestSuccessRatePct >= 95 ? "text-success" : s.RequestSuccessRatePct >= 80 ? "text-warning" : "text-danger")" />
                     </div>
-                    <div class="audit-kpi-val" style="color: @(s.SuccessRatePct >= 95 ? "var(--success)" : s.SuccessRatePct >= 80 ? "var(--warning)" : "var(--danger)");">
-                        @UiFormatter.FormatPercent(s.SuccessRatePct)
+                    <div class="audit-kpi-val" style="color: @(s.RequestSuccessRatePct >= 95 ? "var(--success)" : s.RequestSuccessRatePct >= 80 ? "var(--warning)" : "var(--danger)");">
+                        @UiFormatter.FormatPercent(s.RequestSuccessRatePct)
                     </div>
                     <div class="audit-kpi-sub">
-                        <span>稳定性指数 @(s.SuccessRatePct >= 99 ? "卓越" : s.SuccessRatePct >= 95 ? "良好" : "需排查")</span>
+                        <span>稳定性指数 @(s.RequestSuccessRatePct >= 99 ? "卓越" : s.RequestSuccessRatePct >= 95 ? "良好" : s.RequestSuccessRatePct >= 90 ? "需排查" : "严重")</span>
+                        <span> · 行级 @UiFormatter.FormatPercent(s.SuccessRatePct)（含级联中间行）</span>
                     </div>
                 </div>
                 <div class="audit-kpi-card">

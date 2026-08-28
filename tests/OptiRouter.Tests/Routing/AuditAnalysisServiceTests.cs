@@ -144,6 +144,26 @@ public class AuditAnalysisServiceTests
     }
 
     [Fact]
+    public void Analyze_RequestSuccessRate_DeduplicatedByRequestId()
+    {
+        // 请求级成功率：同 request_id 的失败行+成功行合并为一次成功请求（级联中间失败不扣分）；
+        // 无 request_id 的旧行逐行计。
+        var store = new InMemoryRequestAuditStore();
+        var ts = new DateTime(2026, 8, 20, 10, 0, 0, DateTimeKind.Utc);
+        store.Append(Rec(ts, "model-a", success: false, cost: 0m, latency: 0, requestId: "req-1"));
+        store.Append(Rec(ts, "model-b", success: true, cost: 0.1m, latency: 100, requestId: "req-1"));
+        store.Append(Rec(ts, "model-c", success: true, cost: 0.1m, latency: 100, requestId: "req-2"));
+        store.Append(Rec(ts, "model-a", success: false, cost: 0m, latency: 0)); // 无 id 旧行：独立计失败
+
+        var analyzer = CreateAnalyzer(store);
+        var report = analyzer.Analyze(ts.AddHours(-1), ts.AddHours(1));
+
+        // 行级：2 成 2 败 = 50%；请求级：req-1 成功 + req-2 成功 + 无 id 行失败 = 2/3 ≈ 66.7%。
+        Assert.Equal(50.0, report.Summary.SuccessRatePct);
+        Assert.Equal(66.67, report.Summary.RequestSuccessRatePct);
+    }
+
+    [Fact]
     public void Analyze_EmptyWindow_ReturnsZeroedReport()
     {
         var store = new InMemoryRequestAuditStore();
