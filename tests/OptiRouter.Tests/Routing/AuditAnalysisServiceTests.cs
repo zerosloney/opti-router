@@ -30,9 +30,10 @@ public class AuditAnalysisServiceTests
     private static RequestAuditRecord Rec(
         DateTime ts, string model, bool success, decimal cost, long latency,
         ModelTier tier = ModelTier.Medium, bool cascade = false, string? upgradedFrom = null,
-        string reason = "initial", string? fusionRole = null, int cached = 0) => new(
+        string reason = "initial", string? fusionRole = null, int cached = 0,
+        string? requestId = null) => new(
         Timestamp: ts,
-        RequestId: null,
+        RequestId: requestId,
         Model: model,
         EstimatedInputTokens: 10,
         PromptTokens: 100,
@@ -118,6 +119,28 @@ public class AuditAnalysisServiceTests
         Assert.Equal(2, report.DailyTrend[0].Successes);
         Assert.Equal("2026-08-19", report.DailyTrend[1].Day);
         Assert.Equal(2, report.DailyTrend[1].Successes);
+    }
+
+    [Fact]
+    public void Analyze_FusionRequests_DeduplicatedByRequestId()
+    {
+        // 一次融合请求产生多行（secondary/analyst 均带 FusionRole 且共享 request_id）：
+        // FusionRequests 必须按 request_id 去重计数，而非逐行累加（旧口径夸大约 4 倍）。
+        var store = new InMemoryRequestAuditStore();
+        var ts = new DateTime(2026, 8, 20, 10, 0, 0, DateTimeKind.Utc);
+        store.Append(Rec(ts, "model-a", success: true, cost: 0.1m, latency: 100, fusionRole: "secondary", requestId: "req-1"));
+        store.Append(Rec(ts, "model-b", success: true, cost: 0.1m, latency: 100, fusionRole: "secondary", requestId: "req-1"));
+        store.Append(Rec(ts, "model-c", success: true, cost: 0.1m, latency: 100, fusionRole: "analyst", requestId: "req-1"));
+        // 第二次融合请求 + 一条无 request_id 的旧记录（按行回退计数）。
+        store.Append(Rec(ts, "model-a", success: true, cost: 0.1m, latency: 100, fusionRole: "secondary", requestId: "req-2"));
+        store.Append(Rec(ts, "model-b", success: true, cost: 0.1m, latency: 100, fusionRole: "analyst"));
+
+        var analyzer = CreateAnalyzer(store);
+        var report = analyzer.Analyze(ts.AddHours(-1), ts.AddHours(1));
+
+        Assert.Equal(3, report.Fusion.FusionRequests); // req-1 去重为 1 + req-2 为 1 + 无 id 行为 1
+        Assert.Equal(3, report.Fusion.ByRole["secondary"]);
+        Assert.Equal(2, report.Fusion.ByRole["analyst"]);
     }
 
     [Fact]

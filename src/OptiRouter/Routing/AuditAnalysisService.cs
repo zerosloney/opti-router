@@ -84,7 +84,8 @@ public sealed record AuditCascadeStats(
     double TriggerRatePct,
     IReadOnlyDictionary<string, int> UpgradedFrom);
 
-/// <summary>Fusion 融合路由统计。</summary>
+/// <summary>Fusion 融合路由统计。FusionRequests 按 request_id 去重后的融合请求次数
+/// （一次融合产生 anchor/secondary/analyst 多行，逐行累加会夸大约 4 倍）。</summary>
 public sealed record AuditFusionStats(
     int FusionRequests,
     IReadOnlyDictionary<string, int> ByRole);
@@ -201,7 +202,11 @@ public sealed class AuditAnalysisService
         var byDay = new Dictionary<string, DayAcc>(StringComparer.Ordinal);
         var upgradedFrom = new Dictionary<string, int>(StringComparer.Ordinal);
         var fusionRoles = new Dictionary<string, int>(StringComparer.Ordinal);
-        int cascadeTriggered = 0, fusionRequests = 0;
+        // Fusion 计数按 request_id 去重：一次融合请求产生多行（secondary/analyst 带 FusionRole），
+        // 逐行累加会把 "Fusion N 次" 夸大约 4 倍。无 request_id 的旧记录按行回退计数。
+        var fusionRequestIds = new HashSet<string>(StringComparer.Ordinal);
+        int fusionRowsWithoutId = 0;
+        int cascadeTriggered = 0;
 
         // 模型路由名 → 供应商：当前配置（显式/推断）+ 已删除模型墓碑的合并映射。
         var providerByModel = BuildProviderMap();
@@ -277,8 +282,11 @@ public sealed class AuditAnalysisService
 
                 if (!string.IsNullOrEmpty(r.FusionRole))
                 {
-                    fusionRequests++;
-                    fusionRoles[r.FusionRole] = fusionRoles.TryGetValue(r.FusionRole, out int n) ? n + 1 : 1;
+                    fusionRoles[r.FusionRole] = fusionRoles.TryGetValue(r.FusionRole, out var n) ? n + 1 : 1;
+                    if (!string.IsNullOrEmpty(r.RequestId))
+                        fusionRequestIds.Add(r.RequestId);
+                    else
+                        fusionRowsWithoutId++;
                 }
             }
 
@@ -343,7 +351,7 @@ public sealed class AuditAnalysisService
             upgradedFrom.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value));
 
         var fusion = new AuditFusionStats(
-            fusionRequests,
+            fusionRequestIds.Count + fusionRowsWithoutId,
             fusionRoles.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value));
 
         var reasonRows = byReason

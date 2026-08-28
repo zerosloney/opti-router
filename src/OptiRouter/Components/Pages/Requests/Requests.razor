@@ -198,11 +198,11 @@
                     <div class="audit-kpi-sub">
                         @if (Analysis.Fusion.FusionRequests > 0)
                         {
-                            <span>Fusion @UiFormatter.FormatNumber(Analysis.Fusion.FusionRequests) 次</span>
+                            <span>Fusion @UiFormatter.FormatNumber(Analysis.Fusion.FusionRequests) 次（按请求去重）</span>
                         }
                         else
                         {
-                            <span>级联调度升级率</span>
+                            <span>级联升级触发率 · 仅非流式 Cheap 档</span>
                         }
                     </div>
                 </div>
