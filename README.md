@@ -231,6 +231,7 @@ curl http://localhost:5000/health
 | `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（默认关闭；管理员可显式设为 `true` 以 opt-in。升级注意：该默认值由早前版本的 `true` 改为 `false`，依赖请求内容留存的部署需显式开启） | `false` |
 | `AuditRetentionHours` | 审计记录保留小时数。`0` = 永久保留（默认，后台不淘汰）；正数按窗口周期淘汰过期记录，防止审计表无界增长 | `0` |
 | `StreamFirstTokenTimeoutMs` | 流式首 token（TTFB）超时毫秒数。`0` 表示不限制，仅依赖客户端层超时兜底 | `0` |
+| `StreamHedgeDelayMs` | 流式首行竞速（Hedge）延迟毫秒数。`>0` 且存在下一候选时，主候选开始拉流后延迟此时长启动下一候选竞速首行，谁先出首行由谁服务（落败方取消并按慢首行记失败；已生成部分可能仍被上游计费）。`0` = 禁用 | `0` |
 
 ### 推荐配置预设 (Presets)
 

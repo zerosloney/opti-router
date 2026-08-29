@@ -461,6 +461,8 @@ public static class DashboardHandler
                     opt.Routing.FailoverFailureThreshold,
                     opt.Routing.FailoverCooldownSeconds,
                     opt.Routing.FailoverGlobalTimeoutSeconds,
+                    opt.Routing.StreamFirstTokenTimeoutMs,
+                    opt.Routing.StreamHedgeDelayMs,
                     opt.Routing.EnableBudgetGuard,
                     opt.Routing.EnableHealthProbe,
                     // ③ 学习与优化
@@ -596,6 +598,8 @@ public static class DashboardHandler
                 if (req.FailoverFailureThreshold is > 0) routing["FailoverFailureThreshold"] = req.FailoverFailureThreshold.Value;
                 if (req.FailoverCooldownSeconds is > 0) routing["FailoverCooldownSeconds"] = req.FailoverCooldownSeconds.Value;
                 if (req.FailoverGlobalTimeoutSeconds is >= 0) routing["FailoverGlobalTimeoutSeconds"] = req.FailoverGlobalTimeoutSeconds.Value;
+                if (req.StreamFirstTokenTimeoutMs is >= 0) routing["StreamFirstTokenTimeoutMs"] = req.StreamFirstTokenTimeoutMs.Value;
+                if (req.StreamHedgeDelayMs is >= 0) routing["StreamHedgeDelayMs"] = req.StreamHedgeDelayMs.Value;
                 if (req.EnableBudgetGuard is not null) routing["EnableBudgetGuard"] = req.EnableBudgetGuard.Value;
                 if (req.EnableHealthProbe is not null) routing["EnableHealthProbe"] = req.EnableHealthProbe.Value;
 
@@ -917,6 +921,8 @@ public static class DashboardHandler
         public int? FailoverFailureThreshold { get; init; }
         public int? FailoverCooldownSeconds { get; init; }
         public int? FailoverGlobalTimeoutSeconds { get; init; }
+        public int? StreamFirstTokenTimeoutMs { get; init; }
+        public int? StreamHedgeDelayMs { get; init; }
         public bool? EnableBudgetGuard { get; init; }
         public bool? EnableHealthProbe { get; init; }
         public decimal? DailyBudgetUsd { get; init; }
@@ -1004,6 +1010,8 @@ public static class DashboardHandler
         if (req.FailoverFailureThreshold is > 0) routing.FailoverFailureThreshold = req.FailoverFailureThreshold.Value;
         if (req.FailoverCooldownSeconds is > 0) routing.FailoverCooldownSeconds = req.FailoverCooldownSeconds.Value;
         if (req.FailoverGlobalTimeoutSeconds is >= 0) routing.FailoverGlobalTimeoutSeconds = req.FailoverGlobalTimeoutSeconds.Value;
+        if (req.StreamFirstTokenTimeoutMs is >= 0) routing.StreamFirstTokenTimeoutMs = req.StreamFirstTokenTimeoutMs.Value;
+        if (req.StreamHedgeDelayMs is >= 0) routing.StreamHedgeDelayMs = req.StreamHedgeDelayMs.Value;
         if (req.EnableBudgetGuard is not null) routing.EnableBudgetGuard = req.EnableBudgetGuard.Value;
         if (req.EnableHealthProbe is not null) routing.EnableHealthProbe = req.EnableHealthProbe.Value;
         if (req.DailyBudgetUsd is >= 0) candidate.Budget.DailyBudgetUsd = req.DailyBudgetUsd.Value;

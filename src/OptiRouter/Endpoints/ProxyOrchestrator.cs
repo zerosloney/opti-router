@@ -839,6 +839,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             }
 
             bool attemptedCandidate = false;
+            // Hedge 接力：主候选首行竞速落败时，胜者（下一候选）已打开并拿到首行的流挂在这里，
+            // 由该候选的循环迭代直接采用（探测槽位仍在其迭代顶部正常获取，不预先占用）。
+            StreamingHedgeOrchestrator? pendingHedge = null;
+            string? pendingHedgeSuccessor = null;
             foreach (var candidate in decision.Candidates)
             {
                 if (!failedInThisRequest.Add(candidate.Name))
@@ -848,6 +852,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (failoverEnabled && !_healthTracker.TryBeginProbe(candidate.Name, halfOpenMaxProbes))
                 {
                     _logger.LogInformation("Model {Name} circuit not ready (cooling or probes busy), skipping", candidate.Name);
+                    if (pendingHedge is not null && pendingHedgeSuccessor == candidate.Name)
+                    {
+                        await pendingHedge.DisposeAsync().ConfigureAwait(false);
+                        pendingHedge = null;
+                        pendingHedgeSuccessor = null;
+                    }
                     continue;
                 }
 
@@ -865,6 +875,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 // 两者共同保证离开本候选时探测槽位必被结算（上报或释放），不泄漏。
                 bool probeResolved = false;
                 bool streamFaulted = false;
+                StreamingHedgeOrchestrator? hedge = null;
                 var attemptSw = System.Diagnostics.Stopwatch.StartNew();
 
                 try
@@ -873,44 +884,132 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 此处有 catch，不能 yield；仅做"失败则继续下一候选"的判定。
                     try
                     {
-                        // TTFT 专项超时：首字节迟迟不到时尽快 failover，而非干等到整体超时。
-                        // 超时抛 OperationCanceledException，落入下方 !ct.IsCancellationRequested 的 catch（记断路器 + continue）。
-                        CancellationTokenSource? ttftCts = options.Routing.StreamFirstTokenTimeoutMs > 0
-                            ? CancellationTokenSource.CreateLinkedTokenSource(effectiveCt)
-                            : null;
-                        try
+                        if (pendingHedge is not null && pendingHedgeSuccessor == candidate.Name)
                         {
-                            if (ttftCts is not null)
-                                ttftCts.CancelAfter(TimeSpan.FromMilliseconds(options.Routing.StreamFirstTokenTimeoutMs));
-                            var firstTokenCt = ttftCts?.Token ?? effectiveCt;
-
-                            enumerator = client.StreamRawAsync(request, firstTokenCt).GetAsyncEnumerator(firstTokenCt);
-                            if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                            // Hedge 接力：上一候选竞速落败，本候选直接采用已拿到首行的胜者流。
+                            hedge = pendingHedge;
+                            pendingHedge = null;
+                            pendingHedgeSuccessor = null;
+                            enumerator = hedge.WinnerEnumerator!;
+                            firstLine = hedge.WinnerFirstLine;
+                            _recorder.RecordQuota(candidate.Name, firstLine.Metadata);
+                            if (firstLine.Usage is not null)
+                                finalUsage = firstLine.Usage;
+                            hasFirstLine = true;
+                            if (_qualityJudge is not null)
                             {
-                                firstLine = enumerator.Current;
-                                _recorder.RecordQuota(candidate.Name, firstLine.Metadata);
-                                if (firstLine.Usage is not null)
-                                    finalUsage = firstLine.Usage;
-                                hasFirstLine = true;
-                                if (_qualityJudge is not null)
-                                {
-                                    string? firstDelta = ExtractDeltaText(firstLine.Data);
-                                    if (!string.IsNullOrEmpty(firstDelta))
-                                        judgeTextSb.Append(firstDelta);
-                                }
-                            }
-                            else
-                            {
-                                // 空流：视为成功但无内容，继续尝试下一个候选。
-                                await enumerator.DisposeAsync().ConfigureAwait(false);
-                                enumerator = null;
-                                // 无健康信号：外层 finally 会释放探测槽位。
-                                continue;
+                                string? firstDelta = ExtractDeltaText(firstLine.Data);
+                                if (!string.IsNullOrEmpty(firstDelta))
+                                    judgeTextSb.Append(firstDelta);
                             }
                         }
-                        finally
+                        else
                         {
-                            ttftCts?.Dispose();
+                            // TTFT 专项超时：首字节迟迟不到时尽快 failover，而非干等到整体超时。
+                            // 超时抛 OperationCanceledException，落入下方 !ct.IsCancellationRequested 的 catch（记断路器 + continue）。
+                            CancellationTokenSource? ttftCts = options.Routing.StreamFirstTokenTimeoutMs > 0
+                                ? CancellationTokenSource.CreateLinkedTokenSource(effectiveCt)
+                                : null;
+                            try
+                            {
+                                if (ttftCts is not null)
+                                    ttftCts.CancelAfter(TimeSpan.FromMilliseconds(options.Routing.StreamFirstTokenTimeoutMs));
+                                var firstTokenCt = ttftCts?.Token ?? effectiveCt;
+
+                                // Hedge 竞速：配置了延迟且存在下一候选时，延迟启动下一候选竞速首行，
+                                // 显著缩短慢热上游的首字等待（代价：落败方已生成部分可能仍被上游计费）。
+                                var hedgeSuccessor = failoverEnabled && options.Routing.StreamHedgeDelayMs > 0
+                                    ? FindHedgeSuccessor(decision, candidate.Name, failedInThisRequest)
+                                    : null;
+                                if (hedgeSuccessor is not null)
+                                {
+                                    hedge = new StreamingHedgeOrchestrator(
+                                        client,
+                                        _clientProvider.GetClient(hedgeSuccessor),
+                                        TimeSpan.FromMilliseconds(options.Routing.StreamHedgeDelayMs));
+                                    if (await hedge.RaceFirstLineAsync(request, firstTokenCt).ConfigureAwait(false))
+                                    {
+                                        if (ReferenceEquals(hedge.WinnerClient, client))
+                                        {
+                                            enumerator = hedge.WinnerEnumerator!;
+                                            firstLine = hedge.WinnerFirstLine;
+                                            _recorder.RecordQuota(candidate.Name, firstLine.Metadata);
+                                            if (firstLine.Usage is not null)
+                                                finalUsage = firstLine.Usage;
+                                            hasFirstLine = true;
+                                            if (_qualityJudge is not null)
+                                            {
+                                                string? firstDelta = ExtractDeltaText(firstLine.Data);
+                                                if (!string.IsNullOrEmpty(firstDelta))
+                                                    judgeTextSb.Append(firstDelta);
+                                            }
+                                        }
+                                        else
+                                        {
+                                            // 备选先出首行：胜者流挂起给备选候选接力；
+                                            // 主候选按慢首行记失败（与 TTFT 超时同语义），备选候选的探测槽位在其自身迭代获取。
+                                            pendingHedge = hedge;
+                                            pendingHedgeSuccessor = hedgeSuccessor.Name;
+                                            hedge = null;
+                                            preStreamFailure = new OperationCanceledException($"lost first-token hedge race to {hedgeSuccessor.Name}");
+                                            lastModelName = candidate.Name;
+                                            lastStatusCode = 408;
+                                            lastErrorMessage = "lost first-token hedge race";
+                                        }
+                                    }
+                                    else if (hedge.PrimaryFailure is null)
+                                    {
+                                        // 双双空流（无异常）：与单候选空流同语义——无健康信号，继续下一候选。
+                                        await hedge.DisposeAsync().ConfigureAwait(false);
+                                        hedge = null;
+                                        continue;
+                                    }
+                                    else
+                                    {
+                                        // 双双未出首行：以主候选异常走既有失败记账；备选候选本轮自行重试。
+                                        preStreamFailure = hedge.PrimaryFailure;
+                                        lastModelName = candidate.Name;
+                                        lastStatusCode = preStreamFailure switch
+                                        {
+                                            ModelClientException m => (int)m.StatusCode,
+                                            HttpRequestException => 503,
+                                            OperationCanceledException => 408,
+                                            _ => 500,
+                                        };
+                                        lastErrorMessage = preStreamFailure.Message;
+                                    }
+                                }
+                                else
+                                {
+                                    enumerator = client.StreamRawAsync(request, firstTokenCt).GetAsyncEnumerator(firstTokenCt);
+                                    if (await enumerator.MoveNextAsync().ConfigureAwait(false))
+                                    {
+                                        firstLine = enumerator.Current;
+                                        _recorder.RecordQuota(candidate.Name, firstLine.Metadata);
+                                        if (firstLine.Usage is not null)
+                                            finalUsage = firstLine.Usage;
+                                        hasFirstLine = true;
+                                        if (_qualityJudge is not null)
+                                        {
+                                            string? firstDelta = ExtractDeltaText(firstLine.Data);
+                                            if (!string.IsNullOrEmpty(firstDelta))
+                                                judgeTextSb.Append(firstDelta);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // 空流：视为成功但无内容，继续尝试下一个候选。
+                                        await enumerator.DisposeAsync().ConfigureAwait(false);
+                                        enumerator = null;
+                                        // 无健康信号：外层 finally 会释放探测槽位。
+                                        continue;
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                ttftCts?.Dispose();
+                            }
                         }
                     }
                     catch (ModelClientException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
@@ -956,6 +1055,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         if (!hasFirstLine && enumerator is not null)
                         {
                             await enumerator.DisposeAsync().ConfigureAwait(false);
+                        }
+                        if (hedge is not null && !hasFirstLine)
+                        {
+                            // 竞速夭折（TTFT/外部取消的 OCE 穿过上方 catch 后）：双方流在此收尾；
+                            // 胜者流路径（hasFirstLine）留给外层 finally 统一释放。
+                            await hedge.DisposeAsync().ConfigureAwait(false);
+                            hedge = null;
                         }
                     }
 
@@ -1007,6 +1113,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
                         if (isGlobalTimeout)
                         {
+                            if (pendingHedge is not null)
+                            {
+                                // 全局超时终止 failover：接力流无人接手，先收尾再抛。
+                                await pendingHedge.DisposeAsync().ConfigureAwait(false);
+                                pendingHedge = null;
+                                pendingHedgeSuccessor = null;
+                            }
                             throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
                         }
                         if (requestRejection && !HasOtherCandidate(decision, candidate.Name, failedInThisRequest))
@@ -1119,6 +1232,11 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 }
                 finally
                 {
+                    if (hedge is not null)
+                    {
+                        // 竞速胜者流已服务完毕（Phase 2 的 finally 已 dispose 枚举器），这里收尾胜者内部 CTS。
+                        await hedge.DisposeAsync().ConfigureAwait(false);
+                    }
                     if (!probeResolved)
                     {
                         if (streamFaulted)
@@ -1146,6 +1264,25 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             if (!failoverEnabled || !attemptedCandidate)
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, "All candidates failed.");
         }
+    }
+
+    /// <summary>
+    /// Hedge 竞速的备选候选：当前候选之后第一个尚未失败的候选（保持决策优先级顺序）。
+    /// </summary>
+    private static ModelEndpointOptions? FindHedgeSuccessor(RouterDecision decision, string currentName, HashSet<string> failedInThisRequest)
+    {
+        bool seen = false;
+        foreach (var successor in decision.Candidates)
+        {
+            if (!seen)
+            {
+                seen = successor.Name == currentName;
+                continue;
+            }
+            if (!failedInThisRequest.Contains(successor.Name))
+                return successor;
+        }
+        return null;
     }
 
     /// <summary>

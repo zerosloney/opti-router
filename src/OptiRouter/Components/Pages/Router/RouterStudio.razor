@@ -250,10 +250,10 @@
                             <span class="toggle-track"><span class="toggle-thumb"></span></span>
                         </label>
                     </div>
-                    <div class="config-item @(IsDirty(nameof(ConfigForm.FailoverFailureThreshold)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FailoverCooldownSeconds)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FailoverGlobalTimeoutSeconds)) ? "dirty-field" : "")">
+                    <div class="config-item @(IsDirty(nameof(ConfigForm.FailoverFailureThreshold)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FailoverCooldownSeconds)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.FailoverGlobalTimeoutSeconds)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.StreamFirstTokenTimeoutMs)) ? "dirty-field" : "") @(IsDirty(nameof(ConfigForm.StreamHedgeDelayMs)) ? "dirty-field" : "")">
                         <div class="item-text">
                             <span class="item-title">熔断参数</span>
-                            <span class="item-desc">连续失败 N 次熔断进入隔离；冷却期后半开探测，成功才恢复全流量；全局超时兜底防无限等待。</span>
+                            <span class="item-desc">连续失败 N 次熔断进入隔离，冷却期后半开探测；首 token 超时仅限制流式响应开始前的等待，Hedge 延迟超过后启动下一候选竞速首行（落败方照常计费），均 0 为关闭。</span>
                         </div>
                         <div class="config-row">
                             <span class="config-row-label">失败阈值:</span>
@@ -262,6 +262,10 @@
                             <input type="number" step="10" min="1" @bind="Cfg.FailoverCooldownSeconds" class="form-control" style="width: 80px;" />
                             <span class="config-row-label">全局超时 (秒):</span>
                             <input type="number" step="10" min="0" @bind="Cfg.FailoverGlobalTimeoutSeconds" class="form-control" style="width: 80px;" />
+                            <span class="config-row-label">首 token 超时 (毫秒):</span>
+                            <input type="number" step="1000" min="0" @bind="Cfg.StreamFirstTokenTimeoutMs" class="form-control" style="width: 100px;" />
+                            <span class="config-row-label">Hedge 延迟 (毫秒):</span>
+                            <input type="number" step="500" min="0" @bind="Cfg.StreamHedgeDelayMs" class="form-control" style="width: 100px;" />
                         </div>
                     </div>
                 </div>
@@ -1299,6 +1303,8 @@
         public int FailoverFailureThreshold { get; set; } = 3;
         public int FailoverCooldownSeconds { get; set; } = 60;
         public int FailoverGlobalTimeoutSeconds { get; set; }
+        public int StreamFirstTokenTimeoutMs { get; set; }
+        public int StreamHedgeDelayMs { get; set; }
         public bool EnableBudgetGuard { get; set; }
         public bool EnableHealthProbe { get; set; } = true;
         public decimal DailyBudgetUsd { get; set; } = 10.0m;
@@ -1606,6 +1612,8 @@
                     FailoverFailureThreshold = r.FailoverFailureThreshold,
                     FailoverCooldownSeconds = r.FailoverCooldownSeconds,
                     FailoverGlobalTimeoutSeconds = r.FailoverGlobalTimeoutSeconds,
+                    StreamFirstTokenTimeoutMs = r.StreamFirstTokenTimeoutMs,
+                    StreamHedgeDelayMs = r.StreamHedgeDelayMs,
                     EnableBudgetGuard = r.EnableBudgetGuard,
                     EnableHealthProbe = r.EnableHealthProbe,
                     DailyBudgetUsd = cfg.Budget.DailyBudgetUsd,
@@ -1705,6 +1713,8 @@
                 FailoverFailureThreshold = Dirty(nameof(ConfigForm.FailoverFailureThreshold), Cfg.FailoverFailureThreshold),
                 FailoverCooldownSeconds = Dirty(nameof(ConfigForm.FailoverCooldownSeconds), Cfg.FailoverCooldownSeconds),
                 FailoverGlobalTimeoutSeconds = Dirty(nameof(ConfigForm.FailoverGlobalTimeoutSeconds), Cfg.FailoverGlobalTimeoutSeconds),
+                StreamFirstTokenTimeoutMs = Dirty(nameof(ConfigForm.StreamFirstTokenTimeoutMs), Cfg.StreamFirstTokenTimeoutMs),
+                StreamHedgeDelayMs = Dirty(nameof(ConfigForm.StreamHedgeDelayMs), Cfg.StreamHedgeDelayMs),
                 EnableBudgetGuard = Dirty(nameof(ConfigForm.EnableBudgetGuard), Cfg.EnableBudgetGuard),
                 EnableHealthProbe = Dirty(nameof(ConfigForm.EnableHealthProbe), Cfg.EnableHealthProbe),
                 DailyBudgetUsd = Dirty(nameof(ConfigForm.DailyBudgetUsd), Cfg.DailyBudgetUsd),

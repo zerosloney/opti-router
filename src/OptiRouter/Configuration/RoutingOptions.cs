@@ -118,6 +118,15 @@ public sealed class RoutingOptions
     public int StreamFirstTokenTimeoutMs { get; set; } = 0;
 
     /// <summary>
+    /// 流式首行竞速（Hedge）延迟（毫秒）。0 = 禁用（默认，行为同串行 failover）。
+    /// &gt;0 且存在下一候选时，主候选开始拉流后延迟此时长启动下一候选竞速首行：
+    /// 谁先产出首行由谁服务本请求（落败方取消并按慢首行记失败），显著缩短慢热上游的首字等待。
+    /// 注意：竞速期间双方均在生成，落败方已产生的 token 可能仍被上游计费。
+    /// <see cref="StreamFirstTokenTimeoutMs"/> &gt; 0 时作为整个竞速阶段的兜底上限。仅作用于流式。默认 0。
+    /// </summary>
+    public int StreamHedgeDelayMs { get; set; } = 0;
+
+    /// <summary>
     /// 是否启用响应缓存（仅非流式）。开启后，按规范化请求 SHA256 精确缓存上游响应，命中即短路返回（不经路由/上游）。
     /// 适合分类/提取/翻译等幂等请求。缓存键在 PII 脱敏前计算，不会因占位符相同而串扰。默认 false。
     /// </summary>

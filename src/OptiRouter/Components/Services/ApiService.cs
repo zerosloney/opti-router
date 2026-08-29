@@ -1017,6 +1017,8 @@ public class ApiService
         public int FailoverFailureThreshold { get; init; } = 3;
         public int FailoverCooldownSeconds { get; init; } = 60;
         public int FailoverGlobalTimeoutSeconds { get; init; }
+        public int StreamFirstTokenTimeoutMs { get; init; }
+        public int StreamHedgeDelayMs { get; init; }
         public bool EnableBudgetGuard { get; init; } = true;
         public bool EnableHealthProbe { get; init; } = true;
         // ③ 学习与优化
@@ -1095,6 +1097,8 @@ public class ApiService
         public int? FailoverFailureThreshold { get; init; }
         public int? FailoverCooldownSeconds { get; init; }
         public int? FailoverGlobalTimeoutSeconds { get; init; }
+        public int? StreamFirstTokenTimeoutMs { get; init; }
+        public int? StreamHedgeDelayMs { get; init; }
         public bool? EnableBudgetGuard { get; init; }
         public bool? EnableHealthProbe { get; init; }
         public decimal? DailyBudgetUsd { get; init; }

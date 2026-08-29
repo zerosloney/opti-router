@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
 using OptiRouter.Routing;
+using System.Runtime.CompilerServices;
 using Xunit;
 
 namespace OptiRouter.Tests.Endpoints;
@@ -65,6 +66,85 @@ public sealed class RequestContentAuditTests
                     File.Delete(path);
             }
         }
+    }
+
+    [Fact]
+    public void StreamTimingKnobs_PersistedRoutingDocumentBindsThroughDbProvider()
+    {
+        string dbPath = Path.Combine(Path.GetTempPath(), $"optirouter-ttft-routing-{Guid.NewGuid():N}.db");
+        try
+        {
+            using (var store = new AppConfigDbStore(dbPath))
+            {
+                store.SaveDocument(AppConfigDbStore.RoutingScope, "{\"streamFirstTokenTimeoutMs\":30000,\"streamHedgeDelayMs\":1500}");
+            }
+
+            var configuration = new ConfigurationBuilder()
+                .Add(new DbAppConfigSource { DbPath = dbPath })
+                .Build();
+            var options = new RouterOptions();
+            configuration.GetSection("OptiRouter").Bind(options);
+
+            Assert.Equal("30000", configuration["OptiRouter:Routing:StreamFirstTokenTimeoutMs"]);
+            Assert.Equal(30000, options.Routing.StreamFirstTokenTimeoutMs);
+            Assert.Equal("1500", configuration["OptiRouter:Routing:StreamHedgeDelayMs"]);
+            Assert.Equal(1500, options.Routing.StreamHedgeDelayMs);
+        }
+        finally
+        {
+            foreach (var suffix in new[] { "", "-shm", "-wal" })
+            {
+                string path = dbPath + suffix;
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+        }
+    }
+
+    [Fact]
+    public void StreamTimingKnobs_AreWiredThroughDashboardConfigReadWriteAndForm()
+    {
+        const int timeoutMs = 30000;
+        const int hedgeDelayMs = 1500;
+
+        // These initializers are compile-time contract checks for both dashboard DTO directions.
+        var readDto = new ApiService.RoutingConfigDto { StreamFirstTokenTimeoutMs = timeoutMs, StreamHedgeDelayMs = hedgeDelayMs };
+        var updateDto = new ApiService.UpdateSystemConfigRequest { StreamFirstTokenTimeoutMs = timeoutMs, StreamHedgeDelayMs = hedgeDelayMs };
+        Assert.Equal(timeoutMs, readDto.StreamFirstTokenTimeoutMs);
+        Assert.Equal(timeoutMs, updateDto.StreamFirstTokenTimeoutMs);
+        Assert.Equal(hedgeDelayMs, readDto.StreamHedgeDelayMs);
+        Assert.Equal(hedgeDelayMs, updateDto.StreamHedgeDelayMs);
+
+        string apiService = ReadRepositorySourceFile("src/OptiRouter/Components/Services/ApiService.cs");
+        Assert.Contains("public int StreamFirstTokenTimeoutMs { get; init; }", apiService, StringComparison.Ordinal);
+        Assert.Contains("public int? StreamFirstTokenTimeoutMs { get; init; }", apiService, StringComparison.Ordinal);
+        Assert.Contains("public int StreamHedgeDelayMs { get; init; }", apiService, StringComparison.Ordinal);
+        Assert.Contains("public int? StreamHedgeDelayMs { get; init; }", apiService, StringComparison.Ordinal);
+
+        string routerStudio = ReadRepositoryFile("RouterStudio.razor");
+        Assert.Contains("public int StreamFirstTokenTimeoutMs { get; set; }", routerStudio, StringComparison.Ordinal);
+        Assert.Contains("@bind=\"Cfg.StreamFirstTokenTimeoutMs\"", routerStudio, StringComparison.Ordinal);
+        Assert.Contains("StreamFirstTokenTimeoutMs = r.StreamFirstTokenTimeoutMs", routerStudio, StringComparison.Ordinal);
+        Assert.Contains("StreamFirstTokenTimeoutMs = Dirty(nameof(ConfigForm.StreamFirstTokenTimeoutMs), Cfg.StreamFirstTokenTimeoutMs)", routerStudio, StringComparison.Ordinal);
+        Assert.Contains("public int StreamHedgeDelayMs { get; set; }", routerStudio, StringComparison.Ordinal);
+        Assert.Contains("@bind=\"Cfg.StreamHedgeDelayMs\"", routerStudio, StringComparison.Ordinal);
+        Assert.Contains("StreamHedgeDelayMs = r.StreamHedgeDelayMs", routerStudio, StringComparison.Ordinal);
+        Assert.Contains("StreamHedgeDelayMs = Dirty(nameof(ConfigForm.StreamHedgeDelayMs), Cfg.StreamHedgeDelayMs)", routerStudio, StringComparison.Ordinal);
+
+        string dashboardHandler = ReadRepositorySourceFile("src/OptiRouter/Endpoints/DashboardHandler.cs");
+        Assert.Contains("opt.Routing.StreamFirstTokenTimeoutMs,", dashboardHandler, StringComparison.Ordinal);
+        Assert.Contains("public int? StreamFirstTokenTimeoutMs { get; init; }", dashboardHandler, StringComparison.Ordinal);
+        Assert.Contains("routing[\"StreamFirstTokenTimeoutMs\"] = req.StreamFirstTokenTimeoutMs.Value;", dashboardHandler, StringComparison.Ordinal);
+        Assert.Contains("routing.StreamFirstTokenTimeoutMs = req.StreamFirstTokenTimeoutMs.Value;", dashboardHandler, StringComparison.Ordinal);
+        Assert.Contains("opt.Routing.StreamHedgeDelayMs,", dashboardHandler, StringComparison.Ordinal);
+        Assert.Contains("public int? StreamHedgeDelayMs { get; init; }", dashboardHandler, StringComparison.Ordinal);
+        Assert.Contains("routing[\"StreamHedgeDelayMs\"] = req.StreamHedgeDelayMs.Value;", dashboardHandler, StringComparison.Ordinal);
+        Assert.Contains("routing.StreamHedgeDelayMs = req.StreamHedgeDelayMs.Value;", dashboardHandler, StringComparison.Ordinal);
+
+        // 代理路径接线：竞速由 StreamHedgeDelayMs 门控并构造编排器。
+        string proxyOrchestrator = ReadRepositorySourceFile("src/OptiRouter/Endpoints/ProxyOrchestrator.cs");
+        Assert.Contains("options.Routing.StreamHedgeDelayMs > 0", proxyOrchestrator, StringComparison.Ordinal);
+        Assert.Contains("new StreamingHedgeOrchestrator(", proxyOrchestrator, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -273,6 +353,20 @@ public sealed class RequestContentAuditTests
     // 仓库源文件由测试项目复制到输出目录（见 OptiRouter.Tests.csproj），不依赖仓库目录布局。
     private static string ReadRepositoryFile(string fileName)
         => File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "RepositoryFiles", fileName));
+
+    private static string ReadRepositorySourceFile(string relativePath, [CallerFilePath] string callerFilePath = "")
+    {
+        var directory = new DirectoryInfo(Path.GetDirectoryName(callerFilePath)!);
+        while (directory is not null)
+        {
+            string projectFile = Path.Combine(directory.FullName, "src", "OptiRouter", "OptiRouter.csproj");
+            if (File.Exists(projectFile))
+                return File.ReadAllText(Path.Combine(directory.FullName, relativePath));
+            directory = directory.Parent;
+        }
+
+        throw new DirectoryNotFoundException($"Repository root not found for '{relativePath}'.");
+    }
 
     private sealed class CapturingLoggerProvider : ILoggerProvider
     {

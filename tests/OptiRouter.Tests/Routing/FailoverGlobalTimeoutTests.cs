@@ -271,6 +271,132 @@ public class FailoverGlobalTimeoutTests
         Assert.DoesNotContain("ALL_CANDIDATES_FAILED", body);
     }
 
+    /// <summary>
+    /// Hedge fixture：两个 Cheap 候选，Failover + 流式首行竞速延迟 100ms，不依赖 TTFT/全局超时。
+    /// </summary>
+    private sealed class HedgeFactory : WebApplicationFactory<Program>
+    {
+        public const string Key = "hedge-test-key";
+        public Dictionary<string, IModelClient> MockClients { get; } = new();
+
+        protected override void ConfigureWebHost(IWebHostBuilder builder)
+        {
+            builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
+            builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveBackgroundServices();
+                services.UseFixedTenantKey("hedge-test-key");
+                services.Configure<RouterOptions>(opt =>
+                {
+                    opt.Models.Clear();
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "m1", BaseUrl = "https://example.com", ApiKey = "k",
+                        Tier = ModelTier.Cheap, MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m, OutputPricePerMillion = 2m, Enabled = true
+                    });
+                    opt.Models.Add(new ModelEndpointOptions
+                    {
+                        Name = "m2", BaseUrl = "https://example.com", ApiKey = "k",
+                        Tier = ModelTier.Cheap, MaxContextTokens = 8192,
+                        InputPricePerMillion = 1m, OutputPricePerMillion = 2m, Enabled = true
+                    });
+
+                    opt.Routing.EnableRuleClassifier = false;
+                    opt.Routing.EnableTokenEstimator = false;
+                    opt.Routing.EnableBudgetGuard = false;
+                    opt.Routing.EnableFailover = true;
+                    opt.Routing.StreamHedgeDelayMs = 100; // 100ms 后启动下一候选竞速首行
+                    opt.Routing.StreamFirstTokenTimeoutMs = 0; // 不依赖 TTFT 兜底
+                    opt.Routing.EnableSemanticRouter = false;
+                    opt.Routing.EnableSessionAffinity = false;
+                    opt.Routing.EnableLoadBalance = false;
+                    opt.Routing.EnableFusionMode = false;
+                    opt.Routing.EnableHealthProbe = false;
+                });
+                services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
+            });
+        }
+    }
+
+    [Fact]
+    public async Task StreamAsync_HedgeSecondaryWinsFirstLine_ServesFromSecondary()
+    {
+        using var factory = new HedgeFactory();
+        // m1 首行挂起 3s；m2 立即出首行 → 延迟 100ms 后 m2 启动并赢得竞速，由接力路径服务本请求。
+        factory.MockClients["m1"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "m1", BaseUrl = "https://example.com" },
+            streamRawFunc: (req, ct) => StreamDelay(3000, ct));
+        factory.MockClients["m2"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "m2", BaseUrl = "https://example.com" },
+            streamRawFunc: (req, ct) => StreamFromFast());
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", HedgeFactory.Key);
+
+        var json = JsonSerializer.Serialize(new ChatRequest
+        {
+            Model = "auto",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") },
+            Stream = true
+        });
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/event-stream", response.Content.Headers.ContentType?.MediaType);
+        var body = await response.Content.ReadAsStringAsync(cts.Token);
+        Assert.Contains("fast-m2", body); // 竞速胜者 m2 的内容到达客户端
+        Assert.DoesNotContain("ALL_CANDIDATES_FAILED", body);
+    }
+
+    [Fact]
+    public async Task StreamAsync_HedgePrimaryWinsBeforeDelay_SecondaryNeverStarted()
+    {
+        using var factory = new HedgeFactory();
+        int m2Calls = 0;
+        // m1 立即出首行（先于 100ms 延迟到期）→ m2 不应被启动，无竞速开销。
+        factory.MockClients["m1"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "m1", BaseUrl = "https://example.com" },
+            streamRawFunc: (req, ct) => StreamFromFastM1());
+        factory.MockClients["m2"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "m2", BaseUrl = "https://example.com" },
+            streamRawFunc: (req, ct) =>
+            {
+                Interlocked.Increment(ref m2Calls);
+                return StreamFromFast();
+            });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", HedgeFactory.Key);
+
+        var json = JsonSerializer.Serialize(new ChatRequest
+        {
+            Model = "auto",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "hi") },
+            Stream = true
+        });
+        using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync(cts.Token);
+        Assert.Contains("primary-m1", body);
+        Assert.Equal(0, m2Calls); // 主模型首行先到，备选从未启动
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> StreamFromFastM1([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        yield return new RawStreamLine("data: {\"from\":\"primary-m1\"}", null, null);
+        yield return new RawStreamLine("data: [DONE]", null, null);
+        await Task.CompletedTask;
+    }
+
     private static async IAsyncEnumerable<RawStreamLine> StreamFromFast([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         yield return new RawStreamLine("data: {\"from\":\"fast-m2\"}", null, null);
