@@ -67,6 +67,15 @@ public sealed class RouterMetrics
         "Upstream attempts rejected because of provider quota.",
         new CounterConfiguration { LabelNames = new[] { "model" } });
 
+    /// <summary>流式首行竞速（Hedge）次数，按竞速结局与落败原因分。每次进入竞速计一次。</summary>
+    private readonly Counter _hedgeRacesTotal = Prometheus.Metrics.CreateCounter(
+        "optirouter_stream_hedge_races_total",
+        "Streaming first-line hedge races, by outcome and loser reason.",
+        new CounterConfiguration
+        {
+            LabelNames = new[] { "result", "loser_reason" }
+        });
+
     /// <summary>断路器累计失败数（gauge，按模型）。</summary>
     private readonly Gauge _circuitFailureCount = Prometheus.Metrics.CreateGauge(
         "optirouter_circuit_failure_count",
@@ -119,6 +128,16 @@ public sealed class RouterMetrics
     public void RecordMeshSync(string eventType)
     {
         _meshSyncEventsTotal.WithLabels(eventType ?? "state_update").Inc();
+    }
+
+    /// <summary>
+    /// 记录一次流式首行竞速的结局。
+    /// </summary>
+    /// <param name="result">竞速结局：<c>primary_won</c>（主模型先于延迟出首行）、<c>secondary_won</c>（备选竞速胜出）、<c>both_failed</c>（双方均未出首行）。</param>
+    /// <param name="loserReason">落败方原因：<c>none</c>（主胜，备选无失败）、<c>slow_first_token</c>（备选胜，主模型太慢）、<c>exception</c>（主模型首行前异常）、<c>empty</c>（双方空流）。</param>
+    public void RecordHedgeRace(string result, string loserReason)
+    {
+        _hedgeRacesTotal.WithLabels(result, loserReason).Inc();
     }
 
     /// <summary>

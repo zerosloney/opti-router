@@ -351,6 +351,9 @@ public class FailoverGlobalTimeoutTests
         var body = await response.Content.ReadAsStringAsync(cts.Token);
         Assert.Contains("fast-m2", body); // 竞速胜者 m2 的内容到达客户端
         Assert.DoesNotContain("ALL_CANDIDATES_FAILED", body);
+
+        var metrics = await (await client.GetAsync("/metrics")).Content.ReadAsStringAsync(cts.Token);
+        Assert.Contains("optirouter_stream_hedge_races_total{result=\"secondary_won\"", metrics); // 竞速结局进入监控
     }
 
     [Fact]
@@ -388,6 +391,9 @@ public class FailoverGlobalTimeoutTests
         var body = await response.Content.ReadAsStringAsync(cts.Token);
         Assert.Contains("primary-m1", body);
         Assert.Equal(0, m2Calls); // 主模型首行先到，备选从未启动
+
+        var metrics = await (await client.GetAsync("/metrics")).Content.ReadAsStringAsync(cts.Token);
+        Assert.Contains("optirouter_stream_hedge_races_total{result=\"primary_won\"", metrics); // 竞速结局进入监控
     }
 
     private static async IAsyncEnumerable<RawStreamLine> StreamFromFastM1([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)

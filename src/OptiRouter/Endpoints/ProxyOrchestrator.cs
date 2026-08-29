@@ -39,6 +39,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     private readonly OptiRouter.Compliance.IContentModerator? _contentModerator;
     private readonly IHttpContextAccessor? _httpContextAccessor;
     private readonly LlmQualityJudge? _qualityJudge;
+    private readonly OptiRouter.Metrics.RouterMetrics _metrics;
     private bool _disposed;
 
     /// <summary>
@@ -56,6 +57,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         IResponseCache responseCache,
         RegenerateFeedbackTracker regenerateTracker,
         ILogger<ProxyOrchestrator> logger,
+        OptiRouter.Metrics.RouterMetrics metrics,
         ISemanticResponseCache? semanticCache = null,
         IAdaptiveConcurrencyLimiter? adaptiveLimiter = null,
         IStreamingComplianceFilter? complianceFilter = null,
@@ -95,6 +97,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         _contentModerator = contentModerator;
         _httpContextAccessor = httpContextAccessor;
         _qualityJudge = qualityJudge;
+        _metrics = metrics;
         _logger = logger;
     }
 
@@ -937,6 +940,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                             if (firstLine.Usage is not null)
                                                 finalUsage = firstLine.Usage;
                                             hasFirstLine = true;
+                                            _metrics.RecordHedgeRace("primary_won", "none");
                                             if (_qualityJudge is not null)
                                             {
                                                 string? firstDelta = ExtractDeltaText(firstLine.Data);
@@ -948,6 +952,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                         {
                                             // 备选先出首行：胜者流挂起给备选候选接力；
                                             // 主候选按慢首行记失败（与 TTFT 超时同语义），备选候选的探测槽位在其自身迭代获取。
+                                            _metrics.RecordHedgeRace("secondary_won", "slow_first_token");
                                             pendingHedge = hedge;
                                             pendingHedgeSuccessor = hedgeSuccessor.Name;
                                             hedge = null;
@@ -960,6 +965,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                     else if (hedge.PrimaryFailure is null)
                                     {
                                         // 双双空流（无异常）：与单候选空流同语义——无健康信号，继续下一候选。
+                                        _metrics.RecordHedgeRace("both_failed", "empty");
                                         await hedge.DisposeAsync().ConfigureAwait(false);
                                         hedge = null;
                                         continue;
@@ -967,6 +973,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                     else
                                     {
                                         // 双双未出首行：以主候选异常走既有失败记账；备选候选本轮自行重试。
+                                        _metrics.RecordHedgeRace("both_failed", "exception");
                                         preStreamFailure = hedge.PrimaryFailure;
                                         lastModelName = candidate.Name;
                                         lastStatusCode = preStreamFailure switch
