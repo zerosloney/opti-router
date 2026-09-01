@@ -255,7 +255,8 @@
                             <span class="item-title">熔断参数</span>
                             <span class="item-desc">连续失败 N 次熔断进入隔离，冷却期后半开探测；首 token 超时仅限制流式响应开始前的等待，Hedge 延迟超过后启动下一候选竞速首行（落败方照常计费），均 0 为关闭。</span>
                         </div>
-                        <div class="config-row">
+                        <!-- 5 组标签不可收缩（flex-shrink:0），三列窄卡放不下一行，允许折行防溢出 -->
+                        <div class="config-row" style="flex-wrap: wrap; row-gap: 0.4rem;">
                             <span class="config-row-label">失败阈值:</span>
                             <input type="number" step="1" min="1" @bind="Cfg.FailoverFailureThreshold" class="form-control" style="width: 70px;" />
                             <span class="config-row-label">冷却 (秒):</span>
