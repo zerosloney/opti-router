@@ -232,6 +232,7 @@ public class ApiService
         List<AuditProviderStatsDto> ByProvider,
         List<AuditTierStatsDto> ByTier,
         AuditCascadeDto Cascade,
+        AuditRescueDto Rescue,
         AuditFusionDto Fusion,
         List<AuditReasonDto> ByReason,
         List<AuditDayDto> DailyTrend,
@@ -254,7 +255,9 @@ public class ApiService
     public sealed record AuditTierStatsDto(
         string Tier, int Requests, int Failures, double SuccessRatePct, double CostUsd, double CostSharePct);
 
-    public sealed record AuditCascadeDto(int Triggered, double TriggerRatePct, Dictionary<string, int> UpgradedFrom);
+    public sealed record AuditCascadeDto(int Triggered, double TriggerRatePct, int EligibleRequests, Dictionary<string, int> UpgradedFrom);
+
+    public sealed record AuditRescueDto(int RescuedRequests, int FailedRequests);
 
     public sealed record AuditFusionDto(int FusionRequests, Dictionary<string, int> ByRole);
 

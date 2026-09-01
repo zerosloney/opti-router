@@ -95,10 +95,15 @@ public class AuditAnalysisServiceTests
         Assert.Equal(3, report.ByTier.Single(t => t.Tier == "Strong").Requests);
         Assert.Equal(100.0, report.ByTier.Sum(t => t.CostSharePct), 2);
 
-        // 级联：1/5 = 20%，upgradedFrom 分布 model-a × 1。
+        // 级联：分母为合格人群（非流式 + Cheap + 成功 = 仅 model-b 一行）= 1/1 = 100%。
         Assert.Equal(1, report.Cascade.Triggered);
-        Assert.Equal(20.0, report.Cascade.TriggerRatePct);
+        Assert.Equal(1, report.Cascade.EligibleRequests);
+        Assert.Equal(100.0, report.Cascade.TriggerRatePct);
         Assert.Equal(1, report.Cascade.UpgradedFrom["model-a"]);
+
+        // 救援：仅一行失败且无 request_id，无法关联 → 0 次救回，失败请求 1 个。
+        Assert.Equal(0, report.Rescue.RescuedRequests);
+        Assert.Equal(1, report.Rescue.FailedRequests);
 
         // Fusion：1 条，角色 outer × 1。
         Assert.Equal(1, report.Fusion.FusionRequests);
@@ -161,6 +166,27 @@ public class AuditAnalysisServiceTests
         // 行级：2 成 2 败 = 50%；请求级：req-1 成功 + req-2 成功 + 无 id 行失败 = 2/3 ≈ 66.7%。
         Assert.Equal(50.0, report.Summary.SuccessRatePct);
         Assert.Equal(66.67, report.Summary.RequestSuccessRatePct);
+    }
+
+    [Fact]
+    public void Analyze_Rescue_LinkedFailAndSuccess_CountsOncePerRequest()
+    {
+        // 兜底救援（请求级）：同 request_id 既有失败行又有成功行 = 救回一次，多次失败不去重膨胀；
+        // 失败后未救回的请求与无 request_id 的失败行只计入 FailedRequests。
+        var store = new InMemoryRequestAuditStore();
+        var ts = new DateTime(2026, 8, 20, 10, 0, 0, DateTimeKind.Utc);
+        store.Append(Rec(ts, "m1", success: false, cost: 0m, latency: 0, requestId: "req-1"));
+        store.Append(Rec(ts, "m1", success: false, cost: 0m, latency: 0, requestId: "req-1")); // 同请求二次失败
+        store.Append(Rec(ts, "m2", success: true, cost: 0.1m, latency: 100, requestId: "req-1")); // 救回
+        store.Append(Rec(ts, "m3", success: false, cost: 0m, latency: 0, requestId: "req-2"));    // 失败未救回
+        store.Append(Rec(ts, "m4", success: true, cost: 0.1m, latency: 100, requestId: "req-2")); // 但最终成功 → 不算失败请求
+        store.Append(Rec(ts, "m5", success: false, cost: 0m, latency: 0));                        // 无 id 失败行
+
+        var analyzer = CreateAnalyzer(store);
+        var report = analyzer.Analyze(ts.AddHours(-1), ts.AddHours(1));
+
+        Assert.Equal(1, report.Rescue.RescuedRequests);
+        Assert.Equal(2, report.Rescue.FailedRequests); // req-1 + 无 id 失败行；req-2 最终成功不计
     }
 
     [Fact]

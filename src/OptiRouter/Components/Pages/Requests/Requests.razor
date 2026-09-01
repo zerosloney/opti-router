@@ -190,21 +190,24 @@
                 </div>
                 <div class="audit-kpi-card">
                     <div class="audit-kpi-label">
-                        <span>智能路由 & 级联</span>
+                        <span>Failover 兜底救援</span>
                         <AppIcon Name="router" Size="13" Class="text-warning" />
                     </div>
                     <div class="audit-kpi-val">
-                        @UiFormatter.FormatPercent(Analysis.Cascade.TriggerRatePct)
+                        @UiFormatter.FormatNumber(Analysis.Rescue.RescuedRequests) 次
                     </div>
                     <div class="audit-kpi-sub">
-                        @if (Analysis.Fusion.FusionRequests > 0)
-                        {
-                            <span>Fusion @UiFormatter.FormatNumber(Analysis.Fusion.FusionRequests) 次（按请求去重）</span>
-                        }
-                        else
-                        {
-                            <span>级联升级触发率 · 仅非流式 Cheap 档</span>
-                        }
+                        <span>
+                            失败请求 @UiFormatter.FormatNumber(Analysis.Rescue.FailedRequests) 个中救回（按请求去重）
+                            @if (Analysis.Cascade.Triggered > 0)
+                            {
+                                <span> · 级联 @Analysis.Cascade.Triggered 行 / 合格 @Analysis.Cascade.EligibleRequests（仅非流式 Cheap）</span>
+                            }
+                            @if (Analysis.Fusion.FusionRequests > 0)
+                            {
+                                <span> · Fusion @UiFormatter.FormatNumber(Analysis.Fusion.FusionRequests) 次</span>
+                            }
+                        </span>
                     </div>
                 </div>
             </div>

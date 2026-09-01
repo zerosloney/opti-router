@@ -14,6 +14,7 @@ public sealed record AuditAnalysisReport(
     IReadOnlyList<AuditProviderStats> ByProvider,
     IReadOnlyList<AuditTierStats> ByTier,
     AuditCascadeStats Cascade,
+    AuditRescueStats Rescue,
     AuditFusionStats Fusion,
     IReadOnlyList<AuditReasonStats> ByReason,
     IReadOnlyList<AuditDayStats> DailyTrend)
@@ -81,11 +82,17 @@ public sealed record AuditTierStats(
     double CostUsd,
     double CostSharePct);
 
-/// <summary>级联触发统计。</summary>
+/// <summary>级联触发统计。TriggerRatePct 分母为合格人群（非流式 + Cheap 档 + 成功行）而非窗口全部行——
+/// 流式请求在级联闸门外，全量分母会把比率永远稀释成 ≈0。</summary>
 public sealed record AuditCascadeStats(
     int Triggered,
     double TriggerRatePct,
+    int EligibleRequests,
     IReadOnlyDictionary<string, int> UpgradedFrom);
+
+/// <summary>Failover 兜底救援统计（请求级）：同 request_id 既有失败行又有成功行 = 救回一次。
+/// FailedRequests 为出现过失败行的请求数，含无 request_id 的失败行（逐行计，无法关联成败）。</summary>
+public sealed record AuditRescueStats(int RescuedRequests, int FailedRequests);
 
 /// <summary>Fusion 融合路由统计。FusionRequests 按 request_id 去重后的融合请求次数
 /// （一次融合产生 anchor/secondary/analyst 多行，逐行累加会夸大约 4 倍）。</summary>
@@ -210,11 +217,16 @@ public sealed class AuditAnalysisService
         var fusionRequestIds = new HashSet<string>(StringComparer.Ordinal);
         int fusionRowsWithoutId = 0;
         int cascadeTriggered = 0;
+        // 级联合格人群：非流式 + Cheap 档 + 成功行（级联升级只在成功的非流式 Cheap 响应后运行）。
+        int cascadeEligible = 0;
 
         // 请求级成功率：同 request_id 任一行成功即算成功（级联中间失败不扣用户体感分）；
         // 无 request_id 的旧记录逐行计。
         var requestOk = new Dictionary<string, bool>(StringComparer.Ordinal);
         int requestsWithoutId = 0, requestsWithoutIdOk = 0;
+        // 兜底救援：同 request_id 既有失败行又有成功行 = 首选失败后由后续候选救回。
+        var requestHadFail = new Dictionary<string, bool>(StringComparer.Ordinal);
+        int failedRowsWithoutId = 0;
 
         // 模型路由名 → 供应商：当前配置（显式/推断）+ 已删除模型墓碑的合并映射。
         var providerByModel = BuildProviderMap();
@@ -297,14 +309,19 @@ public sealed class AuditAnalysisService
                         fusionRowsWithoutId++;
                 }
 
+                if (!r.IsStreaming && ok && r.RoutedTier == ModelTier.Cheap)
+                    cascadeEligible++;
+
                 if (!string.IsNullOrEmpty(r.RequestId))
                 {
                     requestOk[r.RequestId] = requestOk.TryGetValue(r.RequestId, out var prevOk) && prevOk || ok;
+                    requestHadFail[r.RequestId] = requestHadFail.TryGetValue(r.RequestId, out var prevFail) && prevFail || !ok;
                 }
                 else
                 {
                     requestsWithoutId++;
                     if (ok) requestsWithoutIdOk++;
+                    if (!ok) failedRowsWithoutId++;
                 }
             }
 
@@ -371,8 +388,19 @@ public sealed class AuditAnalysisService
 
         var cascade = new AuditCascadeStats(
             cascadeTriggered,
-            Math.Round(100.0 * cascadeTriggered / Math.Max(1, total), 2),
+            Math.Round(100.0 * cascadeTriggered / Math.Max(1, cascadeEligible), 2),
+            cascadeEligible,
             upgradedFrom.OrderByDescending(kv => kv.Value).ToDictionary(kv => kv.Key, kv => kv.Value));
+
+        int rescuedRequests = 0, failedRequests = 0;
+        foreach (var (rid, hadFail) in requestHadFail)
+        {
+            if (!hadFail) continue;
+            failedRequests++;
+            if (requestOk.TryGetValue(rid, out var reqOk) && reqOk) rescuedRequests++;
+        }
+        failedRequests += failedRowsWithoutId;
+        var rescue = new AuditRescueStats(rescuedRequests, failedRequests);
 
         var fusion = new AuditFusionStats(
             fusionRequestIds.Count + fusionRowsWithoutId,
@@ -391,7 +419,7 @@ public sealed class AuditAnalysisService
             .OrderBy(d => d.Day)
             .ToList();
 
-        return new AuditAnalysisReport(fromUtc, toUtc, total, summary, modelRows, providerRows, tierRows, cascade, fusion, reasonRows, dayRows)
+        return new AuditAnalysisReport(fromUtc, toUtc, total, summary, modelRows, providerRows, tierRows, cascade, rescue, fusion, reasonRows, dayRows)
         {
             ProviderByModel = providerByModel
         };
