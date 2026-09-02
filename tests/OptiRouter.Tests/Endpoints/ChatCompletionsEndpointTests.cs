@@ -556,6 +556,57 @@ public class ChatCompletionsEndpointTests
             bySession.Single(group => group.Count() == 1).Key);
     }
 
+    [Fact]
+    public async Task Post_StreamingLongBody_OutlivesFailoverGlobalTimeout()
+    {
+        // 回归（2026-09-02 生产事故）：FailoverGlobalTimeoutSeconds 曾贯穿流式 body 转发，
+        // 全局超时在 body 中途引爆 → 客户端看到响应输出到一半被掐断
+        // （审计：fusion secondary/analyst 行大量 latency≈29.95s 'timeout'）。
+        // 修复语义：全局预算只覆盖"选候选+等首行"，首行到手即解除。
+        using var tenant = CreateTenantKeyFixture();
+        var routing = tenant.Factory.Services.GetRequiredService<IOptionsMonitor<RouterOptions>>().CurrentValue.Routing;
+        routing.EnableRuleClassifier = false;
+        routing.EnableTokenEstimator = false;
+        routing.EnableBudgetGuard = false;
+        routing.EnableFailover = true;
+        routing.FailoverGlobalTimeoutSeconds = 1;
+        routing.EnableFusionRouter = false;
+        routing.StreamFirstTokenTimeoutMs = 0;
+        routing.StreamHedgeDelayMs = 0;
+
+        var endpoint = CreateEndpoint("model-a");
+        tenant.Factory.MockClients["model-a"] = new MockModelClient(
+            endpoint,
+            streamRawFunc: (_, ct) => CreateSlowStream(ct));
+        using var client = tenant.Factory.CreateClient(tenant.PlaintextKey);
+
+        using var response = await PostChatAsync(client, model: "model-a", stream: true);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("early", body);
+        Assert.Contains("late", body);
+        Assert.Contains("[DONE]", body);
+    }
+
+    private static async IAsyncEnumerable<RawStreamLine> CreateSlowStream(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        // 首行立即产出（预算内拿到首行），随后跨过 FailoverGlobalTimeoutSeconds=1s 的
+        // 预算线继续推进——旧实现在 1s 处经 ct 掐断流（"late"/[DONE] 丢失），修复后完整到达。
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-slow\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"early\"}}]}",
+            null);
+        await Task.Delay(1500, ct);
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-slow\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" late\"}}]}",
+            null);
+        yield return new RawStreamLine(
+            "{\"id\":\"chatcmpl-slow\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}",
+            new ChatUsage { PromptTokens = 5, CompletionTokens = 2, TotalTokens = 7 });
+        yield return new RawStreamLine("[DONE]", null);
+    }
+
     private static List<RequestAuditRecord> GetTenantSessionAudits(
         TestWebApplicationFactory factory,
         int expectedCount)

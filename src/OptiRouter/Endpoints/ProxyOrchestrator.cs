@@ -826,7 +826,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     request, options, decision, decision.EstimatedInputTokens, routedTier,
                     sessionId, failedInThisRequest, attemptedModels, effectiveCt).WithCancellation(effectiveCt))
                 {
-                    producedAnyChunk = true;
+                    if (!producedAnyChunk)
+                    {
+                        producedAnyChunk = true;
+                        // 全局 failover 预算只约束"选候选 + 等首个产出"阶段：流一旦开始产出即解除，
+                        // 否则超时在 body/融合 patch 中途引爆，客户端看到响应输出到一半被掐断
+                        //（2026-09-02 审计：fusion secondary/analyst 行大量 latency≈29.95s 'timeout'）。
+                        globalCts?.CancelAfter(Timeout.InfiniteTimeSpan);
+                    }
                     var restored = ProcessCompliance(RestorePii(line, piiMap), complianceBuffer, options.Routing);
                     totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(restored.Data ?? "");
                     if (totalBytesTransferred > maxResponseBytes)
@@ -1138,6 +1145,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
 
                     ArgumentNullException.ThrowIfNull(enumerator);
+
+                    // 全局 failover 预算只覆盖"选候选 + 等首行"阶段：首行到手即解除，
+                    // 否则超时会在 body 转发中途引爆，客户端看到响应输出到一半被掐断
+                    //（2026-09-02 审计：30s 线 timeout 行贯穿流式 body；body 阶段由
+                    // 模型级空闲超时与客户端断开兜底）。后续候选首行仍受 TTFT 超时约束。
+                    globalCts?.CancelAfter(Timeout.InfiniteTimeSpan);
 
                     // Phase 2: 首行与剩余行统一在内层 try-finally 内 yield（无 catch，CS1626 允许）。
                     // size-limit 抛出时 finally 仍会 dispose enumerator，避免 socket/stream 泄漏。
