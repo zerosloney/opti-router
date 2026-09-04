@@ -162,10 +162,11 @@ public class FusionModeTests
         var response = await client.PostAsync("/v1/chat/completions", content, cts.Token);
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
 
-        // 等取消的 slow task 收尾（fusion 内部 WhenAll 已等，这里给一点缓冲确保审计落库）。
-        await Task.Delay(200);
-
+        // 轮询等审计落库（固定 sleep 在慢 CI runner 上会抖）。
         var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+        Assert.True(
+            await WaitUntilAsync(() => auditStore.GetRecent(10).Any(r => r.Model == "slow-model"), TimeSpan.FromSeconds(5)),
+            "取消的 slow 尝试审计记录应落库");
         var recent = auditStore.GetRecent(10);
 
         // 两条记录：fast（采纳，真实成本）+ slow（被取消，预估成本）。
@@ -236,9 +237,12 @@ public class FusionModeTests
         using var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         await client.PostAsync("/v1/chat/completions", content, cts.Token);
-        await Task.Delay(300); // 等审计落库
 
+        // 轮询等审计落库（固定 sleep 在慢 CI runner 上会抖）。
         var auditStore = factory.Services.GetRequiredService<IRequestAuditStore>();
+        Assert.True(
+            await WaitUntilAsync(() => auditStore.GetRecent(20).Count(r => !string.IsNullOrEmpty(r.ParallelGroupId)) >= 2, TimeSpan.FromSeconds(5)),
+            "并行组审计记录应落库");
         var recent = auditStore.GetRecent(20);
 
         // 找到 fusion 组记录（有 ParallelGroupId 的）。
@@ -467,7 +471,7 @@ public class FusionModeTests
                     opt.Routing.EnableLoadBalance = false;
                     opt.Routing.EnableFusionMode = true;
                     opt.Routing.FusionMaxParallel = 2;
-                    opt.Routing.FusionHedgeDelayMs = 500; // 主立即，hedged 延迟 500ms
+                    opt.Routing.FusionHedgeDelayMs = 2000; // 余量拉大：主路同步完成，慢 CI runner 上完成→取消路径卡 500ms 会误启动 hedged
                     opt.Routing.EnableHealthProbe = false;
                 });
                 services.AddSingleton<IModelClientProvider>(new TestProvider(MockClients));
@@ -507,13 +511,13 @@ public class FusionModeTests
     [Fact]
     public async Task Fusion_Hedge_PrimarySlow_HedgedLaunchedAndAdopted()
     {
-        // 主（fast-model）慢：1s 后才返回（> HedgeDelayMs 500）→ hedged（slow-model）延迟到期启动并采纳。
+        // 主（fast-model）慢：3s 后才返回（> HedgeDelayMs 2000）→ hedged（slow-model）延迟到期启动并采纳。
         using var factory = new HedgeFactory();
         factory.MockClients["fast-model"] = new TestModelClient(
             new ModelEndpointOptions { Name = "fast-model" },
             async (req, ct) =>
             {
-                try { await Task.Delay(1000, ct).ConfigureAwait(false); }
+                try { await Task.Delay(3000, ct).ConfigureAwait(false); }
                 catch (TaskCanceledException) { throw new OperationCanceledException(ct); }
                 return MakeResponse("fast-model", 10, 5);
             });
@@ -544,5 +548,16 @@ public class FusionModeTests
             yield return new RawStreamLine(line, null);
             await Task.Yield();
         }
+    }
+
+    private static async Task<bool> WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return true;
+            await Task.Delay(50);
+        }
+        return condition();
     }
 }
