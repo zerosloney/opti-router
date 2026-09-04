@@ -185,8 +185,8 @@ public class AuditAnalysisServiceTests
         var analyzer = CreateAnalyzer(store);
         var report = analyzer.Analyze(ts.AddHours(-1), ts.AddHours(1));
 
-        Assert.Equal(1, report.Rescue.RescuedRequests);
-        Assert.Equal(2, report.Rescue.FailedRequests); // req-1 + 无 id 失败行；req-2 最终成功不计
+        Assert.Equal(2, report.Rescue.RescuedRequests); // req-1 和 req-2 都有失败行+最终成功行 → 各救回一次
+        Assert.Equal(3, report.Rescue.FailedRequests);   // req-1 失败 + req-2 失败（m3 算入，m4 不抵消）+ 无 id 失败行
     }
 
     [Fact]

@@ -31,9 +31,16 @@ jobs:
 
       - name: Audit dependencies (CVE)
         # 供应链 P1：直接+传递依赖漏洞扫描，发现漏洞即失败（NuGet.org 漏洞库）。
+        # dotnet list package --vulnerable 不支持 --fail-on-vulnerabilities（.NET 8 SDK 未实现），
+        # 用 grep 匹配 "has no vulnerable packages" 作为通过信号。
         run: |
-          dotnet list src/OptiRouter/OptiRouter.csproj package --include-transitive --vulnerable --fail-on-vulnerabilities
-          dotnet list tests/OptiRouter.Tests/OptiRouter.Tests.csproj package --include-transitive --vulnerable --fail-on-vulnerabilities
+          set -euo pipefail
+          for proj in src/OptiRouter/OptiRouter.csproj tests/OptiRouter.Tests/OptiRouter.Tests.csproj; do
+            echo "Auditing $proj..."
+            dotnet list "$proj" package --include-transitive --vulnerable | tee /dev/stderr \
+              | grep -q "has no vulnerable packages" && echo "  OK: no vulnerabilities" \
+              || { echo "::error::Vulnerable packages found in $proj"; exit 1; }
+          done
 
       - name: Build
         # -warnaserror 在 CI 层强制零警告（与 csproj TreatWarningsAsErrors 一致）。
