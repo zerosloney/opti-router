@@ -274,8 +274,15 @@ public class ChatCompletionsEndpointTests
         public void Dispose()
         {
             Factory.Dispose();
-            if (Directory.Exists(_directory))
-                Directory.Delete(_directory, recursive: true);
+            // best-effort 清理（同 ConfigApiExpansionTests 等既有约定）：Linux CI overlayfs /tmp 上
+            // Directory.Delete 间发 "Directory not empty"，teardown 清理失败不应抖红通过的测试。
+            try
+            {
+                if (Directory.Exists(_directory))
+                    Directory.Delete(_directory, recursive: true);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 

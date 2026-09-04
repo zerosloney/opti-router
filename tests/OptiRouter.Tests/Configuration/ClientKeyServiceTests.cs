@@ -218,8 +218,14 @@ public sealed class ClientKeyServiceTests
 
         public void Dispose()
         {
-            if (Directory.Exists(_directory))
-                Directory.Delete(_directory, recursive: true);
+            // best-effort 清理：落盘与删除目录之间的收尾竞态不抖红测试（同 TenantKeyFixture 约定）。
+            try
+            {
+                if (Directory.Exists(_directory))
+                    Directory.Delete(_directory, recursive: true);
+            }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
         }
     }
 
