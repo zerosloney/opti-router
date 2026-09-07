@@ -23,6 +23,9 @@ using OptiRouter.Metrics;
 using OptiRouter.Routing;
 using OptiRouter.Concurrency;
 using OptiRouter.Compliance;
+using OptiRouter.Compression;
+using OptiRouter.Providers;
+using OptiRouter.Mcp;
 using Prometheus;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -95,6 +98,19 @@ builder.Services.AddOptions<RouterOptions>()
     // Name 留空且配置了 Id 的模型在此归一化为 "{供应商}/{Id}"（冲突时追加序号），
     // 后续 Validate 与所有消费方（路由/客户端/显示）看到的都是最终路由名。
     .PostConfigure(options => ModelNameNormalizer.Normalize(options.Models))
+    // 可选内置 catalog 注入：配置库为空且 EnableBuiltInProviderCatalog=true（默认关闭——
+    // 目录为第三方端点，注入即改变 prompt 数据流向且默认无 ApiKey，须管理员显式开启）时，
+    // 注入 BuiltInProviderCatalog 默认 provider 让 auto 路由从零配置可工作。
+    // 用户手动配置的模型优先级高于 catalog：只要配置里有一条记录就不注入。
+    .PostConfigure(options =>
+    {
+        if (options.Routing.EnableBuiltInProviderCatalog && options.Models.Count == 0)
+        {
+            var catalogDefaults = BuiltInProviderCatalog.GetDefaults();
+            foreach (var m in catalogDefaults)
+                options.Models.Add(m);
+        }
+    })
     // Budget 的 MariaDB 连接缺省回退全局 OptiRouter:ConfigDbConnectionString——
     // 同一数据库只需配置一处连接（Budget.MariaDbConnectionString 仅作独立库覆盖用）。
     // StoreProvider 默认 Auto：配置了全局连接即 MariaDb，否则回退 SQLite（显式指定可覆盖），
@@ -314,6 +330,14 @@ builder.Services.AddSingleton<CalibratingTokenEstimator>(sp =>
 });
 builder.Services.AddSingleton<ITokenEstimator>(sp => sp.GetRequiredService<CalibratingTokenEstimator>());
 
+// ── Token 压缩引擎（RTK + Caveman 双引擎串联）──────────────────────
+// RTK Shell 输出压缩：工具执行结果（bash/git/npm 输出等）去 ANSI/进度条/空行
+builder.Services.AddSingleton<RtkShellOutputCompressor>();
+// Caveman 文本精简：英文/中文冗余表达压缩客套话剔除
+builder.Services.AddSingleton<CavemanCondenser>();
+// 组合压缩流水线：RTK → Caveman → AdaptivePromptPruner 三阶段串联
+builder.Services.AddSingleton<TokenCompressionPipeline>();
+
 builder.Services.AddSingleton<ISemanticVectorEngine>(sp =>
 {
     var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
@@ -495,6 +519,20 @@ builder.Services.AddSingleton<OptiRouter.Mcp.McpToolOrchestrator>(sp =>
         sp.GetRequiredService<IModelClientProvider>(),
         sp.GetService<ILogger<OptiRouter.Mcp.McpToolOrchestrator>>(),
         recorder: sp.GetRequiredService<OptiRouter.Endpoints.OutcomeRecorder>()));
+
+// ── MCP Server 协议层（HTTP transport，暴露内置工具给外部 MCP 客户端）───────────
+// MCP Server：OptiRouter 作为 MCP Server 被外部 agent（Claude Code/Cline/Cursor）调用
+builder.Services.AddSingleton(new McpServerOptions
+{
+    Enabled = true,
+    // 注意：Path 变更须同步 AdminPathPrefixes（/mcp 前缀靠它纳入管理端鉴权）。
+    Path = "/mcp",
+    MaxToolCallTimeoutMs = 30_000
+});
+// MCP 内置工具提供者（路由状态/预算/模型健康/工具状态等）
+builder.Services.AddSingleton<McpServerToolProvider, OptiRouter.Mcp.OptiRouterMcpTools>();
+// MCP Server 主机
+builder.Services.AddSingleton<OptiRouter.Mcp.McpServerHost>();
 builder.Services.AddSingleton<OptiRouter.Compression.IPromptPruner, OptiRouter.Compression.AdaptivePromptPruner>();
 builder.Services.AddSingleton<OptiRouter.Clients.IProviderAdapterSandbox, OptiRouter.Clients.ProviderAdapterSandbox>();
 builder.Services.AddSingleton<OptiRouter.Benchmarks.StressBenchmarkEngine>();
@@ -962,9 +1000,11 @@ app.Use(async (context, next) =>
                 loginRateLimiter.RecordFailure(LoginRateLimiter.ResolveClientIp(context, trustProxy));
             }
             // 页面（HTML）场景：浏览器重定向到登录页；API 场景：直接 401。
-            // openapi.json（/dashboard/api-docs）按 API 处理返回 401，便于工具链识别。
+            // openapi.json（/dashboard/api-docs）与 /mcp（JSON-RPC，MCP 客户端不认登录页
+            // 重定向）按 API 处理返回 401，便于工具链识别。
             bool isPageRequest = !context.Request.Path.StartsWithSegments("/api")
-                && !context.Request.Path.StartsWithSegments("/dashboard/api-docs");
+                && !context.Request.Path.StartsWithSegments("/dashboard/api-docs")
+                && !context.Request.Path.StartsWithSegments("/mcp");
             if (isPageRequest)
             {
                 context.Response.Redirect("/login");
@@ -1174,6 +1214,52 @@ app.MapFallbackToPage("/Dashboard/_Host");
 app.MapDashboardEndpoints();
 app.MapModelsConfigEndpoints();
 
+// ── MCP Server HTTP 端点（JSON-RPC 2.0）────────────────────────────
+// 支持 Claude Code / Cline / Cursor 等 MCP 客户端连接 OptiRouter
+// POST /mcp           — JSON-RPC 单请求
+// POST /mcp/batch     — JSON-RPC batch 请求
+// GET  /mcp/tools     — 列出所有可用工具（人类可读）
+// /mcp 已纳入 AdminPathPrefixes：外部 MCP 客户端携带 Bearer <AdminApiKey>，
+// 浏览器访问走登录 Cookie；未认证请求由自定义鉴权中间件 401 拦截（不 302 登录页）。
+var mcpOptions = app.Services.GetRequiredService<OptiRouter.Mcp.McpServerOptions>();
+var mcpServer = app.Services.GetRequiredService<OptiRouter.Mcp.McpServerHost>();
+
+if (mcpOptions.Enabled)
+{
+    app.MapPost(mcpOptions.Path, async (HttpContext ctx) =>
+    {
+        using var reader = new StreamReader(ctx.Request.Body);
+        string body = await reader.ReadToEndAsync();
+        var response = await mcpServer.HandleRequestAsync(body, ctx.RequestAborted);
+
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.StatusCode = response.StatusCode;
+        await ctx.Response.WriteAsync(response.Body, ctx.RequestAborted);
+    });
+
+    app.MapPost($"{mcpOptions.Path}/batch", async (HttpContext ctx) =>
+    {
+        using var reader = new StreamReader(ctx.Request.Body);
+        string body = await reader.ReadToEndAsync();
+        var response = await mcpServer.HandleRequestAsync(body, ctx.RequestAborted);
+
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.StatusCode = response.StatusCode;
+        await ctx.Response.WriteAsync(response.Body, ctx.RequestAborted);
+    });
+
+    app.MapGet($"{mcpOptions.Path}/tools", async (HttpContext ctx) =>
+    {
+        var response = await mcpServer.HandleRequestAsync(
+            """{"jsonrpc":"2.0","method":"tools/list","params":{},"id":1}""",
+            ctx.RequestAborted);
+
+        ctx.Response.ContentType = "application/json";
+        ctx.Response.StatusCode = response.StatusCode;
+        await ctx.Response.WriteAsync(response.Body, ctx.RequestAborted);
+    });
+}
+
 app.Run();
 
 // 分区 Key 解析：限流与并发中间件共用。
@@ -1229,7 +1315,8 @@ public partial class Program
         "/keys",
         "/benchmarks",
         "/api/dashboard",
-        "/api/models"
+        "/api/models",
+        "/mcp"
     };
 
     /// <summary>

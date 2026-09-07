@@ -813,7 +813,62 @@ public sealed class FusionRouter
         string? patchJson = null;
         try
         {
-            var secondaryResults = await Task.WhenAll(secondaryTasks).ConfigureAwait(false);
+            // Quorum-Grace 收集（OmniRoute Fusion 策略）：达到 minQuorum 个 Secondary 完成后再给
+            // graceMs 宽限，到期即采纳已完成的 Panel 推进 Analyst，不等最慢 Panel（长尾优化）。
+            // 未达成 quorum（多数失败/挂起）时退化为等全部完成——与关闭开关时行为一致。
+            (string Model, string Text)[] secondaryResults;
+            if (routing.EnableStreamingFusionQuorumGrace && secondaryModels.Count >= 2)
+            {
+                int minQuorum = Math.Min(routing.StreamingFusionQuorumMinPanels, secondaryModels.Count);
+                int graceMs = routing.StreamingFusionQuorumGraceMs;
+
+                int completed = 0;
+                var quorumGrace = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using var graceTimer = new System.Threading.Timer(
+                    _ => quorumGrace.TrySetResult(true), null, Timeout.Infinite, Timeout.Infinite);
+                foreach (var t in secondaryTasks)
+                {
+                    // Secondary 完成即计数；凑满 quorum 时才起算 grace timer（从宽限期起点计时，
+                    // 而非请求起点——慢 Panel 占用宽限之外的额外时间不该挤占其他 Panel 的收集窗口）。
+                    _ = t.ContinueWith(_ =>
+                    {
+                        if (Interlocked.Increment(ref completed) >= minQuorum)
+                        {
+                            try { graceTimer.Change(graceMs, Timeout.Infinite); }
+                            catch (ObjectDisposedException) { } // grace 已触发或本块已退出后的迟到完成
+                        }
+                    }, TaskScheduler.Default);
+                }
+
+                var allCompleted = Task.WhenAll(secondaryTasks);
+                await Task.WhenAny(allCompleted, quorumGrace.Task).ConfigureAwait(false);
+
+                if (allCompleted.IsCompleted)
+                {
+                    secondaryResults = await allCompleted.ConfigureAwait(false);
+                }
+                else
+                {
+                    // grace 到期：采纳已完成的 Panel；未完成的后台善后——secondary task 内部自记
+                    // 审计/健康/成本，完整性不依赖此处等待（共用 ct，客户端断开时快速收尾）。
+                    var collected = new List<(string Model, string Text)>(secondaryTasks.Count);
+                    var stragglers = new List<Task<(string Model, string Text)>>(secondaryTasks.Count);
+                    foreach (var t in secondaryTasks)
+                    {
+                        if (t.IsCompleted) collected.Add(await t.ConfigureAwait(false));
+                        else stragglers.Add(t);
+                    }
+                    secondaryResults = collected.ToArray();
+                    _ = Task.WhenAll(stragglers).ContinueWith(_ => { }, TaskScheduler.Default);
+                    _logger.LogInformation(
+                        "Streaming Fusion Quorum-Grace advance: collected={Collected}/{Total}, stragglers={Stragglers}, minQuorum={MinQuorum}, graceMs={GraceMs}",
+                        collected.Count, secondaryModels.Count, stragglers.Count, minQuorum, graceMs);
+                }
+            }
+            else
+            {
+                secondaryResults = await Task.WhenAll(secondaryTasks).ConfigureAwait(false);
+            }
             var panelAnswers = new List<(string Model, string Text)> { (anchorModel.Name, anchorTextSb.ToString()) };
             foreach (var secRes in secondaryResults)
             {

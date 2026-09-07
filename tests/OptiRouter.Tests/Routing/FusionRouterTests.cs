@@ -33,6 +33,9 @@ public class FusionRouterTests
         public bool EnableRuleClassifierInFactory { get; set; }
         public int FusionRouterPanelSize { get; set; } = 3;
         public int FusionRouterPanelTimeoutSeconds { get; set; } = 0;
+        public bool AddFourthModel { get; set; }
+        public int StreamingFusionQuorumMinPanels { get; set; } = 2;
+        public int StreamingFusionQuorumGraceMs { get; set; } = 8000;
         public string? FusionRouterAnalystPrompt { get; set; }
         public string? CascadeUpgradeSelfVerifyPrompt { get; set; }
         public bool EnableByzantineConsensus { get; set; }
@@ -88,6 +91,20 @@ public class FusionRouterTests
                         OutputPricePerMillion = 2m,
                         Enabled = true
                     });
+                    if (AddFourthModel)
+                    {
+                        opt.Models.Add(new ModelEndpointOptions
+                        {
+                            Name = "model-d",
+                            BaseUrl = "https://example.com",
+                            ApiKey = "k",
+                            Tier = ModelTier.Medium,
+                            MaxContextTokens = 2048,
+                            InputPricePerMillion = 1m,
+                            OutputPricePerMillion = 2m,
+                            Enabled = true
+                        });
+                    }
 
                     // 关闭其他策略，确保走 fusion router 路径。
                     opt.Routing.EnableRuleClassifier = EnableRuleClassifierInFactory;
@@ -101,6 +118,8 @@ public class FusionRouterTests
                     opt.Routing.EnableFusionRouter = true;
                     opt.Routing.FusionRouterPanelSize = FusionRouterPanelSize;
                     opt.Routing.FusionRouterPanelTimeoutSeconds = FusionRouterPanelTimeoutSeconds;
+                    opt.Routing.StreamingFusionQuorumMinPanels = StreamingFusionQuorumMinPanels;
+                    opt.Routing.StreamingFusionQuorumGraceMs = StreamingFusionQuorumGraceMs;
                     opt.Routing.FusionRouterTemperature = FusionRouterTemperature;
                     opt.Routing.FusionRouterPanelTemperature = FusionRouterPanelTemperature;
                     opt.Routing.FusionRouterMinComplexity = FusionRouterMinComplexity;
@@ -1032,6 +1051,62 @@ public class FusionRouterTests
             yield return new RawStreamLine(line, null);
             await Task.Yield();
         }
+    }
+
+    /// <summary>
+    /// Quorum-Grace：4 panel（anchor + 3 secondary）、quorum=2、grace=300ms。
+    /// 两个 secondary 立即完成 → grace 起算 → 到期采纳已完成的推进 analyst，
+    /// 不等 2.5s 的最慢 secondary。
+    /// 修复前：quorum/grace 触发后仍 Task.WhenAll 等全部，耗时必然 ≥ 2.5s。
+    /// </summary>
+    [Fact]
+    public async Task FusionRouter_Streaming_QuorumGrace_AdvancesWithoutSlowestPanel()
+    {
+        using var factory = new FusionRouterFactory
+        {
+            FusionRouterPanelSize = 4,
+            AddFourthModel = true,
+            StreamingFusionQuorumMinPanels = 2,
+            StreamingFusionQuorumGraceMs = 300
+        };
+
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeAnalystResponse("model-a", 50, 30, AnalystJson)),
+            streamRawFunc: (req, ct) => StreamLinesAsync(new[]
+            {
+                "{\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"anchor-answer\"}}]}",
+                "[DONE]"
+            }));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-b", 10, 5, "secondary-b")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-c", 10, 5, "secondary-c")));
+        factory.MockClients["model-d"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-d" },
+            completeRawFunc: async (req, ct) =>
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(2500), ct);
+                return MakeResponse("model-d", 10, 5, "slow-secondary-d");
+            });
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"),
+            cts.Token);
+        sw.Stop();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        // grace 到期推进：总耗时远低于最慢 secondary 的 2.5s（修复前 WhenAll 必然 ≥ 2.5s）。
+        Assert.True(sw.ElapsedMilliseconds < 2000,
+            $"Expected quorum-grace advance before slow panel completes, took {sw.ElapsedMilliseconds}ms");
     }
 
     /// <summary>

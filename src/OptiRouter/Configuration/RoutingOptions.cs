@@ -566,6 +566,36 @@ public sealed class RoutingOptions
     public int FusionRouterPanelTimeoutSeconds { get; set; } = 0;
 
     /// <summary>
+    /// 流式融合（Streaming Fusion）的 Secondary 收集策略：
+    /// false = 等全部 Secondary 完成后再 Analyst（向后兼容）；
+    /// true = 收集到 <see cref="StreamingFusionQuorumMinPanels"/> 个后启动 grace timer，
+    /// grace 到期即推进 Analyst（不等最慢 Panel），减少长尾延迟。
+    /// 默认 true。
+    /// </summary>
+    public bool EnableStreamingFusionQuorumGrace { get; set; } = true;
+
+    /// <summary>
+    /// 流式融合 Quorum-Grace 的最小成功 Panel 数。达到此数即启动 grace timer。
+    /// 默认 2（与 OmniRoute Fusion 行为对齐）。必须 ≥ 2 且 ≤ <see cref="FusionRouterPanelSize"/>。
+    /// </summary>
+    public int StreamingFusionQuorumMinPanels { get; set; } = 2;
+
+    /// <summary>
+    /// 流式融合 Quorum-Grace 的等待宽限期（毫秒）。收集到 Quorum 后等待此时长，
+    /// grace 到期即推进 Analyst；时长内全部完成则提前推进。
+    /// 默认 8000（8s，与 OmniRoute Fusion stragglerGraceMs 对齐）。
+    /// </summary>
+    public int StreamingFusionQuorumGraceMs { get; set; } = 8000;
+
+    /// <summary>
+    /// 配置库为空时是否自动注入内置 provider 目录（BuiltInProviderCatalog）。
+    /// 默认 false：目录为第三方端点（opencode.ai、moonshot、deepseek 等），注入后 auto 路由会把
+    /// prompt 发往这些外部服务且默认无 ApiKey——数据流出与端点可用性均需管理员知情，须显式开启。
+    /// 开启后建议在管理台 /models 为各端点补配密钥。
+    /// </summary>
+    public bool EnableBuiltInProviderCatalog { get; set; } = false;
+
+    /// <summary>
     /// 是否启用 PII 敏感数据脱敏与反向还原。默认 false。
     /// </summary>
     public bool EnablePiiAnonymization { get; set; } = false;
