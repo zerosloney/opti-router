@@ -9,7 +9,6 @@ namespace OptiRouter.Providers;
 /// 目录均为第三方端点，注入即改变 prompt 数据流向，故默认不注入。
 ///
 /// 目录结构参考 OmniRoute 的 provider catalog，按 tier 分组：
-/// - <c>Keyless</c>：无需 API Key，零配置接入
 /// - <c>FreeTier</c>：有免费配额，需要 API Key
 /// - <c>Cheap</c>：价格极低的付费端点（$0.01/M token 以下）
 ///
@@ -29,131 +28,222 @@ public static class BuiltInProviderCatalog
     {
         var models = new List<ModelEndpointOptions>();
 
-        // ─── Keyless（无需 API Key）────────────────────────────
-        // OpenCode Free — OmniRoute 社区维护的免费 Claude 3.5 兼容端点
+        // ─── Free Tier（需注册获取免费 Key）───────────────────
+        // OpenCode Zen — Claude Sonnet 5 兼容端点。旧匿名网关 /api/v1 已下线（实测返回官网 HTML），
+        // 统一走 Zen 网关，须在 opencode.ai 控制台取 Key；模型 ID 以 GET /zen/v1/models 实时列表为准。
         models.Add(new ModelEndpointOptions
         {
-            Name = "oc/claude-3.5-sonnet",
-            Id = "claude-3.5-sonnet",
-            BaseUrl = "https://opencode.ai/api/v1",
-            ApiKey = null,
+            Name = "oc/claude-sonnet-5",
+            Id = "claude-sonnet-5",
+            BaseUrl = "https://opencode.ai/zen/v1",
+            ApiKey = null, // env:OPENCODE_API_KEY
             Tier = ModelTier.Strong,
             Protocol = ProviderProtocol.OpenAI,
-            MaxContextTokens = 200_000,
+            MaxContextTokens = 1_000_000,
             InputPricePerMillion = 0m,
             OutputPricePerMillion = 0m,
             Provider = "opencode",
-            Family = "claude",
+            Family = "claude-sonnet",
             Tags = new[] { "vision", "tool-use", "json-mode" },
             Enabled = true,
         });
 
-        // Felo Free — Kimi 社区项目，OpenAI 兼容
+        // OpenCode Zen — DeepSeek V4 Flash 免费档（-free 后缀为 Zen 官方免费模型）
         models.Add(new ModelEndpointOptions
         {
-            Name = "felo/gpt-4o-mini",
-            Id = "gpt-4o-mini",
-            BaseUrl = "https://ws.felo.me",
-            ApiKey = null,
-            Tier = ModelTier.Medium,
+            Name = "oc/deepseek-v4-flash-free",
+            Id = "deepseek-v4-flash-free",
+            BaseUrl = "https://opencode.ai/zen/v1",
+            ApiKey = null, // env:OPENCODE_API_KEY
+            Tier = ModelTier.Cheap,
             Protocol = ProviderProtocol.OpenAI,
-            MaxContextTokens = 128_000,
+            MaxContextTokens = 1_300_000,
             InputPricePerMillion = 0m,
             OutputPricePerMillion = 0m,
-            Provider = "felo",
-            Family = "gpt-4o-mini",
+            Provider = "opencode",
+            Family = "deepseek-v4",
             Tags = new[] { "tool-use", "json-mode" },
             Enabled = true,
         });
 
-        // ─── Free Tier（需注册获取免费 Key）───────────────────
-        // Kimi（月之暗面）— 注册送免费 token
+        // Kimi K3（月之暗面）— 当前前沿
         models.Add(new ModelEndpointOptions
         {
-            Name = "kimi/moonshot-v1-8k",
-            Id = "moonshot-v1-8k",
+            Name = "kimi/kimi-k3",
+            Id = "kimi-k3",
             BaseUrl = "https://api.moonshot.cn/v1",
             ApiKey = null, // env:KIMI_API_KEY
-            Tier = ModelTier.Medium,
+            Tier = ModelTier.Strong,
             Protocol = ProviderProtocol.OpenAI,
-            MaxContextTokens = 8_000,
+            MaxContextTokens = 256_000,
             InputPricePerMillion = 0m,
             OutputPricePerMillion = 0m,
             Provider = "kimi",
-            Family = "moonshot",
+            Family = "kimi-k3",
             Tags = new[] { "tool-use", "json-mode" },
             Enabled = true,
         });
 
-        // DeepSeek — 免费额度
+        // DeepSeek V4 Flash — 当前前沿
         models.Add(new ModelEndpointOptions
         {
-            Name = "deepseek/deepseek-chat",
-            Id = "deepseek-chat",
+            Name = "deepseek/deepseek-v4-flash",
+            Id = "deepseek-v4-flash",
             BaseUrl = "https://api.deepseek.com/v1",
             ApiKey = null, // env:DEEPSEEK_API_KEY
             Tier = ModelTier.Cheap,
             Protocol = ProviderProtocol.OpenAI,
-            MaxContextTokens = 64_000,
-            InputPricePerMillion = 0.1m,
+            MaxContextTokens = 1_300_000,
+            InputPricePerMillion = 0.07m,
             OutputPricePerMillion = 0.28m,
             Provider = "deepseek",
-            Family = "deepseek-chat",
+            Family = "deepseek-v4",
             Tags = new[] { "tool-use", "json-mode" },
             Enabled = true,
         });
 
-        // Qwen（阿里通义）— 注册送免费 token
+        // Qwen3.7 Max（阿里通义）— 注册送免费 token
         models.Add(new ModelEndpointOptions
         {
-            Name = "qwen/qwen-turbo",
-            Id = "qwen-turbo",
+            Name = "qwen/qwen3.7-max",
+            Id = "qwen3.7-max",
             BaseUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1",
             ApiKey = null, // env:DASHSCOPE_API_KEY
-            Tier = ModelTier.Cheap,
+            Tier = ModelTier.Medium,
             Protocol = ProviderProtocol.OpenAI,
-            MaxContextTokens = 128_000,
+            MaxContextTokens = 1_000_000,
             InputPricePerMillion = 0.8m,
             OutputPricePerMillion = 2m,
             Provider = "qwen",
-            Family = "qwen-turbo",
+            Family = "qwen3.7",
             Tags = new[] { "tool-use" },
             Enabled = true,
         });
 
-        // Gemini Free — Google 免费层
+        // Gemini 3 Flash Free — Google 免费层
         models.Add(new ModelEndpointOptions
         {
-            Name = "gemini/gemini-2.0-flash",
-            Id = "gemini-2.0-flash",
+            Name = "gemini/gemini-3-flash-free",
+            Id = "gemini-3-flash",
             BaseUrl = "https://generativelanguage.googleapis.com/v1beta",
             ApiKey = null, // env:GEMINI_API_KEY
             Tier = ModelTier.Medium,
             Protocol = ProviderProtocol.Gemini,
-            MaxContextTokens = 1_048_576,
+            MaxContextTokens = 1_000_000,
             InputPricePerMillion = 0m,
             OutputPricePerMillion = 0m,
             Provider = "google",
-            Family = "gemini",
+            Family = "gemini-3",
             Tags = new[] { "vision", "tool-use", "json-mode" },
             Enabled = true,
         });
 
-        // MiniMax — 注册送免费 token
+        // MiniMax M3 — 当前前沿
         models.Add(new ModelEndpointOptions
         {
-            Name = "minimax/minimax-01",
+            Name = "minimax/minimax-m3",
             Id = "MiniMax-Text-01",
             BaseUrl = "https://api.minimax.chat/v1",
             ApiKey = null, // env:MINIMAX_API_KEY
             Tier = ModelTier.Cheap,
             Protocol = ProviderProtocol.OpenAI,
-            MaxContextTokens = 256_000,
+            MaxContextTokens = 1_000_000,
             InputPricePerMillion = 0.01m,
             OutputPricePerMillion = 0.1m,
             Provider = "minimax",
-            Family = "minimax-01",
+            Family = "minimax-m3",
             Tags = new[] { "tool-use", "json-mode" },
+            Enabled = true,
+        });
+
+        // ─── 前沿补全（2026-09 新增）─────────────────────────
+        // GLM 5.3 Flash（智谱）— 中文前沿，超便宜
+        models.Add(new ModelEndpointOptions
+        {
+            Name = "zhipu/glm-5.3-flash",
+            Id = "glm-5.3-flash",
+            BaseUrl = "https://open.bigmodel.cn/api/paas/v4",
+            ApiKey = null, // env:ZHIPU_API_KEY
+            Tier = ModelTier.Cheap,
+            Protocol = ProviderProtocol.OpenAI,
+            MaxContextTokens = 1_300_000,
+            InputPricePerMillion = 0.075m,
+            OutputPricePerMillion = 0.25m,
+            Provider = "zhipu",
+            Family = "glm-5.3",
+            Tags = new[] { "tool-use", "json-mode" },
+            Enabled = true,
+        });
+
+        // GLM 5.3（智谱）— 中文强档
+        models.Add(new ModelEndpointOptions
+        {
+            Name = "zhipu/glm-5.3",
+            Id = "glm-5.3",
+            BaseUrl = "https://open.bigmodel.cn/api/paas/v4",
+            ApiKey = null, // env:ZHIPU_API_KEY
+            Tier = ModelTier.Strong,
+            Protocol = ProviderProtocol.OpenAI,
+            MaxContextTokens = 1_300_000,
+            InputPricePerMillion = 2.9m,
+            OutputPricePerMillion = 2.9m,
+            Provider = "zhipu",
+            Family = "glm-5.3",
+            Tags = new[] { "tool-use", "json-mode" },
+            Enabled = true,
+        });
+
+        // Hy3 Preview（腾讯）— 9 月新发布，免费 tier
+        models.Add(new ModelEndpointOptions
+        {
+            Name = "tencent/hy3-preview",
+            Id = "hy3-preview",
+            BaseUrl = "https://api.hunyuan.cloud.tencent.com/v1",
+            ApiKey = null, // env:HUNYUAN_API_KEY
+            Tier = ModelTier.Strong,
+            Protocol = ProviderProtocol.OpenAI,
+            MaxContextTokens = 1_000_000,
+            InputPricePerMillion = 0m,
+            OutputPricePerMillion = 0m,
+            Provider = "tencent",
+            Family = "hy3",
+            Tags = new[] { "tool-use", "json-mode" },
+            Enabled = true,
+        });
+
+        // Step 3.5 Flash（阶跃星辰）— 中文友好
+        models.Add(new ModelEndpointOptions
+        {
+            Name = "stepfun/step-3.5-flash",
+            Id = "step-3.5-flash",
+            BaseUrl = "https://api.stepfun.com/v1",
+            ApiKey = null, // env:STEPFUN_API_KEY
+            Tier = ModelTier.Cheap,
+            Protocol = ProviderProtocol.OpenAI,
+            MaxContextTokens = 262_000,
+            InputPricePerMillion = 0.1m,
+            OutputPricePerMillion = 0.3m,
+            Provider = "stepfun",
+            Family = "step-3.5",
+            Tags = new[] { "tool-use", "json-mode" },
+            Enabled = true,
+        });
+
+        // Grok 4.5（xAI）— 实时信息
+        models.Add(new ModelEndpointOptions
+        {
+            Name = "xai/grok-4.5",
+            Id = "grok-4.5",
+            BaseUrl = "https://api.x.ai/v1",
+            ApiKey = null, // env:XAI_API_KEY
+            Tier = ModelTier.Strong,
+            Protocol = ProviderProtocol.OpenAI,
+            MaxContextTokens = 500_000,
+            InputPricePerMillion = 5m,
+            OutputPricePerMillion = 15m,
+            Provider = "xai",
+            Family = "grok-4.5",
+            Tags = new[] { "vision", "tool-use", "json-mode" },
             Enabled = true,
         });
 

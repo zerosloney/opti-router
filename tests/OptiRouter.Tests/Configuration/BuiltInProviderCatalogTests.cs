@@ -60,8 +60,8 @@ public class BuiltInProviderCatalogTests
         var models = ResolveModels(factory);
 
         Assert.NotEmpty(models);
-        Assert.Contains(models, m => m.Name == "kimi/moonshot-v1-8k");
-        Assert.Contains(models, m => m.Name == "deepseek/deepseek-chat");
+        Assert.Contains(models, m => m.Name == "kimi/kimi-k3");
+        Assert.Contains(models, m => m.Name == "deepseek/deepseek-v4-flash");
         Assert.All(models, m => Assert.True(m.Enabled));
     }
 
