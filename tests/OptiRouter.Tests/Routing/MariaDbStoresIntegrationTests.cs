@@ -380,6 +380,74 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         cmd.ExecuteNonQuery();
     }
 
+    /// <summary>
+    /// P1-5 回归：DB 故障跨越缓存 TTL 后，缓存刷新异常不得先于准入降级抛出。
+    /// 修复前 AuthorizeRequest 在 TTL 过期时先走 Flush/Load，异常直接传播；
+    /// 原有的进程内降级准入（AuthorizeViaDbNoLock 的 catch）永远执行不到。
+    /// 注入方式：测试中途 DROP 掉 scratch 库（真实 MySQL 异常），时钟推过 30s TTL。
+    /// </summary>
+    [Fact]
+    public void ClientKeyService_RefreshFailureAfterTtl_DegradesToSnapshotAuthorization()
+    {
+        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
+
+        // 独立 scratch 库：可整体 DROP 制造真实 DB 故障，不污染共享测试库。
+        string scratchDb = "optirouter_p1refresh_" + Guid.NewGuid().ToString("N")[..8];
+        string cs = System.Text.RegularExpressions.Regex.Replace(
+            ConnectionString!, @"Database=[^;]*", $"Database={scratchDb}");
+        ExecuteOnServer(ConnectionString!, $"CREATE DATABASE IF NOT EXISTS `{scratchDb}`");
+
+        var clock = new MutableClock(new DateTimeOffset(2026, 3, 1, 0, 0, 0, TimeSpan.Zero));
+        try
+        {
+            using var service = new ClientKeyService(
+                filePath: "n/a.json", logger: NullLogger<ClientKeyService>.Instance,
+                timeProvider: clock, flushInterval: TimeSpan.Zero, mariaDbConnectionString: cs);
+            var (plaintext, info) = service.CreateKey("p1-refresh-tenant", dailyBudgetUsd: 0m, maxQps: 2);
+
+            // DB 正常：全局口径放行。
+            Assert.True(service.AuthorizeRequest(plaintext).IsAuthorized);
+
+            // 注入 DB 故障（表所在库整体消失），时钟推过 30s 缓存刷新周期。
+            ExecuteOnServer(ConnectionString!, $"DROP DATABASE IF EXISTS `{scratchDb}`");
+            clock.Advance(TimeSpan.FromSeconds(31));
+
+            // 修复前：刷新异常直接抛出（Table doesn't exist）。
+            // 修复后：降级为快照 + 进程内 QPS 准入，正常放行。
+            Assert.True(service.AuthorizeRequest(plaintext).IsAuthorized);
+            Assert.True(service.AuthorizeRequest(plaintext).IsAuthorized);
+            // 降级口径的进程内 QPS 仍在工作：maxQps=2，窗口内第 3 次拒绝。
+            Assert.Equal(
+                ClientKeyAuthorizationStatus.RateLimited,
+                service.AuthorizeRequest(plaintext).Status);
+
+            // 管理端列举同样走缓存刷新路径：故障期间应返回快照而非抛异常。
+            Assert.Single(service.GetAllKeys(), k => k.KeyId == info.KeyId);
+        }
+        finally
+        {
+            ExecuteOnServer(ConnectionString!, $"DROP DATABASE IF EXISTS `{scratchDb}`");
+        }
+    }
+
+    /// <summary>连接服务器（不带 Database）执行 DDL，用于创建/销毁 scratch 库。</summary>
+    private static void ExecuteOnServer(string connectionString, string ddl)
+    {
+        string serverCs = System.Text.RegularExpressions.Regex.Replace(connectionString, @"Database=[^;]*;?", "");
+        using var conn = new MySqlConnector.MySqlConnection(serverCs);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = ddl;
+        cmd.ExecuteNonQuery();
+    }
+
+    private sealed class MutableClock(DateTimeOffset now) : TimeProvider
+    {
+        private DateTimeOffset _now = now;
+        public void Advance(TimeSpan delta) => _now += delta;
+        public override DateTimeOffset GetUtcNow() => _now;
+    }
+
     [Fact]
     public void AppConfigStore_Facade_RoutesToMariaDbBackend()
     {

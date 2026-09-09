@@ -157,13 +157,26 @@ public sealed class ClientKeyService : IDisposable
                 return _cachedKeys;
             }
 
-            FlushPendingDeltasNoLock();
-            var dbLoaded = _mariaDb.Load();
-            foreach (var key in dbLoaded)
-                ValidatePersistedKey(key);
-            _cachedKeys = dbLoaded;
-            _lastDbLoadUtc = _timeProvider.GetUtcNow().UtcDateTime;
-            return _cachedKeys;
+            // 刷新失败策略（与 AuthorizeViaDbNoLock 的降级口径一致）：刷新异常不得先于
+            // 准入降级抛出——视同 MariaDB 不可达，保留上一份快照继续进程内准入（QPS/预算），
+            // 按状态迁移记一次日志。不更新 _lastDbLoadUtc，后续调用继续尝试刷新，
+            // 恢复后自动回切全局口径；挂起花费增量留在内存，下轮重试提交。
+            // 密钥撤销/新建在故障期间对齐既有降级语义：以最后一次成功加载的快照为准。
+            try
+            {
+                FlushPendingDeltasNoLock();
+                var dbLoaded = _mariaDb.Load();
+                foreach (var key in dbLoaded)
+                    ValidatePersistedKey(key);
+                _cachedKeys = dbLoaded;
+                _lastDbLoadUtc = _timeProvider.GetUtcNow().UtcDateTime;
+            }
+            catch (Exception ex) when (ex is MySqlException or IOException)
+            {
+                MarkAuthDegraded(ex);
+            }
+
+            return _cachedKeys!; // EnsureStorageReady 在构造时已成功加载，此处必非空
         }
 
         if (File.Exists(_filePath))
