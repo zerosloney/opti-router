@@ -51,8 +51,10 @@ public sealed class CascadeUpgradeHandler
         HashSet<string> failedInThisRequest,
         CancellationToken ct)
     {
-        var routing = _options.CurrentValue.Routing;
+        var options = _options.CurrentValue;
+        var routing = options.Routing;
         if (!routing.EnableCascadeUpgrade) return null;
+        var hardExcluded = decision.HardExcludedModels.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
         string? requestContent = null;
@@ -90,8 +92,9 @@ public sealed class CascadeUpgradeHandler
         bool peerReview = false;
         if (!string.IsNullOrWhiteSpace(configuredVerifier))
         {
-            var resolved = _options.CurrentValue.Models
-                .FirstOrDefault(m => m.Enabled && string.Equals(m.Name, configuredVerifier, StringComparison.OrdinalIgnoreCase));
+            var resolved = options.Models
+                .FirstOrDefault(m => m.Enabled && !hardExcluded.Contains(m.Name)
+                    && string.Equals(m.Name, configuredVerifier, StringComparison.OrdinalIgnoreCase));
             if (resolved is not null)
             {
                 verifierModel = resolved;
@@ -99,7 +102,7 @@ public sealed class CascadeUpgradeHandler
             }
             else
             {
-                _logger.LogWarning("CascadeUpgradeVerifierModel '{Verifier}' 未找到或未启用，回退自评（cheap={Cheap})",
+                _logger.LogWarning("CascadeUpgradeVerifierModel '{Verifier}' 未找到、未启用或被硬约束排除，回退自评（cheap={Cheap})",
                     configuredVerifier, cheapModel.Name);
             }
         }
@@ -147,8 +150,10 @@ public sealed class CascadeUpgradeHandler
             // 升级目标从全量启用模型选，不依赖 decision.Candidates——
             // 候选链经 RuleClassifier/SemanticRouter 的 FilterByTier 砍成单 tier 后不含 Strong。
             // 排序与 RouterEngine 初始候选一致（Strong 优先 + MaxContextTokens 降序），结果可预测。
-            var upgradeTarget = _options.CurrentValue.Models
-                .Where(m => m.Enabled && m.Tier == ModelTier.Strong && !failedInThisRequest.Contains(m.Name))
+            // 可以越过 tier 偏好，但不能重新引入数据主权/能力过滤已硬排除的模型。
+            var upgradeTarget = options.Models
+                .Where(m => m.Enabled && m.Tier == ModelTier.Strong
+                    && !failedInThisRequest.Contains(m.Name) && !hardExcluded.Contains(m.Name))
                 .OrderByDescending(m => m.MaxContextTokens)
                 .FirstOrDefault();
             if (upgradeTarget is null) return null;
