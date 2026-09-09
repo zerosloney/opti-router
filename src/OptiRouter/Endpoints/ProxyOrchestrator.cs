@@ -358,6 +358,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         _regenerateTracker.Record(feedbackKey, fusionResult.LastModelName, success: true);
                     }
+                    await ModerateFinalOutputAsync(fusionResult.Response, options, routedTier, sessionId, requestContent, effectiveCt).ConfigureAwait(false);
                     return ProcessResponse(fusionResult.Response, piiMap);
                 }
                 // 失败后继续到 Fusion-lite（若同开且仍有足够候选）或串行降级。
@@ -389,6 +390,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     {
                         _regenerateTracker.Record(feedbackKey, fusionResult.LastModelName, success: true);
                     }
+                    await ModerateFinalOutputAsync(fusionResult.Response, options, routedTier, sessionId, requestContent, effectiveCt).ConfigureAwait(false);
                     return ProcessResponse(fusionResult.Response, piiMap);
                 }
                 // 全部失败：failedInThisRequest 已填充，continue 到下一轮串行降级。
@@ -440,28 +442,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             sessionId: sessionId, ct: effectiveCt).ConfigureAwait(false);
                     }
 
-                    // 内容审核（输出）：审核模型生成的最终响应文本，违规按策略中断。
-                    if (options.Routing.EnableContentModeration && _contentModerator is not null
-                        && options.Routing.ModerationOutputAction != OptiRouter.Compliance.ModerationAction.None
-                        && ShouldModerate(options.Routing))
-                    {
-                        string? outputText = ExtractContentText(response.Body);
-                        if (!string.IsNullOrWhiteSpace(outputText))
-                        {
-                            var modResult = await _contentModerator.ModerateTextAsync(
-                                outputText, OptiRouter.Compliance.ModerationDirection.Output, effectiveCt).ConfigureAwait(false);
-                            if (modResult.IsViolation)
-                            {
-                                _logger.LogWarning("Output blocked by content moderation: category={Category}, score={Score:F3}", modResult.Category, modResult.Score);
-                                _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-output-blocked:{modResult.Category}", false, modResult.Reason, false, routedTier, requestContent: requestContent);
-                                if (options.Routing.ModerationOutputAction == OptiRouter.Compliance.ModerationAction.Block)
-                                {
-                                    throw new OptiRouter.Compliance.ComplianceViolationException(
-                                        $"Output blocked by content moderation (category: {modResult.Category}).", modResult.Category);
-                                }
-                            }
-                        }
-                    }
+                    // 内容审核（输出）：所有非流式成功出口统一经 ModerateFinalOutputAsync，
+                    // 保证 Fusion/Race/Cascade 的最终答案与串行路径一样不绕过审核。
+                    await ModerateFinalOutputAsync(response, options, routedTier, sessionId, requestContent, effectiveCt).ConfigureAwait(false);
 
                     decimal cost = response.Usage is not null
                         ? CostCalculator.Compute(response.Usage, candidate)
@@ -513,6 +496,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                              request, response, decision, candidate, estimatedTokens, routedTier, sessionId, failedInThisRequest, effectiveCt).ConfigureAwait(false);
                         if (upgraded is not null)
                         {
+                            // 升级答案是新模型生成的新文本：Cheap 已过审不代表 Strong 答案过审，
+                            // 升级出口同样必须审核，否则 Cascade 借升级绕过输出审核。
+                            await ModerateFinalOutputAsync(upgraded.Response, options, routedTier, sessionId, requestContent, effectiveCt).ConfigureAwait(false);
                             // 升级成功：regenerate 反馈与响应缓存都记用户实际看到的 Strong 答案，
                             // 而非被判定低置信、未下发的 Cheap 答案（否则同键重发会惩罚错模型、且升级响应永远缓存 miss）。
                             var upgradedFinal = ProcessResponse(upgraded.Response, piiMap);
@@ -1419,6 +1405,46 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         decision.Candidates.Any(c =>
             !string.Equals(c.Name, currentModel, StringComparison.Ordinal)
             && !failed.Contains(c.Name));
+
+    /// <summary>
+    /// 最终响应输出审核的统一出口：串行、Fusion（quality router）、Fusion-lite（race）、
+    /// Cascade 升级四个非流式成功路径都必须经过，违规记审计并按
+    /// <see cref="Configuration.RoutingOptions.ModerationOutputAction"/> 为 Block 时抛
+    /// <see cref="OptiRouter.Compliance.ComplianceViolationException"/>。
+    /// 各模式的真实调用计费/学习反馈在各自路径已完成，不受此处阻断影响。
+    /// </summary>
+    private async Task ModerateFinalOutputAsync(
+        RawChatResponse response,
+        RouterOptions options,
+        ModelTier routedTier,
+        string? sessionId,
+        string? requestContent,
+        CancellationToken ct)
+    {
+        if (!options.Routing.EnableContentModeration || _contentModerator is null
+            || options.Routing.ModerationOutputAction == OptiRouter.Compliance.ModerationAction.None
+            || !ShouldModerate(options.Routing))
+        {
+            return;
+        }
+
+        string? outputText = ExtractContentText(response.Body);
+        if (string.IsNullOrWhiteSpace(outputText))
+            return;
+
+        var modResult = await _contentModerator.ModerateTextAsync(
+            outputText, OptiRouter.Compliance.ModerationDirection.Output, ct).ConfigureAwait(false);
+        if (!modResult.IsViolation)
+            return;
+
+        _logger.LogWarning("Output blocked by content moderation: category={Category}, score={Score:F3}", modResult.Category, modResult.Score);
+        _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-output-blocked:{modResult.Category}", false, modResult.Reason, false, routedTier, requestContent: requestContent);
+        if (options.Routing.ModerationOutputAction == OptiRouter.Compliance.ModerationAction.Block)
+        {
+            throw new OptiRouter.Compliance.ComplianceViolationException(
+                $"Output blocked by content moderation (category: {modResult.Category}).", modResult.Category);
+        }
+    }
 
     private static RawChatResponse ProcessResponse(RawChatResponse response, PiiMap? piiMap)
     {
