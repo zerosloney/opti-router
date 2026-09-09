@@ -7,7 +7,7 @@
 
 - .NET 单进程双职责：`/v1`、`/v1beta` OpenAI/Gemini 兼容代理路由 + Blazor Server 管理台（`/dashboard`、`/models` 等页面）。
 - 存储：MariaDB（`OptiRouter:ConfigDbConnectionString`，见 publish 的 `appsettings.Production.json`）；未配置连接时回退 SQLite。
-- 管理台鉴权：登录 Cookie（8h 滑动过期）或 `Authorization: Bearer <AdminApiKey>`；代理路径走 ProxyApiKey/租户 ClientKey。管理端路径前缀集中在 `Program.AdminPathPrefixes`（新增管理页面/接口必须同步）。
+- 管理台鉴权：登录 Cookie（8h 滑动过期）或 `Authorization: Bearer <AdminApiKey>`；代理路径走 ProxyApiKey/租户 ClientKey。管理端路径前缀集中在 `Security/RequestPathPolicy.AdminPathPrefixes`（新增管理页面/接口必须同步）。
 - 管理密钥在 `appsettings.json`（src 与 publish 两份保持一致）。
 
 ## 生产部署（本机）

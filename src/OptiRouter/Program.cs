@@ -1,7 +1,4 @@
-using System.Net.Http.Headers;
-using System.Security.Claims;
-using System.Security.Cryptography;
-using System.Text;
+using OptiRouter.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.RateLimiting;
@@ -525,7 +522,7 @@ builder.Services.AddSingleton<OptiRouter.Mcp.McpToolOrchestrator>(sp =>
 builder.Services.AddSingleton(new McpServerOptions
 {
     Enabled = true,
-    // 注意：Path 变更须同步 AdminPathPrefixes（/mcp 前缀靠它纳入管理端鉴权）。
+    // 注意：Path 变更须同步 RequestPathPolicy.AdminPathPrefixes（/mcp 前缀靠它纳入管理端鉴权）。
     Path = "/mcp",
     MaxToolCallTimeoutMs = 30_000
 });
@@ -755,13 +752,13 @@ builder.Services.AddRateLimiter(options =>
     };
     options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(context =>
     {
-        if (!IsProxyPath(context.Request.Path))
+        if (!RequestPathPolicy.IsProxyPath(context.Request.Path))
             return RateLimitPartition.GetNoLimiter("public");
 
         // 每请求从已合并的 IConfiguration 读阈值（含 WebApplicationFactory 经 ConfigureAppConfiguration 注入的值）。
         var config = context.RequestServices.GetRequiredService<IConfiguration>();
         bool trustProxy = config.GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false;
-        string partitionKey = ResolvePartitionKey(context, trustProxy);
+        string partitionKey = RequestIdentity.ResolvePartitionKey(context, trustProxy);
 
         // 注意：FixedWindowRateLimiter 的 PermitLimit 在分区首次创建时定型，运行时改配置仅对新建分区生效，
         // 既有分区沿用创建时的值——变更全局生效需重启进程。这是 ASP.NET 限流器的固有约束，非可热更。
@@ -868,223 +865,20 @@ app.Use(async (context, next) =>
     }
 });
 
-static bool IsProtectedPath(PathString path) =>
-    IsProxyPath(path)
-    || IsAdminPath(path);
-
-// 管理端路径前缀：受保护路径判定与鉴权中间件的管理分支共用一份定义，
-// 新增管理页面只改这里（漏改 = 漏保护）。
-static bool IsAdminPath(PathString path)
-{
-    foreach (var prefix in Program.AdminPathPrefixes)
-    {
-        if (path.StartsWithSegments(prefix))
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-// 代理入口路径（限流 / 并发闸 / 代理鉴权三处共用）。
-// /v1beta 是独立段：StartsWithSegments("/v1") 不匹配 "/v1beta/..."，必须显式并列，
-// 否则 Gemini 入口绕过限流与并发控制。
-static bool IsProxyPath(PathString path) =>
-    path.StartsWithSegments("/v1")
-    || path.StartsWithSegments("/v1beta");
-
-static bool IsBlazorFrameworkPath(PathString path) =>
-    path.StartsWithSegments("/_framework")
-    || path.StartsWithSegments("/_blazor")
-    || path.StartsWithSegments("/_content");
-
-app.Use(async (context, next) =>
-{
-    // Blazor Server 框架端点（静态资源 _framework/blazor.server.js、SignalR /_blazor negotiate）由浏览器
-    // 在页面加载后自动发起，无法携带 ?key= 查询参数，必须放行。页面 HTML 自身仍走下面的鉴权。
-    if (IsBlazorFrameworkPath(context.Request.Path))
-    {
-        await next(context).ConfigureAwait(false);
-        return;
-    }
-
-    if (!IsProtectedPath(context.Request.Path))
-    {
-        await next(context).ConfigureAwait(false);
-        return;
-    }
-
-    // 管理端与代理分离鉴权：
-    //   - 管理路径（dashboard/models 页面与 /api/dashboard、/api/models）：优先放行已登录会话（Cookie），
-    //     兼容 Authorization: Bearer <AdminApiKey>（脚本/测试客户端）。未认证的页面请求 302 到 /login，API 请求 401。
-    //   - /v1/* 代理路径：租户 ClientKeyService 全局准入（全局 ProxyApiKey 已移除——泄露面收敛，所有客户端走租户 key）。
-    bool isAdminPath = IsAdminPath(context.Request.Path);
-    bool isV1Path = IsProxyPath(context.Request.Path);
-    var adminKeyStore = app.Services.GetRequiredService<OptiRouter.Configuration.AdminKeyStore>();
-
-    if (isV1Path && !isAdminPath)
-    {
-        var authorizationResult = context.RequestServices
-            .GetRequiredService<ClientKeyService>()
-            .AuthorizeRequest(ExtractBearerToken(context));
-
-        switch (authorizationResult.Status)
-        {
-            case ClientKeyAuthorizationStatus.Authorized:
-                // Keep the complete immutable identity for OutcomeRecorder and other request
-                // scoped consumers without changing their public method signatures.
-                context.Items[typeof(ClientKeyAuthorizationResult)] = authorizationResult;
-                break;
-
-            case ClientKeyAuthorizationStatus.RateLimited:
-                await WriteClientKeyProblemAsync(
-                    context,
-                    StatusCodes.Status429TooManyRequests,
-                    "Client key rate limit exceeded",
-                    authorizationResult.RetryAfterSeconds,
-                    "RATE_LIMIT_EXCEEDED").ConfigureAwait(false);
-                return;
-
-            case ClientKeyAuthorizationStatus.BudgetExhausted:
-                await WriteClientKeyProblemAsync(
-                    context,
-                    StatusCodes.Status429TooManyRequests,
-                    "Client key daily budget exhausted",
-                    authorizationResult.RetryAfterSeconds,
-                    "BUDGET_EXHAUSTED").ConfigureAwait(false);
-                return;
-
-            case ClientKeyAuthorizationStatus.Invalid:
-            case ClientKeyAuthorizationStatus.Disabled:
-            default:
-                await WriteClientKeyProblemAsync(
-                    context,
-                    StatusCodes.Status401Unauthorized,
-                    "Unauthorized",
-                    code: "INVALID_API_KEY").ConfigureAwait(false);
-                return;
-        }
-    }
-    else if (isAdminPath)
-    {
-        bool sessionAuthenticated = context.User.Identity?.IsAuthenticated == true;
-        string? presentedToken = sessionAuthenticated ? null : ExtractBearerToken(context);
-
-        // Bearer 爆破防护：管理 API 直连 Bearer 的失败尝试与 /login 登录页共享同一 IP 锁定窗口
-        //（限流器只覆盖 /v1/*，此前这里完全无阻）。仅在实际出示了 token 时参与——
-        // 匿名页面/无凭证 API 请求不计数，避免误伤正常浏览；已登录 Cookie 会话不受影响。
-        if (presentedToken is not null)
-        {
-            var loginRateLimiter = context.RequestServices.GetRequiredService<LoginRateLimiter>();
-            bool trustProxy = context.RequestServices.GetRequiredService<IConfiguration>()
-                .GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false;
-            string throttleKey = LoginRateLimiter.ResolveClientIp(context, trustProxy);
-            if (loginRateLimiter.IsLocked(throttleKey))
-            {
-                await ProtocolErrorHelper.WriteProxyErrorAsync(
-                    context, StatusCodes.Status401Unauthorized, "Unauthorized", "INVALID_API_KEY").ConfigureAwait(false);
-                return;
-            }
-        }
-
-        bool bearerAuthenticated = presentedToken is not null && adminKeyStore.IsValid(presentedToken);
-
-        if (!sessionAuthenticated && !bearerAuthenticated)
-        {
-            if (presentedToken is not null)
-            {
-                // 校验失败计入锁定窗口（与登录页同语义：窗口内累计 5 次失败即锁 5 分钟）。
-                var loginRateLimiter = context.RequestServices.GetRequiredService<LoginRateLimiter>();
-                bool trustProxy = context.RequestServices.GetRequiredService<IConfiguration>()
-                    .GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false;
-                loginRateLimiter.RecordFailure(LoginRateLimiter.ResolveClientIp(context, trustProxy));
-            }
-            // 页面（HTML）场景：浏览器重定向到登录页；API 场景：直接 401。
-            // openapi.json（/dashboard/api-docs）与 /mcp（JSON-RPC，MCP 客户端不认登录页
-            // 重定向）按 API 处理返回 401，便于工具链识别。
-            bool isPageRequest = !context.Request.Path.StartsWithSegments("/api")
-                && !context.Request.Path.StartsWithSegments("/dashboard/api-docs")
-                && !context.Request.Path.StartsWithSegments("/mcp");
-            if (isPageRequest)
-            {
-                context.Response.Redirect("/login");
-                return;
-            }
-            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            return;
-        }
-    }
-    else
-    {
-        // 兜底：受保护路径既非 /v1 代理也非管理前缀（前缀集合并集外的理论场景）——直接拒绝。
-        await ProtocolErrorHelper.WriteProxyErrorAsync(
-            context,
-            StatusCodes.Status401Unauthorized,
-            "Unauthorized",
-            "INVALID_API_KEY").ConfigureAwait(false);
-        return;
-    }
-
-    // 管理端 key 经 URL/referer 有泄露风险：禁止页面外传 referer，降低泄露面。
-    context.Response.Headers["Referrer-Policy"] = "no-referrer";
-
-    await next(context).ConfigureAwait(false);
-});
-
-static string? ExtractBearerToken(HttpContext context)
-{
-    if (AuthenticationHeaderValue.TryParse(context.Request.Headers.Authorization, out var authorization)
-        && authorization.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase))
-    {
-        return authorization.Parameter;
-    }
-    return ExtractProtocolNativeKey(context);
-}
-
-// 协议对齐：原生协议入口使用各自的 key 传递习惯，与 Bearer 等价参与同一套校验
-// （ProxyApiKey / ClientKeyService），不新增密钥体系。
-static string? ExtractProtocolNativeKey(HttpContext context)
-{
-    var path = context.Request.Path;
-    if (path.StartsWithSegments("/v1/messages"))
-    {
-        return context.Request.Headers["x-api-key"].FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
-    }
-    if (path.StartsWithSegments("/v1beta"))
-    {
-        return context.Request.Headers["x-goog-api-key"].FirstOrDefault(v => !string.IsNullOrWhiteSpace(v))
-            ?? context.Request.Query["key"].FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
-    }
-    return null;
-}
-
-static async Task WriteClientKeyProblemAsync(
-    HttpContext context,
-    int statusCode,
-    string title,
-    int retryAfterSeconds = 0,
-    string code = "INVALID_API_KEY")
-{
-    await ProtocolErrorHelper.WriteProxyErrorAsync(
-        context,
-        statusCode,
-        title,
-        code,
-        retryAfterSeconds).ConfigureAwait(false);
-}
+app.UseMiddleware<RequestAuthenticationMiddleware>();
 
 // M2 阶段：分区最大并发数控制，防止单用户请求洪水打满线程池
 // （端点级授权——Blazor Hub RequireAuthorization / Razor 页 [Authorize]——在此之后评估。）
 app.UseAuthorization();
 app.Use(async (context, next) =>
 {
-    if (!IsProxyPath(context.Request.Path))
+    if (!RequestPathPolicy.IsProxyPath(context.Request.Path))
     {
         await next(context).ConfigureAwait(false);
         return;
     }
 
-    string partitionKey = ResolvePartitionKey(context,
+    string partitionKey = RequestIdentity.ResolvePartitionKey(context,
         app.Configuration.GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false);
 
     int maxConcurrency = app.Configuration.GetValue<int?>("OptiRouter:MaxConcurrentRequestsPerPartition") ?? 100;
@@ -1145,7 +939,7 @@ if (enableMetrics)
     {
         metricsEndpoint.AddEndpointFilter(async (context, next) =>
         {
-            string? providedKey = ExtractBearerToken(context.HttpContext);
+            string? providedKey = RequestIdentity.ExtractApiKey(context.HttpContext);
             if (!AdminKeyVerifier.IsValid(metricsApiKey, providedKey))
             {
                 context.HttpContext.Response.StatusCode = StatusCodes.Status401Unauthorized;
@@ -1219,7 +1013,7 @@ app.MapModelsConfigEndpoints();
 // POST /mcp           — JSON-RPC 单请求
 // POST /mcp/batch     — JSON-RPC batch 请求
 // GET  /mcp/tools     — 列出所有可用工具（人类可读）
-// /mcp 已纳入 AdminPathPrefixes：外部 MCP 客户端携带 Bearer <AdminApiKey>，
+// /mcp 已纳入 RequestPathPolicy.AdminPathPrefixes：外部 MCP 客户端携带 Bearer <AdminApiKey>，
 // 浏览器访问走登录 Cookie；未认证请求由自定义鉴权中间件 401 拦截（不 302 登录页）。
 var mcpOptions = app.Services.GetRequiredService<OptiRouter.Mcp.McpServerOptions>();
 var mcpServer = app.Services.GetRequiredService<OptiRouter.Mcp.McpServerHost>();
@@ -1262,63 +1056,8 @@ if (mcpOptions.Enabled)
 
 app.Run();
 
-// 分区 Key 解析：限流与并发中间件共用。
-// 优先级 IP > Auth：
-//   - IP：网络来源（CF-Connecting-IP > X-Forwarded-For 首段 > RemoteIpAddress），
-//         仅当 OptiRouter:TrustProxyHeaders=true 时信任代理头（必须位于可信反代/CF 之后）；
-//         否则回退 socket 级 RemoteIpAddress，防止客户端伪造代理头绕过限流/并发限制
-//   - Auth：退路（无 IP 才用），SHA256 前 16 hex 字符，避免明文 key 入分区诊断日志
-// 注意：X-Session-Id 是客户端可控头，不作为限流身份——每请求换随机值即可独享配额绕过限流；
-// 它仅用于会话亲和路由与记账。同 IP 多会话共享配额是限流的保守正确行为。
-static string ResolvePartitionKey(HttpContext context, bool trustProxyHeaders)
-{
-    var headers = context.Request.Headers;
-
-    string? ip = null;
-    if (trustProxyHeaders && headers.TryGetValue("CF-Connecting-IP", out var cfIp) && !string.IsNullOrEmpty(cfIp))
-        ip = cfIp;
-    else if (trustProxyHeaders && headers.TryGetValue("X-Forwarded-For", out var xff) && !string.IsNullOrEmpty(xff))
-        ip = xff.ToString().Split(',')[0].Trim();
-    else
-        ip = context.Connection.RemoteIpAddress?.ToString();
-
-    if (!string.IsNullOrEmpty(ip))
-        return $"ip:{ip}";
-
-    if (headers.TryGetValue("Authorization", out var authHeader)
-        && authHeader.ToString().StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-    {
-        string token = authHeader.ToString().Substring("Bearer ".Length).Trim();
-        return $"auth:{HashPartitionToken(token)}";
-    }
-
-    return "anonymous";
-}
-
-static string HashPartitionToken(string token)
-{
-    // 前 16 hex 字符（64 bit），分区去重足够，且不可逆推原 key。
-    byte[] hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
-    return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
-}
-
 public partial class Program
 {
-    /// <summary>管理端路径前缀（页面与 API）。受保护路径判定与鉴权中间件共用。</summary>
-    internal static readonly string[] AdminPathPrefixes =
-    {
-        "/dashboard",
-        "/overview",
-        "/requests",
-        "/models",
-        "/router",
-        "/keys",
-        "/benchmarks",
-        "/api/dashboard",
-        "/api/models",
-        "/mcp"
-    };
-
     /// <summary>
     /// 首启迁移：配置库无数据时，把 appsettings.json 的 Routing/Budget 段与遗留 models-config.json
     /// 的模型列表导入数据库。之后 DB 为唯一权威，不再读取文件配置。
