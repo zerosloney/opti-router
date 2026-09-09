@@ -318,6 +318,68 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         Assert.Contains(report.Cascade.UpgradedFrom, kv => kv.Key == "other");
     }
 
+    /// <summary>
+    /// P1-4 回归：MariaDB 路由/预算文档保存必须是跨实例原子 CAS。修复前事务内普通 SELECT
+    /// 检查版本后直接 UPSERT，两个实例持相同 expectedVersion 并发保存会双双通过、后写覆盖先写。
+    /// 修复后：文档行按旧内容条件 UPDATE（InnoDB 当前读 + 行锁），首次无文档场景并发首写
+    /// 由主键冲突判定——同版本并发保存恰好一方成功。需真实 MariaDB（OPTIROUTER_MARIADB_TEST）。
+    /// </summary>
+    [Fact]
+    public async Task AppConfigStore_TrySaveRoutingBudget_ConcurrentSameVersion_ExactlyOneWins()
+    {
+        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
+
+        // 构造即建表（CREATE TABLE IF NOT EXISTS），随后清出确定的空文档状态。
+        using var storeA = new AppConfigDbStore("n/a.db", ConnectionString!);
+        ClearRoutingBudgetDocuments();
+        using var storeB = new AppConfigDbStore("n/a.db", ConnectionString!);
+
+        // 首次无文档场景：两写手拿"空文档版本"并发首写，恰好一方成功（INSERT 主键冲突判定）。
+        var (_, _, emptyVersion) = storeA.LoadRoutingBudgetSnapshot();
+        Assert.Equal(1, (await RaceSaveRoutingBudget(storeA, storeB, emptyVersion, "first")).Count(w => w));
+
+        // 常规冲突：每轮两写手拿同一 expectedVersion 并发覆盖，恰好一方成功。
+        // 修复前此处大概率出现双成功（后写覆盖先写）；多轮循环放大竞态窗口。
+        for (int round = 0; round < 10; round++)
+        {
+            var (_, _, version) = storeA.LoadRoutingBudgetSnapshot();
+            Assert.Equal(1, (await RaceSaveRoutingBudget(storeA, storeB, version, $"round-{round}")).Count(w => w));
+        }
+
+        // 串行过期版本：旧 expectedVersion 失败且返回当前库内版本。
+        var (_, _, currentVersion) = storeA.LoadRoutingBudgetSnapshot();
+        Assert.False(storeA.TrySaveRoutingBudgetDocuments(
+            "stale-version", "{\"x\":1}", "{\"x\":1}", out string conflictVersion));
+        Assert.Equal(currentVersion, conflictVersion);
+        // 失败方不得改动文档：并发轮的胜者内容保持原样。
+        var (routing, _, _) = storeA.LoadRoutingBudgetSnapshot();
+        Assert.Contains("winner", routing);
+    }
+
+    /// <summary>两个独立 store 实例（模拟两个进程）屏障后用同一版本并发保存，返回双方成败。</summary>
+    private static async Task<bool[]> RaceSaveRoutingBudget(AppConfigDbStore a, AppConfigDbStore b, string expectedVersion, string tag)
+    {
+        string Routing(string writer) => $"{{\"writer\":\"{writer}\",\"tag\":\"{tag}\"}}";
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var t1 = Task.Run(() => { start.Task.Wait(); return a.TrySaveRoutingBudgetDocuments(expectedVersion, Routing("winner-A"), Routing("winner-A"), out _); });
+        var t2 = Task.Run(() => { start.Task.Wait(); return b.TrySaveRoutingBudgetDocuments(expectedVersion, Routing("winner-B"), Routing("winner-B"), out _); });
+        start.SetResult();
+        return await Task.WhenAll(t1, t2);
+    }
+
+    /// <summary>清空路由/预算文档行，保证"首次无文档"场景可确定性重现（专用测试库约定）。</summary>
+    private void ClearRoutingBudgetDocuments()
+    {
+        using var conn = new MySqlConnector.MySqlConnection(ConnectionString);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"""
+            DELETE FROM optirouter_app_config
+            WHERE `key` = 'document' AND scope IN ('{AppConfigDbStore.RoutingScope}', '{AppConfigDbStore.BudgetScope}');
+            """;
+        cmd.ExecuteNonQuery();
+    }
+
     [Fact]
     public void AppConfigStore_Facade_RoutesToMariaDbBackend()
     {

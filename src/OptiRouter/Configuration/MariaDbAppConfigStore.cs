@@ -234,6 +234,14 @@ internal sealed class MariaDbAppConfigStore : IDisposable
 
     /// <summary>
     /// 仅当当前路由/预算文档版本仍等于 <paramref name="expectedVersion"/> 时原子覆盖两份文档。
+    /// <para>
+    /// 跨实例原子 CAS：事务内普通 SELECT 检查版本后直接 UPSERT 不是原子操作——两个连接可持
+    /// 相同 expectedVersion 双双通过检查，后写覆盖先写。这里改为<b>内容条件更新</b>：
+    /// 版本检查通过后，每份文档以读取到的旧内容作 WHERE 谓词 UPDATE（InnoDB 当前读会看到
+    /// 最新已提交内容并持行锁至提交），另一实例抢先提交后谓词不匹配 → 0 行 → 回滚报冲突。
+    /// 首次无文档场景无行可加锁，直接 INSERT 并发首写由主键冲突（错误码 1062）判定，
+    /// 恰好一方成功。写入顺序两份文档固定先 routing 后 budget，无双写死锁。
+    /// </para>
     /// </summary>
     public bool TrySaveRoutingBudgetDocuments(
         string expectedVersion,
@@ -249,7 +257,9 @@ internal sealed class MariaDbAppConfigStore : IDisposable
         {
             using var conn = new MySqlConnection(_connectionString);
             conn.Open();
-            using var transaction = conn.BeginTransaction();
+            // READ COMMITTED：CAS 正确性由条件 UPDATE 的谓词（当前读）保证，不依赖事务快照。
+            // 默认 REPEATABLE READ 下，快照读之后行被并发提交改写会触发 1020（Record has changed）。
+            using var transaction = conn.BeginTransaction(System.Data.IsolationLevel.ReadCommitted);
             string? currentRouting = LoadDocumentNoLock(conn, transaction, AppConfigDbStore.RoutingScope);
             string? currentBudget = LoadDocumentNoLock(conn, transaction, AppConfigDbStore.BudgetScope);
             string currentVersion = ComputeDocumentsVersion(currentRouting, currentBudget);
@@ -260,12 +270,76 @@ internal sealed class MariaDbAppConfigStore : IDisposable
                 return false;
             }
 
-            SaveDocumentNoLock(conn, transaction, AppConfigDbStore.RoutingScope, routingJson);
-            SaveDocumentNoLock(conn, transaction, AppConfigDbStore.BudgetScope, budgetJson);
-            transaction.Commit();
-            version = ComputeDocumentsVersion(routingJson, budgetJson);
-            return true;
+            try
+            {
+                bool routingSaved = ConditionalSaveDocumentNoLock(
+                    conn, transaction, AppConfigDbStore.RoutingScope, currentRouting, routingJson);
+                bool budgetSaved = ConditionalSaveDocumentNoLock(
+                    conn, transaction, AppConfigDbStore.BudgetScope, currentBudget, budgetJson);
+                if (routingSaved && budgetSaved)
+                {
+                    transaction.Commit();
+                    version = ComputeDocumentsVersion(routingJson, budgetJson);
+                    return true;
+                }
+            }
+            catch (MySqlException ex) when (ex.Number == DuplicateKeyErrorNumber)
+            {
+                // 并发首写同一文档行的主键冲突：本方落败。
+            }
+
+            transaction.Rollback();
+            version = LoadRoutingBudgetVersionFresh();
+            return false;
         }
+    }
+
+    /// <summary>
+    /// 文档行条件写入：旧内容非空时以旧内容作谓词 CAS UPDATE（BINARY 强制按字节比较，
+    /// 避免 ci collation 把仅大小写不同的不同内容误判相等）；旧内容为空（行不存在）时
+    /// 直接 INSERT，并发首写抛 1062 由调用方按落败处理。返回 false = 条件不匹配。
+    /// </summary>
+    private bool ConditionalSaveDocumentNoLock(
+        MySqlConnection conn, MySqlTransaction transaction, string scope, string? oldJson, string newJson)
+    {
+        if (oldJson is not null)
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = transaction;
+            cmd.CommandText = $"""
+                UPDATE {Table} SET value = @v, updated_at = @ts
+                WHERE scope = @s AND `key` = @k AND BINARY value = @old;
+                """;
+            cmd.Parameters.AddWithValue("@s", scope);
+            cmd.Parameters.AddWithValue("@k", DocumentKey);
+            cmd.Parameters.AddWithValue("@v", newJson);
+            cmd.Parameters.AddWithValue("@ts", NowTimestamp());
+            cmd.Parameters.AddWithValue("@old", oldJson);
+            return cmd.ExecuteNonQuery() > 0;
+        }
+
+        using var insert = conn.CreateCommand();
+        insert.Transaction = transaction;
+        insert.CommandText = $"""
+            INSERT INTO {Table} (scope, `key`, value, ord, updated_at)
+            VALUES (@s, @k, @v, 0, @ts);
+            """;
+        insert.Parameters.AddWithValue("@s", scope);
+        insert.Parameters.AddWithValue("@k", DocumentKey);
+        insert.Parameters.AddWithValue("@v", newJson);
+        insert.Parameters.AddWithValue("@ts", NowTimestamp());
+        insert.ExecuteNonQuery();
+        return true;
+    }
+
+    /// <summary>冲突回滚后用全新连接重读当前路由/预算版本（原事务 RR 快照已过期，不可复用）。</summary>
+    private string LoadRoutingBudgetVersionFresh()
+    {
+        using var conn = new MySqlConnection(_connectionString);
+        conn.Open();
+        string? routing = LoadDocumentNoLock(conn, transaction: null, AppConfigDbStore.RoutingScope);
+        string? budget = LoadDocumentNoLock(conn, transaction: null, AppConfigDbStore.BudgetScope);
+        return ComputeDocumentsVersion(routing, budget);
     }
 
     /// <remarks>调用方保证 conn 已打开；transaction 非空时命令挂到该事务。</remarks>
@@ -279,23 +353,8 @@ internal sealed class MariaDbAppConfigStore : IDisposable
         return cmd.ExecuteScalar() as string;
     }
 
-    private void SaveDocumentNoLock(MySqlConnection conn, MySqlTransaction transaction, string scope, string json)
-    {
-        using var cmd = conn.CreateCommand();
-        cmd.Transaction = transaction;
-        cmd.CommandText = $"""
-            INSERT INTO {Table} (scope, `key`, value, ord, updated_at)
-            VALUES (@s, @k, @v, 0, @ts)
-            ON DUPLICATE KEY UPDATE
-                value = VALUES(value),
-                updated_at = VALUES(updated_at);
-            """;
-        cmd.Parameters.AddWithValue("@s", scope);
-        cmd.Parameters.AddWithValue("@k", DocumentKey);
-        cmd.Parameters.AddWithValue("@v", json);
-        cmd.Parameters.AddWithValue("@ts", NowTimestamp());
-        cmd.ExecuteNonQuery();
-    }
+    /// <summary>并发首写同一文档行时主键冲突的 MariaDB 错误码（ER_DUP_ENTRY）。</summary>
+    private const int DuplicateKeyErrorNumber = 1062;
 
     private static string ComputeDocumentsVersion(string? routingJson, string? budgetJson)
     {
