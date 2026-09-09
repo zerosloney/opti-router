@@ -1,6 +1,8 @@
 using System.Net;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using OptiRouter.Clients;
@@ -59,6 +61,8 @@ public sealed class OutputModerationExitTests
         public int StrongRawCalls;
         public ExitMode Mode { get; set; }
         public bool Violating { get; set; }
+        /// <summary>SUT 侧 Error 级日志捕获（含未处理异常堆栈），诊断并行负载下的偶发 500。</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<string> CapturedErrors { get; } = new();
 
         public new HttpClient CreateClient()
         {
@@ -75,6 +79,8 @@ public sealed class OutputModerationExitTests
             builder.UseSetting("OptiRouter:EnableSingleInstanceGuard", "false");
             builder.UseSetting("OptiRouter:ConfigDbPath",
                 Path.Combine(Path.GetTempPath(), "optirouter-config-test-" + Guid.NewGuid().ToString("N") + ".db"));
+            builder.ConfigureLogging(logging =>
+                logging.AddProvider(new CapturingLoggerProvider(CapturedErrors)));
             builder.ConfigureServices(services =>
             {
                 services.RemoveBackgroundServices();
@@ -84,6 +90,26 @@ public sealed class OutputModerationExitTests
                 services.AddSingleton<IModelClientProvider>(new TestModelClientProvider(BuildClients()));
                 services.Configure<RouterOptions>(ConfigureRouting);
             });
+        }
+
+        /// <summary>把 SUT Error 级日志转入测试可断言的队列。</summary>
+        private sealed class CapturingLoggerProvider(System.Collections.Concurrent.ConcurrentQueue<string> sink) : Microsoft.Extensions.Logging.ILoggerProvider
+        {
+            public Microsoft.Extensions.Logging.ILogger CreateLogger(string categoryName) => new CapturingLogger(sink);
+
+            public void Dispose() { }
+
+            private sealed class CapturingLogger(System.Collections.Concurrent.ConcurrentQueue<string> sink) : Microsoft.Extensions.Logging.ILogger
+            {
+                public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+                public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => logLevel >= Microsoft.Extensions.Logging.LogLevel.Error;
+                public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+                    TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+                {
+                    if (IsEnabled(logLevel))
+                        sink.Enqueue(formatter(state, exception) + "\n" + exception);
+                }
+            }
         }
 
         /// <summary>按执行模式返回路由开关配置（模型定义与 CascadeHardConstraintTests 同源：cheap 为首选候选）。</summary>
@@ -175,13 +201,16 @@ public sealed class OutputModerationExitTests
         return (factory, primary);
     }
 
-    private static async Task<(HttpStatusCode Status, string Body)> PostChatAsync(HttpClient client)
+    private static async Task<(HttpStatusCode Status, string Body)> PostChatAsync(ExitModeFactory factory, HttpClient client)
     {
         using var response = await client.PostAsync("/v1/chat/completions",
             new StringContent(
                 JsonSerializer.Serialize(new ChatRequest { Model = "auto", Messages = [ChatMessage.FromText("user", "Hi")] }),
                 System.Text.Encoding.UTF8, "application/json"));
-        return (response.StatusCode, await response.Content.ReadAsStringAsync());
+        string body = await response.Content.ReadAsStringAsync();
+        Assert.True(response.StatusCode == HttpStatusCode.OK || response.StatusCode == HttpStatusCode.BadRequest,
+            $"unexpected status {(int)response.StatusCode}: {body}\nSUT errors:\n{string.Join("\n---\n", factory.CapturedErrors)}");
+        return (response.StatusCode, body);
     }
 
     /// <summary>所有执行模式 × 违规输出：违规文本不得送达客户端（400 CONTENT_MODERATED）。</summary>
@@ -195,7 +224,7 @@ public sealed class OutputModerationExitTests
         var (factory, _) = Build(mode, violating: true);
         using var client = factory.CreateClient();
 
-        var (status, body) = await PostChatAsync(client);
+        var (status, body) = await PostChatAsync(factory, client);
 
         Assert.Equal(HttpStatusCode.BadRequest, status);
         using var doc = JsonDocument.Parse(body);
@@ -229,7 +258,7 @@ public sealed class OutputModerationExitTests
         var (factory, primary) = Build(mode, violating: false);
         using var client = factory.CreateClient();
 
-        var (status, body) = await PostChatAsync(client);
+        var (status, body) = await PostChatAsync(factory, client);
 
         Assert.Equal(HttpStatusCode.OK, status);
         Assert.Contains(primary, body);

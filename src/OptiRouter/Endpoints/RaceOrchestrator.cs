@@ -106,6 +106,9 @@ public sealed class RaceOrchestrator
         using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var perCandidateCts = new Dictionary<string, CancellationTokenSource>(StringComparer.Ordinal);
         var tasks = new List<Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs, bool WasHalfOpen, bool RequestSent)>>();
+        // 任务 → 模型映射：Task.Run 带取消令牌时，令牌在委托被调度前取消会使任务直接进入
+        // Canceled 态（委托未运行、内部 try/catch 不存在），await 无元组结果，需按此映射回模型结算槽位。
+        var taskModels = new Dictionary<Task, ModelEndpointOptions>();
         int hedgeDelayMs = options.Routing.FusionHedgeDelayMs;
 
         for (int idx = 0; idx < admitted.Count; idx++)
@@ -115,7 +118,7 @@ public sealed class RaceOrchestrator
             perCandidateCts[model.Name] = linkedCts;
             // 主候选（admitted[0]）立即启动；hedged 候选（admitted[1..]）在 HedgeDelayMs 后启动（若期间主已成功则不启动）。
             bool isHedged = idx > 0 && hedgeDelayMs > 0;
-            tasks.Add(Task.Run(async () =>
+            var task = Task.Run(async () =>
             {
                 // hedged：先等待延迟；延迟内 raceCts 取消（主已成功或请求被取消）则不发请求（1× 成本）。
                 if (isHedged)
@@ -143,7 +146,9 @@ public sealed class RaceOrchestrator
                     sw.Stop();
                     return (model, (RawChatResponse?)null, ex, sw.ElapsedMilliseconds, wasHalfOpen, true);
                 }
-            }, linkedCts.Token));
+            }, linkedCts.Token);
+            taskModels[task] = model;
+            tasks.Add(task);
         }
 
         // 3. WhenAny 循环：首个成功立即采纳并 cancel 其余。
@@ -159,7 +164,14 @@ public sealed class RaceOrchestrator
             var done = await Task.WhenAny(remaining).ConfigureAwait(false);
             remaining.Remove(done);
 
-            var (model, response, error, elapsedMs, wasHalfOpen, requestSent) = await done.ConfigureAwait(false);
+            var (completed, model, response, error, elapsedMs, wasHalfOpen, requestSent) = await AwaitRaceTaskAsync(done, taskModels[done]).ConfigureAwait(false);
+            if (!completed)
+            {
+                // 令牌在委托调度前取消，任务 Canceled 态终止：等价未发请求，仅释放槽位。
+                _healthTracker.ReleaseProbe(model.Name);
+                accounted.Add(model.Name);
+                continue;
+            }
 
             // hedged 未启动（延迟期内主已成功，raceCts 取消）：未调上游，仅释放槽位，不计成本、不记断路器。
             if (!requestSent)
@@ -294,7 +306,14 @@ public sealed class RaceOrchestrator
         //    WhenWhenAll 已使任务全部完成，此处再 await 立即返回缓存结果。
         foreach (var task in remaining)
         {
-            var (m, response, error, elapsedMs, _, requestSent) = await task.ConfigureAwait(false);
+            var (completed, m, response, error, elapsedMs, _, requestSent) = await AwaitRaceTaskAsync(task, taskModels[task]).ConfigureAwait(false);
+            if (!completed)
+            {
+                // 同上：Canceled 态等价未发请求，仅释放槽位。
+                _healthTracker.ReleaseProbe(m.Name);
+                accounted.Add(m.Name);
+                continue;
+            }
 
             // 跳过循环内已记审计的（成功采纳/失败/被取消）。
             if (accounted.Contains(m.Name))
@@ -402,4 +421,26 @@ public sealed class RaceOrchestrator
         return new FusionAttemptResult(adopted, lastModelName, lastStatusCode, lastErrorMessage);
     }
 
+    /// <summary>
+    /// 等待竞速任务并区分"委托产出结果"与"任务被取消态终止"。Task.Run 带取消令牌时，
+    /// 令牌在委托被线程池调度前取消会使任务直接进入 Canceled 态——委托未运行、其内部
+    /// try/catch 不存在，await 直接抛 TaskCanceledException 逃逸出 ExecuteAsync（负载越重
+    /// 调度延迟越大，窗口越大）。Canceled 态等价"未发请求"：completed=false 时
+    /// RequestSent=false，调用方按既有未启动分支结算（仅释放探测槽位，不计成本/熔断）。
+    /// </summary>
+    private static async Task<(bool Completed, ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs, bool WasHalfOpen, bool RequestSent)>
+        AwaitRaceTaskAsync(
+            Task<(ModelEndpointOptions Model, RawChatResponse? Response, Exception? Error, long ElapsedMs, bool WasHalfOpen, bool RequestSent)> task,
+            ModelEndpointOptions model)
+    {
+        try
+        {
+            var result = await task.ConfigureAwait(false);
+            return (true, result.Model, result.Response, result.Error, result.ElapsedMs, result.WasHalfOpen, result.RequestSent);
+        }
+        catch (OperationCanceledException)
+        {
+            return (false, model, null, null, 0, false, false);
+        }
+    }
 }
