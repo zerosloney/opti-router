@@ -867,10 +867,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 ChatUsage? finalUsage = null;
                 Exception? preStreamFailure = null;
                 bool hasFirstLine = false;
-                // probeResolved：已上报成功/失败结果；streamFaulted：首行后流中途异常中断。
-                // 两者共同保证离开本候选时探测槽位必被结算（上报或释放），不泄漏。
+                // probeResolved：已上报成功/失败结果；streamFaulted：首行后流中途异常中断；
+                // clientCancelled：首行后客户端外部取消（不算上游故障）。三者共同保证离开本候选时
+                // 探测槽位必被结算（上报或释放），不泄漏。
                 bool probeResolved = false;
                 bool streamFaulted = false;
+                bool clientCancelled = false;
                 StreamingHedgeOrchestrator? hedge = null;
                 var attemptSw = System.Diagnostics.Stopwatch.StartNew();
 
@@ -1161,6 +1163,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             {
                                 moved = await enumerator!.MoveNextAsync().ConfigureAwait(false);
                             }
+                            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                            {
+                                // P1-6：客户端外部取消不是上游故障——不进熔断统计；
+                                // ct 未取消的 OCE（代理内部超时）仍按流故障计。区分结果在 finally 结算。
+                                clientCancelled = true;
+                                throw;
+                            }
                             catch
                             {
                                 // 流中途异常中断（上游断连/超时等）：标记后向外抛出。
@@ -1258,9 +1267,33 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                                 candidate.Name, tripped ? " (circuit tripped)" : "");
                         }
+                        else if (hasFirstLine)
+                        {
+                            // P1-6：客户端取消 / 提前断开不是上游失败——不进熔断、不记负反馈。
+                            // usage 行已到达的消费仍须一次性结算（供应商侧可能已按生成量计费），
+                            // 不重复计费（正常结束路径不会再走这里）。
+                            attemptSw.Stop();
+                            string terminal = clientCancelled ? "client-cancelled" : "client-disconnected";
+                            if (finalUsage is not null)
+                            {
+                                decimal cost = CostCalculator.Compute(finalUsage, candidate);
+                                _recorder.RecordCost(cost, sessionId);
+                                _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage, cost,
+                                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
+                                    timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
+                                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                            }
+                            else
+                            {
+                                _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
+                                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
+                                    requestContent: requestContent);
+                            }
+                            _healthTracker.ReleaseProbe(candidate.Name);
+                        }
                         else
                         {
-                            // 无健康信号（不可重试错误、外部取消、空流、客户端提前断开）：仅释放探测槽位。
+                            // 无健康信号（不可重试错误、首行前外部取消、空流）：仅释放探测槽位。
                             _healthTracker.ReleaseProbe(candidate.Name);
                         }
                     }
