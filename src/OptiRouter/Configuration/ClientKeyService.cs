@@ -535,6 +535,8 @@ public sealed class ClientKeyService : IDisposable
 
     /// <summary>
     /// 创建新密钥。返回一次性明文（调用方须立即交付租户，不再持久化也不再可重取）与持久化的 KeyInfo。
+    /// 先持久化成功再发布到内存缓存：持久化失败抛异常时缓存保持原状，
+    /// 不会出现"API 报错但新密钥已可鉴权"的劈裂状态。
     /// </summary>
     public (string PlaintextKey, ClientKeyInfo Info) CreateKey(
         string tenantName,
@@ -546,11 +548,17 @@ public sealed class ClientKeyService : IDisposable
         {
             var keys = GetCachedOrLoadKeysNoLock();
             var (plaintext, info) = Build(tenantName.Trim(), dailyBudgetUsd, maxQps);
-            keys.Add(info);
             if (_mariaDb is not null)
-                _mariaDb.InsertKey(info); // 按行插入，不影响其他实例的行
+            {
+                _mariaDb.InsertKey(info); // 按行插入，失败即抛且缓存不动，不影响其他实例的行
+                keys.Add(info);
+            }
             else
-                PersistKeys(keys);
+            {
+                // 文件后端：写入含新 key 的独立快照，PersistKeys 成功时原子替换缓存。
+                var snapshot = new List<ClientKeyInfo>(keys) { info };
+                PersistKeys(snapshot);
+            }
             return (plaintext, info);
         }
     }
@@ -563,15 +571,26 @@ public sealed class ClientKeyService : IDisposable
             var item = keys.FirstOrDefault(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
             if (item is null) return false;
 
-            if (enabled.HasValue) item.Enabled = enabled.Value;
+            // 修改落在克隆上：持久化失败时缓存本体保持原值，失败前后鉴权口径一致。
+            var staged = CloneKeyInfo(item);
+            if (enabled.HasValue) staged.Enabled = enabled.Value;
             // 与 CreateKey/Build 同口径：越界值钳到下界，而非静默忽略（创建/更新行为一致）。
-            if (dailyBudgetUsd.HasValue) item.DailyBudgetUsd = Math.Max(0, dailyBudgetUsd.Value);
-            if (maxQps.HasValue) item.MaxQps = Math.Max(1, maxQps.Value);
+            if (dailyBudgetUsd.HasValue) staged.DailyBudgetUsd = Math.Max(0, dailyBudgetUsd.Value);
+            if (maxQps.HasValue) staged.MaxQps = Math.Max(1, maxQps.Value);
 
             if (_mariaDb is not null)
-                _mariaDb.UpdateKeySettings(item); // 只写设置列，不触碰计数控（多实例安全）
+            {
+                _mariaDb.UpdateKeySettings(staged); // 只写设置列，不触碰计数控（多实例安全）；失败即抛
+                item.Enabled = staged.Enabled;
+                item.DailyBudgetUsd = staged.DailyBudgetUsd;
+                item.MaxQps = staged.MaxQps;
+            }
             else
-                PersistKeys(keys);
+            {
+                var snapshot = new List<ClientKeyInfo>(keys);
+                snapshot[keys.IndexOf(item)] = staged;
+                PersistKeys(snapshot); // 成功时缓存整体替换为快照（含 staged），失败时缓存与磁盘保持原状
+            }
             return true;
         }
     }
@@ -581,21 +600,39 @@ public sealed class ClientKeyService : IDisposable
         lock (_gate)
         {
             var keys = GetCachedOrLoadKeysNoLock();
-            int removed = keys.RemoveAll(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
-            if (removed > 0)
+            if (!keys.Any(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal)))
+                return false;
+
+            if (_mariaDb is not null)
+                _mariaDb.DeleteKey(keyId); // 按行删除，失败即抛且缓存不动，不影响其他实例的行
+            else
             {
-                if (_mariaDb is not null)
-                    _mariaDb.DeleteKey(keyId); // 按行删除，不影响其他实例的行
-                else
-                    PersistKeys(keys);
-                _qpsWindows.Remove(keyId);
-                _pendingDeltas.Remove(keyId);
-                return true;
+                var snapshot = new List<ClientKeyInfo>(keys);
+                snapshot.RemoveAll(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
+                PersistKeys(snapshot);
             }
 
-            return false;
+            keys.RemoveAll(k => string.Equals(k.KeyId, keyId, StringComparison.Ordinal));
+            _qpsWindows.Remove(keyId);
+            _pendingDeltas.Remove(keyId);
+            return true;
         }
     }
+
+    private static ClientKeyInfo CloneKeyInfo(ClientKeyInfo key) => new()
+    {
+        KeyId = key.KeyId,
+        KeyHash = key.KeyHash,
+        KeyPrefix = key.KeyPrefix,
+        TenantName = key.TenantName,
+        DailyBudgetUsd = key.DailyBudgetUsd,
+        DailySpendUsd = key.DailySpendUsd,
+        DailyRequestCount = key.DailyRequestCount,
+        MaxQps = key.MaxQps,
+        Enabled = key.Enabled,
+        CreatedAt = key.CreatedAt,
+        DailySpendDateUtc = key.DailySpendDateUtc
+    };
 
     private (string Plaintext, ClientKeyInfo Info) Build(string tenantName, decimal dailyBudgetUsd, int maxQps)
     {

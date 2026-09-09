@@ -200,6 +200,75 @@ public sealed class ClientKeyServiceTests
         Assert.Equal(92, outcomes.Count(r => r.Status == ClientKeyAuthorizationStatus.RateLimited));
     }
 
+    /// <summary>
+    /// P1-3 回归：持久化失败时密钥修改不得生效。注入方式：以 FileShare.None 独占打开
+    /// client-keys.json，使 PersistKeys 的 File.Replace 抛 IOException（覆盖"写临时文件成功、
+    /// 替换失败"的真实故障形态）。修复前：缓存先改后持久化，异常后内存对象已被改写——
+    /// 禁用失败却鉴权 Disabled、删除失败却 Invalid；修复后失败前后鉴权口径与磁盘一致。
+    /// </summary>
+    [Fact]
+    public void UpdateKey_PersistFails_CacheKeepsOldEnabledState()
+    {
+        using var fixture = new TempFixture();
+        var service = CreateService(fixture.Path);
+        var (plaintext, info) = service.CreateKey("tenant-a");
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
+
+        using (File.Open(fixture.Path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.ThrowsAny<IOException>(() => service.UpdateKey(info.KeyId, enabled: false, dailyBudgetUsd: null, maxQps: null));
+        }
+
+        // 失败后：本进程缓存与磁盘持久状态都必须仍是启用。
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
+        var reloaded = CreateService(fixture.Path);
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, reloaded.AuthorizeRequest(plaintext).Status);
+
+        // 故障恢复后重试同一修改：正常生效。
+        Assert.True(service.UpdateKey(info.KeyId, enabled: false, dailyBudgetUsd: null, maxQps: null));
+        Assert.Equal(ClientKeyAuthorizationStatus.Disabled, service.AuthorizeRequest(plaintext).Status);
+        Assert.Equal(ClientKeyAuthorizationStatus.Disabled, CreateService(fixture.Path).AuthorizeRequest(plaintext).Status);
+    }
+
+    [Fact]
+    public void DeleteKey_PersistFails_KeyRemainsAuthorizable()
+    {
+        using var fixture = new TempFixture();
+        var service = CreateService(fixture.Path);
+        var (plaintext, info) = service.CreateKey("tenant-a");
+
+        using (File.Open(fixture.Path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.ThrowsAny<IOException>(() => service.DeleteKey(info.KeyId));
+        }
+
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, CreateService(fixture.Path).AuthorizeRequest(plaintext).Status);
+        Assert.Single(service.GetAllKeys());
+
+        // 故障恢复后重试删除：正常生效。
+        Assert.True(service.DeleteKey(info.KeyId));
+        Assert.Equal(ClientKeyAuthorizationStatus.Invalid, service.AuthorizeRequest(plaintext).Status);
+        Assert.Empty(CreateService(fixture.Path).GetAllKeys());
+    }
+
+    [Fact]
+    public void CreateKey_PersistFails_NewKeyNeverBecomesAuthorizable()
+    {
+        using var fixture = new TempFixture();
+        var service = CreateService(fixture.Path);
+        var (plaintextA, _) = service.CreateKey("tenant-a");
+
+        using (File.Open(fixture.Path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            Assert.ThrowsAny<IOException>(() => service.CreateKey("tenant-b"));
+        }
+
+        Assert.Single(service.GetAllKeys());
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintextA).Status);
+        Assert.Equal(ClientKeyAuthorizationStatus.Authorized, CreateService(fixture.Path).AuthorizeRequest(plaintextA).Status);
+    }
+
     private static ClientKeyService CreateService(string path, TimeProvider? clock = null, TimeSpan? flushInterval = null)
         => new(path, NullLogger<ClientKeyService>.Instance, clock, flushInterval);
 
