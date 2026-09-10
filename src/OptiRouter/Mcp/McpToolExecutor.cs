@@ -136,6 +136,14 @@ public sealed class McpToolExecutor : IMcpToolExecutor
         {
             return new McpToolCallResult(false, string.Empty, $"MCP tool call timed out after {timeoutMs}ms.");
         }
+        catch (Exception ex) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // 超时窗已到期：无论传输层把取消包装成何种异常形态（TestServer/平台差异下
+            // 可能不是 OCE，此前落进通用失败分支产生空/误导错误信息），一律按超时口径返回。
+            _logger.LogWarning(ex, "MCP tool call {Tool} timed out after {TimeoutMs}ms against {BaseUrl}",
+                toolName, timeoutMs, server.BaseUrl);
+            return new McpToolCallResult(false, string.Empty, $"MCP tool call timed out after {timeoutMs}ms.");
+        }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "MCP tool call {Tool} failed against {BaseUrl}", toolName, server.BaseUrl);

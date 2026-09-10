@@ -17,6 +17,22 @@ jobs:
     name: Build & Test (Linux)
     runs-on: ubuntu-latest
 
+    # P2-6：专用临时 MariaDB——MariaDB 后端集成测试（配置 CAS/密钥多实例/花费增量等
+    # OPTIROUTER_MARIADB_TEST 门控用例）在 CI 真实执行，而非缺库静默跳过计为 Passed。
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_ROOT_PASSWORD: ci-root-pass
+          MARIADB_DATABASE: optirouter_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,6 +63,11 @@ jobs:
         run: dotnet build OptiRouter.sln -c Release --no-restore -warnaserror
 
       - name: Test
+        # OPTIROUTER_MARIADB_TEST 指向服务容器中的专用临时库 optirouter_ci（与生产隔离；
+        # 门控测试自建表与 scratch 库并自清理）。未设置时这些用例本地静默跳过
+        # （xunit 2.9 无运行时 Skip，暂不引入 SkippableFact 依赖）。
+        env:
+          OPTIROUTER_MARIADB_TEST: "Server=127.0.0.1;Port=3306;Database=optirouter_ci;User ID=root;Password=ci-root-pass;Connection Timeout=15;Default Command Timeout=30"
         # coverlet（已在测试项目引用）收集 XPlat 覆盖率，结果在 TestResults/*/coverage.cobertura.xml。
         run: dotnet test OptiRouter.sln -c Release --no-build --verbosity minimal --collect:"XPlat Code Coverage"
 

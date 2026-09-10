@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -246,6 +247,42 @@ public sealed class McpToolExecutorTests
 
         Assert.False(result.IsSuccess);
         Assert.Contains("timed out", result.ErrorMessage);
+    }
+
+    /// <summary>
+    /// P2-6：MCP 超时契约的确定性 transport 测试。handler 挂起直至取消令牌触发，
+    /// 不依赖 TestServer 的中止传播语义与线程池时序（原 10s Task.Delay + 200ms 窗口的
+    /// TestServer 实现在慢 CI/Linux 上传输层可能以非 OCE 异常暴露取消，错误信息
+    /// 不含 "timed out"）。执行器侧配套加固：超时窗已到期即按超时口径返回。
+    /// </summary>
+    [Fact]
+    public async Task ExecuteToolAsync_Timeout_DeterministicTransport_ReturnsTimedOut()
+    {
+        var executor = new McpToolExecutor(new HttpClient(new BlockingOnCancellationHandler()));
+        var server = new McpServerRegistration
+        {
+            Name = "slow-server",
+            BaseUrl = "http://mcp.test/mcp",
+            TimeoutMs = 200
+        };
+
+        var result = await executor.ExecuteToolAsync(server, "slow_tool", default);
+
+        Assert.False(result.IsSuccess);
+        Assert.Contains("timed out", result.ErrorMessage);
+    }
+
+    /// <summary>
+    /// 确定性 transport：挂起直至取消令牌触发。超时到期必然以 OCE 浮出（无 TestServer
+    /// 中止传播与时序竞态），严格断言超时契约。
+    /// </summary>
+    private sealed class BlockingOnCancellationHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            throw new UnreachableException("cancellation did not propagate");
+        }
     }
 
     [Fact]
