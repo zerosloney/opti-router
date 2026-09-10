@@ -2320,6 +2320,60 @@ public class ChatCompletionsEndpointTests
         Assert.DoesNotContain("PII_PHONE", secondBody);
     }
 
+    /// <summary>
+    /// P2-2 回归：末条 user 消息含图片（多模态数组）时不得进入语义缓存。修复前分区构建
+    /// 把整个 Content 置空，同文字不同图片的请求命中同一缓存项——拿到上一张图片的答案
+    /// （同一安全分区内错答）。修复后多模态末条完全跳过语义缓存；纯文本缓存不受影响。
+    /// </summary>
+    [Fact]
+    public async Task Post_SemanticCacheWithMultimodalLastUser_DoesNotReuseCachedResponse()
+    {
+        int attempts = 0;
+        using var factory = CreateSemanticCachePiiFactory(() => attempts++);
+        using var client = factory.CreateClient();
+
+        static ChatMessage VisionMessage(string imageUrl) => new()
+        {
+            Role = "user",
+            Content = JsonSerializer.SerializeToElement(new object[]
+            {
+                new { type = "text", text = "describe this image" },
+                new { type = "image_url", image_url = new { url = imageUrl } }
+            })
+        };
+
+        // 同文字、不同图片：必须各自经过上游（语义缓存不得按相似文本错答）。
+        using var first = await client.PostAsync("/v1/chat/completions", CreateVisionContent(VisionMessage("https://img.example/a.png")));
+        using var second = await client.PostAsync("/v1/chat/completions", CreateVisionContent(VisionMessage("https://img.example/b.png")));
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        Assert.Equal(2, attempts);
+
+        // 完全相同的多模态请求重复发送：多模态整体禁用语义缓存，仍走上游。
+        using var third = await client.PostAsync("/v1/chat/completions", CreateVisionContent(VisionMessage("https://img.example/a.png")));
+        Assert.Equal(HttpStatusCode.OK, third.StatusCode);
+        Assert.Equal(3, attempts);
+
+        // 对照组：纯文本相同请求第二次命中语义缓存，只调一次上游。
+        using var textFirst = await client.PostAsync("/v1/chat/completions", CreateTextContent("plain text question"));
+        using var textSecond = await client.PostAsync("/v1/chat/completions", CreateTextContent("plain text question"));
+        Assert.Equal(HttpStatusCode.OK, textFirst.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, textSecond.StatusCode);
+        Assert.Equal(4, attempts);
+    }
+
+    private static StringContent CreateVisionContent(ChatMessage visionMessage)
+    {
+        var request = new ChatRequest { Model = "auto", Messages = new List<ChatMessage> { visionMessage } };
+        return new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+    }
+
+    private static StringContent CreateTextContent(string text)
+    {
+        var request = new ChatRequest { Model = "auto", Messages = new List<ChatMessage> { ChatMessage.FromText("user", text) } };
+        return new StringContent(JsonSerializer.Serialize(request), Encoding.UTF8, "application/json");
+    }
+
     private static TestWebApplicationFactory CreateSemanticCachePiiFactory(Action? onUpstream = null)
     {
         var factory = new TestWebApplicationFactory();

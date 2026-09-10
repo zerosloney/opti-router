@@ -1609,7 +1609,30 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         routing.EnableSemanticCache
         && !routing.EnableContentModeration
         && piiMap?.HasSensitiveData != true
-        && !ContainsToolContext(request);
+        && !ContainsToolContext(request)
+        && !LastUserMessageIsMultimodal(request);
+
+    /// <summary>
+    /// 保守禁用多模态语义缓存（P2-2）：分区构建为相似度剔除最后一条 user 文本时把整个
+    /// Content 置空——同文字不同图片的请求落入同一分区，命中上一张图片的缓存答案
+    /// （同一安全分区内错答）。原生多模态分区支持落地前，含非文本块的末条 user 消息
+    /// 直接不进语义缓存。
+    /// intentional-simple: 粒度为"末条 user 消息 Content 是否非字符串"。升级路径：
+    /// BuildSemanticPartition 保留非文本块参与键计算（仅剔除文本块）后可放开。
+    /// </summary>
+    private static bool LastUserMessageIsMultimodal(ChatRequest request)
+    {
+        if (request.Messages is null) return false;
+        for (int i = request.Messages.Count - 1; i >= 0; i--)
+        {
+            var message = request.Messages[i];
+            if (string.Equals(message.Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                return message.Content is { ValueKind: not (System.Text.Json.JsonValueKind.String or System.Text.Json.JsonValueKind.Null or System.Text.Json.JsonValueKind.Undefined) };
+            }
+        }
+        return false;
+    }
 
     private static bool ContainsToolContext(ChatRequest request)
     {
