@@ -220,11 +220,13 @@ internal sealed class MariaDbClientKeyStore
     }
 
     /// <summary>
-    /// 累加一个 Key 当日（UTC）花费，单条原子语句处理跨日滚动：
-    /// 当日已有记录则增量累加，否则（新一天或首次）从增量值起算。
+    /// 按业务发生日期提交相对花费增量，单条原子语句处理三种情形：
+    /// 行日期 == 增量日期：累加；行日期 &gt; 增量日期（迟到旧日增量，行已滚到新一天）：
+    /// 折入当前行日期累加——若重置回旧日期会丢掉新一天已入账花费（折入使预算保守多算，防超订）；
+    /// 行日期 &lt; 增量日期（行尚未滚动）：滚动到增量日期并从增量值起算。
     /// 各实例只提交自己的增量，全局值在库内收敛，不会互相覆盖。行不存在时为 no-op。
     /// </summary>
-    public void ApplySpendDelta(string keyId, DateTime todayUtc, decimal spendDelta)
+    public void ApplySpendDelta(string keyId, DateTime occurredUtc, decimal spendDelta)
     {
         ArgumentException.ThrowIfNullOrEmpty(keyId);
         using var conn = new MySqlConnection(_connectionString);
@@ -232,11 +234,14 @@ internal sealed class MariaDbClientKeyStore
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
             UPDATE optirouter_client_keys
-            SET daily_spend_usd     = IF(daily_spend_date_utc = @today, daily_spend_usd + @spendDelta, @spendDelta),
-                daily_spend_date_utc = @today
+            SET daily_spend_usd = CASE
+                    WHEN daily_spend_date_utc  = @date THEN daily_spend_usd + @spendDelta
+                    WHEN daily_spend_date_utc  > @date THEN daily_spend_usd + @spendDelta
+                    ELSE @spendDelta END,
+                daily_spend_date_utc = IF(daily_spend_date_utc > @date, daily_spend_date_utc, @date)
             WHERE key_id = @kid;
             """;
-        cmd.Parameters.AddWithValue("@today", todayUtc.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+        cmd.Parameters.AddWithValue("@date", occurredUtc.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
         cmd.Parameters.AddWithValue("@spendDelta", spendDelta);
         cmd.Parameters.AddWithValue("@kid", keyId);
         cmd.ExecuteNonQuery();

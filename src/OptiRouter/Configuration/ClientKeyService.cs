@@ -48,8 +48,9 @@ public sealed class ClientKeyService : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<string, QpsWindow> _qpsWindows = new(StringComparer.Ordinal);
     // DB 模式待提交的按 key 花费增量（本实例视角），flush 时以相对增量提交到库；
-    // 请求数不走增量——由全局准入语句在库端原子计数。
-    private readonly Dictionary<string, decimal> _pendingDeltas = new(StringComparer.Ordinal);
+    // 增量按业务发生日期分桶：午夜前消费、午夜后 flush 时按发生日期落账，不挪进新一天
+    // （修复前 flush 时重新取当天，跨日增量会记入新一天预算）。请求数不走增量——由全局准入语句在库端原子计数。
+    private readonly Dictionary<string, Dictionary<DateTime, decimal>> _pendingDeltas = new(StringComparer.Ordinal);
     // in-flight 花费预留（按 keyId，请求发起前预扣、结束释放）：租户预算与全局账本同源的
     // TOCTOU 防护——预算检查在授权时、计费在请求完成后，窗口内并发请求会集体越过预算线。
     // 仅进程内口径：不落库、不进增量，多节点各自保守（与 CostLedger 预留语义一致）。
@@ -422,7 +423,7 @@ public sealed class ClientKeyService : IDisposable
             item.DailySpendUsd += cost;
             item.DailySpendDateUtc ??= today;
             if (_mariaDb is not null)
-                TrackSpendDelta(item.KeyId, cost);
+                TrackSpendDelta(item.KeyId, today, cost);
             else
                 _spendDirty = true;
         }
@@ -491,23 +492,28 @@ public sealed class ClientKeyService : IDisposable
         }
     }
 
-    /// <summary>DB 后端：把本实例挂起的花费增量逐 key 提交到库；单 key 失败保留其余重试。</summary>
+    /// <summary>DB 后端：把本实例挂起的花费增量按业务发生日期逐桶提交到库；单 key 失败保留其余重试。</summary>
     private void FlushPendingDeltasNoLock()
     {
         if (_pendingDeltas.Count == 0) return;
 
-        DateTime today = UtcToday();
         foreach (var keyId in _pendingDeltas.Keys.ToList())
         {
-            _mariaDb!.ApplySpendDelta(keyId, today, _pendingDeltas[keyId]);
+            // 日期升序提交：迟到旧日增量先于新日增量落库（库端按行日期三态合并，见 ApplySpendDelta）。
+            foreach (var (occurredUtc, amount) in _pendingDeltas[keyId].OrderBy(b => b.Key))
+            {
+                _mariaDb!.ApplySpendDelta(keyId, occurredUtc, amount);
+            }
             _pendingDeltas.Remove(keyId);
         }
     }
 
-    private void TrackSpendDelta(string keyId, decimal spendDelta)
+    private void TrackSpendDelta(string keyId, DateTime occurredUtc, decimal spendDelta)
     {
-        _pendingDeltas.TryGetValue(keyId, out decimal current);
-        _pendingDeltas[keyId] = current + spendDelta;
+        if (!_pendingDeltas.TryGetValue(keyId, out var buckets))
+            _pendingDeltas[keyId] = buckets = new Dictionary<DateTime, decimal>();
+        buckets.TryGetValue(occurredUtc, out decimal current);
+        buckets[occurredUtc] = current + spendDelta;
     }
 
     /// <summary>定时器回调：脏则合并落盘。异常吞掉以免后台任务死亡（下一周期重试）。</summary>

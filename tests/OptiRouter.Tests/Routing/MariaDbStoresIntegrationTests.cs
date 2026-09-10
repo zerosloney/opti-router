@@ -448,6 +448,99 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         public override DateTimeOffset GetUtcNow() => _now;
     }
 
+    /// <summary>
+    /// P2-3 回归：日消费增量必须携带业务发生日期。修复前 flush 时重新取当天，
+    /// 午夜前消费、午夜后 flush 会把增量记入新一天预算（DB 故障重试跨日进一步放大）。
+    /// 库端合并规则：同日累加；行已滚到新一天的迟到旧日增量折入当前日（保守多算防超订）；
+    /// 行未滚动的增量触发滚动。
+    /// </summary>
+    [Fact]
+    public void ClientKeyService_SpendDeltaCarriesOccurrenceDate_AcrossMidnightFlush()
+    {
+        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
+
+        string scratchDb = "optirouter_p2spend_" + Guid.NewGuid().ToString("N")[..8];
+        string cs = System.Text.RegularExpressions.Regex.Replace(
+            ConnectionString!, @"Database=[^;]*", $"Database={scratchDb}");
+        ExecuteOnServer(ConnectionString!, $"CREATE DATABASE IF NOT EXISTS `{scratchDb}`");
+
+        // 时钟钉在午夜前 10 秒：记账发生日在 03-01，flush 已跨到 03-02。
+        var clock = new MutableClock(new DateTimeOffset(2026, 3, 1, 23, 59, 50, TimeSpan.Zero));
+        try
+        {
+            using var service = new ClientKeyService(
+                filePath: "n/a.json", logger: NullLogger<ClientKeyService>.Instance,
+                timeProvider: clock, flushInterval: TimeSpan.Zero, mariaDbConnectionString: cs);
+            var (_, info) = service.CreateKey("p2-spend-tenant", dailyBudgetUsd: 0m, maxQps: 50);
+
+            service.RecordSpend(info.KeyId, 0.5m); // 发生于 03-01
+            clock.Advance(TimeSpan.FromSeconds(20)); // 跨过午夜
+            service.Flush();
+
+            // 修复前：flush 取 03-02，行被重置为 03-02/0.5，03-01 的预算口径丢失。
+            Assert.Equal(("2026-03-01", 0.5m), ReadSpendRow(cs, info.KeyId));
+
+            // 新一天记账：行滚动到 03-02 并从增量起算。
+            service.RecordSpend(info.KeyId, 0.25m);
+            service.Flush();
+            Assert.Equal(("2026-03-02", 0.25m), ReadSpendRow(cs, info.KeyId));
+        }
+        finally
+        {
+            ExecuteOnServer(ConnectionString!, $"DROP DATABASE IF EXISTS `{scratchDb}`");
+        }
+    }
+
+    /// <summary>库端合并规则直测：迟到旧日增量折入当前行日期累加，不重置、不丢新日花费。</summary>
+    [Fact]
+    public void ApplySpendDelta_LateOldDateDelta_FoldsIntoCurrentRowDate()
+    {
+        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
+
+        string scratchDb = "optirouter_p2spend_" + Guid.NewGuid().ToString("N")[..8];
+        string cs = System.Text.RegularExpressions.Regex.Replace(
+            ConnectionString!, @"Database=[^;]*", $"Database={scratchDb}");
+        ExecuteOnServer(ConnectionString!, $"CREATE DATABASE IF NOT EXISTS `{scratchDb}`");
+
+        try
+        {
+            var clock = new MutableClock(new DateTimeOffset(2026, 3, 2, 12, 0, 0, TimeSpan.Zero));
+            using var service = new ClientKeyService(
+                filePath: "n/a.json", logger: NullLogger<ClientKeyService>.Instance,
+                timeProvider: clock, flushInterval: TimeSpan.Zero, mariaDbConnectionString: cs);
+            var (_, info) = service.CreateKey("p2-late-tenant", dailyBudgetUsd: 0m, maxQps: 50);
+            service.RecordSpend(info.KeyId, 0.25m); // 03-02
+            service.Flush();
+            Assert.Equal(("2026-03-02", 0.25m), ReadSpendRow(cs, info.KeyId));
+
+            var store = new OptiRouter.Configuration.MariaDbClientKeyStore(cs);
+            // 迟到的 03-01 增量：折入当前行日期（03-02/0.35），不得重置回 03-01。
+            store.ApplySpendDelta(info.KeyId, new DateTime(2026, 3, 1), 0.1m);
+            Assert.Equal(("2026-03-02", 0.35m), ReadSpendRow(cs, info.KeyId));
+
+            // 同日增量：直接累加。
+            store.ApplySpendDelta(info.KeyId, new DateTime(2026, 3, 2), 0.05m);
+            Assert.Equal(("2026-03-02", 0.4m), ReadSpendRow(cs, info.KeyId));
+        }
+        finally
+        {
+            ExecuteOnServer(ConnectionString!, $"DROP DATABASE IF EXISTS `{scratchDb}`");
+        }
+    }
+
+    /// <summary>直读 keys 表的单日花费行（date, spend），绕过服务端内存滚动视图。</summary>
+    private static (string Date, decimal Spend) ReadSpendRow(string cs, string keyId)
+    {
+        using var conn = new MySqlConnector.MySqlConnection(cs);
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT daily_spend_date_utc, daily_spend_usd FROM optirouter_client_keys WHERE key_id = @kid;";
+        cmd.Parameters.AddWithValue("@kid", keyId);
+        using var reader = cmd.ExecuteReader();
+        Assert.True(reader.Read(), $"key row not found: {keyId}");
+        return (reader.GetString(0), reader.GetDecimal(1));
+    }
+
     [Fact]
     public void AppConfigStore_Facade_RoutesToMariaDbBackend()
     {
