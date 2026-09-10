@@ -144,8 +144,10 @@ public sealed class NativeProtocolClientTests
         // ② temperature/top_p/stop 需映射；③ Id 留空时 model 回退 Name（UpstreamModelId）。
         string? capturedBody = null;
         var http = await StartMockServerAsync("/v1/messages", _ => """
+            event: message_start
             data: {"type":"message_start","message":{"id":"msg_1"}}
 
+            event: message_stop
             data: {"type":"message_stop"}
 
             """, b => capturedBody = b);
@@ -248,7 +250,7 @@ public sealed class NativeProtocolClientTests
         {
             capturedTarget = ctx.Request.Path + ctx.Request.QueryString;
             ctx.Response.ContentType = "text/event-stream";
-            await ctx.Response.WriteAsync("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hola\"}],\"role\":\"model\"}}]}\n\n");
+            await ctx.Response.WriteAsync("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hola\"}],\"role\":\"model\"}}]}\n\ndata: {\"done\":true}\n\n");
         });
         await app.StartAsync();
 
@@ -276,10 +278,100 @@ public sealed class NativeProtocolClientTests
         Assert.Contains("alt=sse", capturedTarget);
     }
 
+    /// <summary>P2-1：流内 error 事件（event: error）必须抛异常走失败路径，不得当正常内容中继。</summary>
+    [Fact]
+    public async Task AnthropicClient_StreamRaw_InBandErrorEvent_Throws()
+    {
+        var http = await StartMockServerAsync("/v1/messages", _ => """
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"par"}}
+
+            event: error
+            data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+            """);
+        var client = new AnthropicModelClient(CreateEndpoint(ProviderProtocol.Anthropic, "claude-3-5-sonnet"), http);
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None)) { }
+        });
+        Assert.Contains("Overloaded", ex.Message);
+    }
+
+    /// <summary>P2-1：数据行形态的 {"type":"error"}（无 event 行）同样抛异常。</summary>
+    [Fact]
+    public async Task AnthropicClient_StreamRaw_InBandErrorDataLine_Throws()
+    {
+        var http = await StartMockServerAsync("/v1/messages", _ => """
+            data: {"type":"message_start","message":{"id":"msg_1"}}
+
+            data: {"type":"error","error":{"type":"api_error","message":"upstream blew up"}}
+            """);
+        var client = new AnthropicModelClient(CreateEndpoint(ProviderProtocol.Anthropic, "claude-3-5-sonnet"), http);
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None)) { }
+        });
+        Assert.Contains("upstream blew up", ex.Message);
+    }
+
+    /// <summary>P2-1：流结束无 message_stop（异常 EOF）不得合成 [DONE] 当正常结束，改抛 BadGateway。</summary>
+    [Fact]
+    public async Task AnthropicClient_StreamRaw_AbnormalEndWithoutMessageStop_Throws()
+    {
+        var http = await StartMockServerAsync("/v1/messages", _ => """
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"truncated"}}
+
+            """);
+        var client = new AnthropicModelClient(CreateEndpoint(ProviderProtocol.Anthropic, "claude-3-5-sonnet"), http);
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None)) { }
+        });
+        Assert.Equal(HttpStatusCode.BadGateway, ex.StatusCode);
+        Assert.Contains("termination event", ex.Message);
+    }
+
+    /// <summary>P2-1：Gemini 流内 {"error":...} 数据行抛异常（code 解析为状态码）。</summary>
+    [Fact]
+    public async Task GeminiClient_StreamRaw_InBandError_Throws()
+    {
+        var http = await StartMockServerAsync("/v1beta/models/gemini-1.5-pro:streamGenerateContent", _ => """
+            data: {"error":{"code":503,"message":"model overloaded"}}
+            """);
+        var client = new GeminiModelClient(CreateEndpoint(ProviderProtocol.Gemini, "gemini-1.5-pro"), http);
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None)) { }
+        });
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
+        Assert.Contains("model overloaded", ex.Message);
+    }
+
+    /// <summary>P2-1：Gemini 流结束无终止块（异常 EOF）不得合成 [DONE]，改抛 BadGateway。</summary>
+    [Fact]
+    public async Task GeminiClient_StreamRaw_AbnormalEndWithoutDone_Throws()
+    {
+        var http = await StartMockServerAsync("/v1beta/models/gemini-1.5-pro:streamGenerateContent", _ => """
+            data: {"candidates":[{"content":{"parts":[{"text":"cut off"}],"role":"model"}}]}
+            """);
+        var client = new GeminiModelClient(CreateEndpoint(ProviderProtocol.Gemini, "gemini-1.5-pro"), http);
+
+        var ex = await Assert.ThrowsAsync<ModelClientException>(async () =>
+        {
+            await foreach (var _ in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None)) { }
+        });
+        Assert.Equal(HttpStatusCode.BadGateway, ex.StatusCode);
+        Assert.Contains("termination event", ex.Message);
+    }
+
     [Fact]
     public async Task AnthropicClient_UpstreamError_NormalizedToModelClientException()
-    {
-        var builder = WebApplication.CreateBuilder();
+    {        var builder = WebApplication.CreateBuilder();
         builder.WebHost.UseTestServer();
         var app = builder.Build();
         app.MapPost("/v1/messages", (HttpContext ctx) =>

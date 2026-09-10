@@ -394,7 +394,11 @@ public sealed class OpenAICompatibleModelClient : IModelClient
                     var statusCode = response.StatusCode;
                     try
                     {
-                        var errorBody = await ReadResponseBodyAsync(response.Content, cancellationToken).ConfigureAwait(false);
+                        // 错误正文读取施加与建连同值的时间上限：此前只有大小限制且已离开
+                        // 模型超时包装，上游悬挂错误正文可长期占用请求。
+                        var errorBody = await ModelClientRetry.WithTotalTimeout(
+                            callTimeout, cancellationToken,
+                            token => ReadResponseBodyAsync(response.Content, token)).ConfigureAwait(false);
                         var exception = new ModelClientException(statusCode, errorBody, metadata: responseMetadata);
 
                         if (IsRetryable(statusCode) && attempt < maxRetries)

@@ -163,6 +163,15 @@ public sealed class GeminiModelClient : IModelClient
             string data = line["data: ".Length..].Trim();
             if (string.IsNullOrEmpty(data)) continue;
 
+            // 流内 error 事件（200 流里直接推 {"error":{...}}）：抛异常交由消费方既有失败
+            // 机器接管（failover/审计/熔断），修复前被当普通数据行中继或静默吞掉。
+            if (data.StartsWith("{\"error\"", StringComparison.Ordinal))
+            {
+                throw OpenAICompatibleModelClient.ExtractInBandError(data, System.Net.HttpStatusCode.BadGateway, null)
+                    ?? new ModelClientException(System.Net.HttpStatusCode.BadGateway, data,
+                        message: "Upstream Gemini stream emitted an error event.");
+            }
+
             foreach (string translated in lineTranslator.Translate(data))
             {
                 if (translated == "[DONE]")
@@ -181,7 +190,11 @@ public sealed class GeminiModelClient : IModelClient
 
         if (!doneSent)
         {
-            yield return new RawStreamLine("[DONE]", null, null);
+            // 协议违约断流：修复前合成 [DONE] 被下游当正常结束（审计假成功、熔断无感、
+            // 客户端收断头流），改抛异常走统一失败路径（与 OpenAICompatible 客户端同语义）。
+            throw new ModelClientException(System.Net.HttpStatusCode.BadGateway,
+                "Upstream Gemini stream ended without a termination chunk.",
+                message: "Upstream stream ended without a termination event.");
         }
     }
 
@@ -243,7 +256,11 @@ public sealed class GeminiModelClient : IModelClient
                 if (!response.IsSuccessStatusCode)
                 {
                     var statusCode = response.StatusCode;
-                    string errorBody = await BoundedResponseReader.ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
+                    // 错误正文读取施加与建连同值的时间上限：修复前只有大小限制且已离开
+                    // 模型超时包装，上游悬挂错误正文可长期占用请求。
+                    string errorBody = await ModelClientRetry.WithTotalTimeout(
+                        connectTimeout, ct,
+                        token => BoundedResponseReader.ReadBodyAsync(response.Content, token)).ConfigureAwait(false);
                     response.Dispose();
                     if (ModelClientRetry.IsRetryable(statusCode) && attempt < maxRetries)
                     {
