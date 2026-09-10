@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using OptiRouter.Configuration;
 using OptiRouter.Routing;
-using Xunit.Abstractions;
 
 namespace OptiRouter.Tests.Routing;
 
@@ -11,18 +10,14 @@ namespace OptiRouter.Tests.Routing;
 /// 本地执行示例：
 /// <c>OPTIROUTER_MARIADB_TEST="Server=127.0.0.1;Database=optirouter_it;User ID=root;Password=..." dotnet test</c>
 /// </summary>
-public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
+public class MariaDbStoresIntegrationTests
 {
     private static readonly string? ConnectionString =
         Environment.GetEnvironmentVariable("OPTIROUTER_MARIADB_TEST");
 
-    private bool ShouldSkip => string.IsNullOrWhiteSpace(ConnectionString);
-
-    [Fact]
+    [MariaDbFact]
     public void CostLedger_Roundtrip_WritesAndReadsBack()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         using var store = new MariaDbCostLedgerStore(ConnectionString!);
         string sid = "it-session-" + Guid.NewGuid().ToString("N");
         var date = new DateTime(2026, 1, 15, 0, 0, 0, DateTimeKind.Utc);
@@ -79,11 +74,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         Assert.Equal(0m, store.GetTotal());
     }
 
-    [Fact]
+    [MariaDbFact]
     public async Task RequestAudit_Append_FlushesAndReadsBack()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         using var store = new MariaDbRequestAuditStore(ConnectionString!);
         string model = "it-audit-" + Guid.NewGuid().ToString("N");
         string rid = "it-req-" + Guid.NewGuid().ToString("N");
@@ -140,11 +133,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         Assert.Equal(failuresBefore, failureStats.Failures);
     }
 
-    [Fact]
+    [MariaDbFact]
     public void LearningState_Roundtrip_PersistsThompsonAndBandit()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         using var store = new MariaDbLearningStateStore(ConnectionString!);
         string model = "it-learn-" + Guid.NewGuid().ToString("N");
 
@@ -166,11 +157,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         Assert.Equal(0.75, bandit[model].B[1]);
     }
 
-    [Fact]
+    [MariaDbFact]
     public void ClientKeyService_MariaDbBackend_Roundtrip()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         // flushInterval=0 禁用后台定时器，全部同步落库。
         using var service = new ClientKeyService(
             filePath: "n/a.json",
@@ -210,11 +199,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         Assert.False(reloaded.AuthorizeRequest(plaintext).IsAuthorized);
     }
 
-    [Fact]
+    [MariaDbFact]
     public void ClientKeyService_MultiInstance_DeltasAccumulateWithoutClobbering()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         // 实例 A：建 key + 记账 + 提交增量。
         using var instanceA = new ClientKeyService(
             filePath: "n/a.json", logger: NullLogger<ClientKeyService>.Instance,
@@ -244,11 +231,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         instanceC.DeleteKey(info.KeyId);
     }
 
-    [Fact]
+    [MariaDbFact]
     public void ClientKeyService_GlobalLimits_EnforcedAcrossInstances()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         ClientKeyService NewService() => new(
             filePath: "n/a.json", logger: NullLogger<ClientKeyService>.Instance,
             flushInterval: TimeSpan.Zero, mariaDbConnectionString: ConnectionString!);
@@ -276,11 +261,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         c.DeleteKey(info.KeyId);
     }
 
-    [Fact]
+    [MariaDbFact]
     public async Task AuditAnalysis_OverMariaDbStore_ProducesReport()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         using var store = new MariaDbRequestAuditStore(ConnectionString!);
         string model = "it-analyze-" + Guid.NewGuid().ToString("N")[..8];
         var baseTime = DateTime.UtcNow.AddMinutes(-1);
@@ -324,11 +307,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
     /// 修复后：文档行按旧内容条件 UPDATE（InnoDB 当前读 + 行锁），首次无文档场景并发首写
     /// 由主键冲突判定——同版本并发保存恰好一方成功。需真实 MariaDB（OPTIROUTER_MARIADB_TEST）。
     /// </summary>
-    [Fact]
+    [MariaDbFact]
     public async Task AppConfigStore_TrySaveRoutingBudget_ConcurrentSameVersion_ExactlyOneWins()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         // 构造即建表（CREATE TABLE IF NOT EXISTS），随后清出确定的空文档状态。
         using var storeA = new AppConfigDbStore("n/a.db", ConnectionString!);
         ClearRoutingBudgetDocuments();
@@ -386,11 +367,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
     /// 原有的进程内降级准入（AuthorizeViaDbNoLock 的 catch）永远执行不到。
     /// 注入方式：测试中途 DROP 掉 scratch 库（真实 MySQL 异常），时钟推过 30s TTL。
     /// </summary>
-    [Fact]
+    [MariaDbFact]
     public void ClientKeyService_RefreshFailureAfterTtl_DegradesToSnapshotAuthorization()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         // 独立 scratch 库：可整体 DROP 制造真实 DB 故障，不污染共享测试库。
         string scratchDb = "optirouter_p1refresh_" + Guid.NewGuid().ToString("N")[..8];
         string cs = System.Text.RegularExpressions.Regex.Replace(
@@ -454,11 +433,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
     /// 库端合并规则：同日累加；行已滚到新一天的迟到旧日增量折入当前日（保守多算防超订）；
     /// 行未滚动的增量触发滚动。
     /// </summary>
-    [Fact]
+    [MariaDbFact]
     public void ClientKeyService_SpendDeltaCarriesOccurrenceDate_AcrossMidnightFlush()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         string scratchDb = "optirouter_p2spend_" + Guid.NewGuid().ToString("N")[..8];
         string cs = System.Text.RegularExpressions.Regex.Replace(
             ConnectionString!, @"Database=[^;]*", $"Database={scratchDb}");
@@ -492,11 +469,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
     }
 
     /// <summary>库端合并规则直测：迟到旧日增量折入当前行日期累加，不重置、不丢新日花费。</summary>
-    [Fact]
+    [MariaDbFact]
     public void ApplySpendDelta_LateOldDateDelta_FoldsIntoCurrentRowDate()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         string scratchDb = "optirouter_p2spend_" + Guid.NewGuid().ToString("N")[..8];
         string cs = System.Text.RegularExpressions.Regex.Replace(
             ConnectionString!, @"Database=[^;]*", $"Database={scratchDb}");
@@ -541,11 +516,9 @@ public class MariaDbStoresIntegrationTests(ITestOutputHelper output)
         return (reader.GetString(0), reader.GetDecimal(1));
     }
 
-    [Fact]
+    [MariaDbFact]
     public void AppConfigStore_Facade_RoutesToMariaDbBackend()
     {
-        if (ShouldSkip) { output.WriteLine("OPTIROUTER_MARIADB_TEST 未设置，跳过。"); return; }
-
         // 传入连接串 → MariaDb 后端；dbPath 参数在该分支不使用。
         using var store = new AppConfigDbStore("n/a.db", ConnectionString!);
 
