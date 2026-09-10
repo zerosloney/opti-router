@@ -599,6 +599,9 @@ builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
 builder.Services.AddSingleton<CascadeUpgradeHandler>();
 builder.Services.AddSingleton<FusionRouter>();
 builder.Services.AddSingleton<RaceOrchestrator>();
+// 分区并发闸注册表（DI 单例）：租约化并发控制，替代原静态 ConcurrencyRegistry
+// （静态实现跨测试宿主共享状态，且返回裸信号量存在淘汰/替换竞态）。
+builder.Services.AddSingleton<ConcurrencyRegistry>();
 // LLM-as-judge 采样质量打分：旁路后台任务，按采样率把成功响应送打分模型并回灌学习状态。
 builder.Services.AddSingleton<LlmQualityJudge>();
 // regenerate 负反馈跟踪器：进程内状态，供 ProxyOrchestrator 在同键请求重发时注入惩罚 reward。
@@ -870,6 +873,9 @@ app.UseMiddleware<RequestAuthenticationMiddleware>();
 // M2 阶段：分区最大并发数控制，防止单用户请求洪水打满线程池
 // （端点级授权——Blazor Hub RequireAuthorization / Razor 页 [Authorize]——在此之后评估。）
 app.UseAuthorization();
+
+// 分区并发闸注册表（DI 单例）：租约化并发控制，见 ConcurrencyRegistry。
+var concurrencyRegistry = app.Services.GetRequiredService<ConcurrencyRegistry>();
 app.Use(async (context, next) =>
 {
     if (!RequestPathPolicy.IsProxyPath(context.Request.Path))
@@ -882,9 +888,11 @@ app.Use(async (context, next) =>
         app.Configuration.GetValue<bool?>("OptiRouter:TrustProxyHeaders") ?? false);
 
     int maxConcurrency = app.Configuration.GetValue<int?>("OptiRouter:MaxConcurrentRequestsPerPartition") ?? 100;
-    var sem = OptiRouter.Concurrency.ConcurrencyRegistry.GetSemaphore(partitionKey, maxConcurrency);
+    // 租约把"引用—获取—可淘汰判定"绑进同一生命周期：等待在注册表内完成，
+    // 租约持有期间分区条目不会被空闲扫描淘汰（防同分区新旧两道闸）。
+    var lease = concurrencyRegistry.Acquire(partitionKey, maxConcurrency);
 
-    if (!await sem.WaitAsync(0).ConfigureAwait(false))
+    if (lease is null)
     {
         await ProtocolErrorHelper.WriteProxyErrorAsync(
             context,
@@ -901,7 +909,7 @@ app.Use(async (context, next) =>
     }
     finally
     {
-        sem.Release();
+        lease.Dispose();
     }
 });
 
