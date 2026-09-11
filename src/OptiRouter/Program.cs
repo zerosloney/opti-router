@@ -799,7 +799,10 @@ if (app.Configuration.GetValue("OptiRouter:EnableSingleInstanceGuard", false))
 SeedConfigFromLegacySources(
     app.Services.GetRequiredService<AppConfigDbStore>(),
     app.Configuration,
-    Path.Combine(app.Environment.ContentRootPath, "models-config.json"));
+    Path.Combine(app.Environment.ContentRootPath, "models-config.json"),
+    string.IsNullOrWhiteSpace(configDbConnectionString)
+        ? configDbPath
+        : "MariaDB (ConfigDbConnectionString)");
 ((IConfigurationRoot)app.Configuration).Reload();
 
 // 管理端密钥预热：哈希存配置库 security scope（appsettings 仅首启种子，明文不再进代码库）。
@@ -1073,7 +1076,8 @@ public partial class Program
     internal static void SeedConfigFromLegacySources(
         AppConfigDbStore store,
         Microsoft.Extensions.Configuration.IConfiguration configuration,
-        string legacyModelsPath)
+        string legacyModelsPath,
+        string configDbDescription)
     {
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(configuration);
@@ -1116,7 +1120,7 @@ public partial class Program
         }
 
         if (seeded)
-            Console.WriteLine("[SeedConfigFromLegacySources] migrated appsettings Routing/Budget + models-config.json into config database (data/optirouter-config.db)");
+            Console.WriteLine($"[SeedConfigFromLegacySources] migrated appsettings Routing/Budget + models-config.json into config database ({configDbDescription})");
     }
 
     /// <summary>IConfiguration 节 → JsonNode（数字键子节收敛为数组，保证 SemanticRoutes 等数组形态正确）。</summary>
