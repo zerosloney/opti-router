@@ -540,36 +540,23 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 {
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
-                    lastStatusCode = 429;
-                    lastErrorMessage = "quota-exhausted";
-                    _recorder.RecordQuota(candidate.Name, ex.Metadata, rateLimited: true);
-                    _healthTracker.ReleaseProbe(candidate.Name);
-                    outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m,
-                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "quota-exhausted", false,
-                        routedTier, quotaLimited: true, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                    _logger.LogWarning("Model {Name} quota exhausted (status {Status}), trying next candidate",
-                        candidate.Name, 429);
+                    (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
+                        CandidateFailureKind.QuotaLimited, candidate, decision, estimatedTokens,
+                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
+                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
                 }
                 catch (ModelClientException ex) when (IsRequestRejection(ex))
                 {
                     attemptSw.Stop();
-                    lastModelName = candidate.Name;
-                    lastStatusCode = (int)ex.StatusCode;
-                    lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
                     // 请求语义类拒绝（400/422/413...）：上游校验阶段即拒绝，未产生生成费用，
                     // 降级尝试其余候选成本≈0。不熔断（模型对其他请求仍可用），但必须进审计
                     // 与 bandit——此前此类失败对学习回路完全不可见（审计零记录、路由反复踩坑）。
-                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                    outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
-                        lastErrorMessage, false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                    _healthTracker.ReleaseProbe(candidate.Name);
                     bool rejectHasOther = HasOtherCandidate(decision, candidate.Name, failedInThisRequest);
-                    _logger.LogWarning("Model {Name} rejected request (status {Status}){Action}",
-                        candidate.Name, ex.StatusCode, rejectHasOther ? ", trying next candidate" : ", propagating to client");
+                    lastModelName = candidate.Name;
+                    (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
+                        CandidateFailureKind.RequestRejection, candidate, decision, estimatedTokens,
+                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
+                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, rejectHasOther);
                     if (!rejectHasOther)
                         throw; // 无候选可降级：保持透传语义，原始状态码到达客户端
                 }
@@ -577,48 +564,30 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 {
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
-                    lastStatusCode = (int)ex.StatusCode;
-                    lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
-                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                    outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false,
-                        $"upstream-status-{(int)ex.StatusCode}", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                    _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
-                        candidate.Name, ex.StatusCode, tripped ? " (circuit tripped)" : "");
+                    (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
+                        CandidateFailureKind.UpstreamStatus, candidate, decision, estimatedTokens,
+                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
+                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
                 }
                 catch (HttpRequestException ex)
                 {
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
-                    lastStatusCode = 503;
-                    lastErrorMessage = "network-error";
-                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                    outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "network-error", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                    _logger.LogWarning(ex, "Model {Name} network request failed, trying next candidate{Tripped}",
-                        candidate.Name, tripped ? " (circuit tripped)" : "");
+                    (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
+                        CandidateFailureKind.NetworkError, candidate, decision, estimatedTokens,
+                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
+                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
                 }
-                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
                 {
                     attemptSw.Stop();
-                    lastModelName = candidate.Name;
-                    lastStatusCode = 408;
-                    bool isGlobalTimeout = globalCts is { IsCancellationRequested: true };
-                    lastErrorMessage = isGlobalTimeout
-                        ? $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded."
-                        : "Request timed out inside the proxy.";
                     // 客户端内部超时/全局 Failover 超时，非外部取消，记失败继续。
-                    bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                    outcomeReported = true;
-                    _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, isGlobalTimeout ? "global-failover-timeout" : "timeout", false, routedTier, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                    _logger.LogWarning("Model {Name} timed out ({Reason}), trying next{Tripped}",
-                        candidate.Name, isGlobalTimeout ? "global failover timeout" : "timeout", tripped ? " (circuit tripped)" : "");
+                    bool isGlobalTimeout = globalCts is { IsCancellationRequested: true };
+                    lastModelName = candidate.Name;
+                    (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
+                        CandidateFailureKind.InternalTimeout, candidate, decision, estimatedTokens,
+                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
+                        isGlobalTimeout, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
 
                     if (isGlobalTimeout)
                     {
@@ -1434,6 +1403,145 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// 是否还有未失败的其他候选。凭证错误在 auto 路由下应降级到下一候选而非放弃整个请求；
     /// 无其他候选（显式单模型或最后一个候选）时保持透传，原始状态码到达客户端。
     /// </summary>
+    /// <summary>
+    /// 生命周期收敛（结算组件种子）：串行/降级路径的候选失败结算统一出口——Thompson 惩罚、
+    /// regenerate 负反馈、审计、熔断/探槽处理按失败类别在一处表达，控制流
+    /// （换下一候选/透传原始状态码/全局超时终止）留在调用方。修复前五类失败的记账
+    /// 分散在五个近乎复制的 catch 块，新增失败类别时极易漏记某一维度。
+    /// 参数束是后续 RequestSnapshot 提取的雏形（收敛后归并为快照对象）。
+    /// 返回 (上次失败状态码, 上次失败信息, 是否触发熔断)。
+    /// </summary>
+    private (int StatusCode, string ErrorMessage, bool Tripped) SettleCandidateFailure(
+        CandidateFailureKind kind,
+        ModelEndpointOptions candidate,
+        RouterDecision decision,
+        int estimatedTokens,
+        long elapsedMs,
+        string? sessionId,
+        string? requestContent,
+        ModelTier routedTier,
+        Exception exception,
+        string? feedbackKey,
+        bool globalTimeout,
+        int globalTimeoutSeconds,
+        int threshold,
+        int cooldown,
+        bool hasOtherCandidates)
+    {
+        int statusCode;
+        string errorMessage;
+        string auditFailure;
+        bool recordCircuitFailure;
+
+        switch (kind)
+        {
+            case CandidateFailureKind.QuotaLimited:
+                var quotaError = (ModelClientException)exception;
+                _recorder.RecordQuota(candidate.Name, quotaError.Metadata, rateLimited: true);
+                statusCode = 429;
+                errorMessage = "quota-exhausted";
+                auditFailure = "quota-exhausted";
+                recordCircuitFailure = false;
+                break;
+
+            case CandidateFailureKind.RequestRejection:
+                statusCode = (int)((ModelClientException)exception).StatusCode;
+                errorMessage = $"upstream-status-{statusCode}";
+                auditFailure = errorMessage;
+                recordCircuitFailure = false;
+                break;
+
+            case CandidateFailureKind.UpstreamStatus:
+                statusCode = (int)((ModelClientException)exception).StatusCode;
+                errorMessage = $"upstream-status-{statusCode}";
+                auditFailure = errorMessage;
+                recordCircuitFailure = true;
+                break;
+
+            case CandidateFailureKind.NetworkError:
+                statusCode = 503;
+                errorMessage = "network-error";
+                auditFailure = "network-error";
+                recordCircuitFailure = true;
+                break;
+
+            default: // InternalTimeout
+                statusCode = 408;
+                errorMessage = globalTimeout
+                    ? $"Global failover timeout ({globalTimeoutSeconds}s) exceeded."
+                    : "Request timed out inside the proxy.";
+                auditFailure = globalTimeout ? "global-failover-timeout" : "timeout";
+                recordCircuitFailure = true;
+                break;
+        }
+
+        bool tripped;
+        if (recordCircuitFailure)
+        {
+            tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+        }
+        else
+        {
+            tripped = false;
+            _healthTracker.ReleaseProbe(candidate.Name);
+        }
+
+        // 429 视为纯配额：不入断路器，也不给 Thompson 负反馈（quota 状态与模型质量无关）。
+        double? reward = kind == CandidateFailureKind.QuotaLimited
+            ? null
+            : _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+        _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
+        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, elapsedMs, sessionId,
+            decision.Reason, false, auditFailure, false, routedTier,
+            quotaLimited: kind == CandidateFailureKind.QuotaLimited,
+            reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel,
+            requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+
+        switch (kind)
+        {
+            case CandidateFailureKind.QuotaLimited:
+                _logger.LogWarning("Model {Name} quota exhausted (status {Status}), trying next candidate", candidate.Name, 429);
+                break;
+            case CandidateFailureKind.RequestRejection:
+                _logger.LogWarning("Model {Name} rejected request (status {Status}){Action}",
+                    candidate.Name, ((ModelClientException)exception).StatusCode, hasOtherCandidates ? ", trying next candidate" : ", propagating to client");
+                break;
+            case CandidateFailureKind.UpstreamStatus:
+                _logger.LogWarning("Model {Name} failed (status {Status}), trying next candidate{Tripped}",
+                    candidate.Name, ((ModelClientException)exception).StatusCode, tripped ? " (circuit tripped)" : "");
+                break;
+            case CandidateFailureKind.NetworkError:
+                _logger.LogWarning(exception, "Model {Name} network request failed, trying next candidate{Tripped}",
+                    candidate.Name, tripped ? " (circuit tripped)" : "");
+                break;
+            default:
+                _logger.LogWarning("Model {Name} timed out ({Reason}), trying next{Tripped}",
+                    candidate.Name, globalTimeout ? "global failover timeout" : "timeout", tripped ? " (circuit tripped)" : "");
+                break;
+        }
+
+        return (statusCode, errorMessage, tripped);
+    }
+
+    /// <summary>候选失败的结算类别。控制流差异（透传/终止）不在此枚举内，由调用方按原语义处理。</summary>
+    private enum CandidateFailureKind
+    {
+        /// <summary>429 配额耗尽：仅记配额与探槽释放，不入熔断、不记 Thompson。</summary>
+        QuotaLimited,
+
+        /// <summary>请求语义类拒绝（400/422/413...）：不入熔断。</summary>
+        RequestRejection,
+
+        /// <summary>可重试上游状态（5xx/408）与凭证错误：计入熔断。</summary>
+        UpstreamStatus,
+
+        /// <summary>网络异常：计入熔断。</summary>
+        NetworkError,
+
+        /// <summary>代理内部超时 / 全局 Failover 超时（非外部取消）：计入熔断。</summary>
+        InternalTimeout,
+    }
+
     private static bool HasOtherCandidate(RouterDecision decision, string currentModel, HashSet<string> failed) =>
         decision.Candidates.Any(c =>
             !string.Equals(c.Name, currentModel, StringComparison.Ordinal)
