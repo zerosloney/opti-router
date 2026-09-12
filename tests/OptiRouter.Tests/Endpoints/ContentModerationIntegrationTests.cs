@@ -32,6 +32,7 @@ public sealed class ContentModerationIntegrationTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseIsolatedPersistence();
             builder.UseSetting("OptiRouter:AdminApiKey", AdminKey);
             builder.UseSetting("OptiRouter:RequestsPerMinute", "6000");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");

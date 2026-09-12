@@ -102,6 +102,7 @@ public class LlmQualityJudgeTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseIsolatedPersistence();
             builder.UseEnvironment("Development");
             builder.ConfigureServices(services =>
             {

@@ -12,6 +12,7 @@ public class UiStaticAssetsTests
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseIsolatedPersistence();
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.UseSetting("OptiRouter:AdminApiKey", "ui-test-key");
             builder.UseSetting("OptiRouter:Routing:EnableHealthProbe", "false");

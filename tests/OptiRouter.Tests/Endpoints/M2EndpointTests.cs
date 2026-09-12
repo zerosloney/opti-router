@@ -68,6 +68,7 @@ internal sealed class M2WebApplicationFactory : WebApplicationFactory<Program>
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+            builder.UseIsolatedPersistence();
         builder.ConfigureAppConfiguration((context, config) =>
         {
             var inMemoryConfig = new Dictionary<string, string?>

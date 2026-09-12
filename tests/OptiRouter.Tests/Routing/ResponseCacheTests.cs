@@ -48,6 +48,7 @@ public class ResponseCacheTests
 
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            builder.UseIsolatedPersistence();
             builder.UseSetting("OptiRouter:RequestsPerMinute", "600");
             builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
             builder.ConfigureServices(services =>

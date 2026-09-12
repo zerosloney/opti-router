@@ -72,6 +72,7 @@ internal sealed class AutoRoutingWebApplicationFactory : WebApplicationFactory<P
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+            builder.UseIsolatedPersistence();
         builder.ConfigureAppConfiguration((context, config) =>
         {
             config.AddInMemoryCollection(new Dictionary<string, string?>

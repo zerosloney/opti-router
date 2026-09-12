@@ -71,6 +71,7 @@ internal sealed class RoutingModeWebApplicationFactory : WebApplicationFactory<P
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+            builder.UseIsolatedPersistence();
         builder.UseEnvironment("Development");
 
         builder.ConfigureServices(services =>

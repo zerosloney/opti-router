@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -16,6 +17,20 @@ namespace OptiRouter.Tests;
 /// </summary>
 public static class TestHostServiceDefaults
 {
+    /// <summary>
+    /// 测试宿主持久状态隔离基线（自建工厂的 ConfigureWebHost 最前调用）：独立临时配置库、
+    /// 关闭单实例守卫、内存账本。修复前自建工厂的宿主缺这三项，共享 bin 目录下同一
+    /// data/optirouter-config.db，形成跨测试状态耦合与脏产物。
+    /// 不触碰 RequestsPerMinute/AdminApiKey/租户 key/后台服务——各工厂按自身语义单独设置。
+    /// </summary>
+    public static void UseIsolatedPersistence(this IWebHostBuilder builder)
+    {
+        builder.UseSetting("OptiRouter:ConfigDbPath",
+            System.IO.Path.Combine(System.IO.Path.GetTempPath(), "optirouter-config-test-" + Guid.NewGuid().ToString("N") + ".db"));
+        builder.UseSetting("OptiRouter:Budget:UsePersistentStore", "false");
+        builder.UseSetting("OptiRouter:EnableSingleInstanceGuard", "false");
+    }
+
     /// <summary>
     /// 移除全部后台 HostedService。健康探针会在测试中途给模型打熔断标记、会话亲和预热
     /// 会改写粘性缓存、指标 gauge 定时刷新会与断言竞争——这些后台任务改写的是请求间共享
