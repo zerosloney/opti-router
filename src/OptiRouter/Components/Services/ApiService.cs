@@ -68,11 +68,30 @@ public class ApiService
     }
 
     private async Task<T?> GetFromJsonAsync<T>(string url, CancellationToken cancellationToken = default)
-        where T : class
     {
         using var resp = await SendAsync(HttpMethod.Get, url, cancellationToken: cancellationToken);
         resp.EnsureSuccessStatusCode();
         return await resp.Content.ReadFromJsonAsync<T>(cancellationToken);
+    }
+
+    /// <summary>
+    /// 只读 GET 的统一失败语义（fail-soft，生命周期收敛：ApiService 失败语义固定）：
+    /// 异常记日志并返回 fallback，成功但响应体为空同样回退。管理页展示用途——
+    /// 单次后端抖动不应击穿 Blazor circuit。变更类方法（POST/PUT/DELETE）不走此路径，
+    /// 保留 (Ok, Error) 元组语义将后端校验错误带回 UI。
+    /// </summary>
+    private async Task<T?> GetSafeAsync<T>(string url, T? fallback, [System.Runtime.CompilerServices.CallerMemberName] string? caller = null)
+    {
+        try
+        {
+            var result = await GetFromJsonAsync<T>(url);
+            return result ?? fallback;
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "{ApiMethod} failed", caller);
+            return fallback;
+        }
     }
 
     /// <summary>
@@ -102,26 +121,26 @@ public class ApiService
     // ── Dashboard ──────────────────────────────────────────────────
 
     public Task<DashboardMetrics?> GetMetricsAsync()
-        => GetFromJsonAsync<DashboardMetrics>(Url("/api/dashboard/metrics"));
+        => GetSafeAsync<DashboardMetrics?>(Url("/api/dashboard/metrics"), null);
 
     public Task<WindowSummary?> GetWindowSummaryAsync(string window)
-        => GetFromJsonAsync<WindowSummary>(Url($"/api/dashboard/metrics/summary?window={Uri.EscapeDataString(window)}"));
+        => GetSafeAsync<WindowSummary?>(Url($"/api/dashboard/metrics/summary?window={Uri.EscapeDataString(window)}"), null);
 
     public async Task<List<DailySpend>> GetTrendsAsync(int days = 7)
     {
-        var result = await GetFromJsonAsync<List<DailySpend>>(Url($"/api/dashboard/trends?days={days}"));
-        return result ?? new List<DailySpend>();
+        var result = await GetSafeAsync<List<DailySpend>>(Url($"/api/dashboard/trends?days={days}"), new List<DailySpend>());
+        return result!;
     }
 
     public async Task<List<LearningStateDto>> GetLearningAsync()
     {
-        var result = await GetFromJsonAsync<List<LearningStateDto>>(Url("/api/dashboard/learning"));
-        return result ?? new List<LearningStateDto>();
+        var result = await GetSafeAsync<List<LearningStateDto>>(Url("/api/dashboard/learning"), new List<LearningStateDto>());
+        return result!;
     }
 
     /// <summary>token 估算校准诊断（比率 EMA + 采样数 + 估算模式）。</summary>
     public async Task<CalibrationDiagnosticsDto?> GetCalibrationDiagnosticsAsync()
-        => await GetFromJsonAsync<CalibrationDiagnosticsDto>(Url("/api/dashboard/diagnostics/calibration"));
+        => await GetSafeAsync<CalibrationDiagnosticsDto?>(Url("/api/dashboard/diagnostics/calibration"), null);
 
     /// <summary>重置 Thompson/Bandit 学习状态为初始先验（含持久化回落）。</summary>
     public async Task<(bool Ok, string? Error)> ResetLearningAsync()
@@ -138,8 +157,8 @@ public class ApiService
     {
         try
         {
-            var result = await GetFromJsonAsync<List<AlertEventDto>>(Url("/api/dashboard/alerts/history"));
-            return result ?? new List<AlertEventDto>();
+            var result = await GetSafeAsync<List<AlertEventDto>>(Url("/api/dashboard/alerts/history"), new List<AlertEventDto>());
+        return result!;
         }
         catch (Exception ex)
         {
@@ -153,8 +172,8 @@ public class ApiService
     {
         try
         {
-            var result = await GetFromJsonAsync<List<ConfigChangeDto>>(Url($"/api/dashboard/config/history?limit={limit}"));
-            return result ?? new List<ConfigChangeDto>();
+            var result = await GetSafeAsync<List<ConfigChangeDto>>(Url($"/api/dashboard/config/history?limit={limit}"), new List<ConfigChangeDto>());
+        return result!;
         }
         catch (Exception ex)
         {
@@ -310,8 +329,8 @@ public class ApiService
     {
         try
         {
-            var result = await GetFromJsonAsync<List<EvalReportDto>>(Url("/api/dashboard/eval/batches"));
-            return result ?? new List<EvalReportDto>();
+            var result = await GetSafeAsync<List<EvalReportDto>>(Url("/api/dashboard/eval/batches"), new List<EvalReportDto>());
+        return result!;
         }
         catch (Exception ex)
         {
@@ -415,7 +434,7 @@ public class ApiService
     }
 
     public Task<SystemConfigDto?> GetSystemConfigAsync()
-        => GetFromJsonAsync<SystemConfigDto>(Url("/api/dashboard/config"));
+        => GetSafeAsync<SystemConfigDto?>(Url("/api/dashboard/config"), null);
 
     /// <summary>三档路由预设（预设名 → 配置项 → 值），供配置页一键填充。</summary>
     public async Task<Dictionary<string, Dictionary<string, JsonElement>>?> GetPresetsAsync()
@@ -453,15 +472,15 @@ public class ApiService
 
     public async Task<List<ClientKeyDto>> GetClientKeysAsync()
     {
-        var result = await GetFromJsonAsync<List<ClientKeyDto>>(Url("/api/dashboard/keys"));
-        return result ?? new List<ClientKeyDto>();
+        var result = await GetSafeAsync<List<ClientKeyDto>>(Url("/api/dashboard/keys"), new List<ClientKeyDto>());
+        return result!;
     }
 
     /// <summary>租户用量视图（日消费/剩余预算/用量占比/请求数；不含 KeyHash）。</summary>
     public async Task<List<TenantUsageDto>> GetClientKeysUsageAsync()
     {
-        var result = await GetFromJsonAsync<List<TenantUsageDto>>(Url("/api/dashboard/keys/usage"));
-        return result ?? new List<TenantUsageDto>();
+        var result = await GetSafeAsync<List<TenantUsageDto>>(Url("/api/dashboard/keys/usage"), new List<TenantUsageDto>());
+        return result!;
     }
 
     /// <summary>租户用量 CSV 导出 URL（绝对地址）。</summary>
@@ -517,8 +536,8 @@ public class ApiService
 
     public async Task<List<ModelDto>> GetModelsAsync()
     {
-        var result = await GetFromJsonAsync<List<ModelDto>>(Url("/api/models"));
-        return result ?? new List<ModelDto>();
+        var result = await GetSafeAsync<List<ModelDto>>(Url("/api/models"), new List<ModelDto>());
+        return result!;
     }
 
     public async Task<(bool Ok, string? Error)> CreateModelAsync(CreateModelRequest req)
