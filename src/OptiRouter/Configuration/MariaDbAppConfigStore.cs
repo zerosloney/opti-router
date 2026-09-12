@@ -228,7 +228,7 @@ internal sealed class MariaDbAppConfigStore : IDisposable
             conn.Open();
             string? routing = LoadDocumentNoLock(conn, transaction: null, scope: AppConfigDbStore.RoutingScope);
             string? budget = LoadDocumentNoLock(conn, transaction: null, scope: AppConfigDbStore.BudgetScope);
-            return (routing, budget, ComputeDocumentsVersion(routing, budget));
+            return (routing, budget, ConfigDocumentContract.ComputeDocumentsVersion(routing, budget));
         }
     }
 
@@ -262,7 +262,7 @@ internal sealed class MariaDbAppConfigStore : IDisposable
             using var transaction = conn.BeginTransaction(System.Data.IsolationLevel.ReadCommitted);
             string? currentRouting = LoadDocumentNoLock(conn, transaction, AppConfigDbStore.RoutingScope);
             string? currentBudget = LoadDocumentNoLock(conn, transaction, AppConfigDbStore.BudgetScope);
-            string currentVersion = ComputeDocumentsVersion(currentRouting, currentBudget);
+            string currentVersion = ConfigDocumentContract.ComputeDocumentsVersion(currentRouting, currentBudget);
             if (!string.Equals(expectedVersion, currentVersion, StringComparison.Ordinal))
             {
                 version = currentVersion;
@@ -279,7 +279,7 @@ internal sealed class MariaDbAppConfigStore : IDisposable
                 if (routingSaved && budgetSaved)
                 {
                     transaction.Commit();
-                    version = ComputeDocumentsVersion(routingJson, budgetJson);
+                    version = ConfigDocumentContract.ComputeDocumentsVersion(routingJson, budgetJson);
                     return true;
                 }
             }
@@ -339,7 +339,7 @@ internal sealed class MariaDbAppConfigStore : IDisposable
         conn.Open();
         string? routing = LoadDocumentNoLock(conn, transaction: null, AppConfigDbStore.RoutingScope);
         string? budget = LoadDocumentNoLock(conn, transaction: null, AppConfigDbStore.BudgetScope);
-        return ComputeDocumentsVersion(routing, budget);
+        return ConfigDocumentContract.ComputeDocumentsVersion(routing, budget);
     }
 
     /// <remarks>调用方保证 conn 已打开；transaction 非空时命令挂到该事务。</remarks>
@@ -355,14 +355,6 @@ internal sealed class MariaDbAppConfigStore : IDisposable
 
     /// <summary>并发首写同一文档行时主键冲突的 MariaDB 错误码（ER_DUP_ENTRY）。</summary>
     private const int DuplicateKeyErrorNumber = 1062;
-
-    private static string ComputeDocumentsVersion(string? routingJson, string? budgetJson)
-    {
-        routingJson ??= string.Empty;
-        budgetJson ??= string.Empty;
-        string content = $"{routingJson.Length}:{routingJson}{budgetJson.Length}:{budgetJson}";
-        return Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
-    }
 
     /// <summary>读取原始模型列表（不展开 env: 引用），按 ord 排序。</summary>
     public IList<ModelEndpointOptions> LoadModelsRaw()

@@ -275,7 +275,7 @@ public sealed class AppConfigDbStore : IDisposable
         {
             string? routing = LoadDocumentNoLock(RoutingScope, transaction: null);
             string? budget = LoadDocumentNoLock(BudgetScope, transaction: null);
-            return (routing, budget, ComputeDocumentsVersion(routing, budget));
+            return (routing, budget, ConfigDocumentContract.ComputeDocumentsVersion(routing, budget));
         }
     }
 
@@ -298,7 +298,7 @@ public sealed class AppConfigDbStore : IDisposable
             using var transaction = _connection.BeginTransaction(deferred: false);
             string? currentRouting = LoadDocumentNoLock(RoutingScope, transaction);
             string? currentBudget = LoadDocumentNoLock(BudgetScope, transaction);
-            string currentVersion = ComputeDocumentsVersion(currentRouting, currentBudget);
+            string currentVersion = ConfigDocumentContract.ComputeDocumentsVersion(currentRouting, currentBudget);
             if (!string.Equals(expectedVersion, currentVersion, StringComparison.Ordinal))
             {
                 version = currentVersion;
@@ -309,7 +309,7 @@ public sealed class AppConfigDbStore : IDisposable
             SaveDocumentNoLock(RoutingScope, routingJson, transaction);
             SaveDocumentNoLock(BudgetScope, budgetJson, transaction);
             transaction.Commit();
-            version = ComputeDocumentsVersion(routingJson, budgetJson);
+            version = ConfigDocumentContract.ComputeDocumentsVersion(routingJson, budgetJson);
             return true;
         }
     }
@@ -339,14 +339,6 @@ public sealed class AppConfigDbStore : IDisposable
         cmd.Parameters.AddWithValue("$k", DocumentKey);
         cmd.Parameters.AddWithValue("$v", json);
         cmd.ExecuteNonQuery();
-    }
-
-    private static string ComputeDocumentsVersion(string? routingJson, string? budgetJson)
-    {
-        routingJson ??= string.Empty;
-        budgetJson ??= string.Empty;
-        string content = $"{routingJson.Length}:{routingJson}{budgetJson.Length}:{budgetJson}";
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
     }
 
     /// <summary>读取原始模型列表（不展开 env: 引用），按 ord 排序。</summary>
