@@ -1,3 +1,4 @@
+using OptiRouter.Composition;
 using OptiRouter.Security;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -534,79 +535,8 @@ builder.Services.AddSingleton<OptiRouter.Compression.IPromptPruner, OptiRouter.C
 builder.Services.AddSingleton<OptiRouter.Clients.IProviderAdapterSandbox, OptiRouter.Clients.ProviderAdapterSandbox>();
 builder.Services.AddSingleton<OptiRouter.Benchmarks.StressBenchmarkEngine>();
 
-builder.Services.AddSingleton<RouterEngine>(sp =>
-{
-    var ledger = sp.GetRequiredService<CostLedger>();
-    var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
-    var tokenEstimator = sp.GetRequiredService<ITokenEstimator>();
-    var vectorEngine = sp.GetRequiredService<ISemanticVectorEngine>();
-    var tsStore = sp.GetRequiredService<ThompsonStateStore>();
-    var kalmanTracker = sp.GetRequiredService<KalmanLatencyTracker>();
-    var kvCacheTrie = sp.GetRequiredService<KvCachePrefixTrie>();
-    var resilienceEngine = sp.GetRequiredService<PredictiveResilienceEngine>();
-    var ragAnalyzer = sp.GetRequiredService<RagContextDensityAnalyzer>();
-    var mcpAnalyzer = sp.GetRequiredService<OptiRouter.Mcp.McpToolComplexityAnalyzer>();
-    // 策略链在请求处理时读取 IOptionsMonitor.CurrentValue（ProxyOrchestrator 注入），
-    // Tier/价格等字段 reload 后立即生效；Models 端点连接配置（BaseUrl/ApiKey/Timeout）
-    // 缓存于 ModelClientProvider，经 OnChange 热更新重建（见其注册处）。
-    var policies = new List<IRouterPolicy>
-    {
-        new RoutingModePolicy(),
-        // 显式模型固定必须在 ModePolicy 之后执行：若用户指定了模型，则覆盖 ModePolicy 的预设档位。
-        new ExplicitModelPolicy(),
-        new DataSovereigntyPolicy(),
-        new CapabilityFilterPolicy(),
-        new RuleClassifierPolicy(),
-        new SessionAffinityPolicy(sp.GetRequiredService<IMemoryCache>(), sp.GetRequiredService<SessionLatencyTracker>()),
-        new SemanticRouterPolicy(vectorEngine),
-        new RagAwareRoutingPolicy(ragAnalyzer),
-        new McpToolRoutingPolicy(mcpAnalyzer),
-        new LongInputPolicy(),
-        new LatencyAwarePolicy(sp.GetRequiredService<ILatencyStatsProvider>(), tsStore, null,
-            sp.GetRequiredService<ContextualBanditState>()),
-        new PromptCacheAffinityPolicy(sp.GetRequiredService<PromptCacheAffinityStore>()),
-        new KvCacheLocalityPolicy(kvCacheTrie),
-        new PredictiveResiliencePolicy(resilienceEngine),
-        new ParetoFrontierPolicy(),
-        new BudgetGuardPolicy(ledger),
-        new QuotaAwarePolicy(sp.GetRequiredService<UpstreamQuotaStateStore>()),
-        new FailoverPolicy(healthTracker),
-        new LoadBalancePolicy(kalmanTracker)
-    };
-    return new RouterEngine(ledger, policies, tokenEstimator);
-});
-
-// t4: 注册降级重试编排器。
-// 构造依赖（RouterEngine/IOptionsMonitor/ModelHealthTracker/OutcomeRecorder/ILogger）由 DI 自动注入。
-builder.Services.AddSingleton<OutcomeRecorder>(sp => new OutcomeRecorder(
-    sp.GetRequiredService<IRequestAuditStore>(),
-    sp.GetRequiredService<OptiRouter.Metrics.RouterMetrics>(),
-    sp.GetRequiredService<CostLedger>(),
-    sp.GetRequiredService<IOptionsMonitor<RouterOptions>>(),
-    sp.GetRequiredService<IMemoryCache>(),
-    sp.GetRequiredService<ThompsonStateStore>(),
-    sp.GetRequiredService<PromptCacheAffinityStore>(),
-    sp.GetRequiredService<UpstreamQuotaStateStore>(),
-    sp.GetRequiredService<ILogger<OutcomeRecorder>>(),
-    banditStore: sp.GetRequiredService<ContextualBanditState>(),
-    clientKeyService: sp.GetRequiredService<ClientKeyService>(),
-    httpContextAccessor: sp.GetRequiredService<IHttpContextAccessor>(),
-    calibratingEstimator: sp.GetRequiredService<CalibratingTokenEstimator>(),
-    kalmanTracker: sp.GetRequiredService<KalmanLatencyTracker>(),
-    kvCacheTrie: sp.GetRequiredService<KvCachePrefixTrie>(),
-    resilienceEngine: sp.GetRequiredService<PredictiveResilienceEngine>(),
-    meshSynchronizer: sp.GetService<OptiRouter.Mesh.DistributedMeshSynchronizer>()));
-builder.Services.AddSingleton<CascadeUpgradeHandler>();
-builder.Services.AddSingleton<FusionRouter>();
-builder.Services.AddSingleton<RaceOrchestrator>();
-// 分区并发闸注册表（DI 单例）：租约化并发控制，替代原静态 ConcurrencyRegistry
-// （静态实现跨测试宿主共享状态，且返回裸信号量存在淘汰/替换竞态）。
-builder.Services.AddSingleton<ConcurrencyRegistry>();
-// LLM-as-judge 采样质量打分：旁路后台任务，按采样率把成功响应送打分模型并回灌学习状态。
-builder.Services.AddSingleton<LlmQualityJudge>();
-// regenerate 负反馈跟踪器：进程内状态，供 ProxyOrchestrator 在同键请求重发时注入惩罚 reward。
-builder.Services.AddSingleton<RegenerateFeedbackTracker>();
-builder.Services.AddSingleton<ProxyOrchestrator>();
+// 路由决策与执行引擎注册见 Composition/RoutingEngineServiceExtensions.cs。
+builder.Services.AddRoutingDecisionEngine();
 
 // Prometheus 指标集合（单例，ProxyOrchestrator 经 DI 注入）。
 // 仪表（Counter/Histogram/Gauge）在 RouterMetrics 构造时向 prometheus-net 静态注册表登记，
