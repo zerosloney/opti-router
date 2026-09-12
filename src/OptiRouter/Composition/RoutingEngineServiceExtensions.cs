@@ -1,14 +1,16 @@
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Caching.Memory;
+using OptiRouter.Compliance;
+using OptiRouter.Clients;
 using OptiRouter.Concurrency;
+using OptiRouter.Mcp;
 using OptiRouter.Health;
 using OptiRouter.Compression;
+using OptiRouter.Endpoints;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using OptiRouter.Clients;
 using OptiRouter.Configuration;
-using OptiRouter.Endpoints;
 using OptiRouter.Metrics;
 using OptiRouter.Routing;
 
@@ -96,6 +98,127 @@ services.AddSingleton<LlmQualityJudge>();
 // regenerate 负反馈跟踪器：进程内状态，供 ProxyOrchestrator 在同键请求重发时注入惩罚 reward。
 services.AddSingleton<RegenerateFeedbackTracker>();
 services.AddSingleton<ProxyOrchestrator>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// 代理执行支撑：响应/语义缓存、Mesh 同步、自适应并发、流式合规过滤器、
+    /// Kalman 延迟、KV 前缀缓存、推理控制、拜占庭共识、预测韧性、RAG/MCP 分析、
+    /// MCP 工具执行与 Server 宿主、提示压缩、适配器沙箱、压力基准。
+    /// </summary>
+    public static IServiceCollection AddProxySupportServices(this IServiceCollection services)
+    {
+services.AddSingleton<IResponseCache>(sp => new MemoryResponseCache(
+    sp.GetRequiredService<IMemoryCache>(),
+    sp.GetRequiredService<IOptions<RouterOptions>>().Value.Routing.ResponseCacheMaxEntries,
+    sp.GetRequiredService<IOptions<RouterOptions>>().Value.Routing.ResponseCacheMaxBytes,
+    useSize: true)); // AddMemoryCache 设了 SizeLimit，entry 须申报 Size
+// 同一实例的具体类型注册：MaxEntries 在构造时绑定（重启生效），dashboard 状态端点借它读命中/写入统计。
+services.AddSingleton(sp => (MemoryResponseCache)sp.GetRequiredService<IResponseCache>());
+
+services.AddSingleton<ISemanticResponseCache>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new SemanticResponseCache(options.Routing.SemanticCacheMaxEntries, sp.GetService<ISemanticVectorEngine>());
+});
+
+// 分布式状态网格 (Distributed State Mesh)
+services.AddSingleton<OptiRouter.Mesh.IDistributedStateMesh>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    string nodeId = options.Routing.MeshNodeId;
+
+    // 配置了 Redis 连接串时使用集群级网格；连接失败降级 InMemory（单机模式），不阻断启动。
+    if (!string.IsNullOrWhiteSpace(options.Routing.MeshRedisConnectionString))
+    {
+        try
+        {
+            return new OptiRouter.Mesh.RedisDistributedStateMesh(
+                new OptiRouter.Mesh.RedisChannelBus(options.Routing.MeshRedisConnectionString),
+                nodeId,
+                sp.GetService<ILogger<OptiRouter.Mesh.RedisDistributedStateMesh>>());
+        }
+        catch (Exception ex)
+        {
+            var logger = sp.GetService<ILoggerFactory>()?.CreateLogger("OptiRouter.Mesh");
+            logger?.LogWarning(ex, "Redis mesh unavailable, falling back to in-memory mesh");
+        }
+    }
+
+    return new OptiRouter.Mesh.InMemoryDistributedStateMesh(nodeId);
+});
+
+services.AddSingleton<OptiRouter.Mesh.DistributedMeshSynchronizer>(sp =>
+{
+    var mesh = sp.GetRequiredService<OptiRouter.Mesh.IDistributedStateMesh>();
+    var kvTrie = sp.GetService<KvCachePrefixTrie>();
+    var kalmanTracker = sp.GetService<KalmanLatencyTracker>();
+    var costLedger = sp.GetService<CostLedger>();
+    var resilienceEngine = sp.GetService<PredictiveResilienceEngine>();
+    var logger = sp.GetService<ILogger<OptiRouter.Mesh.DistributedMeshSynchronizer>>();
+    return new OptiRouter.Mesh.DistributedMeshSynchronizer(mesh, kvTrie, kalmanTracker, costLedger, resilienceEngine, logger);
+});
+
+services.AddSingleton<IAdaptiveConcurrencyLimiter>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new AdaptiveConcurrencyLimiter(options.Routing.AdaptiveMinLimit, options.Routing.AdaptiveMaxLimit);
+});
+
+services.AddSingleton<IStreamingComplianceFilter>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new StreamingSlidingWindowFilter(options.Routing);
+});
+
+services.AddSingleton<KalmanLatencyTracker>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new KalmanLatencyTracker(
+        targetLatencyMs: options.Routing.KalmanTargetLatencyMs,
+        penaltyGamma: options.Routing.KalmanPenaltyGamma);
+});
+
+services.AddSingleton<KvCachePrefixTrie>(sp =>
+{
+    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
+    return new KvCachePrefixTrie(TimeSpan.FromMinutes(options.Routing.KvCacheTtlMinutes));
+});
+
+services.AddSingleton<ReasoningEffortController>();
+services.AddSingleton<ByzantineConsensusEngine>(sp =>
+    new ByzantineConsensusEngine(sp.GetService<ISemanticVectorEngine>()));
+services.AddSingleton<PredictiveResilienceEngine>();
+services.AddSingleton<RagContextDensityAnalyzer>();
+services.AddSingleton<OptiRouter.Mcp.McpToolComplexityAnalyzer>();
+services.AddSingleton<OptiRouter.Mcp.McpToolCallSanitizer>();
+services.AddSingleton<OptiRouter.Mcp.McpToolRegistry>();
+services.AddHttpClient<OptiRouter.Mcp.IMcpToolExecutor, OptiRouter.Mcp.McpToolExecutor>();
+services.AddSingleton<OptiRouter.Mcp.McpToolOrchestrator>(sp =>
+    new OptiRouter.Mcp.McpToolOrchestrator(
+        sp.GetRequiredService<OptiRouter.Mcp.McpToolRegistry>(),
+        sp.GetRequiredService<OptiRouter.Mcp.IMcpToolExecutor>(),
+        sp.GetRequiredService<IModelClientProvider>(),
+        sp.GetService<ILogger<OptiRouter.Mcp.McpToolOrchestrator>>(),
+        recorder: sp.GetRequiredService<OptiRouter.Endpoints.OutcomeRecorder>()));
+
+// ── MCP Server 协议层（HTTP transport，暴露内置工具给外部 MCP 客户端）───────────
+// MCP Server：OptiRouter 作为 MCP Server 被外部 agent（Claude Code/Cline/Cursor）调用
+services.AddSingleton(new McpServerOptions
+{
+    Enabled = true,
+    // 注意：Path 变更须同步 RequestPathPolicy.AdminPathPrefixes（/mcp 前缀靠它纳入管理端鉴权）。
+    Path = "/mcp",
+    MaxToolCallTimeoutMs = 30_000
+});
+// MCP 内置工具提供者（路由状态/预算/模型健康/工具状态等）
+services.AddSingleton<McpServerToolProvider, OptiRouter.Mcp.OptiRouterMcpTools>();
+// MCP Server 主机
+services.AddSingleton<OptiRouter.Mcp.McpServerHost>();
+services.AddSingleton<OptiRouter.Compression.IPromptPruner, OptiRouter.Compression.AdaptivePromptPruner>();
+services.AddSingleton<OptiRouter.Clients.IProviderAdapterSandbox, OptiRouter.Clients.ProviderAdapterSandbox>();
+services.AddSingleton<OptiRouter.Benchmarks.StressBenchmarkEngine>();
 
         return services;
     }
