@@ -131,7 +131,9 @@ public sealed class RequestContentAuditTests
         Assert.Contains("StreamHedgeDelayMs = r.StreamHedgeDelayMs", routerStudio, StringComparison.Ordinal);
         Assert.Contains("StreamHedgeDelayMs = Dirty(nameof(ConfigForm.StreamHedgeDelayMs), Cfg.StreamHedgeDelayMs)", routerStudio, StringComparison.Ordinal);
 
-        string dashboardHandler = ReadRepositorySourceFile("src/OptiRouter/Endpoints/DashboardHandler.cs");
+        // 分部类拆分（#4 模块化）：接线成员分布于主文件与 Helpers 分部类，断言对合并源执行。
+        string dashboardHandler = ReadRepositorySourceFile("src/OptiRouter/Endpoints/DashboardHandler.cs")
+            + ReadRepositorySourceFile("src/OptiRouter/Endpoints/DashboardHandler.Helpers.cs");
         Assert.Contains("opt.Routing.StreamFirstTokenTimeoutMs,", dashboardHandler, StringComparison.Ordinal);
         Assert.Contains("public int? StreamFirstTokenTimeoutMs { get; init; }", dashboardHandler, StringComparison.Ordinal);
         Assert.Contains("routing[\"StreamFirstTokenTimeoutMs\"] = req.StreamFirstTokenTimeoutMs.Value;", dashboardHandler, StringComparison.Ordinal);
