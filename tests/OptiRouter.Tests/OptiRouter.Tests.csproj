@@ -33,6 +33,7 @@
          统一复制到输出目录后从 BaseDirectory 读取，不向上遍历目录树（发布/CI 布局下会脆断）。 -->
     <None Include="..\..\README.md" Link="RepositoryFiles\README.md" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\src\OptiRouter\Components\Pages\Router\RouterStudio.razor" Link="RepositoryFiles\RouterStudio.razor" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OptiRouter\Components\Pages\Router\RouterStudio.razor.cs" Link="RepositoryFiles\RouterStudio.razor.cs" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\src\OptiRouter\appsettings.json" Link="RepositoryFiles\appsettings.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

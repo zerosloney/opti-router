@@ -27,7 +27,8 @@ public sealed class RequestContentAuditTests
         Assert.Equal(0, new RoutingOptions().AuditRetentionHours);
         Assert.False(new ApiService.RoutingConfigDto().AuditStoreRequestContent);
 
-        string routerStudio = ReadRepositoryFile("RouterStudio.razor");
+        string routerStudio = ReadRepositoryFile("RouterStudio.razor")
+            + ReadRepositoryFile("RouterStudio.razor.cs");
         Assert.Contains("public bool AuditStoreRequestContent { get; set; } = false;", routerStudio, StringComparison.Ordinal);
 
         string readme = ReadRepositoryFile("README.md");
@@ -121,7 +122,8 @@ public sealed class RequestContentAuditTests
         Assert.Contains("public int StreamHedgeDelayMs { get; init; }", apiService, StringComparison.Ordinal);
         Assert.Contains("public int? StreamHedgeDelayMs { get; init; }", apiService, StringComparison.Ordinal);
 
-        string routerStudio = ReadRepositoryFile("RouterStudio.razor");
+        string routerStudio = ReadRepositoryFile("RouterStudio.razor")
+            + ReadRepositoryFile("RouterStudio.razor.cs");
         Assert.Contains("public int StreamFirstTokenTimeoutMs { get; set; }", routerStudio, StringComparison.Ordinal);
         Assert.Contains("@bind=\"Cfg.StreamFirstTokenTimeoutMs\"", routerStudio, StringComparison.Ordinal);
         Assert.Contains("StreamFirstTokenTimeoutMs = r.StreamFirstTokenTimeoutMs", routerStudio, StringComparison.Ordinal);
