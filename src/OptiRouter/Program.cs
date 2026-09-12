@@ -59,21 +59,12 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB limit
 });
 
-// 配置存储：Routing/Budget/模型配置全部落配置库（StoreProvider 默认 Auto：有 ConfigDbConnectionString 即 MariaDB，否则 SQLite）。
-// SQLite 后端可由 ConfigDbPath 指定文件路径（默认 data/optirouter-config.db）。
-// 页面写入经 AppConfigDbStore → IConfigurationRoot.Reload() 热生效。
-// 首启迁移：库为空时从 appsettings.json 的 Routing/Budget 段与遗留 models-config.json 导入一次，
-// 之后 DB 为唯一权威，appsettings.json 仅保留部署级设置（密钥/端口/限流/DB 连接）。
 string configDbPath = builder.Configuration["OptiRouter:ConfigDbPath"]
     ?? Path.Combine(builder.Environment.ContentRootPath, "data", "optirouter-config.db");
 string? configDbConnectionString = builder.Configuration["OptiRouter:ConfigDbConnectionString"];
-builder.Services.AddSingleton(sp => new AppConfigDbStore(configDbPath, configDbConnectionString));
-// 管理端密钥：哈希存配置库 security scope（构造时种子；appsettings 仅首启种子源）。
-builder.Services.AddSingleton(sp => new OptiRouter.Configuration.AdminKeyStore(
-    sp.GetRequiredService<AppConfigDbStore>(),
-    sp.GetRequiredService<IConfiguration>(),
-    sp.GetService<ILogger<OptiRouter.Configuration.AdminKeyStore>>()));
+builder.Services.AddConfigurationStores(builder.Configuration, configDbPath, configDbConnectionString);
 builder.Configuration.Sources.Add(new DbAppConfigSource { DbPath = configDbPath, ConnectionString = configDbConnectionString });
+
 
 // Bind and validate RouterOptions on startup.
 builder.Services.AddMemoryCache(options =>
@@ -251,156 +242,7 @@ builder.Services.AddOpenTelemetry()
 // t3: 注册成本账本、跨请求模型健康跟踪器（三态断路器）和路由引擎。
 // 注册 ClientKeyService（租户 Key 与配额管理；配置 ConfigDbConnectionString 后持久化到 MariaDB，
 // 否则默认 client-keys.json 文件）
-builder.Services.AddSingleton<ClientKeyService>(sp => new ClientKeyService(
-    Path.Combine(builder.Environment.ContentRootPath, "data", "client-keys.json"),
-    sp.GetRequiredService<ILogger<ClientKeyService>>(),
-    mariaDbConnectionString: configDbConnectionString,
-    alertHistory: sp.GetService<OptiRouter.Health.AlertHistory>()));
-
-builder.Services.AddSingleton<CostLedger>(sp =>
-{
-    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    var store = sp.GetRequiredService<ICostLedgerStore>();
-    return new CostLedger(store, options.Budget.SessionEvictionHours);
-});
-builder.Services.AddSingleton<ModelHealthTracker>(sp =>
-{
-    var store = sp.GetRequiredService<ICostLedgerStore>();
-    var tracker = new ModelHealthTracker(store);
-
-    // 真实流量成败同步到连通状态留痕：探活（EnableHealthProbe）关闭时，模型配置页
-    // "连通状态"列不再只靠手动测试，而由真实请求的成败持续驱动。回调在熔断锁内触发，
-    // 须快速非阻塞；异常自行兜底（记日志不上抛），不拖垮路由热路径。
-    var probeResults = sp.GetRequiredService<OptiRouter.Health.ProbeResultStore>();
-    var syncLogger = sp.GetRequiredService<ILoggerFactory>().CreateLogger("OptiRouter.Routing.ModelHealthTracker");
-    tracker.OutcomeObserved += (modelName, success) =>
-    {
-        try
-        {
-            // latencyMs 记 0：tracker 收敛点无耗时上下文（串行/Fusion/Race 各自持有计时器），
-            // 消息文案与探活区分；如需精确延迟可升级为 Record* 带 latency 参数。
-            probeResults.Record(modelName, new OptiRouter.Health.ProbeStatus(
-                success, 0, DateTime.UtcNow,
-                success ? "真实请求成功（自动同步）" : "真实请求失败（自动同步）", null));
-        }
-        catch (Exception ex)
-        {
-            syncLogger.LogWarning(ex, "连通状态留痕同步失败: {Model}", modelName);
-        }
-    };
-
-    return tracker;
-});
-
-// 延迟统计缓存：后台聚合服务写入，路由策略零 I/O 读快照。
-builder.Services.AddSingleton<ILatencyStatsProvider, LatencyStatsCache>();
-
-// 告警引擎：检查预算、断路器、失败率等条件。
-builder.Services.AddSingleton<AlertEngine>(sp =>
-{
-    var ledger = sp.GetRequiredService<CostLedger>();
-    var healthTracker = sp.GetRequiredService<ModelHealthTracker>();
-    var auditStore = sp.GetRequiredService<IRequestAuditStore>();
-    var routerOptions = sp.GetRequiredService<IOptionsMonitor<RouterOptions>>();
-    return new AlertEngine(ledger, healthTracker, auditStore, routerOptions);
-});
-
-// 告警历史环形缓冲：告警出现/恢复事件进程内留痕，供 Dashboard 历史查询。
-builder.Services.AddSingleton<OptiRouter.Health.AlertHistory>();
-
-// 最近探活结果留痕：手动 + 后台探活统一写入，模型配置页"连通状态"列刷新后预填。
-builder.Services.AddSingleton<OptiRouter.Health.ProbeResultStore>();
-
-// 审计分析：时间窗全量聚合报告（总览/分模型/分档/级联/Fusion/路由原因/日趋势），供策略调优闭环。
-builder.Services.AddSingleton<AuditAnalysisService>();
-
-// Token 估算器：Tiktoken 模式用 SharpToken 真实 BPE 计数（内置词表、离线可用，异常自动回退分桶粗估）；
-// Bucket 模式用分桶加权粗估。编码名校验由 RouterOptionsValidator 在启动时完成。
-// 统一经 CalibratingTokenEstimator 包装：用上游真实 usage 的 EMA 比率校正系统性偏差
-// （分桶对 agent 负载实测偏低 ~34%），RouterEngine/压缩器等所有消费方自动获得校准值。
-builder.Services.AddSingleton<CalibratingTokenEstimator>(sp =>
-{
-    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    ITokenEstimator inner = options.Routing.TokenEstimation == TokenEstimationMode.Bucket
-        ? new BucketTokenEstimator()
-        : new TiktokenTokenEstimator(options.Routing.TiktokenEncoding);
-    return new CalibratingTokenEstimator(inner);
-});
-builder.Services.AddSingleton<ITokenEstimator>(sp => sp.GetRequiredService<CalibratingTokenEstimator>());
-
-// ── Token 压缩引擎（RTK + Caveman 双引擎串联）──────────────────────
-// RTK Shell 输出压缩：工具执行结果（bash/git/npm 输出等）去 ANSI/进度条/空行
-builder.Services.AddSingleton<RtkShellOutputCompressor>();
-// Caveman 文本精简：英文/中文冗余表达压缩客套话剔除
-builder.Services.AddSingleton<CavemanCondenser>();
-// 组合压缩流水线：RTK → Caveman → AdaptivePromptPruner 三阶段串联
-builder.Services.AddSingleton<TokenCompressionPipeline>();
-
-builder.Services.AddSingleton<ISemanticVectorEngine>(sp =>
-{
-    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    var logger = sp.GetRequiredService<ILogger<OnnxEmbeddingVectorEngine>>();
-
-    if (options.Routing.EnableOnnxEmbedding && !string.IsNullOrWhiteSpace(options.Routing.OnnxModelPath))
-    {
-        var onnxEngine = new OnnxEmbeddingVectorEngine(
-            options.Routing.OnnxModelPath,
-            options.Routing.OnnxExecutionProvider,
-            fallbackEngine: new DenseEmbeddingVectorEngine(),
-            logger: logger);
-
-        return new HybridSemanticVectorEngine(
-            sparseEngine: new TfIdfSemanticVectorEngine(),
-            denseEngine: onnxEngine,
-            highConfidenceThreshold: options.Routing.HybridHighConfidenceThreshold);
-    }
-
-    return new HybridSemanticVectorEngine(
-        sparseEngine: new TfIdfSemanticVectorEngine(),
-        denseEngine: new DenseEmbeddingVectorEngine(),
-        highConfidenceThreshold: options.Routing.HybridHighConfidenceThreshold);
-});
-
-// Thompson 采样 + Contextual Bandit 状态持久化（MariaDB/SQLite 双后端，与成本账本共享连接）。
-builder.Services.AddSingleton<IThompsonStateStore>(sp =>
-{
-    var options = sp.GetRequiredService<IOptions<RouterOptions>>().Value;
-    if (!options.Budget.UsePersistentStore)
-        return NullLearningStateStore.Instance;
-    if (string.Equals(options.Budget.StoreProvider, "MariaDb", StringComparison.OrdinalIgnoreCase))
-        return new MariaDbLearningStateStore(options.Budget.MariaDbConnectionString!);
-    string storePath = options.Budget.StorePath;
-    string? dir = Path.GetDirectoryName(storePath);
-    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-        Directory.CreateDirectory(dir);
-    return new SqliteLearningStateStore(storePath);
-});
-// Bandit 复用 Thompson 侧的同一持久化实例（两者写同一 DB 的不同表）。
-builder.Services.AddSingleton<IBanditStateStore>(sp =>
-{
-    var tsStore = sp.GetRequiredService<IThompsonStateStore>();
-    return tsStore is SqliteLearningStateStore or MariaDbLearningStateStore
-        ? (IBanditStateStore)tsStore
-        : NullLearningStateStore.Instance;
-});
-
-builder.Services.AddSingleton<ThompsonStateStore>(sp =>
-{
-    var persistence = sp.GetRequiredService<IThompsonStateStore>();
-    var logger = sp.GetRequiredService<ILogger<ThompsonStateStore>>();
-    return new ThompsonStateStore(persistence, logger);
-});
-builder.Services.AddSingleton<ContextualBanditState>(sp =>
-{
-    var persistence = sp.GetRequiredService<IBanditStateStore>();
-    var logger = sp.GetRequiredService<ILogger<ContextualBanditState>>();
-    return new ContextualBanditState(persistence: persistence, logger: logger);
-});
-builder.Services.AddSingleton<UpstreamQuotaStateStore>();
-builder.Services.AddSingleton<PromptCacheAffinityStore>();
-builder.Services.AddSingleton<FusionPanelSelector>();
-builder.Services.AddSingleton<SessionLatencyTracker>();
-builder.Services.AddHttpContextAccessor();
+builder.Services.AddTenantAndLearningServices(builder.Environment.ContentRootPath, configDbConnectionString);
 
 builder.Services.AddSecurityServices(builder.Configuration);
 
