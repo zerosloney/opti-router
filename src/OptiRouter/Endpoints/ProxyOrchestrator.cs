@@ -1192,50 +1192,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         await hedge.DisposeAsync().ConfigureAwait(false);
                     }
                     if (!probeResolved)
-                    {
-                        if (streamFaulted)
-                        {
-                            // 中途失败计入断路器统计（与非流式失败同等对待）。
-                            attemptSw.Stop();
-                            bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                            double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-                            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                            _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier,
-                                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                            _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
-                                candidate.Name, tripped ? " (circuit tripped)" : "");
-                        }
-                        else if (hasFirstLine)
-                        {
-                            // P1-6：客户端取消 / 提前断开不是上游失败——不进熔断、不记负反馈。
-                            // usage 行已到达的消费仍须一次性结算（供应商侧可能已按生成量计费），
-                            // 不重复计费（正常结束路径不会再走这里）。
-                            attemptSw.Stop();
-                            string terminal = clientCancelled ? "client-cancelled" : "client-disconnected";
-                            if (finalUsage is not null)
-                            {
-                                decimal cost = CostCalculator.Compute(finalUsage, candidate);
-                                _recorder.RecordCost(cost, sessionId);
-                                _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage, cost,
-                                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
-                                    timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
-                                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                            }
-                            else
-                            {
-                                _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
-                                    requestContent: requestContent);
-                            }
-                            _healthTracker.ReleaseProbe(candidate.Name);
-                        }
-                        else
-                        {
-                            // 无健康信号（不可重试错误、首行前外部取消、空流）：仅释放探测槽位。
-                            _healthTracker.ReleaseProbe(candidate.Name);
-                        }
-                    }
+                        SettleStreamAbnormalEnd(candidate, decision, feedbackKey, streamFaulted, clientCancelled,
+                            hasFirstLine, finalUsage, firstLine, attemptSw, sessionId, requestContent, routedTier,
+                            threshold, cooldown);
                 }
             }
 
@@ -1373,6 +1332,72 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// 是否还有未失败的其他候选。凭证错误在 auto 路由下应降级到下一候选而非放弃整个请求；
     /// 无其他候选（显式单模型或最后一个候选）时保持透传，原始状态码到达客户端。
     /// </summary>
+    /// <summary>
+    /// 生命周期收敛（切片③）：流式候选异常终态结算统一出口——中途故障（计入熔断）、
+    /// 客户端取消/提前断开（P1-6：不进熔断不记负反馈，已知 usage 一次性结算）、
+    /// 未产生健康信号（首行前取消/空流：仅释放探槽）。四分支此前内联在迭代器 finally 中。
+    /// </summary>
+    private void SettleStreamAbnormalEnd(
+        ModelEndpointOptions candidate,
+        RouterDecision decision,
+        string? feedbackKey,
+        bool streamFaulted,
+        bool clientCancelled,
+        bool hasFirstLine,
+        ChatUsage? finalUsage,
+        RawStreamLine firstLine,
+        System.Diagnostics.Stopwatch attemptSw,
+        string? sessionId,
+        string? requestContent,
+        ModelTier routedTier,
+        int threshold,
+        int cooldown)
+    {
+        attemptSw.Stop();
+
+        if (streamFaulted)
+        {
+            // 中途失败计入断路器统计（与非流式失败同等对待）。
+            bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+            double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
+            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
+            _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
+                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier,
+                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+            _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
+                candidate.Name, tripped ? " (circuit tripped)" : "");
+            return;
+        }
+
+        if (hasFirstLine)
+        {
+            // P1-6：客户端取消 / 提前断开不是上游失败——不进熔断、不记负反馈。
+            // usage 行已到达的消费仍须一次性结算（供应商侧可能已按生成量计费），
+            // 不重复计费（正常结束路径不会再走这里）。
+            string terminal = clientCancelled ? "client-cancelled" : "client-disconnected";
+            if (finalUsage is not null)
+            {
+                decimal cost = CostCalculator.Compute(finalUsage, candidate);
+                _recorder.RecordCost(cost, sessionId);
+                _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage, cost,
+                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
+                    timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
+                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+            }
+            else
+            {
+                _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
+                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
+                    requestContent: requestContent);
+            }
+            _healthTracker.ReleaseProbe(candidate.Name);
+            return;
+        }
+
+        // 无健康信号（不可重试错误、首行前外部取消、空流）：仅释放探测槽位。
+        _healthTracker.ReleaseProbe(candidate.Name);
+    }
+
     /// <summary>
     /// 生命周期收敛（切片②）：非流式候选成功结算统一出口——成本（usage 精确/输入估算两口径）、
     /// 质量因子折减 reward、Thompson、会话/提示缓存亲和、审计、配额、熔断成功。修复前此套
