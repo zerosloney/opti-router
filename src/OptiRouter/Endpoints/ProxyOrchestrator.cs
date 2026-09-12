@@ -289,6 +289,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             int estimatedTokens = decision.EstimatedInputTokens;
             // 本轮路由命中档（首选候选 tier），用于审计追踪路由分档正确性。
             ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
+            var snapshot = new RequestSnapshot(sessionId, requestContent, feedbackKey, routedTier,
+                options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown);
 
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
@@ -446,8 +448,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 保证 Fusion/Race/Cascade 的最终答案与串行路径一样不绕过审核。
                     await ModerateFinalOutputAsync(response, options, routedTier, sessionId, requestContent, effectiveCt).ConfigureAwait(false);
 
-                    decimal? settledCost = SettleCandidateSuccess(candidate, decision, request, response, estimatedTokens,
-                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier,
+                    decimal? settledCost = SettleCandidateSuccess(in snapshot, candidate, decision, request, response,
+                        estimatedTokens, attemptSw.ElapsedMilliseconds,
                         halfOpenRequiredSuccesses, options.Routing.QualityPenaltyFactor);
                     outcomeReported = true;
 
@@ -512,8 +514,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastModelName = candidate.Name;
                     (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
                         CandidateFailureKind.QuotaLimited, candidate, decision, estimatedTokens,
-                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
-                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                        attemptSw.ElapsedMilliseconds, in snapshot, ex,
+                        globalTimeout: false, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
                 }
                 catch (ModelClientException ex) when (IsRequestRejection(ex))
                 {
@@ -525,8 +527,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastModelName = candidate.Name;
                     (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
                         CandidateFailureKind.RequestRejection, candidate, decision, estimatedTokens,
-                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
-                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, rejectHasOther);
+                        attemptSw.ElapsedMilliseconds, in snapshot, ex,
+                        globalTimeout: false, rejectHasOther);
                     if (!rejectHasOther)
                         throw; // 无候选可降级：保持透传语义，原始状态码到达客户端
                 }
@@ -536,8 +538,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastModelName = candidate.Name;
                     (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
                         CandidateFailureKind.UpstreamStatus, candidate, decision, estimatedTokens,
-                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
-                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                        attemptSw.ElapsedMilliseconds, in snapshot, ex,
+                        globalTimeout: false, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
                 }
                 catch (HttpRequestException ex)
                 {
@@ -545,8 +547,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastModelName = candidate.Name;
                     (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
                         CandidateFailureKind.NetworkError, candidate, decision, estimatedTokens,
-                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
-                        globalTimeout: false, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                        attemptSw.ElapsedMilliseconds, in snapshot, ex,
+                        globalTimeout: false, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
                 }
                 catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
                 {
@@ -556,8 +558,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     lastModelName = candidate.Name;
                     (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
                         CandidateFailureKind.InternalTimeout, candidate, decision, estimatedTokens,
-                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier, ex, feedbackKey,
-                        isGlobalTimeout, globalTimeoutSeconds: options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                        attemptSw.ElapsedMilliseconds, in snapshot, ex,
+                        isGlobalTimeout, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
 
                     if (isGlobalTimeout)
                     {
@@ -696,6 +698,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
 
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
             ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
+            var snapshot = new RequestSnapshot(sessionId, requestContent, feedbackKey, routedTier,
+                options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown);
 
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
@@ -1192,9 +1196,8 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         await hedge.DisposeAsync().ConfigureAwait(false);
                     }
                     if (!probeResolved)
-                        SettleStreamAbnormalEnd(candidate, decision, feedbackKey, streamFaulted, clientCancelled,
-                            hasFirstLine, finalUsage, firstLine, attemptSw, sessionId, requestContent, routedTier,
-                            threshold, cooldown);
+                        SettleStreamAbnormalEnd(in snapshot, candidate, decision, streamFaulted, clientCancelled,
+                            hasFirstLine, finalUsage, firstLine, attemptSw);
                 }
             }
 
@@ -1338,32 +1341,27 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// 未产生健康信号（首行前取消/空流：仅释放探槽）。四分支此前内联在迭代器 finally 中。
     /// </summary>
     private void SettleStreamAbnormalEnd(
+        in RequestSnapshot snapshot,
         ModelEndpointOptions candidate,
         RouterDecision decision,
-        string? feedbackKey,
         bool streamFaulted,
         bool clientCancelled,
         bool hasFirstLine,
         ChatUsage? finalUsage,
         RawStreamLine firstLine,
-        System.Diagnostics.Stopwatch attemptSw,
-        string? sessionId,
-        string? requestContent,
-        ModelTier routedTier,
-        int threshold,
-        int cooldown)
+        System.Diagnostics.Stopwatch attemptSw)
     {
         attemptSw.Stop();
 
         if (streamFaulted)
         {
             // 中途失败计入断路器统计（与非流式失败同等对待）。
-            bool tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+            bool tripped = _healthTracker.RecordFailure(candidate.Name, snapshot.FailureThreshold, snapshot.CooldownSeconds);
             double reward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
+            _regenerateTracker.Record(snapshot.FeedbackKey, candidate.Name, success: false);
             _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, "stream-faulted", true, routedTier,
-                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                attemptSw.ElapsedMilliseconds, snapshot.SessionId, decision.Reason, false, "stream-faulted", true, snapshot.RoutedTier,
+                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                 candidate.Name, tripped ? " (circuit tripped)" : "");
             return;
@@ -1378,17 +1376,17 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             if (finalUsage is not null)
             {
                 decimal cost = CostCalculator.Compute(finalUsage, candidate);
-                _recorder.RecordCost(cost, sessionId);
+                _recorder.RecordCost(cost, snapshot.SessionId);
                 _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage, cost,
-                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
+                    attemptSw.ElapsedMilliseconds, snapshot.SessionId, decision.Reason, false, terminal, true, snapshot.RoutedTier,
                     timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
-                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
             }
             else
             {
                 _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                    attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, terminal, true, routedTier,
-                    requestContent: requestContent);
+                    attemptSw.ElapsedMilliseconds, snapshot.SessionId, decision.Reason, false, terminal, true, snapshot.RoutedTier,
+                    requestContent: snapshot.RequestContent);
             }
             _healthTracker.ReleaseProbe(candidate.Name);
             return;
@@ -1404,15 +1402,13 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// 记账内联在候选循环中，与流式路径及失败路径各持一份变体。
     /// </summary>
     private decimal? SettleCandidateSuccess(
+        in RequestSnapshot snapshot,
         ModelEndpointOptions candidate,
         RouterDecision decision,
         ChatRequest request,
         RawChatResponse response,
         int estimatedTokens,
         long elapsedMs,
-        string? sessionId,
-        string? requestContent,
-        ModelTier routedTier,
         int halfOpenRequiredSuccesses,
         double qualityPenaltyFactor)
     {
@@ -1423,14 +1419,14 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, qualityPenaltyFactor, request);
         double reward = _recorder.RecordThompsonOutcome(candidate.Name, elapsedMs, decision, cost,
             actualTier: candidate.Tier, qualityFactor: qualityFactor, completionTokens: response.Usage?.CompletionTokens ?? 0);
-        _recorder.RecordAffinity(sessionId, candidate.Name, AffinitySignal.Strong, elapsedMs);
+        _recorder.RecordAffinity(snapshot.SessionId, candidate.Name, AffinitySignal.Strong, elapsedMs);
         _recorder.RecordPromptCacheAffinity(request, candidate.Name);
 
         if (response.Usage is not null)
         {
-            _recorder.RecordCost(cost, sessionId);
-            _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, elapsedMs, sessionId, decision.Reason, true, null, false, routedTier,
-                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+            _recorder.RecordCost(cost, snapshot.SessionId);
+            _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, elapsedMs, snapshot.SessionId, decision.Reason, true, null, false, snapshot.RoutedTier,
+                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
         }
         else
         {
@@ -1439,10 +1435,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             // 避免成功请求被记 0 成本导致日/会话预算低估。
             decimal estCost = OutcomeRecorder.EstimateInputCost(candidate, estimatedTokens);
             if (estCost > 0m)
-                _recorder.RecordCost(estCost, sessionId);
-            _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, elapsedMs, sessionId, decision.Reason, true, null, false, routedTier,
+                _recorder.RecordCost(estCost, snapshot.SessionId);
+            _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, elapsedMs, snapshot.SessionId, decision.Reason, true, null, false, snapshot.RoutedTier,
                 isEstimated: estCost > 0m,
-                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
         }
         _recorder.RecordQuota(candidate.Name, response.Metadata);
         _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
@@ -1463,15 +1459,9 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         RouterDecision decision,
         int estimatedTokens,
         long elapsedMs,
-        string? sessionId,
-        string? requestContent,
-        ModelTier routedTier,
+        in RequestSnapshot snapshot,
         Exception exception,
-        string? feedbackKey,
         bool globalTimeout,
-        int globalTimeoutSeconds,
-        int threshold,
-        int cooldown,
         bool hasOtherCandidates)
     {
         int statusCode;
@@ -1514,7 +1504,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
             default: // InternalTimeout
                 statusCode = 408;
                 errorMessage = globalTimeout
-                    ? $"Global failover timeout ({globalTimeoutSeconds}s) exceeded."
+                    ? $"Global failover timeout ({snapshot.GlobalTimeoutSeconds}s) exceeded."
                     : "Request timed out inside the proxy.";
                 auditFailure = globalTimeout ? "global-failover-timeout" : "timeout";
                 recordCircuitFailure = true;
@@ -1524,7 +1514,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         bool tripped;
         if (recordCircuitFailure)
         {
-            tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
+            tripped = _healthTracker.RecordFailure(candidate.Name, snapshot.FailureThreshold, snapshot.CooldownSeconds);
         }
         else
         {
@@ -1536,12 +1526,12 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         double? reward = kind == CandidateFailureKind.QuotaLimited
             ? null
             : _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-        _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, elapsedMs, sessionId,
-            decision.Reason, false, auditFailure, false, routedTier,
+        _regenerateTracker.Record(snapshot.FeedbackKey, candidate.Name, success: false);
+        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, elapsedMs, snapshot.SessionId,
+            decision.Reason, false, auditFailure, false, snapshot.RoutedTier,
             quotaLimited: kind == CandidateFailureKind.QuotaLimited,
             reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel,
-            requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+            requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
 
         switch (kind)
         {
@@ -1587,6 +1577,20 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
         /// <summary>代理内部超时 / 全局 Failover 超时（非外部取消）：计入熔断。</summary>
         InternalTimeout,
     }
+
+    /// <summary>
+    /// 生命周期收敛（切片④）：单轮路由决策的结算上下文快照（不可变）。每轮 while 迭代
+    /// 产出一份（routedTier 随轮次候选变化，故按轮而非按请求），结算方法统一以
+    /// <c>in snapshot</c> 取参，消除散装参数束。
+    /// </summary>
+    private readonly record struct RequestSnapshot(
+        string? SessionId,
+        string? RequestContent,
+        string? FeedbackKey,
+        ModelTier RoutedTier,
+        int GlobalTimeoutSeconds,
+        int FailureThreshold,
+        int CooldownSeconds);
 
     private static bool HasOtherCandidate(RouterDecision decision, string currentModel, HashSet<string> failed) =>
         decision.Candidates.Any(c =>
