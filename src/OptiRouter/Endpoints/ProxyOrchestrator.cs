@@ -446,38 +446,10 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 保证 Fusion/Race/Cascade 的最终答案与串行路径一样不绕过审核。
                     await ModerateFinalOutputAsync(response, options, routedTier, sessionId, requestContent, effectiveCt).ConfigureAwait(false);
 
-                    decimal cost = response.Usage is not null
-                        ? CostCalculator.Compute(response.Usage, candidate)
-                        : 0m;
-                    // 质量因子：从非流式响应检测低质量信号（截断/空答/JSON 契约违约），乘性折减延迟 reward。
-                    // 流式路径未累积 content，不接入（qualityFactor 默认 1.0）。
-                    double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, options.Routing.QualityPenaltyFactor, request);
-                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
-                        actualTier: candidate.Tier, qualityFactor: qualityFactor, completionTokens: response.Usage?.CompletionTokens ?? 0);
+                    decimal? settledCost = SettleCandidateSuccess(candidate, decision, request, response, estimatedTokens,
+                        attemptSw.ElapsedMilliseconds, sessionId, requestContent, routedTier,
+                        halfOpenRequiredSuccesses, options.Routing.QualityPenaltyFactor);
                     outcomeReported = true;
-                    _recorder.RecordAffinity(sessionId, candidate.Name, AffinitySignal.Strong, attemptSw.ElapsedMilliseconds);
-                    _recorder.RecordPromptCacheAffinity(request, candidate.Name);
-
-                    if (response.Usage is not null)
-                    {
-                        _recorder.RecordCost(cost, sessionId);
-                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
-                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                    }
-                    else
-                    {
-                        // 上游未返回 usage：无法精确计费。按估算 input 成本入账并标 IsEstimated，
-                        // 与失败/取消路径（RaceOrchestrator/FusionRouter）的估算口径一致，
-                        // 避免成功请求被记 0 成本导致日/会话预算低估。
-                        decimal estCost = OutcomeRecorder.EstimateInputCost(candidate, estimatedTokens);
-                        if (estCost > 0m)
-                            _recorder.RecordCost(estCost, sessionId);
-                        _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, false, routedTier,
-                            isEstimated: estCost > 0m,
-                            timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
-                    }
-                    _recorder.RecordQuota(candidate.Name, response.Metadata);
-                    _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
 
                     // LLM-as-judge 采样：按配置采样率把"问题-回答"送打分模型，score 回灌学习状态。
                     // 旁路 fire-and-forget；用 PII 还原前的原文（占位符语义略降但默认脱敏关闭）。
@@ -510,9 +482,7 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     }
 
                     _logger.LogInformation("Non-streaming request completed: model={Model}, cost={Cost}",
-                        candidate.Name, response.Usage is not null
-                            ? cost.ToString("F6")
-                            : "unknown");
+                        candidate.Name, settledCost is not null ? settledCost.Value.ToString("F6") : "unknown");
 
                     var finalResponse = ProcessResponse(response, piiMap);
                     if (cacheKey is not null)
@@ -1403,6 +1373,57 @@ public sealed class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// 是否还有未失败的其他候选。凭证错误在 auto 路由下应降级到下一候选而非放弃整个请求；
     /// 无其他候选（显式单模型或最后一个候选）时保持透传，原始状态码到达客户端。
     /// </summary>
+    /// <summary>
+    /// 生命周期收敛（切片②）：非流式候选成功结算统一出口——成本（usage 精确/输入估算两口径）、
+    /// 质量因子折减 reward、Thompson、会话/提示缓存亲和、审计、配额、熔断成功。修复前此套
+    /// 记账内联在候选循环中，与流式路径及失败路径各持一份变体。
+    /// </summary>
+    private decimal? SettleCandidateSuccess(
+        ModelEndpointOptions candidate,
+        RouterDecision decision,
+        ChatRequest request,
+        RawChatResponse response,
+        int estimatedTokens,
+        long elapsedMs,
+        string? sessionId,
+        string? requestContent,
+        ModelTier routedTier,
+        int halfOpenRequiredSuccesses,
+        double qualityPenaltyFactor)
+    {
+        decimal cost = response.Usage is not null
+            ? CostCalculator.Compute(response.Usage, candidate)
+            : 0m;
+        // 质量因子：从非流式响应检测低质量信号（截断/空答/JSON 契约违约），乘性折减延迟 reward。
+        double qualityFactor = OutcomeRecorder.ExtractQualityFactor(response, qualityPenaltyFactor, request);
+        double reward = _recorder.RecordThompsonOutcome(candidate.Name, elapsedMs, decision, cost,
+            actualTier: candidate.Tier, qualityFactor: qualityFactor, completionTokens: response.Usage?.CompletionTokens ?? 0);
+        _recorder.RecordAffinity(sessionId, candidate.Name, AffinitySignal.Strong, elapsedMs);
+        _recorder.RecordPromptCacheAffinity(request, candidate.Name);
+
+        if (response.Usage is not null)
+        {
+            _recorder.RecordCost(cost, sessionId);
+            _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, elapsedMs, sessionId, decision.Reason, true, null, false, routedTier,
+                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+        }
+        else
+        {
+            // 上游未返回 usage：无法精确计费。按估算 input 成本入账并标 IsEstimated，
+            // 与失败/取消路径（RaceOrchestrator/FusionRouter）的估算口径一致，
+            // 避免成功请求被记 0 成本导致日/会话预算低估。
+            decimal estCost = OutcomeRecorder.EstimateInputCost(candidate, estimatedTokens);
+            if (estCost > 0m)
+                _recorder.RecordCost(estCost, sessionId);
+            _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, elapsedMs, sessionId, decision.Reason, true, null, false, routedTier,
+                isEstimated: estCost > 0m,
+                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+        }
+        _recorder.RecordQuota(candidate.Name, response.Metadata);
+        _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
+        return response.Usage is not null ? cost : null;
+    }
+
     /// <summary>
     /// 生命周期收敛（结算组件种子）：串行/降级路径的候选失败结算统一出口——Thompson 惩罚、
     /// regenerate 负反馈、审计、熔断/探槽处理按失败类别在一处表达，控制流
