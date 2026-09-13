@@ -18,8 +18,9 @@ public class ApiService
     private readonly IHttpContextAccessor? _httpContextAccessor;
     // ApiService 是 Scoped（每 circuit 一份实例），Cookie 缓存在实例上即按管理员会话隔离。
     // 管理会话 Cookie 在预渲染/circuit 建立阶段可从 HttpContext 读到；交互阶段 HttpContext 为 null，
-    // 回退用构造时捕获的值。
-    private readonly string? _capturedCookie;
+    // 回退用构造时捕获的值。可变（P2-4）：滑动续期下发新票据时经 SendAsync 捕获更新，
+    // 使电路内凭据与浏览器侧续期同步，旧票据过期不再误踢回登录页。
+    private string? _capturedCookie;
     private int _redirected;
     public ApiService(HttpClient http, NavigationManager nav,
         IHttpContextAccessor? httpContextAccessor = null,
@@ -58,6 +59,24 @@ public class ApiService
             request.Content = JsonContent.Create(jsonBody);
 
         var response = await _http.SendAsync(request, cancellationToken);
+
+        // 会话滑动续期捕获（P2-4）：Cookie 票据过半有效期后，服务端在认证响应中
+        // 下发续期后的新 Cookie。捕获新值使电路内后续服务端调用与浏览器侧续期
+        // 保持同步——修复构造时捕获的旧票据过期后，即使浏览器已续期、面板仍因
+        // 服务端调用 401 被踢回登录页。仅识别管理台会话 Cookie（值随请求回送，
+        // 不含 HttpOnly 保护之外的属性字段）。
+        if (response.Headers.TryGetValues("Set-Cookie", out var renewedCookies))
+        {
+            foreach (var renewed in renewedCookies)
+            {
+                if (renewed.StartsWith("OptiRouter.Admin=", StringComparison.Ordinal))
+                {
+                    _capturedCookie = renewed.Split(';', 2)[0];
+                    break;
+                }
+            }
+        }
+
         if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized
             && Interlocked.CompareExchange(ref _redirected, 1, 0) == 0)
         {
