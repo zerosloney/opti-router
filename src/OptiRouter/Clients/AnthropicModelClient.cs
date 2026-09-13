@@ -232,56 +232,28 @@ public sealed class AnthropicModelClient : IModelClient
     }
 
     /// <summary>
-    /// 发送流式请求并校验状态（迭代器外执行，避免 catch 块内 yield 的编译器限制）。
+    /// 发送流式请求并校验状态（建连/错误正文/重试/释放语义见共享管道）。
     /// </summary>
-    private async Task<HttpResponseMessage> SendStreamRequestAsync(ChatRequest request, CancellationToken ct)
+    private Task<HttpResponseMessage> SendStreamRequestAsync(ChatRequest request, CancellationToken ct)
     {
-        // 重试仅覆盖“拿到成功响应头”之前的阶段（与 OpenAI 客户端流式重试一致）；
-        // 响应体流一旦开始下发不再重试，避免重复输出。建连阶段按 TimeoutSeconds 施加总时长上限。
-        int maxRetries = _endpoint.MaxRetries;
-        int attempt = 0;
-        TimeSpan connectTimeout = ModelClientRetry.ResolveCallTimeout(_endpoint);
-        while (true)
-        {
-            try
+        // 重试仅覆盖"拿到成功响应头"之前；建连阶段按 TimeoutSeconds 施加总时长上限。
+        return ModelClientRequestPipeline.SendStreamRequestAsync(
+            _httpClient,
+            () =>
             {
-                using var content = new StringContent(
+                var content = new StringContent(
                     AnthropicTranslators.BuildRequestBody(request, _endpoint),
                     Encoding.UTF8,
                     "application/json");
                 content.Headers.ContentType!.CharSet = "utf-8";
 
-                using var httpRequest = new HttpRequestMessage(HttpMethod.Post, MessagesPath) { Content = content };
+                var httpRequest = new HttpRequestMessage(HttpMethod.Post, MessagesPath) { Content = content };
                 httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-
-                var response = await ModelClientRetry.WithTotalTimeout(
-                    connectTimeout, ct,
-                    token => _httpClient.SendAsync(httpRequest, HttpCompletionOption.ResponseHeadersRead, token)).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                {
-                    var statusCode = response.StatusCode;
-                    // 错误正文读取施加与建连同值的时间上限：修复前只有大小限制且已离开
-                    // 模型超时包装，上游悬挂错误正文可长期占用请求。
-                    string errorBody = await ModelClientRetry.WithTotalTimeout(
-                        connectTimeout, ct,
-                        token => BoundedResponseReader.ReadBodyAsync(response.Content, token)).ConfigureAwait(false);
-                    response.Dispose();
-                    if (ModelClientRetry.IsRetryable(statusCode) && attempt < maxRetries)
-                    {
-                        attempt++;
-                        await ModelClientRetry.DelayWithJitterAsync(attempt, ct).ConfigureAwait(false);
-                        continue;
-                    }
-                    throw new ModelClientException(statusCode, errorBody);
-                }
-                return response;
-            }
-            catch (Exception ex) when (ModelClientRetry.IsExceptionRetryable(ex) && attempt < maxRetries)
-            {
-                attempt++;
-                await ModelClientRetry.DelayWithJitterAsync(attempt, ct).ConfigureAwait(false);
-            }
-        }
+                return httpRequest;
+            },
+            ModelClientRetry.ResolveCallTimeout(_endpoint),
+            _endpoint.MaxRetries,
+            ct);
     }
 
     /// <summary>
