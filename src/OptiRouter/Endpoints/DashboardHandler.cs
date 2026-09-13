@@ -26,7 +26,19 @@ public static partial class DashboardHandler
         // 1. Dashboard UI is now served by Blazor Server via Pages/Dashboard/_Host.cshtml (Razor Pages routing).
         //    Old MapGet removed - was: static dashboard.html served here.
 
-        // 2. Dashboard Live Metrics API (cached 1s)
+                MapLiveMetricsEndpoints(endpoints);
+        MapRequestAuditEndpoints(endpoints);
+        MapEvalSandboxEndpoints(endpoints);
+        MapRoutingStateEndpoints(endpoints);
+        MapConfigEndpoints(endpoints);
+        MapTenantKeyEndpoints(endpoints);
+    }
+
+
+    /// <summary>Live Metrics：指标/趋势/学习状态/校准诊断/告警历史。</summary>
+    private static void MapLiveMetricsEndpoints(IEndpointRouteBuilder endpoints)
+    {
+// 2. Dashboard Live Metrics API (cached 1s)
         endpoints.MapGet("/api/dashboard/metrics", (
             CostLedger ledger,
             ModelHealthTracker tracker,
@@ -159,7 +171,13 @@ public static partial class DashboardHandler
 
 
         // 4. Request Audit Log API with Multi-Filter Support
-        endpoints.MapGet("/api/dashboard/requests", (IRequestAuditStore auditStore, int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null) =>
+            }
+
+
+    /// <summary>请求审计：列表/导出/明细/审计分析。</summary>
+    private static void MapRequestAuditEndpoints(IEndpointRouteBuilder endpoints)
+    {
+endpoints.MapGet("/api/dashboard/requests", (IRequestAuditStore auditStore, int limit = 50, int offset = 0, string? model = null, string? tier = null, string? status = null, long? minLatency = null, string? q = null, string? from = null, string? to = null) =>
         {
             if (IsInvertedTimeRange(from, to))
                 return Results.BadRequest(new { error = "'from' must be earlier than 'to'." });
@@ -245,7 +263,13 @@ public static partial class DashboardHandler
         });
 
         // 5. Router Sandbox Playground Simulation API
-        endpoints.MapPost("/api/dashboard/sandbox/route", (RouterEngine engine, IOptionsMonitor<RouterOptions> options, SandboxRouteRequest req) =>
+            }
+
+
+    /// <summary>评测与沙箱：沙箱路由、评测运行/批次/对比。</summary>
+    private static void MapEvalSandboxEndpoints(IEndpointRouteBuilder endpoints)
+    {
+endpoints.MapPost("/api/dashboard/sandbox/route", (RouterEngine engine, IOptionsMonitor<RouterOptions> options, SandboxRouteRequest req) =>
         {
             if (string.IsNullOrWhiteSpace(req.Prompt))
                 return Results.BadRequest(new { error = "Prompt cannot be empty." });
@@ -319,7 +343,13 @@ public static partial class DashboardHandler
         });
 
         // 10b. Internal Routing State APIs（进程内状态可见性：上游配额 / 缓存亲和 / 响应缓存）
-        endpoints.MapGet("/api/dashboard/state/quota", (UpstreamQuotaStateStore quotaStore) =>
+            }
+
+
+    /// <summary>路由状态：配额/提示缓存亲和/响应缓存统计。</summary>
+    private static void MapRoutingStateEndpoints(IEndpointRouteBuilder endpoints)
+    {
+endpoints.MapGet("/api/dashboard/state/quota", (UpstreamQuotaStateStore quotaStore) =>
         {
             var now = DateTimeOffset.UtcNow;
             var items = quotaStore.GetAllSnapshots()
@@ -372,7 +402,13 @@ public static partial class DashboardHandler
 
         // 10c. Semantic Routes Management APIs——语义路由此前是唯一只能手改配置文件的路由策略。
         //     SemanticRouterPolicy 每请求从 context.Options 读取路由表，reload 后立即热生效。
-        endpoints.MapGet("/api/dashboard/semantic-routes", (IOptionsMonitor<RouterOptions> options, AppConfigDbStore store) =>
+            }
+
+
+    /// <summary>配置管理：语义路由/系统配置/预设/历史/熔断覆写。</summary>
+    private static void MapConfigEndpoints(IEndpointRouteBuilder endpoints)
+    {
+endpoints.MapGet("/api/dashboard/semantic-routes", (IOptionsMonitor<RouterOptions> options, AppConfigDbStore store) =>
         {
             var opt = options.CurrentValue.Routing;
             var routes = (opt.SemanticRoutes ?? new List<SemanticRouteOptions>())
@@ -693,7 +729,13 @@ public static partial class DashboardHandler
         });
 
         // 10. Client Access Keys & Tenant Quota APIs（响应一律排除 KeyHash，仅返回 KeyId/KeyPrefix 指纹）
-        endpoints.MapGet("/api/dashboard/keys", (ClientKeyService keySvc) =>
+            }
+
+
+    /// <summary>租户密钥：CRUD/用量/导出与会话保活。</summary>
+    private static void MapTenantKeyEndpoints(IEndpointRouteBuilder endpoints)
+    {
+endpoints.MapGet("/api/dashboard/keys", (ClientKeyService keySvc) =>
         {
             var dtos = keySvc.GetAllKeys().Select(k => new
             {
@@ -777,7 +819,6 @@ public static partial class DashboardHandler
         // Cookie 的 8h 滑动过期无请求可滑动，面板常开超 8h 必然掉登录（断线重连
         // negotiate 被 302 到 /login，重连横幅永久卡死）。前端 blazor.js 每 30 分钟
         // 带 Cookie 请求本端点触发续期。鉴权由管理端中间件按 /api/dashboard 前缀统一执行。
-        endpoints.MapGet("/api/dashboard/session/ping", () => Results.NoContent());
-    }
+        endpoints.MapGet("/api/dashboard/session/ping", () => Results.NoContent());    }
 
 }
