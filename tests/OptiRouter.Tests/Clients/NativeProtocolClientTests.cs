@@ -278,6 +278,57 @@ public sealed class NativeProtocolClientTests
         Assert.Contains("alt=sse", capturedTarget);
     }
 
+    /// <summary>
+    /// Google 官方 streamGenerateContent 无 {"done":true} 哨兵：流以末 chunk 携带
+    /// candidates[0].finishReason 结束。此前翻译器只认哨兵，官方端点的每条流都缺终止
+    /// 标记——上层 !doneSent 判协议违约断流（内容已转发后抛 502 + 熔断误计）。
+    /// 修复后 finishReason chunk 产出 finish_reason delta + [DONE]。
+    /// </summary>
+    [Fact]
+    public async Task GeminiClient_StreamRaw_RealGoogleFormat_FinishReasonTerminatesStream()
+    {
+        var http = await StartMockServerAsync("/v1beta/models/gemini-1.5-pro:streamGenerateContent", _ => """
+            data: {"candidates":[{"content":{"parts":[{"text":"Hola"}],"role":"model"},"index":0}]}
+
+            data: {"candidates":[{"content":{"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}
+
+            """);
+        var client = new GeminiModelClient(CreateEndpoint(ProviderProtocol.Gemini, "gemini-1.5-pro"), http);
+
+        var lines = new List<RawStreamLine>();
+        await foreach (var line in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None))
+        {
+            lines.Add(line);
+        }
+
+        Assert.Equal(3, lines.Count);
+        Assert.Contains("Hola", lines[0].Data);
+        Assert.Contains("\"finish_reason\":\"stop\"", lines[1].Data);
+        Assert.Equal("[DONE]", lines[^1].Data);
+    }
+
+    /// <summary>文本与 finishReason 同 chunk（末 chunk 带尾文本）：delta 之后紧跟终结行。</summary>
+    [Fact]
+    public async Task GeminiClient_StreamRaw_TextWithFinishReason_EmitsDeltaThenTerminal()
+    {
+        var http = await StartMockServerAsync("/v1beta/models/gemini-1.5-pro:streamGenerateContent", _ => """
+            data: {"candidates":[{"content":{"parts":[{"text":"tail"}],"role":"model"},"finishReason":"MAX_TOKENS","index":0}]}
+
+            """);
+        var client = new GeminiModelClient(CreateEndpoint(ProviderProtocol.Gemini, "gemini-1.5-pro"), http);
+
+        var lines = new List<RawStreamLine>();
+        await foreach (var line in client.StreamRawAsync(CreateRequest("hi"), CancellationToken.None))
+        {
+            lines.Add(line);
+        }
+
+        Assert.Equal(3, lines.Count);
+        Assert.Contains("tail", lines[0].Data);
+        Assert.Contains("\"finish_reason\":\"length\"", lines[1].Data);
+        Assert.Equal("[DONE]", lines[^1].Data);
+    }
+
     /// <summary>P2-1：流内 error 事件（event: error）必须抛异常走失败路径，不得当正常内容中继。</summary>
     [Fact]
     public async Task AnthropicClient_StreamRaw_InBandErrorEvent_Throws()

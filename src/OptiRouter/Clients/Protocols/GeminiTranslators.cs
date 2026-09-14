@@ -285,22 +285,19 @@ public static class GeminiTranslators
                 using var doc = JsonDocument.Parse(dataJson);
                 var root = doc.RootElement;
 
+                // 自定义网关哨兵 {"done":true}：保持既有终结行为。
                 if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("done", out var doneEl) && doneEl.ValueKind == JsonValueKind.True)
                 {
-                    if (_toolCallCount > 0)
-                    {
-                        return new[]
-                        {
-                            JsonSerializer.Serialize(new
-                            {
-                                choices = new object[] { new { index = 0, delta = new { }, finish_reason = "tool_calls" } }
-                            }),
-                            "[DONE]"
-                        };
-                    }
-                    return new[] { "[DONE]" };
+                    return TerminalLines(finishReason: null);
                 }
 
+                // Google 官方 streamGenerateContent 没有 done 哨兵：流以末 chunk 携带
+                // candidates[0].finishReason 结束。此前只认哨兵，官方端点的每条流都缺终止
+                // 标记——客户端收断头流、上层判协议违约。检测到 finishReason 即在本 chunk
+                // 翻译行之后追加终结行（finish_reason delta + [DONE]）。
+                bool hasFinishReason = TryGetFinishReason(root, out string? finishReason);
+
+                var lines = new List<string>();
                 if (root.TryGetProperty("candidates", out var candidates)
                     && candidates.ValueKind == JsonValueKind.Array
                     && candidates.GetArrayLength() > 0
@@ -333,30 +330,91 @@ public static class GeminiTranslators
 
                     if (toolCalls.Count > 0)
                     {
-                        var lines = new List<string>
+                        lines.Add(JsonSerializer.Serialize(new
                         {
-                            JsonSerializer.Serialize(new
-                            {
-                                choices = new object[] { new { index = 0, delta = new { tool_calls = toolCalls } } }
-                            })
-                        };
+                            choices = new object[] { new { index = 0, delta = new { tool_calls = toolCalls } } }
+                        }));
                         // 同一 chunk 还带文本时补一行文本 delta（客户端按 delta 累积，先后顺序不影响内容）。
                         string? textLine = TranslateStreamLine(dataJson);
                         if (textLine is not null && textLine != "[DONE]")
                         {
                             lines.Add(textLine);
                         }
-                        return lines;
                     }
                 }
+
+                if (lines.Count == 0)
+                {
+                    string? single = TranslateStreamLine(dataJson);
+                    if (single is not null)
+                    {
+                        lines.Add(single);
+                    }
+                }
+
+                if (hasFinishReason)
+                {
+                    lines.AddRange(TerminalLines(finishReason));
+                }
+                return lines;
             }
             catch (JsonException)
             {
                 // 解析失败回落静态翻译（与原行为一致）
             }
 
-            string? single = TranslateStreamLine(dataJson);
-            return single is null ? Array.Empty<string>() : new[] { single };
+            string? fallback = TranslateStreamLine(dataJson);
+            return fallback is null ? Array.Empty<string>() : new[] { fallback };
+        }
+
+        /// <summary>
+        /// 终结行：finish_reason delta + [DONE]。reason 优先级：流中出现过工具调用固定
+        /// tool_calls；否则映射 Gemini finishReason（与 <see cref="ToOpenAiJson"/> 同口径），
+        /// 哨兵终结（无 reason 信息）不产 finish_reason delta，仅 [DONE]。
+        /// </summary>
+        private IReadOnlyList<string> TerminalLines(string? finishReason)
+        {
+            string? reason = _toolCallCount > 0
+                ? "tool_calls"
+                : finishReason switch
+                {
+                    "MAX_TOKENS" => "length",
+                    "SAFETY" => "content_filter",
+                    "RECITATION" => "content_filter",
+                    null => null,
+                    _ => "stop"
+                };
+
+            if (reason is null)
+            {
+                return new[] { "[DONE]" };
+            }
+
+            return new[]
+            {
+                JsonSerializer.Serialize(new
+                {
+                    choices = new object[] { new { index = 0, delta = new { }, finish_reason = reason } }
+                }),
+                "[DONE]"
+            };
+        }
+
+        private static bool TryGetFinishReason(JsonElement root, out string? finishReason)
+        {
+            finishReason = null;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("candidates", out var candidates)
+                || candidates.ValueKind != JsonValueKind.Array
+                || candidates.GetArrayLength() == 0
+                || !candidates[0].TryGetProperty("finishReason", out var frEl)
+                || frEl.ValueKind != JsonValueKind.String)
+            {
+                return false;
+            }
+
+            finishReason = frEl.GetString();
+            return !string.IsNullOrEmpty(finishReason);
         }
     }
 
