@@ -516,6 +516,9 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         CandidateFailureKind.QuotaLimited, candidate, decision, estimatedTokens,
                         attemptSw.ElapsedMilliseconds, in snapshot, ex,
                         globalTimeout: false, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                    // 结算已处理探槽（RecordFailure/ReleaseProbe），置位防 finally 兜底重复释放，
+                    // 否则会偷走在途探测的槽位，使 halfOpenMaxProbes 并发上限失效。
+                    outcomeReported = true;
                 }
                 catch (ModelClientException ex) when (IsRequestRejection(ex))
                 {
@@ -529,6 +532,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         CandidateFailureKind.RequestRejection, candidate, decision, estimatedTokens,
                         attemptSw.ElapsedMilliseconds, in snapshot, ex,
                         globalTimeout: false, rejectHasOther);
+                    outcomeReported = true;
                     if (!rejectHasOther)
                         throw; // 无候选可降级：保持透传语义，原始状态码到达客户端
                 }
@@ -540,6 +544,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         CandidateFailureKind.UpstreamStatus, candidate, decision, estimatedTokens,
                         attemptSw.ElapsedMilliseconds, in snapshot, ex,
                         globalTimeout: false, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                    outcomeReported = true;
                 }
                 catch (HttpRequestException ex)
                 {
@@ -549,6 +554,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         CandidateFailureKind.NetworkError, candidate, decision, estimatedTokens,
                         attemptSw.ElapsedMilliseconds, in snapshot, ex,
                         globalTimeout: false, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                    outcomeReported = true;
                 }
                 catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
                 {
@@ -560,6 +566,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         CandidateFailureKind.InternalTimeout, candidate, decision, estimatedTokens,
                         attemptSw.ElapsedMilliseconds, in snapshot, ex,
                         isGlobalTimeout, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                    outcomeReported = true;
 
                     if (isGlobalTimeout)
                     {
