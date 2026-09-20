@@ -124,6 +124,46 @@ public class OpenAICompatibleModelClientTests
     }
 
     [Fact]
+    public async Task CompleteAsync_StripsStreamOptions_WhenForcingNonStreaming()
+    {
+        // 客户端流式请求携带 stream_options；非流式强制转换后若仍发出该字段，
+        // 严格网关直接 400（"stream_options is only allowed when 'stream' is enabled"）。
+        var endpoint = CreateEndpoint(name: "forced-model");
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        using var streamOptionsDoc = JsonDocument.Parse("""{"include_usage":true}""");
+        using var toolsDoc = JsonDocument.Parse("""[{"type":"function","function":{"name":"f"}}]""");
+        var request = new ChatRequest
+        {
+            Model = "whatever",
+            Messages = new List<ChatMessage>(),
+            Stream = true,
+            ExtensionData = new Dictionary<string, JsonElement>
+            {
+                ["stream_options"] = streamOptionsDoc.RootElement.Clone(),
+                ["tools"] = toolsDoc.RootElement.Clone()
+            }
+        };
+
+        // Act
+        await client.CompleteAsync(request);
+
+        // Assert: 强制非流式、剥离 stream_options，其余扩展字段原样保留
+        var sentBody = handler.GetLastRequestContent();
+        Assert.NotNull(sentBody);
+        using var doc = JsonDocument.Parse(sentBody);
+        Assert.False(doc.RootElement.GetProperty("stream").GetBoolean());
+        Assert.False(doc.RootElement.TryGetProperty("stream_options", out _));
+        Assert.True(doc.RootElement.TryGetProperty("tools", out var tools));
+        Assert.Equal("f", tools[0].GetProperty("function").GetProperty("name").GetString());
+    }
+
+    [Fact]
     public async Task CompleteAsync_SendsUpstreamModelId_WhenIdConfigured()
     {
         // Name 是路由名，Id 是发往上游的真实模型；两者分离时上游应收到 Id。
@@ -735,6 +775,44 @@ public class OpenAICompatibleModelClientTests
         Assert.NotNull(sentBody);
         using var doc = JsonDocument.Parse(sentBody);
         Assert.Equal("forced-model", doc.RootElement.GetProperty("model").GetString()!);
+    }
+
+    [Fact]
+    public async Task CompleteRawAsync_StripsStreamOptions_WhenForcingNonStreaming()
+    {
+        // fusion panel 等非流式调用复用客户端原始请求（Stream=true + stream_options），
+        // 强制 Stream=false 时必须剥离 stream_options，否则严格网关 400。
+        var endpoint = CreateEndpoint(name: "forced-model");
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        };
+        var handler = CreateHandler(response);
+        var client = CreateClient(endpoint, handler);
+
+        using var streamOptionsDoc = JsonDocument.Parse("""{"include_usage":true}""");
+        using var toolsDoc = JsonDocument.Parse("""[{"type":"function","function":{"name":"f"}}]""");
+        var request = new ChatRequest
+        {
+            Model = "whatever",
+            Messages = new List<ChatMessage>(),
+            Stream = true,
+            ExtensionData = new Dictionary<string, JsonElement>
+            {
+                ["stream_options"] = streamOptionsDoc.RootElement.Clone(),
+                ["tools"] = toolsDoc.RootElement.Clone()
+            }
+        };
+
+        await client.CompleteRawAsync(request);
+
+        var sentBody = handler.GetLastRequestContent();
+        Assert.NotNull(sentBody);
+        using var doc = JsonDocument.Parse(sentBody);
+        Assert.False(doc.RootElement.GetProperty("stream").GetBoolean());
+        Assert.False(doc.RootElement.TryGetProperty("stream_options", out _));
+        Assert.True(doc.RootElement.TryGetProperty("tools", out var tools));
+        Assert.Equal("f", tools[0].GetProperty("function").GetProperty("name").GetString());
     }
 
     [Fact]

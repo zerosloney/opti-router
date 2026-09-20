@@ -49,17 +49,34 @@ public sealed class OpenAICompatibleModelClient : IModelClient
         ArgumentNullException.ThrowIfNull(endpoint);
         ArgumentNullException.ThrowIfNull(httpClient);
 
-        _endpoint = endpoint;
-        _httpClient = httpClient;
-        _logger = logger;
-    }
+    _endpoint = endpoint;
+    _httpClient = httpClient;
+    _logger = logger;
+}
 
-    /// <inheritdoc />
-    public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(request);
+/// <summary>
+/// 非流式转换：强制 Stream=false 并剥离 stream_options——后者仅流式请求合法，
+/// 严格网关对 stream=false + stream_options 直接 400（实测 kimi 网关：
+/// "The 'stream_options' parameter is only allowed when 'stream' is enabled"）。
+/// 客户端原始请求经 ExtensionData 透传该字段，fusion panel 等非流式调用曾因此被拒。
+/// </summary>
+private ChatRequest BuildNonStreamingBody(ChatRequest request)
+{
+    var body = request with { Model = _endpoint.UpstreamModelId, Stream = false };
+    if (body.ExtensionData is not { Count: > 0 } extension || !extension.ContainsKey("stream_options"))
+        return body;
 
-        var body = request with { Model = _endpoint.UpstreamModelId, Stream = false };
+    var filtered = new Dictionary<string, JsonElement>(extension);
+    filtered.Remove("stream_options");
+    return body with { ExtensionData = filtered.Count > 0 ? filtered : null };
+}
+
+/// <inheritdoc />
+public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationToken cancellationToken = default)
+{
+    ArgumentNullException.ThrowIfNull(request);
+
+    var body = BuildNonStreamingBody(request);
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
@@ -306,7 +323,7 @@ public sealed class OpenAICompatibleModelClient : IModelClient
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var body = request with { Model = _endpoint.UpstreamModelId, Stream = false };
+        var body = BuildNonStreamingBody(request);
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         int maxRetries = _endpoint.MaxRetries;
