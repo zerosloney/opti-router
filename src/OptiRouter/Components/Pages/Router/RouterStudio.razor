@@ -467,7 +467,10 @@
 
             <!-- ④ 合规与安全 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">🔒 合规与安全</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="shield" Size="15" Class="text-warning" />
+                    <span>合规与安全</span>
+                </div>
                 <div class="config-group-header">数据与隐私</div>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnablePiiAnonymization)) ? "dirty-field" : "")">
@@ -659,7 +662,7 @@
                             <span class="item-title">Analyst 分析提示词</span>
                             <span class="item-desc">留空使用内置 JSON 契约提示词（共识/矛盾/缺口/洞察）。自定义时需保持输出为可解析 JSON。</span>
                         </div>
-                        <textarea class="form-control" rows="3" @bind="Cfg.FusionRouterAnalystPrompt" placeholder="留空使用内置提示词" style="width: 100%; min-height: 60px; font-size: 0.82rem; font-family: 'JetBrains Mono', monospace;"></textarea>
+                        <textarea class="form-control" rows="3" @bind="Cfg.FusionRouterAnalystPrompt" placeholder="留空使用内置提示词" style="width: 100%; min-height: 60px; font-size: 0.82rem; font-family: var(--font-mono);"></textarea>
                     </div>
                 </div>
 
@@ -704,7 +707,10 @@
 
             <!-- ⑥ 观测 -->
             <div class="sub-card">
-                <div class="card-label" style="margin-bottom: 8px;">📊 观测</div>
+                <div class="card-label" style="margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="overview" Size="15" Class="text-info" />
+                    <span>观测</span>
+                </div>
                 <div class="config-group-header">链路与审计</div>
                 <div style="display: flex; flex-direction: column; gap: 6px;">
                     <div class="config-item @(IsDirty(nameof(ConfigForm.EnableDistributedTracing)) ? "dirty-field" : "")">
@@ -947,7 +953,10 @@
 
             <!-- 新增 / 编辑表单 -->
             <div class="sub-card">
-                <div style="font-weight: 600; font-size: 0.9rem; margin-bottom: 8px;">@(SrEditingName is null ? "➕ 添加规则" : $"✏️ 编辑规则: {SrEditingName}")</div>
+                <div style="font-weight: 600; font-size: 0.9rem; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                    <AppIcon Name="@(SrEditingName is null ? "plus" : "edit")" Size="14" Class="text-primary" />
+                    <span>@(SrEditingName is null ? "添加规则" : $"编辑规则: {SrEditingName}")</span>
+                </div>
                 @if (SrEditingName is not null)
                 {
                     <div class="meta-text" style="font-size: 0.72rem; margin-bottom: 8px;">修改名称等同删除旧规则并新建。</div>
@@ -1008,8 +1017,8 @@
                                 <div style="flex: 1; background: var(--bg-input); border-radius: var(--radius-full); height: 14px; overflow: hidden; position: relative;">
                                     <div style="background: @roleBg; width: @widthPct.ToString("F0")%; height: 100%; border-radius: var(--radius-full); transition: width 0.3s ease;"></div>
                                 </div>
-                                <span style="width: 90px; text-align: right; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">@span.LatencyMs.ToString("F0") ms</span>
-                                <span style="width: 80px; text-align: right; color: var(--success); font-family: 'JetBrains Mono', monospace; font-weight: 600;">$@span.Cost.ToString("F6")</span>
+                                <span style="width: 90px; text-align: right; color: var(--text-secondary); font-family: var(--font-mono);">@span.LatencyMs.ToString("F0") ms</span>
+                                <span style="width: 80px; text-align: right; color: var(--success); font-family: var(--font-mono); font-weight: 600;">$@span.Cost.ToString("F6")</span>
                             </div>
                         }
                     </div>
@@ -1032,12 +1041,15 @@
             <textarea class="form-control" rows="3" placeholder="在此输入测试 Prompt（如：写个快速排序、求微积分积分、翻译文本...）" @bind="SandboxInputPrompt"></textarea>
             <div style="display: flex; justify-content: flex-end;">
                 <button class="btn-primary" @onclick="RunSandbox" disabled="@IsSandboxRunning">
-                    @(IsSandboxRunning ? "路由仿真中..." : "🚀 运行路由匹配测试")
+                    @(IsSandboxRunning ? "路由仿真中..." : "运行路由匹配测试")
                 </button>
             </div>
             @if (!string.IsNullOrEmpty(SandboxError))
             {
-                <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">✗ 路由仿真失败：@SandboxError</div>
+                <div class="alert-banner alert-error" style="margin: 8px 0; padding: 6px 12px; font-size: 0.82rem;">
+                    <AppIcon Name="alert" Size="14" />
+                    <span>路由仿真失败：@SandboxError</span>
+                </div>
             }
         </div>
         @if (SandboxResultData != null)
@@ -1069,7 +1081,7 @@
         <div class="card-label">
             <span>Golden Dataset 离线回归评测工作室 (Eval Studio)</span>
             <button class="btn-primary btn-sm" @onclick="RunEval" disabled="@IsEvalRunning">
-                @(IsEvalRunning ? "自动化评测中..." : "🧪 一键运行回归评测")
+                @(IsEvalRunning ? "自动化评测中..." : "一键运行回归评测")
             </button>
         </div>
         <div class="meta-text" style="margin-top: 6px;">评测经真实路由管线执行（路由 → 上游 → 计费 → 审计），非桩仿真；运行消耗计入当日预算与审计日志。</div>
@@ -1130,9 +1142,12 @@
         {
             <div class="sub-card" style="margin-top: 12px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;">
-                    <span style="font-weight: 600; font-size: 0.9rem;">📚 历史批次（最近 @EvalBatches.Count 批，进程内保留、重启清空）</span>
+                    <span style="font-weight: 600; font-size: 0.9rem; display: inline-flex; align-items: center; gap: 6px;">
+                        <AppIcon Name="history" Size="15" Class="text-info" />
+                        <span>历史批次（最近 @EvalBatches.Count 批，进程内保留、重启清空）</span>
+                    </span>
                     <button class="btn-ghost btn-sm" @onclick="RunCompare" disabled="@(string.IsNullOrEmpty(CompareBaselineId) || string.IsNullOrEmpty(CompareCandidateId) || IsComparing)">
-                        @(IsComparing ? "对比中..." : "🆚 对比选中批次")
+                        @(IsComparing ? "对比中..." : "对比选中批次")
                     </button>
                 </div>
                 <div class="table-wrap">
@@ -1174,7 +1189,7 @@
         {
             <div class="sub-card" style="margin-top: 12px;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
-                    <span style="font-weight: 600; font-size: 0.9rem;">🆚 A/B 成对对比</span>
+                    <span style="font-weight: 600; font-size: 0.9rem;">A/B 成对对比</span>
                     <span class="text-secondary" style="font-size: 0.78rem;">
                         @CompareResult.BaselineBatchId → @CompareResult.CandidateBatchId（按用例 ID 配对 @CompareResult.PairedCases 条）
                     </span>

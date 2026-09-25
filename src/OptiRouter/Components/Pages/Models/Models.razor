@@ -312,7 +312,7 @@
                         <button type="button" class="btn-ghost btn-sm" @onclick="FetchUpstreamModelsForForm" disabled="@IsFormDiscovering"
                                 style="font-size: 0.76rem; padding: 2px 8px; display: inline-flex; align-items: center; gap: 4px;"
                                 title="根据下方 BaseUrl 与 ApiKey（或当前模型配置）从上游拉取模型列表并快捷选择">
-                            <AppIcon Name="@(IsFormDiscovering ? "refresh" : "download")" Size="13" Class="@(IsFormDiscovering ? "spin-icon" : "")" />
+                            <AppIcon Name="@(IsFormDiscovering ? "refresh" : "download")" Size="13" Class="@(IsFormDiscovering ? "icon-spin" : "")" />
                             <span>@(IsFormDiscovering ? "拉取中..." : "拉取上游模型")</span>
                         </button>
                     </div>
@@ -415,8 +415,8 @@
                 <div class="form-field">
                     <label for="nm-deploytype">部署类型</label>
                     <select id="nm-deploytype" @bind="Form.DeployTypeStr">
-                        <option value="public">☁️ 公有云</option>
-                        <option value="local">🏠 本地/私有（数据不出域）</option>
+                        <option value="public">公有云</option>
+                        <option value="local">本地/私有（数据不出域）</option>
                     </select>
                 </div>
                 <div class="form-field full">
@@ -536,18 +536,18 @@
                                             <div class="preview-value">
                                                 @if (selectedM.HasApiKey)
                                                 {
-                                                    <span class="tag tag-success" style="font-size: 0.74rem;">🔑 已保存 (安全复用)</span>
+                                                    <span class="tag tag-success" style="font-size: 0.74rem;">已保存（安全复用）</span>
                                                 }
                                                 else
                                                 {
-                                                    <span class="tag tag-secondary" style="font-size: 0.74rem;">🔓 免鉴权</span>
+                                                    <span class="tag tag-secondary" style="font-size: 0.74rem;">免鉴权</span>
                                                 }
                                             </div>
                                         </div>
                                         <div class="preview-meta-item">
                                             <span class="preview-label">部署类型</span>
                                             <div class="preview-value">
-                                                <span class="tag @(selectedM.IsLocalOrPrivate ? "tag-purple" : "tag-info")" style="font-size: 0.74rem;">@(selectedM.IsLocalOrPrivate ? "🏠 本地/私有" : "☁️ 公有云")</span>
+                                                <span class="tag @(selectedM.IsLocalOrPrivate ? "tag-purple" : "tag-info")" style="font-size: 0.74rem;">@(selectedM.IsLocalOrPrivate ? "本地/私有" : "公有云")</span>
                                             </div>
                                         </div>
                                         <div class="preview-meta-item">
@@ -575,7 +575,7 @@
                                 <AppIcon Name="benchmarks" Size="13" Class="text-primary" />
                                 <span>常用 Provider 快速预填</span>
                             </div>
-                            <div class="preset-grid">
+                            <div class="preset-pill-grid">
                                 @foreach (var p in Presets)
                                 {
                                     var isMatch = string.Equals(DiscoverManualBaseUrl, p.BaseUrl, StringComparison.OrdinalIgnoreCase);
@@ -644,7 +644,7 @@
                     <button class="btn-ghost" @onclick="CloseDiscoverModal" type="button">取消</button>
                     <div class="modal-footer-right">
                         <button class="btn-primary" @onclick="RunDiscoverAsync" disabled="@IsDiscovering" type="button" style="min-width: 140px;">
-                            <AppIcon Name="@(IsDiscovering ? "refresh" : "download")" Size="14" Class="@(IsDiscovering ? "spin-icon" : "")" />
+                            <AppIcon Name="@(IsDiscovering ? "refresh" : "download")" Size="14" Class="@(IsDiscovering ? "icon-spin" : "")" />
                             <span>@(IsDiscovering ? "正在拉取…" : "扫描并拉取模型")</span>
                         </button>
                     </div>
@@ -691,15 +691,15 @@
                             <div class="form-group">
                                 <label>部署属性</label>
                                 <select @bind="BulkAddDeployType">
-                                    <option value="public">☁️ 公有云服务</option>
-                                    <option value="local">🏠 本地/私有私有化</option>
+                                    <option value="public">公有云服务</option>
+                                    <option value="local">本地/私有化部署</option>
                                 </select>
                             </div>
                             <div class="form-group">
                                 <label>初始状态</label>
                                 <select @bind="BulkAddEnabled">
-                                    <option value="true">🟢 立即启用</option>
-                                    <option value="false">⚪ 暂不启用</option>
+                                    <option value="true">立即启用</option>
+                                    <option value="false">暂不启用</option>
                                 </select>
                             </div>
                         </div>
@@ -843,7 +843,7 @@
                         <button class="btn-primary" @onclick="BulkAddSelectedAsync"
                                 disabled="@(!DiscoverSelected.Any(x => x.Selected && !x.AlreadyExists && !x.Added) || IsBulkAdding)"
                                 type="button" style="min-width: 160px;">
-                            <AppIcon Name="@(IsBulkAdding ? "refresh" : "plus")" Size="14" Class="@(IsBulkAdding ? "spin-icon" : "")" />
+                            <AppIcon Name="@(IsBulkAdding ? "refresh" : "plus")" Size="14" Class="@(IsBulkAdding ? "icon-spin" : "")" />
                             <span>@(IsBulkAdding ? "正在导入…" : $"批量导入选中 ({DiscoverSelected.Count(x => x.Selected && !x.AlreadyExists && !x.Added)})")</span>
                         </button>
                     </div>
