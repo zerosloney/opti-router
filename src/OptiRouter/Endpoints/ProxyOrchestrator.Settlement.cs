@@ -39,7 +39,7 @@ public sealed partial class ProxyOrchestrator
             _regenerateTracker.Record(snapshot.FeedbackKey, candidate.Name, success: false);
             _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                 attemptSw.ElapsedMilliseconds, snapshot.SessionId, decision.Reason, false, "stream-faulted", true, snapshot.RoutedTier,
-                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
+                reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal, request: snapshot.Request);
             _logger.LogWarning("Streaming model {Name} failed mid-stream{Tripped}",
                 candidate.Name, tripped ? " (circuit tripped)" : "");
             return;
@@ -58,13 +58,13 @@ public sealed partial class ProxyOrchestrator
                 _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage, cost,
                     attemptSw.ElapsedMilliseconds, snapshot.SessionId, decision.Reason, false, terminal, true, snapshot.RoutedTier,
                     timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
-                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
+                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal, request: snapshot.Request);
             }
             else
             {
                 _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                     attemptSw.ElapsedMilliseconds, snapshot.SessionId, decision.Reason, false, terminal, true, snapshot.RoutedTier,
-                    requestContent: snapshot.RequestContent);
+                    requestContent: snapshot.RequestContent, request: snapshot.Request);
             }
             _healthTracker.ReleaseProbe(candidate.Name);
             return;
@@ -104,7 +104,7 @@ public sealed partial class ProxyOrchestrator
         {
             _recorder.RecordCost(cost, snapshot.SessionId);
             _recorder.RecordAudit(null, candidate.Name, estimatedTokens, response.Usage, cost, elapsedMs, snapshot.SessionId, decision.Reason, true, null, false, snapshot.RoutedTier,
-                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
+                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal, request: request);
         }
         else
         {
@@ -116,7 +116,7 @@ public sealed partial class ProxyOrchestrator
                 _recorder.RecordCost(estCost, snapshot.SessionId);
             _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, estCost, elapsedMs, snapshot.SessionId, decision.Reason, true, null, false, snapshot.RoutedTier,
                 isEstimated: estCost > 0m,
-                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
+                timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs, reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal, request: request);
         }
         _recorder.RecordQuota(candidate.Name, response.Metadata);
         _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
@@ -209,7 +209,8 @@ public sealed partial class ProxyOrchestrator
             decision.Reason, false, auditFailure, false, snapshot.RoutedTier,
             quotaLimited: kind == CandidateFailureKind.QuotaLimited,
             reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel,
-            requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal);
+            requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal,
+            upstreamStatusCode: statusCode, request: snapshot.Request);
 
         switch (kind)
         {
@@ -259,7 +260,8 @@ public sealed partial class ProxyOrchestrator
     /// <summary>
     /// 生命周期收敛（切片④）：单轮路由决策的结算上下文快照（不可变）。每轮 while 迭代
     /// 产出一份（routedTier 随轮次候选变化，故按轮而非按请求），结算方法统一以
-    /// <c>in snapshot</c> 取参，消除散装参数束。
+    /// <c>in snapshot</c> 取参，消除散装参数束。<paramref name="Request"/> 供审计行
+    /// 附带输入参数快照（RequestParams），避免结算方法再串一份请求引用。
     /// </summary>
     private readonly record struct RequestSnapshot(
         string? SessionId,
@@ -268,7 +270,8 @@ public sealed partial class ProxyOrchestrator
         ModelTier RoutedTier,
         int GlobalTimeoutSeconds,
         int FailureThreshold,
-        int CooldownSeconds);
+        int CooldownSeconds,
+        OptiRouter.Clients.ChatRequest? Request = null);
 
     /// <summary>
     /// 最终响应输出审核的统一出口：串行、Fusion（quality router）、Fusion-lite（race）、

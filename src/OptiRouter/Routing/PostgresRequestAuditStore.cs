@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Npgsql;
 using OptiRouter.Configuration;
 
@@ -6,12 +7,21 @@ namespace OptiRouter.Routing;
 /// <summary>
 /// 基于 PostgreSQL 的分布式请求审计存储实现。
 /// 供 Kubernetes 多节点 Pod 共享中心审计数据与全局延迟/失败聚合统计。
+/// 与 <see cref="MariaDbRequestAuditStore"/>/Sqlite 同构：零阻塞入列 + 后台批量事务写，
+/// Append 不在请求热路径上做任何同步 I/O；读路径先 FlushQueue 保证读己之写。
+/// 连接串为空或 PG 不可达时各方法降级到内存 fallback。
 /// </summary>
 public sealed class PostgresRequestAuditStore : IRequestAuditStore
 {
+    private readonly object _flushLock = new();
     private readonly string? _connectionString;
     private readonly IRequestAuditStore _fallback;
     private readonly Microsoft.Extensions.Logging.ILogger? _logger;
+    private readonly ConcurrentQueue<RequestAuditRecord> _queue = new();
+    private readonly SemaphoreSlim _signal = new(0, int.MaxValue);
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Task? _processTask;
+    private int _consecutiveFlushFailures;
     private bool _disposed;
 
     /// <summary>
@@ -34,6 +44,8 @@ public sealed class PostgresRequestAuditStore : IRequestAuditStore
             {
                 _logger?.LogError(ex, "PostgresRequestAuditStore 初始化失败（EnsureTableCreated），后续操作将降级到内存 fallback");
             }
+
+            _processTask = Task.Run(ProcessQueueAsync);
         }
     }
 
@@ -78,7 +90,9 @@ CREATE TABLE IF NOT EXISTS optirouter_request_audits (
     reward DOUBLE PRECISION NULL,
     epsilon_promoted_model TEXT NULL,
     request_content TEXT NULL,
-    classification_signal VARCHAR(64) NULL
+    classification_signal VARCHAR(64) NULL,
+    upstream_status_code INTEGER NULL,
+    request_params TEXT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_audits_timestamp ON optirouter_request_audits (timestamp DESC);
@@ -98,6 +112,8 @@ CREATE INDEX IF NOT EXISTS idx_audits_model ON optirouter_request_audits (model)
         EnsureColumn("epsilon_promoted_model", "TEXT");
         EnsureColumn("request_content", "TEXT");
         EnsureColumn("classification_signal", "VARCHAR(64)");
+        EnsureColumn("upstream_status_code", "INTEGER");
+        EnsureColumn("request_params", "TEXT");
     }
 
     // 信任边界守卫：EnsureColumn 用插值拼 DDL（标识符无法参数化）。列名必须是纯小写
@@ -127,58 +143,138 @@ CREATE INDEX IF NOT EXISTS idx_audits_model ON optirouter_request_audits (model)
     /// <inheritdoc />
     public void Append(RequestAuditRecord record)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(record);
+
         if (string.IsNullOrWhiteSpace(_connectionString)) { _fallback.Append(record); return; }
 
-        try
+        // 零阻塞入列并唤醒后台批量写任务（此前为热路径上同步开连接逐条 INSERT，
+        // PG 抖动会直接拖慢请求链路）。
+        _queue.Enqueue(record);
+        _signal.Release();
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        // 等待信号与排空队列分开捕获：FlushQueue 的 Npgsql 异常不能终结后台任务，
+        // 否则任务静默 fault、队列无限增长，审计子系统无声死亡（与 MariaDb 实现同语义）。
+        while (!_cts.IsCancellationRequested)
         {
-            using var conn = new NpgsqlConnection(_connectionString);
-            conn.Open();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
+            try
+            {
+                await _signal.WaitAsync(_cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            try
+            {
+                FlushQueue();
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogError(ex, "Audit FlushQueue failed; requeued batch for retry");
+            }
+        }
+
+        // 取消退出前尽力排空剩余记录。
+        try { FlushQueue(); }
+        catch (Exception ex) { _logger?.LogWarning(ex, "Final audit FlushQueue on shutdown failed"); }
+    }
+
+    private void FlushQueue()
+    {
+        if (string.IsNullOrWhiteSpace(_connectionString)) return;
+
+        lock (_flushLock)
+        {
+            if (_queue.IsEmpty) return;
+
+            var batch = new List<RequestAuditRecord>();
+            while (_queue.TryDequeue(out var record))
+                batch.Add(record);
+
+            if (batch.Count == 0) return;
+
+            try
+            {
+                using var conn = new NpgsqlConnection(_connectionString);
+                conn.Open();
+                using var tx = conn.BeginTransaction();
+                foreach (var record in batch)
+                {
+                    using var cmd = conn.CreateCommand();
+                    cmd.Transaction = tx;
+                    cmd.CommandText = @"
 INSERT INTO optirouter_request_audits
-(timestamp, request_id, model, estimated_tokens, prompt_tokens, completion_tokens, cost, latency_ms, session_id, routing_reason, success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from, is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms, cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited, trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content, classification_signal)
+(timestamp, request_id, model, estimated_tokens, prompt_tokens, completion_tokens, cost, latency_ms, session_id, routing_reason, success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from, is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms, cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited, trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content, classification_signal, upstream_status_code, request_params)
 VALUES
-(@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream, @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft, @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent, @reward, @epsilon, @reqcontent, @csignal);
+(@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream, @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft, @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent, @reward, @epsilon, @reqcontent, @csignal, @ustatus, @rparams);
 ";
-            cmd.Parameters.AddWithValue("ts", record.Timestamp);
-            cmd.Parameters.AddWithValue("rid", (object?)record.RequestId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("model", record.Model);
-            cmd.Parameters.AddWithValue("est", record.EstimatedInputTokens);
-            cmd.Parameters.AddWithValue("ptok", record.PromptTokens);
-            cmd.Parameters.AddWithValue("ctok", record.CompletionTokens);
-            cmd.Parameters.AddWithValue("cost", record.Cost);
-            cmd.Parameters.AddWithValue("lat", record.LatencyMs);
-            cmd.Parameters.AddWithValue("sid", (object?)record.SessionId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("reason", record.RoutingReason);
-            cmd.Parameters.AddWithValue("succ", record.Success);
-            cmd.Parameters.AddWithValue("err", (object?)record.ErrorMessage ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("stream", record.IsStreaming);
-            cmd.Parameters.AddWithValue("rtier", record.RoutedTier.ToString());
-            cmd.Parameters.AddWithValue("cascade", record.CascadeTriggered);
-            cmd.Parameters.AddWithValue("upg", (object?)record.UpgradedFrom ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("adopted", record.IsAdopted);
-            cmd.Parameters.AddWithValue("pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("estim", record.IsEstimated);
-            cmd.Parameters.AddWithValue("frole", (object?)record.FusionRole ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("ttft", (object?)record.TimeToFirstTokenMs ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("cached", record.CachedInputTokens);
-            cmd.Parameters.AddWithValue("cachewrite", record.CacheWriteInputTokens);
-            cmd.Parameters.AddWithValue("uncached", record.UncachedInputTokens);
-            cmd.Parameters.AddWithValue("quota", record.QuotaLimited);
-            cmd.Parameters.AddWithValue("trace", (object?)record.TraceId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("span", (object?)record.SpanId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("parent", (object?)record.ParentSpanId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("reward", (object?)record.Reward ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("epsilon", (object?)record.EpsilonPromotedModel ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("reqcontent", (object?)record.RequestContent ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("csignal", (object?)record.ClassificationSignal ?? DBNull.Value);
-            cmd.ExecuteNonQuery();
+                    AddInsertParameters(cmd, record);
+                    cmd.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+            }
+            catch (Exception ex)
+            {
+                // Commit may be ambiguous; replaying is safer than losing audit records.
+                // 持久性故障下无限重试会刷屏并卡住队列：连续 5 批失败后丢弃该批并记 Error
+                // （审计尽力而为，与 MariaDb/Sqlite 实现同语义）。
+                if (++_consecutiveFlushFailures >= 5)
+                {
+                    _logger?.LogError(ex, "Audit flush failed {Failures} consecutive batches; dropping {Count} audit records to unblock the queue",
+                        _consecutiveFlushFailures, batch.Count);
+                    _consecutiveFlushFailures = 0;
+                    return;
+                }
+                foreach (var record in batch)
+                    _queue.Enqueue(record);
+                _signal.Release(batch.Count);
+                throw;
+            }
         }
-        catch (Exception ex)
-        {
-            _logger?.LogError(ex, "PostgresRequestAuditStore.Append 失败，降级到内存 fallback");
-            _fallback.Append(record);
-        }
+    }
+
+    private static void AddInsertParameters(NpgsqlCommand cmd, RequestAuditRecord record)
+    {
+        cmd.Parameters.AddWithValue("ts", record.Timestamp);
+        cmd.Parameters.AddWithValue("rid", (object?)record.RequestId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("model", record.Model);
+        cmd.Parameters.AddWithValue("est", record.EstimatedInputTokens);
+        cmd.Parameters.AddWithValue("ptok", record.PromptTokens);
+        cmd.Parameters.AddWithValue("ctok", record.CompletionTokens);
+        cmd.Parameters.AddWithValue("cost", record.Cost);
+        cmd.Parameters.AddWithValue("lat", record.LatencyMs);
+        cmd.Parameters.AddWithValue("sid", (object?)record.SessionId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("reason", record.RoutingReason);
+        cmd.Parameters.AddWithValue("succ", record.Success);
+        cmd.Parameters.AddWithValue("err", (object?)record.ErrorMessage ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("stream", record.IsStreaming);
+        cmd.Parameters.AddWithValue("rtier", record.RoutedTier.ToString());
+        cmd.Parameters.AddWithValue("cascade", record.CascadeTriggered);
+        cmd.Parameters.AddWithValue("upg", (object?)record.UpgradedFrom ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("adopted", record.IsAdopted);
+        cmd.Parameters.AddWithValue("pgid", (object?)record.ParallelGroupId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("estim", record.IsEstimated);
+        cmd.Parameters.AddWithValue("frole", (object?)record.FusionRole ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("ttft", (object?)record.TimeToFirstTokenMs ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("cached", record.CachedInputTokens);
+        cmd.Parameters.AddWithValue("cachewrite", record.CacheWriteInputTokens);
+        cmd.Parameters.AddWithValue("uncached", record.UncachedInputTokens);
+        cmd.Parameters.AddWithValue("quota", record.QuotaLimited);
+        cmd.Parameters.AddWithValue("trace", (object?)record.TraceId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("span", (object?)record.SpanId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("parent", (object?)record.ParentSpanId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("reward", (object?)record.Reward ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("epsilon", (object?)record.EpsilonPromotedModel ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("reqcontent", (object?)record.RequestContent ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("csignal", (object?)record.ClassificationSignal ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("ustatus", (object?)record.UpstreamStatusCode ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("rparams", (object?)record.RequestParams ?? DBNull.Value);
     }
 
     /// <inheritdoc />
@@ -188,6 +284,7 @@ VALUES
 
         try
         {
+            FlushQueue();
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
             using var cmd = conn.CreateCommand();
@@ -210,6 +307,7 @@ VALUES
 
         try
         {
+            FlushQueue();
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
             using var cmd = conn.CreateCommand();
@@ -233,6 +331,7 @@ VALUES
 
         try
         {
+            FlushQueue();
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
 
@@ -266,6 +365,7 @@ VALUES
 
         try
         {
+            FlushQueue();
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
             using var cmd = conn.CreateCommand();
@@ -301,6 +401,7 @@ WHERE timestamp >= @from AND timestamp <= @to;
 
         try
         {
+            FlushQueue();
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
             using var cmd = conn.CreateCommand();
@@ -355,6 +456,7 @@ WHERE timestamp >= @from AND timestamp <= @to;
 
         try
         {
+            FlushQueue();
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
             using var cmd = conn.CreateCommand();
@@ -376,6 +478,7 @@ WHERE timestamp >= @from AND timestamp <= @to;
 
         try
         {
+            FlushQueue();
             using var conn = new NpgsqlConnection(_connectionString);
             conn.Open();
             using var cmd = conn.CreateCommand();
@@ -446,7 +549,9 @@ GROUP BY model;
                 Reward: reader.IsDBNull(reader.GetOrdinal("reward")) ? null : reader.GetDouble(reader.GetOrdinal("reward")),
                 EpsilonPromotedModel: reader.IsDBNull(reader.GetOrdinal("epsilon_promoted_model")) ? null : reader.GetString(reader.GetOrdinal("epsilon_promoted_model")),
                 RequestContent: reader.IsDBNull(reader.GetOrdinal("request_content")) ? null : reader.GetString(reader.GetOrdinal("request_content")),
-                ClassificationSignal: reader.IsDBNull(reader.GetOrdinal("classification_signal")) ? null : reader.GetString(reader.GetOrdinal("classification_signal"))
+                ClassificationSignal: reader.IsDBNull(reader.GetOrdinal("classification_signal")) ? null : reader.GetString(reader.GetOrdinal("classification_signal")),
+                UpstreamStatusCode: reader.IsDBNull(reader.GetOrdinal("upstream_status_code")) ? null : reader.GetInt32(reader.GetOrdinal("upstream_status_code")),
+                RequestParams: reader.IsDBNull(reader.GetOrdinal("request_params")) ? null : reader.GetString(reader.GetOrdinal("request_params"))
             ));
         }
         return records;
@@ -456,6 +561,28 @@ GROUP BY model;
     {
         if (_disposed) return;
         _disposed = true;
+
+        // 停机排空：与 MariaDb/Sqlite 同语义——先终结后台任务，再同步刷净剩余队列。
+        _cts.Cancel();
+        try
+        {
+            _processTask?.GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // Ignore cancel exception during dispose
+        }
+
+        try
+        {
+            FlushQueue();
+        }
+        catch
+        {
+            // 停机路径的最终刷写失败不抛（PG 不可达时尽力而为）。
+        }
+        _signal.Dispose();
+        _cts.Dispose();
         _fallback.Dispose();
     }
 }

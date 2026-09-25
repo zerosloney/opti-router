@@ -58,21 +58,9 @@ public sealed class RaceOrchestrator
         //    拿到许可的候选必须最终上报结果（成功/失败/释放），否则槽位泄漏。
         string groupId = Guid.NewGuid().ToString("N");
 
-        // 构造请求内容摘要（用于 dashboard 展示），取最后一条非空 user 消息文本，截断到 500 字符
-        string? requestContent = null;
-        for (int i = request.Messages.Count - 1; i >= 0; i--)
-        {
-            var msg = request.Messages[i];
-            if (msg.Role == "user")
-            {
-                var text = msg.GetText();
-                if (!string.IsNullOrEmpty(text))
-                {
-                    requestContent = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
-                    break;
-                }
-            }
-        }
+        // 构造请求内容摘要（用于 dashboard 展示）：与编排器/融合路由共用同一提取出口
+        //（截断 + 密钥掩码），此前为一份内联拷贝，脱敏升级时容易漏改。
+        string? requestContent = ProxyOrchestrator.ExtractRequestContentSummary(request);
 
         var admitted = new List<(ModelEndpointOptions Model, bool WasHalfOpenProbe)>();
         var skipped = new List<ModelEndpointOptions>();
@@ -205,7 +193,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: adopted", true, null, false, routedTier,
                     isAdopted: true, parallelGroupId: groupId, isEstimated: adoptedIsEstimated,
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, request: request);
                 accounted.Add(model.Name);
 
                 adopted = response;
@@ -241,7 +229,7 @@ public sealed class RaceOrchestrator
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
                     decision.Reason + "; fusion: cancelled-by-race", false, "cancelled", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, request: request);
                 accounted.Add(model.Name);
                 continue;
             }
@@ -297,7 +285,8 @@ public sealed class RaceOrchestrator
                 false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited), false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m,
                 quotaLimited: quotaLimited,
-                reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal,
+                upstreamStatusCode: status, request: request);
             accounted.Add(model.Name);
         }
 
@@ -356,7 +345,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: adopted (post-break)", true, null, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId,
                     timeToFirstTokenMs: response.Metadata?.ResponseHeaderLatencyMs,
-                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, request: request);
                 accounted.Add(m.Name);
                 continue;
             }
@@ -378,7 +367,8 @@ public sealed class RaceOrchestrator
                     "quota-exhausted", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: false,
                     quotaLimited: true,
-                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal,
+                    upstreamStatusCode: UpstreamFailureClassifier.GetStatus(error), request: request);
             }
             else if (postBreakCancelledByRace)
             {
@@ -393,7 +383,7 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: cancelled-by-race (post-break)", false,
                     "cancelled", false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m,
-                    reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    reward: postBreakReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, request: request);
             }
             else
             {
@@ -425,7 +415,8 @@ public sealed class RaceOrchestrator
                     decision.Reason + "; fusion: " + (postBreakRejection ? "rejected (post-break)" : "failed (post-break)") + (tripped ? " (circuit tripped)" : ""),
                     false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited: false), false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: failureEstCost > 0m,
-                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal,
+                    upstreamStatusCode: UpstreamFailureClassifier.GetStatus(error), request: request);
             }
             accounted.Add(m.Name);
         }

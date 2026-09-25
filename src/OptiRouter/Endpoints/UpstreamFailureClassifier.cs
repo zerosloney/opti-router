@@ -50,7 +50,8 @@ internal static class UpstreamFailureClassifier
         return $"{prefix}: {body}";
     }
 
-    public static int GetStatus(Exception error) => error switch
+    /// <summary>失败状态码归一（供审计 upstream_status_code 列）；null/未知类型回退 502。</summary>
+    public static int GetStatus(Exception? error) => error switch
     {
         ModelClientException mce => (int)mce.StatusCode,
         OperationCanceledException => 408,

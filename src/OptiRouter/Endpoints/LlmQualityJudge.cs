@@ -166,7 +166,7 @@ public sealed class LlmQualityJudge
                 true, null, false, routedTier, isAdopted: false, fusionRole: "judge",
                 isEstimated: isEstimated,
                 reward: null, epsilonPromotedModel: decision.EpsilonPromotedModel,
-                requestContent: null, classificationSignal: decision.ClassificationSignal);
+                requestContent: null, classificationSignal: decision.ClassificationSignal, request: originalRequest);
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("LLM judge call completed: judge={Judge}, target={Target}, latency={Ms}ms",
                     judgeModel.Name, judgedModelName, sw.ElapsedMilliseconds);
@@ -190,7 +190,7 @@ public sealed class LlmQualityJudge
                 sw.ElapsedMilliseconds, sessionId, decision.Reason + "; llm-judge failed",
                 false, UpstreamFailureClassifier.SafeMessage(ex, quotaLimited), false, routedTier,
                 fusionRole: "judge", quotaLimited: quotaLimited,
-                epsilonPromotedModel: decision.EpsilonPromotedModel, classificationSignal: decision.ClassificationSignal);
+                epsilonPromotedModel: decision.EpsilonPromotedModel, classificationSignal: decision.ClassificationSignal, request: originalRequest);
             _logger.LogDebug(ex, "LLM judge call failed for target {Target}", judgedModelName);
         }
     }

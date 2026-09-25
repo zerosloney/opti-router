@@ -107,7 +107,9 @@ public sealed class OutcomeRecorder
         double? reward = null,
         string? epsilonPromotedModel = null,
         string? requestContent = null,
-        string? classificationSignal = null)
+        string? classificationSignal = null,
+        int? upstreamStatusCode = null,
+        OptiRouter.Clients.ChatRequest? request = null)
     {
         try
         {
@@ -115,6 +117,10 @@ public sealed class OutcomeRecorder
             // 生成的 GUID 放入 Items["RequestId"]）——与下方 TraceScope 的 ambient 语义对齐，
             // 一次性覆盖 ProxyOrchestrator/FusionRouter/RaceOrchestrator 等全部调用点。
             requestId ??= _httpContextAccessor?.HttpContext?.Items["RequestId"] as string;
+
+            // 输入参数快照：与 RequestContent 同受 AuditStoreRequestContent 开关约束，
+            // 提取失败不阻断审计行（catch 内返回 null）。
+            string? requestParams = BuildRequestParams(request, _options.CurrentValue.Routing);
 
             // 估算校准：成功请求用上游精确 usage 回填 EMA 比率，修正分桶估算的系统性偏低。
             if (usage is { PromptTokens: >= 200 } && estimatedTokens > 0)
@@ -152,7 +158,9 @@ public sealed class OutcomeRecorder
                 Reward: reward,
                 EpsilonPromotedModel: epsilonPromotedModel,
                 RequestContent: requestContent,
-                ClassificationSignal: classificationSignal));
+                ClassificationSignal: classificationSignal,
+                UpstreamStatusCode: upstreamStatusCode,
+                RequestParams: requestParams));
         }
         catch
         {
@@ -586,6 +594,42 @@ public sealed class OutcomeRecorder
 
         // d. 默认：不折算
         return elapsedMs;
+    }
+
+    /// <summary>
+    /// 输入参数快照（紧凑 JSON），覆盖调参复现所需的采样参数与请求形态：
+    /// <c>temp</c>/<c>max_tokens</c>/<c>msgs</c>/<c>tools</c>/<c>stream</c>。
+    /// 完整请求体刻意不落库（隐私与存储体积），参数快照与内容摘要是互补的两半。
+    /// 仅在内容级审计开关（<c>AuditStoreRequestContent</c>）开启时返回非 null。
+    /// </summary>
+    private static string? BuildRequestParams(OptiRouter.Clients.ChatRequest? request, RoutingOptions routing)
+    {
+        if (request is null || !routing.AuditStoreRequestContent)
+            return null;
+
+        try
+        {
+            int toolCount = 0;
+            if (request.ExtensionData?.TryGetValue("tools", out var tools) == true
+                && tools.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                toolCount = tools.GetArrayLength();
+            }
+
+            return System.Text.Json.JsonSerializer.Serialize(new
+            {
+                temp = request.Temperature,
+                max_tokens = request.MaxTokens,
+                msgs = request.Messages?.Count ?? 0,
+                tools = toolCount,
+                stream = request.Stream
+            });
+        }
+        catch
+        {
+            // 参数快照是尽力而为的附加列：提取异常不得影响审计行落库。
+            return null;
+        }
     }
 
     /// <summary>

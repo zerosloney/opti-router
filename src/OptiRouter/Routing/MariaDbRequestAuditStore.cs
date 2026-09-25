@@ -76,11 +76,15 @@ public sealed class MariaDbRequestAuditStore : IRequestAuditStore, IDisposable
                 reward DOUBLE NULL,
                 epsilon_promoted_model VARCHAR(255) NULL,
                 request_content LONGTEXT NULL,
-                classification_signal VARCHAR(64) NULL
+                classification_signal VARCHAR(64) NULL,
+                upstream_status_code INT NULL,
+                request_params TEXT NULL
             );
             """);
         // 存量表补列（CREATE TABLE IF NOT EXISTS 不会更新既有表结构）。
         Execute(conn, "ALTER TABLE optirouter_request_audit ADD COLUMN IF NOT EXISTS classification_signal VARCHAR(64) NULL;");
+        Execute(conn, "ALTER TABLE optirouter_request_audit ADD COLUMN IF NOT EXISTS upstream_status_code INT NULL;");
+        Execute(conn, "ALTER TABLE optirouter_request_audit ADD COLUMN IF NOT EXISTS request_params TEXT NULL;");
         EnsureIndex(conn, "idx_or_audit_timestamp", "CREATE INDEX idx_or_audit_timestamp ON optirouter_request_audit(timestamp);");
         EnsureIndex(conn, "idx_or_audit_model", "CREATE INDEX idx_or_audit_model ON optirouter_request_audit(model);");
 
@@ -179,11 +183,13 @@ public sealed class MariaDbRequestAuditStore : IRequestAuditStore, IDisposable
                              success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                              is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
                              cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-                             trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content, classification_signal)
+                             trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content, classification_signal,
+                             upstream_status_code, request_params)
                         VALUES
                             (@ts, @rid, @model, @est, @ptok, @ctok, @cost, @lat, @sid, @reason, @succ, @err, @stream,
                              @rtier, @cascade, @upg, @adopted, @pgid, @estim, @frole, @ttft,
-                             @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent, @reward, @epsilon, @reqcontent, @csignal);
+                             @cached, @cachewrite, @uncached, @quota, @trace, @span, @parent, @reward, @epsilon, @reqcontent, @csignal,
+                             @ustatus, @rparams);
                         """;
                     cmd.Parameters.AddWithValue("@ts", FormatTimestamp(record.Timestamp));
                     cmd.Parameters.AddWithValue("@rid", record.RequestId ?? string.Empty);
@@ -217,6 +223,8 @@ public sealed class MariaDbRequestAuditStore : IRequestAuditStore, IDisposable
                     cmd.Parameters.AddWithValue("@epsilon", (object?)record.EpsilonPromotedModel ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@reqcontent", (object?)record.RequestContent ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@csignal", (object?)record.ClassificationSignal ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@ustatus", (object?)record.UpstreamStatusCode ?? DBNull.Value);
+                    cmd.Parameters.AddWithValue("@rparams", (object?)record.RequestParams ?? DBNull.Value);
                     cmd.ExecuteNonQuery();
                 }
 
@@ -496,7 +504,8 @@ public sealed class MariaDbRequestAuditStore : IRequestAuditStore, IDisposable
                success, error_message, is_streaming, routed_tier, cascade_triggered, upgraded_from,
                is_adopted, parallel_group_id, is_estimated, fusion_role, ttft_ms,
                cached_input_tokens, cache_write_input_tokens, uncached_input_tokens, quota_limited,
-               trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content, classification_signal
+               trace_id, span_id, parent_span_id, reward, epsilon_promoted_model, request_content, classification_signal,
+               upstream_status_code, request_params
         FROM optirouter_request_audit
         """;
 
@@ -538,7 +547,9 @@ public sealed class MariaDbRequestAuditStore : IRequestAuditStore, IDisposable
                 Reward: reader.IsDBNull(28) ? null : (double?)reader.GetDouble(28),
                 EpsilonPromotedModel: reader.IsDBNull(29) ? null : reader.GetString(29),
                 RequestContent: reader.IsDBNull(30) ? null : reader.GetString(30),
-                ClassificationSignal: reader.IsDBNull(31) ? null : reader.GetString(31)));
+                ClassificationSignal: reader.IsDBNull(31) ? null : reader.GetString(31),
+                UpstreamStatusCode: reader.IsDBNull(32) ? null : reader.GetInt32(32),
+                RequestParams: reader.IsDBNull(33) ? null : reader.GetString(33)));
         }
         return list;
     }

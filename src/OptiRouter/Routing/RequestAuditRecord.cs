@@ -43,6 +43,11 @@ namespace OptiRouter.Routing;
     /// <param name="RequestContent">请求内容摘要（截断到 500 字符，用于 dashboard 展示）。</param>
 /// <param name="ClassificationSignal">结构化路由分类信号（如 <c>code-complex</c>/<c>simple-qa</c>，RuleClassifier 填充）。
 /// 供审计分析按信号聚合，替代对 <paramref name="RoutingReason"/> 字符串前缀的脆弱分组；null = 未分类（显式指定/缓存命中等）。</param>
+/// <param name="UpstreamStatusCode">失败尝试的上游 HTTP 状态码（400-599），供按状态码聚合告警（429 率/5xx 率）。
+/// 成功行与流中断（无 HTTP 语义）为 null——成功恒为 2xx，不重复占列。</param>
+/// <param name="RequestParams">输入参数快照（紧凑 JSON：<c>temp</c>/<c>max_tokens</c>/<c>msgs</c>/<c>tools</c>/<c>stream</c>）。
+/// 仅在 <c>AuditStoreRequestContent</c> 开启时随行持久化（与 <paramref name="RequestContent"/> 同一内容级审计总开关）；
+/// 完整请求体刻意不落库（隐私与存储体积），参数快照 + 内容摘要共同覆盖调参复现所需的全部输入信息。</param>
 public sealed record RequestAuditRecord(
     DateTime Timestamp,
     string? RequestId,
@@ -75,4 +80,6 @@ public sealed record RequestAuditRecord(
     double? Reward = null,
     string? EpsilonPromotedModel = null,
     string? RequestContent = null,
-    string? ClassificationSignal = null);
+    string? ClassificationSignal = null,
+    int? UpstreamStatusCode = null,
+    string? RequestParams = null);

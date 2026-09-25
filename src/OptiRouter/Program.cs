@@ -42,17 +42,30 @@ var builder = WebApplication.CreateBuilder(args);
 // disposed 竞态刷屏问题由 ClearProviders 一并移除。
 // SerilogLoggerProvider 以标准 ILoggerProvider 经 DI 接入（UseSerilog/AddSerilog(IServiceCollection)
 // 会替换 ILoggerFactory，DI 注册的其他 provider 如测试日志捕获器将收不到消息）。
+// OptiRouter:LogJsonFormat=true 时改用 Compact JSON 事件格式（如 "Timestamp"~"@m" 字段化事件），
+// 供 ELK/Loki 等管道直接按字段解析检索；默认纯文本模板（本机 tail/grep 友好）。
 builder.Logging.ClearProviders();
-var serilogLogger = new LoggerConfiguration()
-    .WriteTo.File(
-        Path.Combine(builder.Environment.ContentRootPath, "logs", "service-.log"),
-        outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff}] {Level:l4}: {SourceContext}[{EventId}] {Message:lj}{NewLine}{Exception}",
-        rollingInterval: RollingInterval.Day,
-        rollOnFileSizeLimit: true,
-        fileSizeLimitBytes: 50L * 1024 * 1024,
-        retainedFileCountLimit: 14,
-        flushToDiskInterval: TimeSpan.FromSeconds(2))
-    .CreateLogger();
+string logFilePath = Path.Combine(builder.Environment.ContentRootPath, "logs", "service-.log");
+var serilogLogger = builder.Configuration.GetValue<bool?>("OptiRouter:LogJsonFormat") == true
+    ? new LoggerConfiguration()
+        .WriteTo.File(new Serilog.Formatting.Compact.CompactJsonFormatter(),
+            logFilePath,
+            rollingInterval: RollingInterval.Day,
+            rollOnFileSizeLimit: true,
+            fileSizeLimitBytes: 50L * 1024 * 1024,
+            retainedFileCountLimit: 14,
+            flushToDiskInterval: TimeSpan.FromSeconds(2))
+        .CreateLogger()
+    : new LoggerConfiguration()
+        .WriteTo.File(
+            logFilePath,
+            outputTemplate: "[{Timestamp:yyyy-MM-dd HH:mm:ss.fff}] {Level:l4}: {SourceContext}[{EventId}] {Message:lj}{NewLine}{Exception}",
+            rollingInterval: RollingInterval.Day,
+            rollOnFileSizeLimit: true,
+            fileSizeLimitBytes: 50L * 1024 * 1024,
+            retainedFileCountLimit: 14,
+            flushToDiskInterval: TimeSpan.FromSeconds(2))
+        .CreateLogger();
 builder.Services.AddSingleton<ILoggerProvider>(_ => new SerilogLoggerProvider(serilogLogger, dispose: true));
 builder.WebHost.ConfigureKestrel(options =>
 {

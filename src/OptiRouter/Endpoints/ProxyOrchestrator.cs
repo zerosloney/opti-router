@@ -203,7 +203,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (modResult.IsViolation)
                 {
                     _logger.LogWarning("Input blocked by content moderation: category={Category}, score={Score:F3}", modResult.Category, modResult.Score);
-                    _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-input-blocked:{modResult.Category}", false, modResult.Reason, false, ModelTier.Cheap, requestContent: requestContent);
+                    _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-input-blocked:{modResult.Category}", false, modResult.Reason, false, ModelTier.Cheap, requestContent: requestContent, request: request);
                     if (options.Routing.ModerationInputAction == OptiRouter.Compliance.ModerationAction.Block)
                     {
                         throw new OptiRouter.Compliance.ComplianceViolationException(
@@ -229,7 +229,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     "Regenerate feedback (cache hit): penalizing previous model {Model} with reward {Reward:0.00}",
                     previousModel, options.Routing.RegeneratePenaltyReward);
             }
-            _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap);
+            _recorder.RecordAudit(null, "cache", 0, null, 0m, 0, sessionId, "response-cache-hit", true, null, false, ModelTier.Cheap, request: request);
             return cached;
         }
 
@@ -268,7 +268,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     RawChatResponse semResponse = piiMap is { HasSensitiveData: true }
                         ? new RawChatResponse(piiMap.Restore(semCached.Body), semCached.Usage, semCached.Metadata)
                         : semCached;
-                    _recorder.RecordAudit(null, "semantic-cache", 0, null, 0m, 0, sessionId, $"semantic-cache-hit (sim={semSim:F3})", true, null, false, ModelTier.Cheap);
+                    _recorder.RecordAudit(null, "semantic-cache", 0, null, 0m, 0, sessionId, $"semantic-cache-hit (sim={semSim:F3})", true, null, false, ModelTier.Cheap, request: request);
                     _logger.LogInformation("Semantic Response Cache HIT: similarity={Similarity:F3}", semSim);
                     return semResponse;
                 }
@@ -290,7 +290,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
             // 本轮路由命中档（首选候选 tier），用于审计追踪路由分档正确性。
             ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
             var snapshot = new RequestSnapshot(sessionId, requestContent, feedbackKey, routedTier,
-                options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown);
+                options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, Request: request);
 
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
@@ -303,7 +303,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 预算耗尽拒绝也要留审计痕：请求未到上游、不走正常落账路径，
                     // 不记则租户被拒事件在 Requests/Dashboard 完全不可见。
                     _recorder.RecordAudit(null, "budget-guard", decision.EstimatedInputTokens, null, 0m, 0, sessionId,
-                        decision.Reason, false, "budget exhausted", false, routedTier, classificationSignal: decision.ClassificationSignal);
+                        decision.Reason, false, "budget exhausted", false, routedTier, classificationSignal: decision.ClassificationSignal, request: request);
                     throw new BudgetExhaustedException(decision.Reason);
                 }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
@@ -536,15 +536,22 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (!rejectHasOther)
                         throw; // 无候选可降级：保持透传语义，原始状态码到达客户端
                 }
-                catch (ModelClientException ex) when (IsRetryable(ex) || (IsCredentialError(ex) && HasOtherCandidate(decision, candidate.Name, failedInThisRequest)))
+                catch (ModelClientException ex) when (IsRetryable(ex) || IsCredentialError(ex))
                 {
                     attemptSw.Stop();
                     lastModelName = candidate.Name;
+                    bool hasOther = HasOtherCandidate(decision, candidate.Name, failedInThisRequest);
                     (lastStatusCode, lastErrorMessage, _) = SettleCandidateFailure(
                         CandidateFailureKind.UpstreamStatus, candidate, decision, estimatedTokens,
                         attemptSw.ElapsedMilliseconds, in snapshot, ex,
-                        globalTimeout: false, HasOtherCandidate(decision, candidate.Name, failedInThisRequest));
+                        globalTimeout: false, hasOther);
                     outcomeReported = true;
+                    if (IsCredentialError(ex) && !hasOther)
+                    {
+                        // 凭证错误且无候选可降级：先结算再透传原始状态码
+                        // （修复前异常未结算直接逃逸，审计零记录）。
+                        throw;
+                    }
                 }
                 catch (HttpRequestException ex)
                 {
@@ -683,7 +690,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 if (modResult.IsViolation)
                 {
                     _logger.LogWarning("Streaming input blocked by content moderation: category={Category}, score={Score:F3}", modResult.Category, modResult.Score);
-                    _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-input-blocked:{modResult.Category}", false, modResult.Reason, false, ModelTier.Cheap, requestContent: requestContent);
+                    _recorder.RecordAudit(null, "moderation", 0, null, 0m, 0, sessionId, $"moderation-input-blocked:{modResult.Category}", false, modResult.Reason, false, ModelTier.Cheap, requestContent: requestContent, request: request);
                     if (options.Routing.ModerationInputAction == OptiRouter.Compliance.ModerationAction.Block)
                     {
                         throw new OptiRouter.Compliance.ComplianceViolationException(
@@ -706,7 +713,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
             var decision = _engine.Decide(request, options, failedInThisRequest, sessionId);
             ModelTier routedTier = decision.Candidates.Count > 0 ? decision.Candidates[0].Tier : ModelTier.Medium;
             var snapshot = new RequestSnapshot(sessionId, requestContent, feedbackKey, routedTier,
-                options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown);
+                options.Routing.FailoverGlobalTimeoutSeconds, threshold, cooldown, Request: request);
 
             if (_logger.IsEnabled(LogLevel.Debug))
                 _logger.LogDebug("Route decision: {Reason}, candidates=[{Names}]",
@@ -719,7 +726,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     // 预算耗尽拒绝也要留审计痕：请求未到上游、不走正常落账路径，
                     // 不记则租户被拒事件在 Requests/Dashboard 完全不可见。
                     _recorder.RecordAudit(null, "budget-guard", decision.EstimatedInputTokens, null, 0m, 0, sessionId,
-                        decision.Reason, false, "budget exhausted", false, routedTier, classificationSignal: decision.ClassificationSignal);
+                        decision.Reason, false, "budget exhausted", false, routedTier, classificationSignal: decision.ClassificationSignal, request: request);
                     throw new BudgetExhaustedException(decision.Reason);
                 }
                 throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, decision.Reason);
@@ -994,7 +1001,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         lastStatusCode = (int)ex.StatusCode;
                         lastErrorMessage = $"upstream-status-{(int)ex.StatusCode}";
                     }
-                    catch (ModelClientException ex) when (IsRetryable(ex) || (IsCredentialError(ex) && HasOtherCandidate(decision, candidate.Name, failedInThisRequest)))
+                    catch (ModelClientException ex) when (IsRetryable(ex) || IsCredentialError(ex))
                     {
                         preStreamFailure = ex;
                         lastModelName = candidate.Name;
@@ -1065,6 +1072,13 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         }
                         probeResolved = true;
                         bool isGlobalTimeout = globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested;
+                        int? preStreamStatusCode = preStreamFailure switch
+                        {
+                            ModelClientException mce => (int)mce.StatusCode,
+                            HttpRequestException => 503,
+                            OperationCanceledException => 408,
+                            _ => null
+                        };
                         string failure = quotaLimited
                             ? "quota-exhausted"
                             : preStreamFailure is ModelClientException modelFailure
@@ -1075,7 +1089,8 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
                             attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier,
                             quotaLimited: quotaLimited,
-                            reward: preStreamReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                            reward: preStreamReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal,
+                            upstreamStatusCode: preStreamStatusCode, request: request);
                         _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
                             candidate.Name, failure, tripped ? " (circuit tripped)" : "");
 
@@ -1093,6 +1108,15 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         if (requestRejection && !HasOtherCandidate(decision, candidate.Name, failedInThisRequest))
                         {
                             // 无候选可降级：透传原始 4xx 给客户端（端点包装为 UPSTREAM_REJECTION）。
+                            throw preStreamFailure;
+                        }
+                        bool credentialNoFallback = !requestRejection
+                            && preStreamFailure is ModelClientException credentialEx
+                            && IsCredentialError(credentialEx)
+                            && !HasOtherCandidate(decision, candidate.Name, failedInThisRequest);
+                        if (credentialNoFallback)
+                        {
+                            // 凭证错误且无候选可降级：结算已完成，透传原始状态码（同非流式路径语义）。
                             throw preStreamFailure;
                         }
                         continue;
@@ -1218,7 +1242,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier,
                         isEstimated: isEstimated,
                         timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
-                        reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                        reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, request: request);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, cost.ToString("F6"));
                     yield break;
@@ -1714,7 +1738,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// 取最后一条非空 user 消息文本，截断到 500 字符。
     /// </summary>
     /// <param name="request">聊天请求。</param>
-    /// <returns>请求内容摘要，无 user 消息时返回 null。</returns>
+    /// <returns>请求内容摘要（密钥掩码后），无 user 消息时返回 null。</returns>
     internal static string? ExtractRequestContentSummary(ChatRequest request)
     {
         if (request is null || request.Messages is null)
@@ -1728,7 +1752,10 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                 var text = msg.GetText();
                 if (!string.IsNullOrWhiteSpace(text))
                 {
-                    return text.Length > 500 ? text.Substring(0, 500) + "..." : text;
+                    // 先截断再脱敏：摘要与落库口径在此单点收敛（编排器/竞速/融合共用），
+                    // Sanitize 兜底掩码与上游 PII 脱敏开关无关——内容审计开即生效。
+                    var truncated = text.Length > 500 ? text.Substring(0, 500) + "..." : text;
+                    return AuditContentSanitizer.Sanitize(truncated);
                 }
             }
         }
