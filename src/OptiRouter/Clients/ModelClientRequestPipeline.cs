@@ -41,17 +41,25 @@ internal static class ModelClientRequestPipeline
                     return response;
 
                 var statusCode = response.StatusCode;
-                string errorBody = await ModelClientRetry.WithTotalTimeout(
-                    connectTimeout, ct,
-                    token => BoundedResponseReader.ReadBodyAsync(response.Content, token)).ConfigureAwait(false);
-                response.Dispose();
-                if (ModelClientRetry.IsRetryable(statusCode) && attempt < maxRetries)
+                try
                 {
-                    attempt++;
-                    await ModelClientRetry.DelayWithJitterAsync(attempt, ct).ConfigureAwait(false);
-                    continue;
+                    string errorBody = await ModelClientRetry.WithTotalTimeout(
+                        connectTimeout, ct,
+                        token => BoundedResponseReader.ReadBodyAsync(response.Content, token)).ConfigureAwait(false);
+                    if (ModelClientRetry.IsRetryable(statusCode) && attempt < maxRetries)
+                    {
+                        attempt++;
+                        await ModelClientRetry.DelayWithJitterAsync(attempt, ct).ConfigureAwait(false);
+                        continue;
+                    }
+                    throw new ModelClientException(statusCode, errorBody);
                 }
-                throw new ModelClientException(statusCode, errorBody);
+                finally
+                {
+                    // 错误正文读取自身超时/被取消的路径也必须释放，否则重试与异常传播泄漏已建连的
+                    // response（与 OpenAICompatibleModelClient.StreamRawAsync 的失败建连收尾同语义）。
+                    response.Dispose();
+                }
             }
             catch (Exception ex) when (ModelClientRetry.IsExceptionRetryable(ex) && attempt < maxRetries)
             {
