@@ -736,7 +736,13 @@ public sealed class FusionRouter
                 }
                 if (!string.IsNullOrEmpty(line.Data))
                 {
-                    anchorTextSb.Append(line.Data);
+                    // anchor 供 analyst 比对的是用户可见正文：须提取 delta 文本，而非原始 SSE JSON 行
+                    //（secondary panel 是 ExtractAssistantText 的纯文本，混入原始 JSON 会让分析失真）。
+                    string? anchorDelta = ProxyOrchestrator.ExtractDeltaText(line.Data);
+                    if (!string.IsNullOrEmpty(anchorDelta))
+                    {
+                        anchorTextSb.Append(anchorDelta);
+                    }
                 }
                 yield return line;
             }

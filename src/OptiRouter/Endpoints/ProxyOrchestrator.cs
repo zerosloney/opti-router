@@ -1620,7 +1620,7 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
         return line;
     }
 
-    private static string? ExtractDeltaText(string data)
+    internal static string? ExtractDeltaText(string data)
     {
         if (string.IsNullOrWhiteSpace(data) || data.Trim() == "[DONE]")
             return null;
