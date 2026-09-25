@@ -85,6 +85,13 @@ function roundRect(c, x, y, w, h, r) {
     c.closePath();
 }
 
+// 图表等宽字体取自设计 token（--font-mono），避免 CSS 与 Canvas 各自硬编码字体栈
+function chartMono(size, weight) {
+    var fam = '';
+    try { fam = (getComputedStyle(document.documentElement).getPropertyValue('--font-mono') || '').trim(); } catch (e) { }
+    return (weight ? weight + ' ' : '') + size + 'px ' + (fam || 'monospace');
+}
+
 window.drawTrendChart = function(canvas, data) {
     if (!canvas || !data || data.length === 0) return;
     
@@ -168,7 +175,7 @@ window.drawTrendChart = function(canvas, data) {
             ctx.stroke();
             
             ctx.fillStyle = textSecondary;
-            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11);
             ctx.textAlign = 'right';
             ctx.fillText('$' + (mx - mx * i / 4).toFixed(4), pad.l - 12, y + 3.5);
         }
@@ -226,7 +233,7 @@ window.drawTrendChart = function(canvas, data) {
         
         // X-Axis Labels
         ctx.fillStyle = textSecondary;
-        ctx.font = '11px "JetBrains Mono", monospace';
+        ctx.font = chartMono(11);
         ctx.textAlign = 'center';
         curData.forEach(function(d, i){
             var x = pad.l + cw * i / Math.max(curData.length - 1, 1);
@@ -252,7 +259,7 @@ window.drawTrendChart = function(canvas, data) {
             // Tooltip Box
             var tipTextDate = hp.data.date;
             var tipTextCost = '支出: $' + hp.data.amount.toFixed(4);
-            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11);
             var boxW = Math.max(ctx.measureText(tipTextDate).width, ctx.measureText(tipTextCost).width) + 20;
             var boxH = 44;
             var boxX = Math.min(Math.max(hp.x - boxW / 2, 8), W - boxW - 8);
@@ -271,12 +278,12 @@ window.drawTrendChart = function(canvas, data) {
             ctx.restore();
             
             ctx.fillStyle = textSecondary;
-            ctx.font = '10px "JetBrains Mono", monospace';
+            ctx.font = chartMono(10);
             ctx.textAlign = 'left';
             ctx.fillText(tipTextDate, boxX + 10, boxY + 16);
             
             ctx.fillStyle = isDark ? '#38bdf8' : '#0284c7';
-            ctx.font = 'bold 11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11, 'bold');
             ctx.fillText(tipTextCost, boxX + 10, boxY + 34);
         }
     }
@@ -365,7 +372,7 @@ window.drawAnalysisTrendChart = function(canvas, data) {
             ctx.stroke();
             
             ctx.fillStyle = textSecondary;
-            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11);
             ctx.textAlign = 'right';
             ctx.fillText(String(Math.ceil(mx - mx * i / 4)), pad.l - 12, y + 3.5);
         }
@@ -422,7 +429,7 @@ window.drawAnalysisTrendChart = function(canvas, data) {
         
         // X-Axis Labels
         ctx.fillStyle = textSecondary;
-        ctx.font = '11px "JetBrains Mono", monospace';
+        ctx.font = chartMono(11);
         ctx.textAlign = 'center';
         curData.forEach(function(d, i){
             var x = pad.l + cw * i / Math.max(curData.length - 1, 1);
@@ -446,7 +453,7 @@ window.drawAnalysisTrendChart = function(canvas, data) {
             
             var tipDate = hp.data.day;
             var tipReq = '请求数: ' + hp.data.requests;
-            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11);
             var boxW = Math.max(ctx.measureText(tipDate).width, ctx.measureText(tipReq).width) + 20;
             var boxH = 44;
             var boxX = Math.min(Math.max(hp.x - boxW / 2, 8), W - boxW - 8);
@@ -465,12 +472,12 @@ window.drawAnalysisTrendChart = function(canvas, data) {
             ctx.restore();
             
             ctx.fillStyle = textSecondary;
-            ctx.font = '10px "JetBrains Mono", monospace';
+            ctx.font = chartMono(10);
             ctx.textAlign = 'left';
             ctx.fillText(tipDate, boxX + 10, boxY + 16);
             
             ctx.fillStyle = isDark ? '#38bdf8' : '#0284c7';
-            ctx.font = 'bold 11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11, 'bold');
             ctx.fillText(tipReq, boxX + 10, boxY + 34);
         }
     }
@@ -524,7 +531,7 @@ window.drawAnalysisBarChart = function(canvas, items) {
             
             // 标签（左对齐，超长截断）
             ctx.fillStyle = textSecondary;
-            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11);
             ctx.textAlign = 'left';
             var label = it.label || '-';
             while (ctx.measureText(label).width > labelW - 12 && label.length > 4) label = label.slice(0, -2);
@@ -547,7 +554,7 @@ window.drawAnalysisBarChart = function(canvas, items) {
             
             // 数值与指标文本
             ctx.fillStyle = isDark ? '#e2e8f0' : '#334155';
-            ctx.font = '11px "JetBrains Mono", monospace';
+            ctx.font = chartMono(11);
             ctx.textAlign = 'left';
             ctx.fillText(it.text || String(it.value), labelW + barMax + 12, cy + 3.5);
         });

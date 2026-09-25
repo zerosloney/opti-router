@@ -4,6 +4,9 @@
    ========================================================================== */
 
 :root {
+    /* 原生控件（checkbox/radio/滚动条）跟随暗色 token 渲染 */
+    color-scheme: dark;
+
     /* --- Base Canvas & Neutral Surfaces --- */
     --bg-base: #0a0e17;
     --bg-canvas: #0a0e17;
@@ -59,7 +62,7 @@
     --danger-text: #f43f5e;
     --warn-text: #f87171;
     --dim-text: #9ca3af;
-    --faint-text: #e2e8f0;
+    --faint-text: #64748b;
     --chart-grid: rgba(255, 255, 255, 0.04);
 
     /* --- Borders & Outlines --- */
@@ -89,6 +92,10 @@
 
     /* --- Inline Icons（select 箭头等内联 SVG data-URI） --- */
     --select-arrow-icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+
+    /* --- Route Motif（品牌母题：logo 折线"分流"纹理，用于登录页与空状态点缀。
+         瓦片 168x84：密度低到隐约可感知，勿调小——高密度会变成壁纸式噪点 --- */
+    --route-motif: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='224' height='112' viewBox='0 0 224 112'%3E%3Cpath d='M0 84 L52 84 L76 28 L100 84 L168 84 L192 28 L224 84' fill='none' stroke='rgba(148,163,184,0.04)' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 /* ==========================================================================
@@ -96,6 +103,9 @@
    ========================================================================== */
 
 [data-theme="light"] {
+    /* 原生控件（checkbox/radio/滚动条）跟随浅色 token 渲染 */
+    color-scheme: light;
+
     /* --- Base Canvas & Neutral Surfaces --- */
     --bg-base: #f4f6fa;
     --bg-canvas: #f4f6fa;
@@ -149,7 +159,7 @@
     --danger-text: #e11d48;
     --warn-text: #dc2626;
     --dim-text: #64748b;
-    --faint-text: #cbd5e1;
+    --faint-text: #94a3b8;
     --chart-grid: rgba(15, 23, 42, 0.08);
 
     /* --- Borders & Outlines --- */
@@ -164,6 +174,9 @@
     --shadow-card-hover: 0 10px 28px -6px rgba(15, 23, 42, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.7);
     --shadow-modal: 0 24px 60px -16px rgba(15, 23, 42, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.7);
     --shadow-glow: 0 0 20px rgba(79, 70, 229, 0.18);
+
+    /* 浅色主题下母题纹理换深色描边 */
+    --route-motif: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='224' height='112' viewBox='0 0 224 112'%3E%3Cpath d='M0 84 L52 84 L76 28 L100 84 L168 84 L192 28 L224 84' fill='none' stroke='rgba(15,23,42,0.035)' stroke-width='1.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
 }
 
 /* 浅色主题下对硬编码深色值的覆盖 */
@@ -213,8 +226,8 @@
 [data-theme="light"] .login-page {
     background-image:
         radial-gradient(ellipse 50% 50% at 50% 40%, rgba(79, 70, 229, 0.06) 0%, transparent 60%),
-        linear-gradient(rgba(15, 23, 42, 0.04) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(15, 23, 42, 0.04) 1px, transparent 1px);
+        var(--route-motif);
+    background-size: 100% 100%, 224px 112px;
 }
 
 /* ==========================================================================
@@ -340,7 +353,7 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
 
 .logo-sub {
     color: var(--text-muted);
-    font-size: 0.58rem;
+    font-size: 0.7rem;
     font-weight: 600;
     letter-spacing: 0.12em;
     text-transform: uppercase;
@@ -494,12 +507,6 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     text-decoration: none;
     cursor: pointer;
     transition: all var(--duration-fast);
-}
-
-.side-nav-logout:hover {
-    border-color: var(--danger-border);
-    color: var(--danger);
-    background: var(--danger-glow);
 }
 
 .side-nav-logout:hover {
@@ -693,7 +700,7 @@ code, pre, .stat-value, .stat-card-val, .stat-row-val, .metric-val, .table-mono,
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    transition: transform var(--transition-fast), border-color var(--transition-fast);
+    transition: transform var(--duration-fast), border-color var(--duration-fast);
 }
 
 .roi-metric-item:hover {
@@ -1344,7 +1351,7 @@ select option {
     border-radius: var(--radius-md);
     background: var(--bg-input);
     color: #c7d2fe;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.85rem;
     line-height: 1.5;
     word-break: break-all;
@@ -1392,15 +1399,10 @@ select option {
     justify-content: center;
     padding: 1.5rem;
     background: var(--bg-base);
-    background-image: 
+    background-image:
         radial-gradient(ellipse 50% 50% at 50% 40%, rgba(99, 102, 241, 0.08) 0%, transparent 60%),
-        linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
-    background-size: 100% 100%, 32px 32px, 32px 32px;
-}
-
-.login-glow {
-    display: none; /* Removed heavy neon blobs for minimalist look */
+        var(--route-motif);
+    background-size: 100% 100%, 224px 112px;
 }
 
 .login-card {
@@ -1570,43 +1572,6 @@ select option {
     color: var(--text-muted);
     font-size: 0.74rem;
     text-align: center;
-}
-
-/* ==========================================================================
-   Toast Notifications
-   ========================================================================== */
-
-.toast-overlay {
-    position: fixed;
-    right: 1.5rem;
-    bottom: 1.5rem;
-    z-index: 9999;
-}
-
-.toast-content {
-    padding: 0.75rem 1.1rem;
-    border-radius: var(--radius-md);
-    font-size: 0.84rem;
-    font-weight: 500;
-    box-shadow: var(--shadow-modal);
-    animation: toast-in 0.25s var(--ease-out);
-}
-
-.toast-success {
-    border: 1px solid var(--success-border);
-    color: var(--success);
-    background: var(--bg-surface);
-}
-
-.toast-error {
-    border: 1px solid var(--danger-border);
-    color: var(--danger);
-    background: var(--bg-surface);
-}
-
-@keyframes toast-in {
-    from { opacity: 0; transform: translateY(8px); }
-    to { opacity: 1; transform: translateY(0); }
 }
 
 /* ==========================================================================
@@ -1828,6 +1793,15 @@ select option {
     .side-nav .nav-en,
     .side-nav-footer {
         display: none;
+    }
+    /* 64px 窄轨只留图标；文字对读屏保留（sr-only），视觉隐藏避免挤压换行 */
+    .side-nav .nav-text {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
     }
     .side-nav-link {
         justify-content: center;
@@ -2233,7 +2207,8 @@ select option {
     gap: 6px;
 }
 
-.preset-grid {
+/* 供应商 pill 流式排布（.preset-grid 名已被 RouterStudio 预设卡片网格占用，勿混用） */
+.preset-pill-grid {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
@@ -2299,7 +2274,7 @@ select option {
 }
 
 .preview-url-text {
-    font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+    font-family: var(--font-mono);
     font-size: 0.82rem;
     color: var(--text-primary);
     word-break: break-all;
@@ -2389,7 +2364,7 @@ select option {
 }
 
 .discover-source-url {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     color: var(--text-primary);
     font-size: 0.78rem;
 }
@@ -2623,7 +2598,7 @@ select option {
 }
 
 .model-id-cell {
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-weight: 500;
     color: var(--text-primary);
     display: inline-flex;
@@ -2710,7 +2685,7 @@ select option {
     align-items: center;
     gap: 6px;
     font-size: 0.75rem;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     padding: 4px 10px;
     background: var(--bg-surface);
     border: 1px solid var(--border);
@@ -2752,7 +2727,7 @@ select option {
 
 .apikey-full {
     display: inline-block;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     font-size: 0.8rem;
     color: var(--text-primary);
     background: var(--bg-subtle);
@@ -2761,6 +2736,19 @@ select option {
     padding: 2px 6px;
     word-break: break-all;
     white-space: normal;
+}
+
+/* 遮蔽预览（前 3 + 后 4）：虚线边框与完整密钥的实线盒子区分"非完整值" */
+.apikey-hint {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    background: var(--bg-subtle);
+    border: 1px dashed var(--border-hover);
+    border-radius: var(--radius-md);
+    padding: 2px 6px;
+    white-space: nowrap;
 }
 
 .key-reveal-btn {
@@ -3232,7 +3220,9 @@ select option {
     width: 64px;
     height: 64px;
     border-radius: var(--radius-full);
-    background: var(--bg-hover);
+    background: var(--bg-subtle-hover);
+    background-image: var(--route-motif);
+    background-position: center;
     border: 1px solid var(--border);
     display: flex;
     align-items: center;
@@ -3359,7 +3349,7 @@ select option {
 
 .toast-close-btn:hover {
     color: var(--text-primary);
-    background: var(--bg-hover);
+    background: var(--bg-subtle-hover);
 }
 
 @keyframes slideInRight {
@@ -3439,12 +3429,6 @@ select option {
 }
 
 /* 响应式断点自适应增强 */
-@media (max-width: 1200px) {
-    .stats-overview {
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    }
-}
-
 @media (max-width: 992px) {
     .chart-pair {
         flex-direction: column;
@@ -3478,39 +3462,6 @@ select option {
     .card-label {
         font-size: 0.88rem;
     }
-    
-    .filter-row {
-        flex-direction: column;
-        align-items: stretch;
-    }
-    
-    .filter-row .form-control,
-    .filter-row button,
-    .filter-row select {
-        width: 100%;
-    }
-    
-    .modal-dialog {
-        max-width: 95vw !important;
-        margin: 10px auto;
-        padding: 1.25rem;
-    }
-}
-
-/* 微进度条组件 (Micro Progress / Watermark) */
-.progress-bar-refined {
-    height: 6px;
-    background: var(--bg-surface);
-    border-radius: 999px;
-    overflow: hidden;
-    position: relative;
-}
-
-.progress-bar-refined-fill {
-    height: 100%;
-    background: linear-gradient(90deg, var(--primary) 0%, #38bdf8 100%);
-    border-radius: 999px;
-    transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* ==========================================================================
@@ -3557,7 +3508,7 @@ select option {
     font-size: 1.35rem;
     font-weight: 700;
     color: var(--text-primary);
-    font-family: 'JetBrains Mono', monospace;
+    font-family: var(--font-mono);
     margin: 4px 0 2px 0;
     line-height: 1.2;
 }
@@ -3701,6 +3652,76 @@ select option {
 
 .tier-progress-bar.tier-cheap {
     background: linear-gradient(90deg, #10b981, #34d399);
+}
+
+/* ==========================================================================
+   Accessibility: Focus Ring, Native Controls & Reduced Motion
+   ========================================================================== */
+
+/* 键盘焦点环：btn 系在基础规则里 outline:none，此处以源序 + 元素选择器赢回；
+   鼠标点击不触发（仅 :focus-visible），输入类控件沿用各自的 focus 边框/光晕 */
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+    border-radius: inherit;
+}
+
+/* 原生 range/checkbox/radio 跟随主题主色（配合 color-scheme） */
+input[type="range"],
+input[type="checkbox"],
+input[type="radio"] {
+    accent-color: var(--primary);
+}
+
+/* 卡片标题内的内链（如总览"查看全部请求"）：此前无样式落到 UA 默认蓝 */
+.card-label .nav-link {
+    color: var(--primary);
+    font-weight: 500;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.card-label .nav-link:hover {
+    text-decoration: underline;
+}
+
+/* 用户偏好减弱动效：停掉脉冲/闪烁/旋转等无限动画与过渡 */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* ==========================================================================
+   Capability List（文档式能力清单——呈现"是什么"，而非伪装成实时指标）
+   ========================================================================== */
+
+.capability-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.capability-list li {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+}
+
+.capability-list .capability-name {
+    flex-shrink: 0;
+    color: var(--text-primary);
+    font-weight: 600;
 }
 
 
