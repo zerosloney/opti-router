@@ -951,6 +951,114 @@ public class FusionRouterTests
     }
 
     [Fact]
+    public async Task RaceMode_RequestRejection_DoesNotTripCircuit()
+    {
+        // 回归（审查 #4）：竞速路径曾把 400/413/422 类请求语义拒绝计入熔断，与串行路径
+        // "拒绝不入熔断" 口径冲突——竞速模式会把健康模型误打出熔断。mock 抛 ModelClientException
+        // （非 OCE），即使竞速取消先到也走真实失败分类，断言无时序依赖。
+        using var factory = new FusionRouterFactory { EnableFusionMode = true };
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (_, _) => throw new ModelClientException(HttpStatusCode.BadRequest, "invalid message shape"));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (_, _) => Task.FromResult(MakeResponse("model-b", 1, 1, "ok-b")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (_, _) => Task.FromResult(MakeResponse("model-c", 1, 1, "ok-c")));
+
+        var orchestrator = factory.Services.GetRequiredService<ProxyOrchestrator>();
+        var response = await orchestrator.SendAsync(BuildRequest(), CancellationToken.None);
+
+        Assert.Contains("ok-b", response.Body, StringComparison.Ordinal);
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        Assert.False(circuits.TryGetValue("model-a", out var a) && a.FailureCount > 0,
+            "400 请求语义拒绝不应计入熔断");
+    }
+
+    [Fact]
+    public async Task RaceMode_CredentialFailure_StillTripsCircuit()
+    {
+        // 对照：401/403 凭证错误是模型配置问题，串行与竞速路径都应计入熔断。
+        using var factory = new FusionRouterFactory { EnableFusionMode = true };
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (_, _) => throw new ModelClientException(HttpStatusCode.Unauthorized, "invalid api key"));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (_, _) => Task.FromResult(MakeResponse("model-b", 1, 1, "ok-b")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (_, _) => Task.FromResult(MakeResponse("model-c", 1, 1, "ok-c")));
+
+        var orchestrator = factory.Services.GetRequiredService<ProxyOrchestrator>();
+        var response = await orchestrator.SendAsync(BuildRequest(), CancellationToken.None);
+
+        Assert.Contains("ok-b", response.Body, StringComparison.Ordinal);
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        Assert.True(circuits.TryGetValue("model-a", out var a) && a.FailureCount == 1,
+            "401 凭证错误必须计入熔断");
+    }
+
+    [Fact]
+    public async Task FusionRouter_PanelRequestRejection_DoesNotTripCircuit()
+    {
+        // quality router panel 路径同口径：400 panel 不入熔断，融合继续由健康 panel 完成。
+        using var factory = new FusionRouterFactory();
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (_, _) => throw new ModelClientException(HttpStatusCode.UnprocessableEntity, "context length exceeded"));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (_, _) => Task.FromResult(MakeResponse("model-b", 1, 1, "panel-b")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (_, _) => Task.FromResult(MakeResponse("model-c", 1, 1, "panel-c")));
+
+        var orchestrator = factory.Services.GetRequiredService<ProxyOrchestrator>();
+        var response = await orchestrator.SendAsync(BuildRequest(), CancellationToken.None);
+
+        Assert.False(string.IsNullOrEmpty(response.Body));
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        Assert.False(circuits.TryGetValue("model-a", out var a) && a.FailureCount > 0,
+            "422 请求语义拒绝不应计入熔断");
+    }
+
+    [Fact]
+    public async Task FusionRouter_Streaming_SecondaryRejection_DoesNotTripCircuit()
+    {
+        // 融合流式 secondary 路径同口径：400 不入熔断（仅释放准入探槽）。
+        using var factory = new FusionRouterFactory();
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            streamRawFunc: (req, ct) => StreamLinesAsync(new[]
+            {
+                "{\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}",
+                "[DONE]"
+            }));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (_, _) => throw new ModelClientException(HttpStatusCode.BadRequest, "bad secondary request"));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (_, _) => Task.FromResult(MakeResponse("model-c", 1, 1, "secondary-ok")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        Assert.Contains("hello", body, StringComparison.Ordinal);
+        Assert.Contains("[DONE]", body, StringComparison.Ordinal);
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        Assert.False(circuits.TryGetValue("model-b", out var b) && b.FailureCount > 0,
+            "流式 secondary 的 400 请求语义拒绝不应计入熔断");
+    }
+
+    [Fact]
     public async Task FusionRouter_Streaming_EnforcesCumulativeResponseSizeLimit()
     {
         const string firstLine = "{}";

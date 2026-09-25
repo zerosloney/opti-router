@@ -1358,13 +1358,10 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
     /// <summary>
     /// 请求语义类上游拒绝（400/413/422 等）：上游在校验阶段即拒绝，未产生生成费用。
     /// 与 429（配额独立分支）、401/403（凭证）、408/5xx（可重试）互斥。
+    /// 判定收敛到 <see cref="UpstreamFailureClassifier"/>，与并行路径共用同一口径。
     /// </summary>
     private static bool IsRequestRejection(ModelClientException exception)
-    {
-        int statusCode = (int)exception.StatusCode;
-        return statusCode is >= 400 and <= 499
-            and not 401 and not 403 and not 408 and not 429;
-    }
+        => UpstreamFailureClassifier.IsRequestRejection(exception);
 
     /// <summary>
     /// 是否还有未失败的其他候选。凭证错误在 auto 路由下应降级到下一候选而非放弃整个请求；

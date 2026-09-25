@@ -246,10 +246,14 @@ public sealed class RaceOrchestrator
                 continue;
             }
 
-            // 真实失败：记断路器 + 审计，标记进入 failedInThisRequest（让串行降级排除它）。
+            // 真实失败：标记进入 failedInThisRequest（让串行降级排除它）+ 审计。
+            // 熔断计数与串行路径同口径：仅 5xx/408/凭证（401/403）/网络/超时计入；
+            // 400/413/422 类请求语义拒绝不入熔断（模型对其他请求仍可用，竞速模式
+            // 不应比串行路径更激进地把模型打出熔断）。
             failedInThisRequest.Add(model.Name);
             lastModelName = model.Name;
             bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(error);
+            bool requestRejection = !quotaLimited && UpstreamFailureClassifier.IsRequestRejection(error);
             bool tripped = false;
             double? failureReward = null;
             if (quotaLimited)
@@ -257,6 +261,11 @@ public sealed class RaceOrchestrator
                 var quotaError = (ModelClientException)error!;
                 _recorder.RecordQuota(model.Name, quotaError.Metadata, rateLimited: true);
                 _healthTracker.ReleaseProbe(model.Name);
+            }
+            else if (requestRejection)
+            {
+                _healthTracker.ReleaseProbe(model.Name);
+                failureReward = _recorder.RecordThompsonOutcome(model.Name, null, decision);
             }
             else
             {
@@ -274,12 +283,17 @@ public sealed class RaceOrchestrator
             lastStatusCode = status;
             lastErrorMessage = UpstreamFailureClassifier.SafeMessage(error, quotaLimited);
 
-            // 真实失败同样预估入账：请求已到上游，上游按已处理 input 计费。
-            decimal failedEstCost = quotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
+            // 429/请求语义拒绝发生在上游校验阶段，未产生生成费用，预估入账为 0。
+            decimal failedEstCost = quotaLimited || requestRejection
+                ? 0m
+                : OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
             if (failedEstCost > 0m)
                 _recorder.RecordCost(failedEstCost, sessionId);
+            string failureOutcome = quotaLimited ? "quota-limited"
+                : requestRejection ? "rejected"
+                : "failed" + (tripped ? " (circuit tripped)" : "");
             _recorder.RecordAudit(null, model.Name, estimatedTokens, null, failedEstCost, elapsedMs, sessionId,
-                decision.Reason + "; fusion: failed" + (tripped ? " (circuit tripped)" : ""),
+                decision.Reason + "; fusion: " + failureOutcome,
                 false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited), false, routedTier,
                 isAdopted: false, parallelGroupId: groupId, isEstimated: failedEstCost > 0m,
                 quotaLimited: quotaLimited,
@@ -383,17 +397,32 @@ public sealed class RaceOrchestrator
             }
             else
             {
-                // 真实失败（获胜后到取消传播前完成的上游故障）：与主循环同口径计入断路器，
-                // 修复前被误归为 cancelled-by-race，故障模型漏报、持续收流量。
+                // 与主循环同口径区分请求语义拒绝：不计熔断、不计预估费用（校验阶段拒绝），
+                // 仍排除出本轮串行降级（同一请求重试必然再 400）。
+                bool postBreakRejection = UpstreamFailureClassifier.IsRequestRejection(error);
                 failedInThisRequest.Add(m.Name);
                 lastModelName = m.Name;
-                bool tripped = _healthTracker.RecordFailure(m.Name, threshold, cooldown);
-                double failureReward = _recorder.RecordThompsonOutcome(m.Name, null, decision);
-                decimal failureEstCost = OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
-                if (failureEstCost > 0m)
-                    _recorder.RecordCost(failureEstCost, sessionId);
+                bool tripped = false;
+                double failureReward;
+                decimal failureEstCost;
+                if (postBreakRejection)
+                {
+                    _healthTracker.ReleaseProbe(m.Name);
+                    failureReward = _recorder.RecordThompsonOutcome(m.Name, null, decision);
+                    failureEstCost = 0m;
+                }
+                else
+                {
+                    // 真实失败（获胜后到取消传播前完成的上游故障）：与主循环同口径计入断路器，
+                    // 修复前被误归为 cancelled-by-race，故障模型漏报、持续收流量。
+                    tripped = _healthTracker.RecordFailure(m.Name, threshold, cooldown);
+                    failureReward = _recorder.RecordThompsonOutcome(m.Name, null, decision);
+                    failureEstCost = OutcomeRecorder.EstimateInputCost(m, estimatedTokens);
+                    if (failureEstCost > 0m)
+                        _recorder.RecordCost(failureEstCost, sessionId);
+                }
                 _recorder.RecordAudit(null, m.Name, estimatedTokens, null, failureEstCost, elapsedMs, sessionId,
-                    decision.Reason + "; fusion: failed (post-break)" + (tripped ? " (circuit tripped)" : ""),
+                    decision.Reason + "; fusion: " + (postBreakRejection ? "rejected (post-break)" : "failed (post-break)") + (tripped ? " (circuit tripped)" : ""),
                     false, UpstreamFailureClassifier.SafeMessage(error, quotaLimited: false), false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: failureEstCost > 0m,
                     reward: failureReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);

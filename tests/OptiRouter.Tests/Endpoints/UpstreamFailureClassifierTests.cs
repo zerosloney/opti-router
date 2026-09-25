@@ -82,4 +82,27 @@ public class UpstreamFailureClassifierTests
         Assert.Equal("quota-exhausted", UpstreamFailureClassifier.SafeMessage(new InvalidOperationException(), quotaLimited: true));
         Assert.Equal("upstream-error", UpstreamFailureClassifier.SafeMessage(new InvalidOperationException(), quotaLimited: false));
     }
+
+    [Theory]
+    [InlineData(HttpStatusCode.BadRequest, true)]        // 400 参数/格式
+    [InlineData(HttpStatusCode.RequestEntityTooLarge, true)] // 413
+    [InlineData(HttpStatusCode.UnprocessableEntity, true)]   // 422
+    [InlineData(HttpStatusCode.Unauthorized, false)]     // 401 凭证：模型配置问题，计入熔断
+    [InlineData(HttpStatusCode.Forbidden, false)]        // 403 同上
+    [InlineData(HttpStatusCode.RequestTimeout, false)]   // 408 计入熔断
+    [InlineData(HttpStatusCode.TooManyRequests, false)]  // 429 走配额分支
+    [InlineData(HttpStatusCode.InternalServerError, false)] // 5xx 计入熔断
+    public void IsRequestRejection_MatchesSerialPathSemantics(HttpStatusCode status, bool expected)
+    {
+        var ex = new ModelClientException(status, responseBody: null);
+        Assert.Equal(expected, UpstreamFailureClassifier.IsRequestRejection(ex));
+    }
+
+    [Fact]
+    public void IsRequestRejection_NonModelClientException_False()
+    {
+        Assert.False(UpstreamFailureClassifier.IsRequestRejection(new HttpRequestException()));
+        Assert.False(UpstreamFailureClassifier.IsRequestRejection(new OperationCanceledException()));
+        Assert.False(UpstreamFailureClassifier.IsRequestRejection(null));
+    }
 }

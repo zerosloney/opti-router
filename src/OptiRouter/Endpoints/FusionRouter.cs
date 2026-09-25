@@ -195,10 +195,12 @@ public sealed class FusionRouter
             }
             else
             {
-                // 失败
+                // 失败。熔断计数与串行路径同口径：400/413/422 类请求语义拒绝不入熔断
+                // （模型对其他请求仍可用），仅 5xx/408/凭证（401/403）/网络/超时计入。
                 failedInThisRequest.Add(model.Name);
                 lastModelName = model.Name;
                 bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(error);
+                bool requestRejection = !quotaLimited && UpstreamFailureClassifier.IsRequestRejection(error);
                 bool tripped = false;
                 double? failureReward = null;
                 if (quotaLimited)
@@ -206,6 +208,11 @@ public sealed class FusionRouter
                     var quotaError = (ModelClientException)error!;
                     _recorder.RecordQuota(model.Name, quotaError.Metadata, rateLimited: true);
                     _healthTracker.ReleaseProbe(model.Name);
+                }
+                else if (requestRejection)
+                {
+                    _healthTracker.ReleaseProbe(model.Name);
+                    failureReward = _recorder.RecordThompsonOutcome(model.Name, null, decision);
                 }
                 else
                 {
@@ -225,12 +232,18 @@ public sealed class FusionRouter
                 bool panelTimedOut = error is OperationCanceledException && !ct.IsCancellationRequested;
                 lastErrorMessage = panelTimedOut ? "panel-timeout" : UpstreamFailureClassifier.SafeMessage(error, quotaLimited);
 
-                decimal estCost = quotaLimited ? 0m : OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
+                // 429/请求语义拒绝发生在上游校验阶段，未产生生成费用，预估入账为 0。
+                decimal estCost = quotaLimited || requestRejection
+                    ? 0m
+                    : OutcomeRecorder.EstimateInputCost(model, estimatedTokens);
                 if (estCost > 0m)
                     _recorder.RecordCost(estCost, sessionId);
-                string failureKind = panelTimedOut ? "panel timeout" : "panel failed";
+                string failureKind = panelTimedOut ? "panel timeout"
+                    : quotaLimited ? "panel quota-limited"
+                    : requestRejection ? "panel rejected"
+                    : "panel failed" + (tripped ? " (circuit tripped)" : "");
                 _recorder.RecordAudit(null, model.Name, estimatedTokens, null, estCost, elapsedMs, sessionId,
-                    decision.Reason + $"; fusion-router: {failureKind}" + (tripped ? " (circuit tripped)" : ""),
+                    decision.Reason + $"; fusion-router: {failureKind}",
                     false, lastErrorMessage, false, routedTier,
                     isAdopted: false, parallelGroupId: groupId, isEstimated: estCost > 0m, fusionRole: "panel",
                     quotaLimited: quotaLimited,
@@ -357,11 +370,19 @@ public sealed class FusionRouter
             analystElapsedMs = analystSw.ElapsedMilliseconds;
             bool quotaLimited = ex is ModelClientException
             { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+            // 请求语义拒绝（400/413/422）与配额同理：不入熔断（bypass 信号本就 releaseProbe:false，
+            // 不持有探槽可释放），但排除出本轮串行降级（同一请求重试必然再 400）。
+            bool requestRejection = !quotaLimited && UpstreamFailureClassifier.IsRequestRejection(ex);
             double? analystFailureReward = null;
             if (quotaLimited)
             {
                 var quotaError = (ModelClientException)ex;
                 _recorder.RecordQuota(analystModel.Name, quotaError.Metadata, rateLimited: true);
+                failedInThisRequest.Add(analystModel.Name);
+            }
+            else if (requestRejection)
+            {
+                analystFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                 failedInThisRequest.Add(analystModel.Name);
             }
             else
@@ -442,11 +463,17 @@ public sealed class FusionRouter
                 long retryElapsedMs = retrySw.ElapsedMilliseconds;
                 bool retryQuotaLimited = ex is ModelClientException
                 { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+                bool retryRequestRejection = !retryQuotaLimited && UpstreamFailureClassifier.IsRequestRejection(ex);
                 double? retryFailureReward = null;
                 if (retryQuotaLimited)
                 {
                     var quotaError = (ModelClientException)ex;
                     _recorder.RecordQuota(analystModel.Name, quotaError.Metadata, rateLimited: true);
+                }
+                else if (retryRequestRejection)
+                {
+                    // 请求语义拒绝不入熔断（bypass 信号，不持有探槽）。
+                    retryFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                 }
                 else
                 {
@@ -512,11 +539,19 @@ public sealed class FusionRouter
             outerSw.Stop();
             bool quotaLimited = ex is ModelClientException
             { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
+            // 请求语义拒绝（400/413/422）与配额同理：不入熔断（bypass 信号，不持有探槽），
+            // 但排除出本轮串行降级（同一请求重试必然再 400）。
+            bool requestRejection = !quotaLimited && UpstreamFailureClassifier.IsRequestRejection(ex);
             double? outerFailureReward = null;
             if (quotaLimited)
             {
                 var quotaError = (ModelClientException)ex;
                 _recorder.RecordQuota(outerModel.Name, quotaError.Metadata, rateLimited: true);
+                failedInThisRequest.Add(outerModel.Name);
+            }
+            else if (requestRejection)
+            {
+                outerFailureReward = _recorder.RecordThompsonOutcome(outerModel.Name, null, decision);
                 failedInThisRequest.Add(outerModel.Name);
             }
             else
@@ -667,12 +702,19 @@ public sealed class FusionRouter
                 {
                     secondarySw.Stop();
                     bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
+                    // 请求语义拒绝（400/413/422）不入熔断：模型对其他请求仍可用，仅释放准入槽位。
+                    bool requestRejection = !quotaLimited && UpstreamFailureClassifier.IsRequestRejection(ex);
                     double? secondaryFailureReward = null;
                     if (quotaLimited)
                     {
                         _recorder.RecordQuota(m.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
                         // 配额限流非模型健康信号：仅释放准入时占用的探测槽位（此前为泄漏路径）。
                         _healthTracker.ReleaseProbe(m.Name);
+                    }
+                    else if (requestRejection && !ct.IsCancellationRequested)
+                    {
+                        _healthTracker.ReleaseProbe(m.Name);
+                        secondaryFailureReward = _recorder.RecordThompsonOutcome(m.Name, null, decision);
                     }
                     else if (!ct.IsCancellationRequested)
                     {
@@ -771,7 +813,10 @@ public sealed class FusionRouter
             }
             else
             {
-                if (!ct.IsCancellationRequested)
+                // 请求语义拒绝（400/413/422，如首行前被上游校验拒绝）非模型健康信号：
+                // 不入熔断，仅释放准入时占用的探测槽位——与串行/竞速路径同口径。
+                bool anchorRejection = UpstreamFailureClassifier.IsRequestRejection(anchorFault);
+                if (!ct.IsCancellationRequested && !anchorRejection)
                 {
                     // 真实故障（非客户端取消）：计入断路器 + 审计（RecordFailure 顺带释放准入时占用的探测槽位）。
                     bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
@@ -783,8 +828,16 @@ public sealed class FusionRouter
                 }
                 else
                 {
-                    // 客户端取消：非模型健康信号，仅释放准入时占用的探测槽位（此前为泄漏路径）。
+                    // 客户端取消/请求语义拒绝：非模型健康信号，仅释放准入时占用的探测槽位。
                     _healthTracker.ReleaseProbe(anchorModel.Name);
+                    if (anchorRejection)
+                    {
+                        double anchorRejectionReward = _recorder.RecordThompsonOutcome(anchorModel.Name, null, decision);
+                        _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
+                            anchorElapsedMs, sessionId, "fusion-stream-anchor", false,
+                            UpstreamFailureClassifier.SafeMessage(anchorFault, quotaLimited: false), true, routedTier,
+                            reward: anchorRejectionReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal);
+                    }
                 }
 
                 // anchor 中途故障/取消：控制流不再到达下方的 secondary 收集块（Task.WhenAll），
@@ -924,10 +977,16 @@ public sealed class FusionRouter
                 {
                     analystSw.Stop();
                     bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(ex);
+                    // 请求语义拒绝（400/413/422）不入熔断（bypass 信号，不持有探槽）。
+                    bool requestRejection = !quotaLimited && UpstreamFailureClassifier.IsRequestRejection(ex);
                     double? streamAnalystFailureReward = null;
                     if (quotaLimited)
                     {
                         _recorder.RecordQuota(analystModel.Name, ((ModelClientException)ex).Metadata, rateLimited: true);
+                    }
+                    else if (requestRejection && !ct.IsCancellationRequested)
+                    {
+                        streamAnalystFailureReward = _recorder.RecordThompsonOutcome(analystModel.Name, null, decision);
                     }
                     else if (!ct.IsCancellationRequested)
                     {
