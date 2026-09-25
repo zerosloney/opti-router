@@ -1,0 +1,61 @@
+@namespace OptiRouter.Components.Shared
+@using OptiRouter.Components.Services
+
+@* 总览页与请求追踪页共用的实时请求流表格（10 列）。列结构变更时两页自动同构。 *@
+<div class="table-wrap">
+    <table class="log-table">
+        <thead>
+            <tr>
+                <th scope="col">时间</th><th scope="col">请求 ID</th><th scope="col">路由模型</th><th scope="col">分档 Tier</th><th scope="col">请求内容</th><th scope="col">Tokens (In/Out)</th><th scope="col">延迟 / TTFT</th><th scope="col">成本</th><th scope="col">类型</th><th scope="col">状态</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var r in Items)
+            {
+                <tr>
+                    <td>@r.Timestamp.ToLocalTime().ToString("HH:mm:ss")</td>
+                    <td><code style="font-size: 0.8rem; color: var(--ok-text-strong);">@(string.IsNullOrEmpty(r.RequestId) ? "-" : Truncate(r.RequestId, 10))</code></td>
+                    <td><strong>@r.Model</strong></td>
+                    <td><span class="tag tag-info">@r.RoutedTier</span></td>
+                    <td><span style="font-size: 0.8rem; color: var(--text-secondary); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block;">@(string.IsNullOrEmpty(r.RequestContent) ? "-" : Truncate(r.RequestContent, 30))</span></td>
+                    <td class="table-mono">@UiFormatter.FormatNumber(r.PromptTokens) / @UiFormatter.FormatNumber(r.CompletionTokens)</td>
+                    <td>@UiFormatter.FormatLatency(r.LatencyMs) / @(r.TimeToFirstTokenMs is { } reqTtft ? UiFormatter.FormatLatency(reqTtft) : "--")</td>
+                    <td style="color: var(--ok-text); font-weight: bold;">@UiFormatter.FormatCost(r.Cost)</td>
+                    <td>
+                        <span class="tag tag-secondary">@(r.IsStreaming ? "流式" : "JSON")</span>
+                        @if (!string.IsNullOrEmpty(r.FusionRole))
+                        {
+                            <span class="tag tag-info">@r.FusionRole</span>
+                        }
+                    </td>
+                    <td>
+                        @if (r.Success)
+                        {
+                            <span class="tag tag-success">
+                                <AppIcon Name="check" Size="12" />
+                                <span>成功</span>
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="tag tag-danger">
+                                <AppIcon Name="alert" Size="12" />
+                                <span>失败</span>
+                            </span>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</div>
+
+@code {
+    [Parameter] public IReadOnlyList<ApiService.RecentRequestItem> Items { get; set; } = Array.Empty<ApiService.RecentRequestItem>();
+
+    private static string Truncate(string val, int maxLen)
+    {
+        if (string.IsNullOrEmpty(val)) return "-";
+        return val.Length <= maxLen ? val : val[..maxLen] + "...";
+    }
+}
