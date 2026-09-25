@@ -15,6 +15,7 @@
 @inject McpToolComplexityAnalyzer ToolComplexityAnalyzer
 @inject IPromptPruner PromptPruner
 @inject DistributedMeshSynchronizer MeshSynchronizer
+@inject OptiRouter.Mesh.IDistributedStateMesh StateMesh
 @inject ToastService ToastService
 @implements IDisposable
 
@@ -31,9 +32,9 @@
                 <AppIcon Name="models" Size="14" />
                 <span>Node: @MeshSynchronizer.LocalNodeId</span>
             </span>
-            <span class="tag tag-success">
-                <AppIcon Name="check" Size="14" />
-                <span>Mesh Synchronized</span>
+            <span class="tag tag-secondary" title="本节点经 Mesh 事件总线累计广播/接收的事件数（页面加载时快照）">
+                <AppIcon Name="refresh" Size="14" />
+                <span>Mesh 事件 收 @MeshCount(MeshStatistics?.ReceivedEventsCount) / 发 @MeshCount(MeshStatistics?.PublishedEventsCount)</span>
             </span>
         </div>
     </header>
@@ -184,7 +185,16 @@
                                     <td><span class="badge badge-info">@complexity.RecommendedMinTier</span></td>
                                     <td>@complexity.MaxNestingDepth 级</td>
                                     <td>@complexity.TotalProperties 个</td>
-                                    <td><span class="tag tag-success">Valid</span></td>
+                                            <td>
+                                                @if (tool.InputSchema is { } schema && schema.ValueKind == System.Text.Json.JsonValueKind.Object)
+                                                {
+                                                    <span class="tag tag-success">有效</span>
+                                                }
+                                                else
+                                                {
+                                                    <span class="tag tag-danger">无效</span>
+                                                }
+                                            </td>
                                 </tr>
                             }
                         }
@@ -200,7 +210,7 @@
                     <AppIcon Name="models" Size="18" Class="text-purple" />
                     <span>分布式状态同步网格 (Distributed State Mesh)</span>
                 </h2>
-                <span class="tag tag-primary">P2P Mesh Active</span>
+                <span class="tag tag-info">@(MeshStatistics?.ActiveSubscriptionsCount ?? 0) 个订阅频道</span>
             </div>
 
             <div class="mesh-summary">
@@ -212,22 +222,27 @@
                         <div class="node-title">本地节点 (Local Node)</div>
                         <div class="node-meta">ID: <code style="color: var(--primary);">@MeshSynchronizer.LocalNodeId</code></div>
                     </div>
-                    <span class="tag tag-success">Leader/Active</span>
+                    <span class="tag tag-secondary">本节点</span>
                 </div>
                 <div class="mesh-stats-grid">
                     <div class="stat-item">
-                        <div class="stat-item-value">KV-Prefix Trie</div>
-                        <div class="stat-item-label">分布式上下文缓存热度</div>
+                        <div class="stat-item-value">@MeshCount(MeshStatistics?.PublishedEventsCount)</div>
+                        <div class="stat-item-label">广播事件累计</div>
                     </div>
                     <div class="stat-item">
-                        <div class="stat-item-value">Kalman Filter</div>
-                        <div class="stat-item-label">多节点延迟预估器</div>
+                        <div class="stat-item-value">@MeshCount(MeshStatistics?.ReceivedEventsCount)</div>
+                        <div class="stat-item-label">接收事件累计</div>
                     </div>
                     <div class="stat-item">
-                        <div class="stat-item-value">Cluster Ledger</div>
-                        <div class="stat-item-label">跨网关配额统一结算</div>
+                        <div class="stat-item-value">@(MeshStatistics?.ActiveSubscriptionsCount ?? 0)</div>
+                        <div class="stat-item-label">活跃订阅频道</div>
                     </div>
                 </div>
+                <ul class="capability-list">
+                    <li><span class="capability-name">KV 前缀缓存同步</span>跨节点共享上下文缓存热度，指导亲和路由</li>
+                    <li><span class="capability-name">Kalman 延迟估计</span>多节点观测延迟滤波，改进分流权重</li>
+                    <li><span class="capability-name">成本与韧性事件</span>跨网关配额结算与熔断结果广播</li>
+                </ul>
             </div>
         </section>
 
@@ -238,7 +253,9 @@
                     <AppIcon Name="shield" Size="18" Class="text-success" />
                     <span>智能提示词压缩与 Token 瘦身 (Prompt Pruner)</span>
                 </h2>
-                <span class="tag tag-success">Enabled</span>
+                <span class="tag @(OptionsMonitor.CurrentValue.Routing.EnablePromptCompression ? "tag-success" : "tag-secondary")">
+                    @(OptionsMonitor.CurrentValue.Routing.EnablePromptCompression ? "已启用" : "未启用")
+                </span>
             </div>
 
             <div class="compression-info">
@@ -261,31 +278,16 @@
     private int totalRequests = 200;
     private BenchmarkSummaryReport? latestReport;
     private List<McpToolRegistration> registeredTools = new();
+    private OptiRouter.Mesh.MeshStats? MeshStatistics;
+
+    private static string MeshCount(long? count)
+        => count is { } v ? UiFormatter.FormatNumber(v) : "--";
 
     protected override void OnInitialized()
     {
         registeredTools = ToolRegistry.GetAllTools().ToList();
-        if (registeredTools.Count == 0)
-        {
-            // 初始化展示默认工具
-            ToolRegistry.RegisterTool(new McpToolRegistration
-            {
-                Name = "web_search",
-                Description = "Search the web for realtime information",
-                ServerName = "search-service",
-                InputSchema = System.Text.Json.JsonDocument.Parse("{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}").RootElement
-            });
-
-            ToolRegistry.RegisterTool(new McpToolRegistration
-            {
-                Name = "database_sql_executor",
-                Description = "Execute analytical SQL queries with join conditions",
-                ServerName = "db-service",
-                InputSchema = System.Text.Json.JsonDocument.Parse("{\"type\":\"object\",\"properties\":{\"sql\":{\"type\":\"string\"},\"timeout\":{\"type\":\"integer\"}},\"required\":[\"sql\"]}").RootElement
-            });
-
-            registeredTools = ToolRegistry.GetAllTools().ToList();
-        }
+        // 真实网格统计快照：页面无轮询，展示"加载时刻"的累计值
+        MeshStatistics = StateMesh.GetStats();
     }
 
     private async Task RunBenchmarkAsync()
