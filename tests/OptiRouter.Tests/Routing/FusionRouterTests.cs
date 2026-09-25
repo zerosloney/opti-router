@@ -887,6 +887,70 @@ public class FusionRouterTests
     }
 
     [Fact]
+    public async Task FusionRouter_Streaming_RedactFlushesHeldBackTail_BeforeDone()
+    {
+        // 回归：融合流式此前对合规过滤器完全不做 FlushRemaining——Redact 模式每块扣住的
+        // 尾部字符永久丢失；串行路径则补发在 [DONE] 之后被客户端丢弃。修复后尾部必须在
+        // [DONE] 前下发，跨 chunk 拼接完整。关键词 "qqqq" 恒不命中，仅触发每块扣尾 3 字符。
+        using var factory = new FusionRouterFactory
+        {
+            EnableStreamingComplianceFilter = true,
+            StreamingSensitiveKeywords = ["qqqq"],
+            StreamingComplianceAction = OptiRouter.Compliance.ComplianceAction.Redact
+        };
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            streamRawFunc: (req, ct) => StreamLinesAsync(new[]
+            {
+                "{\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}",
+                "{\"id\":\"x\",\"choices\":[{\"delta\":{\"content\":\"world\"}}]}",
+                "[DONE]"
+            }));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-b", 1, 1, "secondary")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-c", 1, 1, "secondary")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var dataLines = body.Split("\n\n", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(l => l.StartsWith("data: ", StringComparison.Ordinal) ? l["data: ".Length..] : null)
+            .Where(l => l is not null)
+            .Select(l => l!)
+            .ToList();
+
+        Assert.Equal("[DONE]", dataLines[^1]);
+        var contents = dataLines
+            .Select(ExtractDeltaContent)
+            .Where(c => c is not null)
+            .Select(c => c!)
+            .ToList();
+        Assert.Equal("hello world", string.Concat(contents));
+        Assert.Equal("rld", contents[^1]); // 扣住的 3 字符尾部（maxKeywordLength-1）在 [DONE] 前补发，缺失即回归
+    }
+
+    private static string? ExtractDeltaContent(string? data)
+    {
+        if (string.IsNullOrWhiteSpace(data) || data.Trim() == "[DONE]")
+            return null;
+        using var doc = JsonDocument.Parse(data);
+        if (!doc.RootElement.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
+            return null;
+        var delta = choices[0].GetProperty("delta");
+        return delta.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.String
+            ? content.GetString()
+            : null;
+    }
+
+    [Fact]
     public async Task FusionRouter_Streaming_EnforcesCumulativeResponseSizeLimit()
     {
         const string firstLine = "{}";

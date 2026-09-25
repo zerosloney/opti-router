@@ -777,6 +777,22 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         throw new ResponseSizeLimitExceededException(maxResponseBytes,
                             $"Response size limit exceeded ({maxResponseBytes} bytes).");
                     }
+
+                    // 与串行路径同语义：[DONE] 前补发 Redact 模式暂存的尾部字符
+                    //（融合路径此前完全不 flush，尾部永久丢失）。
+                    if (restored.Data == "[DONE]")
+                    {
+                        foreach (var tail in FlushComplianceTail(complianceBuffer))
+                        {
+                            totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(tail.Data ?? "");
+                            if (totalBytesTransferred > maxResponseBytes)
+                            {
+                                throw new ResponseSizeLimitExceededException(maxResponseBytes,
+                                    $"Response size limit exceeded ({maxResponseBytes} bytes).");
+                            }
+                            yield return tail;
+                        }
+                    }
                     yield return restored;
                 }
 
@@ -1147,18 +1163,30 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                                 throw new ResponseSizeLimitExceededException(maxResponseBytes,
                                     $"Response size limit exceeded ({maxResponseBytes} bytes).");
                             }
+
+                            // [DONE] 前补发 Redact 模式暂存的尾部字符：SSE 客户端读到 [DONE] 即停止
+                            // 读取，其后下发的尾部会被客户端整段丢弃。
+                            if (restored.Data == "[DONE]")
+                            {
+                                foreach (var tail in FlushComplianceTail(complianceBuffer))
+                                {
+                                    totalBytesTransferred += System.Text.Encoding.UTF8.GetByteCount(tail.Data ?? "");
+                                    if (totalBytesTransferred > maxResponseBytes)
+                                    {
+                                        throw new ResponseSizeLimitExceededException(maxResponseBytes,
+                                            $"Response size limit exceeded ({maxResponseBytes} bytes).");
+                                    }
+                                    yield return tail;
+                                }
+                            }
                             yield return restored;
                         }
 
-                        // 流结束：补发 Redact 模式为跨 chunk 匹配而暂存的尾部字符（窗口关闭，前缀不可能再补全为敏感词）。
-                        if (complianceBuffer is not null)
+                        // 兜底：上游流未发 [DONE] 即自然结束（按协议不应发生——客户端对缺哨兵按断流
+                        // 抛出），此时仍补发暂存尾部；[DONE] 已拦截补发过的，此处 buffer 已空为 no-op。
+                        foreach (var tail in FlushComplianceTail(complianceBuffer))
                         {
-                            string pendingTail = _complianceFilter.FlushRemaining(complianceBuffer);
-                            if (!string.IsNullOrEmpty(pendingTail))
-                            {
-                                yield return new RawStreamLine(
-                                    ReplaceDeltaContent("{\"choices\":[{\"index\":0,\"delta\":{}}]}", pendingTail), null, null);
-                            }
+                            yield return tail;
                         }
                     }
                     finally
@@ -1603,21 +1631,39 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
             return line;
 
         var result = _complianceFilter.ProcessChunk(delta, buffer);
-        if (result.IsViolation)
+        if (result.IsViolation && routingOpts.StreamingComplianceAction == ComplianceAction.Block)
         {
-            if (routingOpts.StreamingComplianceAction == ComplianceAction.Block)
-            {
-                _logger.LogWarning("Streaming compliance violation intercepted: keyword={Keyword}", result.MatchedKeyword);
-                throw new ComplianceViolationException($"Streaming content blocked due to sensitive keyword match ({result.MatchedKeyword}).", result.MatchedKeyword);
-            }
-            else if (routingOpts.StreamingComplianceAction == ComplianceAction.Redact)
-            {
-                string redactedData = ReplaceDeltaContent(line.Data, result.ProcessedText);
-                return new RawStreamLine(redactedData, line.Usage, line.Metadata);
-            }
+            _logger.LogWarning("Streaming compliance violation intercepted: keyword={Keyword}", result.MatchedKeyword);
+            throw new ComplianceViolationException($"Streaming content blocked due to sensitive keyword match ({result.MatchedKeyword}).", result.MatchedKeyword);
+        }
+
+        if (routingOpts.StreamingComplianceAction == ComplianceAction.Redact)
+        {
+            // Redact 模式必须始终采用过滤器的 emit 文本（含未命中块）：过滤器每块都扣住末尾
+            // maxKeywordLength-1 字符防跨 chunk 敏感词前缀泄漏，丢弃 emitText 会把前缀原样发往
+            // 客户端、且下一块补发暂存内容时重复。
+            string emittedData = ReplaceDeltaContent(line.Data, result.ProcessedText);
+            return new RawStreamLine(emittedData, line.Usage, line.Metadata);
         }
 
         return line;
+    }
+
+    /// <summary>
+    /// 补发 Redact 模式为跨 chunk 匹配而暂存的尾部字符（流已收尾，前缀不可能再补全为敏感词）。
+    /// 必须在转发 [DONE] 之前调用：SSE 客户端读到 [DONE] 即停止读取，其后下发的尾部整段丢失。
+    /// </summary>
+    private IEnumerable<RawStreamLine> FlushComplianceTail(StreamingSlidingWindowBuffer? buffer)
+    {
+        if (buffer is null)
+            yield break;
+
+        string pendingTail = _complianceFilter.FlushRemaining(buffer);
+        if (!string.IsNullOrEmpty(pendingTail))
+        {
+            yield return new RawStreamLine(
+                ReplaceDeltaContent("{\"choices\":[{\"index\":0,\"delta\":{}}]}", pendingTail), null, null);
+        }
     }
 
     internal static string? ExtractDeltaText(string data)
