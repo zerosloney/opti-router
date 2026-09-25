@@ -2,11 +2,10 @@
 @inject ToastService ToastService
 @implements IDisposable
 
-@if (ToastService.Toasts.Count > 0)
-{
-    <div class="toast-container" aria-live="polite">
-        @foreach (var toast in ToastService.Toasts)
-        {
+@* 容器常驻 DOM：aria-live 区域须先于消息存在，屏幕阅读器才能可靠播报首条 toast *@
+<div class="toast-container" aria-live="polite">
+    @foreach (var toast in ToastService.Toasts)
+    {
             var typeClass = toast.Type switch
             {
                 ToastType.Success => "toast-success",
@@ -43,7 +42,6 @@
             </div>
         }
     </div>
-}
 
 @code {
     protected override void OnInitialized()
