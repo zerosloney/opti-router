@@ -100,6 +100,15 @@ public sealed class ModelEndpointOptions
     public int MaxRetries { get; set; } = 0;
 
     /// <summary>
+    /// 注入发往上游请求体的附加顶层参数（键值合并，同名覆盖客户端原值）。
+    /// 模型级强制策略：管理员配置优先于客户端——用于上游网关的专有开关，
+    /// 如 OpenRouter 风格 <c>"extraBody": {"reasoning": {"enabled": false}}</c> 关闭思考输出
+    /// （下游客户端不认 reasoning 字段时会长时间收不到 content 而判响应无效）。
+    /// 仅 openAI 协议客户端注入；其他协议忽略。
+    /// </summary>
+    public Dictionary<string, System.Text.Json.JsonElement>? ExtraBody { get; set; }
+
+    /// <summary>
     /// 负载均衡权重（默认 1.0）。为 0 时退出负载均衡（Failover/熔断 仍可触发）。
     /// 公式：LoadBalancePolicy 中 weight × MaxContextTokens × KalmanPenaltyFactor。
     /// </summary>

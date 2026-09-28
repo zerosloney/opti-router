@@ -38,6 +38,142 @@ public class OpenAICompatibleModelClientTests
         return ModelClientFactory.CreateForEndpoint(endpoint, handler);
     }
 
+    #region ExtraBody injection tests
+
+    /// <summary>
+    /// 模型配置 ExtraBody 合并进发往上游的请求体顶层：cp-deepseek 场景——
+    /// 上游 deepseek-v4.1-flash 以非标准 delta.reasoning 字段输出思考，
+    /// 下游客户端（Cline）只认 content，长时间无 content 判 "Invalid response"。
+    /// 通过注入 reasoning 禁用参数让上游直出 content。
+    /// </summary>
+    [Fact]
+    public async Task CompleteAsync_WithExtraBody_MergesIntoRequestBody()
+    {
+        var endpoint = CreateEndpoint(name: "cp-deepseek/deepseek-v4.1-flash");
+        endpoint.ExtraBody = new Dictionary<string, JsonElement>
+        {
+            ["reasoning"] = JsonSerializer.SerializeToElement(new { enabled = false, exclude = true })
+        };
+        var handler = CreateHandler(SimpleSuccessResponse());
+        var client = CreateClient(endpoint, handler);
+
+        var request = new ChatRequest
+        {
+            Model = "ignored-model",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
+            Stream = false
+        };
+
+        await client.CompleteAsync(request);
+
+        var json = JsonDocument.Parse(handler.GetLastRequestContent()!);
+        Assert.True(json.RootElement.TryGetProperty("reasoning", out var reasoning));
+        Assert.False(reasoning.GetProperty("enabled").GetBoolean());
+        Assert.True(reasoning.GetProperty("exclude").GetBoolean());
+        Assert.Equal("cp-deepseek/deepseek-v4.1-flash", json.RootElement.GetProperty("model").GetString());
+    }
+
+    /// <summary>客户端请求 ExtensionData 与 ExtraBody 同名键时，ExtraBody（模型级策略）覆盖客户端原值。</summary>
+    [Fact]
+    public async Task CompleteAsync_ExtraBodyOverridesClientExtensionData()
+    {
+        var endpoint = CreateEndpoint();
+        endpoint.ExtraBody = new Dictionary<string, JsonElement>
+        {
+            ["reasoning"] = JsonSerializer.SerializeToElement(new { enabled = false })
+        };
+        var handler = CreateHandler(SimpleSuccessResponse());
+        var client = CreateClient(endpoint, handler);
+
+        var request = new ChatRequest
+        {
+            Model = "ignored-model",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
+            Stream = false,
+            ExtensionData = new Dictionary<string, JsonElement>
+            {
+                ["reasoning"] = JsonSerializer.SerializeToElement(new { enabled = true }),
+                ["user"] = JsonSerializer.SerializeToElement("tenant-a")
+            }
+        };
+
+        await client.CompleteAsync(request);
+
+        var json = JsonDocument.Parse(handler.GetLastRequestContent()!);
+        Assert.False(json.RootElement.GetProperty("reasoning").GetProperty("enabled").GetBoolean());
+        Assert.Equal("tenant-a", json.RootElement.GetProperty("user").GetString());
+    }
+
+    /// <summary>流式路径（StreamRawAsync，fusion panel/代理主流共用）同样注入 ExtraBody。</summary>
+    [Fact]
+    public async Task StreamRawAsync_WithExtraBody_MergesIntoRequestBody()
+    {
+        var endpoint = CreateEndpoint();
+        endpoint.ExtraBody = new Dictionary<string, JsonElement>
+        {
+            ["reasoning"] = JsonSerializer.SerializeToElement(new { enabled = false })
+        };
+        var sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n" +
+                  "data: [DONE]\n\n";
+        var handler = CreateHandler(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(sse, Encoding.UTF8, "text/event-stream")
+        });
+        var client = CreateClient(endpoint, handler);
+
+        var request = new ChatRequest
+        {
+            Model = "ignored-model",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
+            Stream = true
+        };
+
+        await foreach (var _ in client.StreamRawAsync(request)) { }
+
+        var json = JsonDocument.Parse(handler.GetLastRequestContent()!);
+        Assert.True(json.RootElement.TryGetProperty("reasoning", out var reasoning));
+        Assert.False(reasoning.GetProperty("enabled").GetBoolean());
+        Assert.True(json.RootElement.GetProperty("stream").GetBoolean());
+    }
+
+    /// <summary>ExtraBody 未配置（null/空）时请求体零改动——既有行为不受影响。</summary>
+    [Fact]
+    public async Task CompleteAsync_WithoutExtraBody_KeepsRequestBodyUntouched()
+    {
+        var endpoint = CreateEndpoint();
+        var handler = CreateHandler(SimpleSuccessResponse());
+        var client = CreateClient(endpoint, handler);
+
+        var request = new ChatRequest
+        {
+            Model = "ignored-model",
+            Messages = new List<ChatMessage> { ChatMessage.FromText("user", "Hi") },
+            Stream = false
+        };
+
+        await client.CompleteAsync(request);
+
+        var json = JsonDocument.Parse(handler.GetLastRequestContent()!);
+        Assert.False(json.RootElement.TryGetProperty("reasoning", out _));
+    }
+
+    private static HttpResponseMessage SimpleSuccessResponse()
+    {
+        var responseJson = JsonSerializer.Serialize(new
+        {
+            id = "chatcmpl-1",
+            model = "gpt-4o",
+            choices = new[] { new { index = 0, message = new { role = "assistant", content = "ok" }, finish_reason = "stop" } },
+            usage = new { prompt_tokens = 1, completion_tokens = 1, total_tokens = 2 }
+        });
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(responseJson, Encoding.UTF8, "application/json")
+        };
+    }
+
+    #endregion
+
     #region CompleteAsync tests
 
     [Fact]

@@ -64,11 +64,28 @@ private ChatRequest BuildNonStreamingBody(ChatRequest request)
 {
     var body = request with { Model = _endpoint.UpstreamModelId, Stream = false };
     if (body.ExtensionData is not { Count: > 0 } extension || !extension.ContainsKey("stream_options"))
-        return body;
+        return ApplyExtraBody(body);
 
     var filtered = new Dictionary<string, JsonElement>(extension);
     filtered.Remove("stream_options");
-    return body with { ExtensionData = filtered.Count > 0 ? filtered : null };
+    return ApplyExtraBody(body with { ExtensionData = filtered.Count > 0 ? filtered : null });
+}
+
+/// <summary>
+/// 合并模型配置的 <see cref="ModelEndpointOptions.ExtraBody"/>：顶层键覆盖客户端同名参数
+/// （模型级策略优先于客户端）。无配置时原样返回，零开销。
+/// </summary>
+private ChatRequest ApplyExtraBody(ChatRequest request)
+{
+    if (_endpoint.ExtraBody is not { Count: > 0 } extra)
+        return request;
+
+    var merged = request.ExtensionData is { Count: > 0 } existing
+        ? new Dictionary<string, JsonElement>(existing)
+        : new Dictionary<string, JsonElement>();
+    foreach (var (key, value) in extra)
+        merged[key] = value.Clone();
+    return request with { ExtensionData = merged };
 }
 
 /// <inheritdoc />
@@ -109,7 +126,7 @@ public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationT
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var body = request with { Model = _endpoint.UpstreamModelId, Stream = true };
+        var body = ApplyExtraBody(request with { Model = _endpoint.UpstreamModelId, Stream = true });
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "chat/completions");
@@ -381,7 +398,7 @@ public async Task<ChatResponse> CompleteAsync(ChatRequest request, CancellationT
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var body = request with { Model = _endpoint.UpstreamModelId, Stream = true };
+        var body = ApplyExtraBody(request with { Model = _endpoint.UpstreamModelId, Stream = true });
         var json = JsonSerializer.Serialize(body, _serializeOptions);
 
         HttpResponseMessage? response = null;
