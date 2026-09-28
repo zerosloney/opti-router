@@ -1762,6 +1762,28 @@ select option {
     min-width: 0;
 }
 
+/* 熔断参数等多字段项：字段纵向列表，标签左、输入框同宽靠右，
+   任何卡宽下每列输入框都对齐，不会因 flex-wrap 折行把「标签+输入」拆到两行 */
+.config-field-list {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.45rem;
+    max-width: 100%;
+}
+
+.config-field-list .config-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    cursor: pointer;
+}
+
+.config-field-list .config-field .form-control {
+    flex: 0 0 auto;
+    width: 96px;
+}
+
 /* ==========================================================================
    Utility Classes
    ========================================================================== */
