@@ -742,6 +742,9 @@ public sealed class FusionRouter
         bool anchorStreamCompleted = false;
         ChatUsage? anchorUsage = null;
         Exception? anchorFault = null;
+        bool anchorYieldedAnyLine = false;
+        // anchor 故障时 finally 块等待并捕获 secondary 结果，供首行前故障抢救（下方 salvage）取用。
+        (string Model, string Text)[] faultedSecondaryResults = [];
 
         // 3. 实时流式输出 Anchor 模型内容。外层 try-finally（IAsyncEnumerable 允许 try-finally 含
         //    yield、禁止 try-catch 含 yield），anchor 故障用内层 try-catch 包 MoveNextAsync（无 yield）
@@ -786,6 +789,8 @@ public sealed class FusionRouter
                         anchorTextSb.Append(anchorDelta);
                     }
                 }
+                // 首行前故障可抢救（客户端零字节）；已流出任何行则视为客户端已收内容。
+                anchorYieldedAnyLine = true;
                 yield return line;
             }
             anchorStreamCompleted = anchorFault is null;
@@ -815,8 +820,22 @@ public sealed class FusionRouter
             {
                 // 请求语义拒绝（400/413/422，如首行前被上游校验拒绝）非模型健康信号：
                 // 不入熔断，仅释放准入时占用的探测槽位——与串行/竞速路径同口径。
+                bool anchorQuotaLimited = UpstreamFailureClassifier.IsQuotaLimited(anchorFault);
                 bool anchorRejection = UpstreamFailureClassifier.IsRequestRejection(anchorFault);
-                if (!ct.IsCancellationRequested && !anchorRejection)
+                if (!ct.IsCancellationRequested && anchorQuotaLimited)
+                {
+                    // 429 纯配额（如账号 TPM 限流）：非模型健康信号——只记配额状态并释放探测槽位，
+                    // 不入熔断、不给 Thompson 负反馈（与串行 SettleCandidateFailure/secondary/Race 同口径；
+                    // 此前落入真实故障分支被计入熔断，账号级限流会误熔断健康模型并污染学习信号）。
+                    _recorder.RecordQuota(anchorModel.Name, ((ModelClientException)anchorFault!).Metadata, rateLimited: true);
+                    _healthTracker.ReleaseProbe(anchorModel.Name);
+                    _recorder.RecordAudit(null, anchorModel.Name, estimatedTokens, null, 0m,
+                        anchorElapsedMs, sessionId, "fusion-stream-anchor", false,
+                        UpstreamFailureClassifier.SafeMessage(anchorFault, quotaLimited: true), true, routedTier,
+                        quotaLimited: true,
+                        epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, upstreamStatusCode: UpstreamFailureClassifier.GetStatus(anchorFault), request: request);
+                }
+                else if (!ct.IsCancellationRequested && !anchorRejection)
                 {
                     // 真实故障（非客户端取消）：计入断路器 + 审计（RecordFailure 顺带释放准入时占用的探测槽位）。
                     bool tripped = _healthTracker.RecordFailure(anchorModel.Name, routing.FailoverFailureThreshold, routing.FailoverCooldownSeconds);
@@ -841,11 +860,11 @@ public sealed class FusionRouter
                 }
 
                 // anchor 中途故障/取消：控制流不再到达下方的 secondary 收集块（Task.WhenAll），
-                // 在此观察已启动的 secondary 任务，避免它们成为孤儿 fire-and-forget（结果丢弃，
-                // 但各 task 自行释放探测槽位/记审计；secondary 共用同一 ct，取消时快速收尾）。
+                // 在此观察已启动的 secondary 任务，避免它们成为孤儿 fire-and-forget（结果捕获给
+                // 首行前故障抢救；各 task 自行释放探测槽位/记审计；secondary 共用同一 ct，取消时快速收尾）。
                 try
                 {
-                    await Task.WhenAll(secondaryTasks).ConfigureAwait(false);
+                    faultedSecondaryResults = await Task.WhenAll(secondaryTasks).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -854,11 +873,33 @@ public sealed class FusionRouter
             }
         }
 
-        // anchor 中途故障：客户端已收部分内容，静默终止 = 断头流（客户端报
-        // Stream ended without finish_reason 且无法区分部分成功）。补发 error 事件 + [DONE]，
+        // anchor 故障收尾，分两种情况：
+        // 首行前故障（客户端尚未收到任何字节）：若已有 secondary panel 拿到完整回答，直接采纳
+        // 其答案合成 SSE 收尾——否则并行已成功的 panel 结果被白白丢弃，客户端空手拿到失败。
+        // 已产出过行则客户端已收部分内容，无法透明换源，只能补发 error 事件 + [DONE]
+        //（静默终止 = 断头流，客户端报 Stream ended without finish_reason 且无法区分部分成功），
         // 客户端 SDK 感知失败可自行重试（级联由服务端熔断/重决策接续）。
         if (anchorFault is not null)
         {
+            if (!anchorYieldedAnyLine)
+            {
+                // 按 panel 排名取首个成功 secondary（admitted 次序即排名次序）。
+                var salvaged = faultedSecondaryResults.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r.Text));
+                if (!string.IsNullOrWhiteSpace(salvaged.Text))
+                {
+                    // 成本/健康/学习已由 secondary task 自行入账，此处仅补采纳审计行，不重复记。
+                    _recorder.RecordAudit(null, salvaged.Model, estimatedTokens, null, 0m,
+                        anchorElapsedMs, sessionId, decision.Reason + "; fusion-stream: salvage",
+                        true, null, true, routedTier, isAdopted: true, fusionRole: "secondary",
+                        epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, request: request);
+                    _logger.LogWarning("Fusion anchor {Anchor} faulted before first line; salvaged from secondary {Model}",
+                        anchorModel.Name, salvaged.Model);
+                    yield return new RawStreamLine(CreateDeltaChunkJson(salvaged.Text), null);
+                    yield return new RawStreamLine(CreateFinishChunkJson(), null);
+                    yield return new RawStreamLine("[DONE]", null);
+                    yield break;
+                }
+            }
             bool quotaLimited = UpstreamFailureClassifier.IsQuotaLimited(anchorFault);
             string faultMessage = UpstreamFailureClassifier.SafeMessage(anchorFault, quotaLimited);
             string errorJson = JsonSerializer.Serialize(
@@ -1036,4 +1077,7 @@ public sealed class FusionRouter
         string escaped = JsonSerializer.Serialize(text);
         return $"{{\"id\":\"fusion-patch-{Guid.NewGuid():N}\",\"object\":\"chat.completion.chunk\",\"created\":{DateTimeOffset.UtcNow.ToUnixTimeSeconds()},\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{escaped}}},\"finish_reason\":null}}]}}";
     }
+
+    private static string CreateFinishChunkJson()
+        => $"{{\"id\":\"fusion-finish-{Guid.NewGuid():N}\",\"object\":\"chat.completion.chunk\",\"created\":{DateTimeOffset.UtcNow.ToUnixTimeSeconds()},\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}";
 }

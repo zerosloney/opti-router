@@ -1123,6 +1123,132 @@ public class FusionRouterTests
         Assert.Equal("anchor-stream-faulted", anchorFault.ErrorMessage);
     }
 
+    [Fact]
+    public async Task FusionRouter_Streaming_AnchorQuotaLimited_DoesNotTripCircuit()
+    {
+        // anchor 流中途 429（如账号 TPM 限流）：纯配额非模型健康信号——不入熔断、不给
+        // Thompson 负反馈（与串行 SettleCandidateFailure/secondary/Race 同口径；此前落入
+        // 真实故障分支被计入熔断，账号级限流会误熔断健康模型）。客户端已收部分内容无法
+        // 透明换源，仍收 in-band error + [DONE]。
+        using var factory = new FusionRouterFactory();
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-a", 1, 1, "secondary")),
+            streamRawFunc: (req, ct) => QuotaFaultingAnchorStream(ct));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-b", 1, 1, "secondary")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-c", 1, 1, "secondary")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("\"content\":\"partial\"", body, StringComparison.Ordinal);
+        Assert.Contains("fusion anchor stream faulted: quota-exhausted", body, StringComparison.Ordinal);
+        Assert.True(body.TrimEnd().EndsWith("data: [DONE]", StringComparison.Ordinal), body[^60..]);
+
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        Assert.False(circuits.TryGetValue("model-a", out var a) && a.FailureCount > 0,
+            "429 纯配额不应计入熔断（quota 状态与模型质量无关）");
+
+        var anchorRow = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(20)
+            .SingleOrDefault(r => r.RoutingReason == "fusion-stream-anchor");
+        Assert.NotNull(anchorRow);
+        Assert.False(anchorRow!.Success);
+        Assert.True(anchorRow.QuotaLimited);
+        Assert.Equal(429, anchorRow.UpstreamStatusCode);
+        Assert.StartsWith("quota-exhausted", anchorRow.ErrorMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FusionRouter_Streaming_PreFirstLineFault_SalvagesFromSuccessfulSecondary()
+    {
+        // anchor 首行前即故障（客户端零字节）：并行已发出的 secondary panel 若已拿到完整
+        // 回答，直接采纳合成 SSE 收尾（content delta + finish_reason stop + [DONE]）——
+        // 此前一律判死请求，把已成功的 panel 结果白白丢弃。
+        using var factory = new FusionRouterFactory();
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-a", 1, 1, "secondary")),
+            streamRawFunc: (req, ct) => ImmediateFaultingAnchorStream(
+                HttpStatusCode.TooManyRequests, "{\"error\":{\"code\":\"429001\"}}", ct));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-b", 1, 1, "panel-b-answer")));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) => Task.FromResult(MakeResponse("model-c", 1, 1, "panel-c-answer")));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        // 采纳 panel 排名最前的成功 secondary（admitted 次序 = b 在 c 前），且不判死请求。
+        Assert.Contains("panel-b-answer", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("panel-c-answer", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("fusion anchor stream faulted", body, StringComparison.Ordinal);
+        Assert.Contains("\"finish_reason\":\"stop\"", body, StringComparison.Ordinal);
+        Assert.True(body.TrimEnd().EndsWith("data: [DONE]", StringComparison.Ordinal), body[^60..]);
+
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        Assert.False(circuits.TryGetValue("model-a", out var a) && a.FailureCount > 0,
+            "429 纯配额不应计入熔断");
+
+        var rows = factory.Services.GetRequiredService<IRequestAuditStore>().GetRecent(20).ToList();
+        var salvage = rows.SingleOrDefault(r => r.RoutingReason.EndsWith("fusion-stream: salvage", StringComparison.Ordinal));
+        Assert.NotNull(salvage);
+        Assert.True(salvage!.Success);
+        Assert.Equal("model-b", salvage.Model);
+        Assert.True(salvage.IsAdopted);
+        var anchorRow = rows.SingleOrDefault(r => r.RoutingReason == "fusion-stream-anchor");
+        Assert.NotNull(anchorRow);
+        Assert.True(anchorRow!.QuotaLimited);
+    }
+
+    [Fact]
+    public async Task FusionRouter_Streaming_PreFirstLineFault_NoHealthySecondary_EmitsErrorEvent()
+    {
+        // 首行前故障但全部 secondary 也失败：无答案可抢救，回退 in-band error + [DONE]；
+        // 非配额真实故障（502）仍计入熔断（既有语义不变）。
+        using var factory = new FusionRouterFactory();
+        factory.MockClients["model-a"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-a" },
+            completeRawFunc: (req, ct) => throw new ModelClientException(HttpStatusCode.BadGateway, "bad gateway"),
+            streamRawFunc: (req, ct) => ImmediateFaultingAnchorStream(HttpStatusCode.BadGateway, "upstream stream failed", ct));
+        factory.MockClients["model-b"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-b" },
+            completeRawFunc: (req, ct) => throw new ModelClientException(HttpStatusCode.BadGateway, "bad gateway"));
+        factory.MockClients["model-c"] = new TestModelClient(
+            new ModelEndpointOptions { Name = "model-c" },
+            completeRawFunc: (req, ct) => throw new ModelClientException(HttpStatusCode.BadGateway, "bad gateway"));
+
+        using var client = factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", FusionRouterFactory.Key);
+        using var response = await client.PostAsync(
+            "/v1/chat/completions",
+            new StringContent(JsonSerializer.Serialize(BuildRequest(stream: true)), System.Text.Encoding.UTF8, "application/json"));
+        var body = await response.Content.ReadAsStringAsync();
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("fusion anchor stream faulted", body, StringComparison.Ordinal);
+        Assert.True(body.TrimEnd().EndsWith("data: [DONE]", StringComparison.Ordinal), body[^60..]);
+
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        Assert.True(circuits.TryGetValue("model-a", out var a) && a.FailureCount > 0,
+            "502 真实故障应计入熔断");
+    }
+
     private static async IAsyncEnumerable<RawStreamLine> FaultingAnchorStream(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
     {
@@ -1131,6 +1257,29 @@ public class FusionRouterTests
             "{\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}", null);
         await Task.Yield();
         throw new ModelClientException(HttpStatusCode.BadGateway, "Upstream stream closed without [DONE] sentinel.");
+    }
+
+    /// <summary>首行前即抛出的 anchor 故障流（模拟建连/首字节阶段被上游拒绝，如 429 TPM）。</summary>
+    private static async IAsyncEnumerable<RawStreamLine> ImmediateFaultingAnchorStream(
+        HttpStatusCode statusCode, string body,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        if (ct.IsCancellationRequested)
+            yield break;
+        await Task.Yield();
+        throw new ModelClientException(statusCode, body);
+    }
+
+    /// <summary>先流出部分内容、再抛 429 的 anchor 故障流（客户端已收部分内容，抢救不可用）。</summary>
+    private static async IAsyncEnumerable<RawStreamLine> QuotaFaultingAnchorStream(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        ct.ThrowIfCancellationRequested();
+        yield return new RawStreamLine(
+            "{\"id\":\"x\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}", null);
+        await Task.Yield();
+        throw new ModelClientException(HttpStatusCode.TooManyRequests,
+            "{\"error\":{\"message\":\"The request rate exceeds the current model TPM limit 6260000.\",\"code\":\"429001\",\"type\":\"gateway_error\"}}");
     }
 
     [Fact]
