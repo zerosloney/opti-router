@@ -461,16 +461,17 @@ public class ApiService
         return await GetFromJsonAsync<Dictionary<string, Dictionary<string, JsonElement>>>(Url("/api/dashboard/config/presets"));
     }
 
-    /// <summary>返回 (是否成功, 失败原因)。400 校验错误时 Error 含 RouterOptionsValidator 的具体消息。</summary>
-    public async Task<(bool Ok, string? Error, string? Version)> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
+    /// <summary>返回 (是否成功, 失败原因, 新版本号, 组合诊断)。400 校验错误时 Error 含 RouterOptionsValidator 的具体消息；
+    /// 200 时 Diagnostics 为路由配置组合诊断（开关互斥/依赖缺失提示，只提示不阻断）。</summary>
+    public async Task<(bool Ok, string? Error, string? Version, List<ConfigDiagnosticDto>? Diagnostics)> UpdateSystemConfigAsync(UpdateSystemConfigRequest req)
     {
         using var resp = await SendAsync(HttpMethod.Put,Url("/api/dashboard/config"), req);
         if (resp.IsSuccessStatusCode)
         {
             var result = await resp.Content.ReadFromJsonAsync<UpdateSystemConfigResponse>();
-            return (true, null, result?.Version);
+            return (true, null, result?.Version, result?.Diagnostics);
         }
-        return (false, await ReadErrorAsync(resp), null);
+        return (false, await ReadErrorAsync(resp), null, null);
     }
 
     /// <summary>手动覆盖模型断路器状态。返回 (是否成功, 失败原因)。</summary>
@@ -1036,7 +1037,10 @@ public class ApiService
         RoutingConfigDto Routing,
         BudgetConfigDto Budget);
 
-    private sealed record UpdateSystemConfigResponse(string Version);
+    /// <summary>路由配置组合诊断条目（severity: warning/info；code 供机器处理，message 供展示）。</summary>
+    public sealed record ConfigDiagnosticDto(string Severity, string Code, string Message);
+
+    private sealed record UpdateSystemConfigResponse(string Version, List<ConfigDiagnosticDto>? Diagnostics = null);
 
     /// <summary>
     /// 配置读取 DTO。属性式（与后端 GET 字段一一对应；新增字段给默认值保持向后兼容）。

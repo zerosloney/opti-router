@@ -114,7 +114,7 @@ public class ApiServiceTests
         using var http = new HttpClient(handler);
         var service = new ApiService(http, new TestNavigationManager("http://localhost/router"));
 
-        var (ok, error, version) = await service.UpdateSystemConfigAsync(new ApiService.UpdateSystemConfigRequest
+        var (ok, error, version, _) = await service.UpdateSystemConfigAsync(new ApiService.UpdateSystemConfigRequest
         {
             ExpectedVersion = "version-1",
             EnableFailover = false

@@ -1036,6 +1036,9 @@ endpoints.MapPost("/api/dashboard/sandbox/route", (RouterEngine engine, IOptions
             HttpContext httpContext,
             ProxyOrchestrator orchestrator,
             AppConfigDbStore store,
+            IOptionsMonitor<RouterOptions> optionsMonitor,
+            IModelClientProvider clientProvider,
+            ISemanticVectorEngine vectorEngine,
             EvalRunRequest? req,
             CancellationToken requestAborted) =>
         {
@@ -1045,11 +1048,15 @@ endpoints.MapPost("/api/dashboard/sandbox/route", (RouterEngine engine, IOptions
                 return Results.BadRequest(new { error = "Cases 为空或全部非法：每条需含非空 question 与 expectedAnswer，上限 50 条。" });
             }
 
+            // 质量口径主链化：judge 已配置用 judge（参考答案引导），否则向量余弦；都无 → token-jaccard 兜底。
+            // 每批解析一次：模型集/开关可热变更，评测结果 QualityMetric 标注实际口径。
+            var scorer = EvalQualityScorers.Resolve(optionsMonitor.CurrentValue.Routing, optionsMonitor, clientProvider, vectorEngine);
             var report = await OfflineEvalRunner.RunBatchEvalAsync(
                 $"eval-batch-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
                 dataset,
                 // SendAsync 带可选 sessionId 参数，方法组无法直接转换为二元委托，显式适配。
                 (request, token) => orchestrator.SendAsync(request, token),
+                qualityScorer: scorer,
                 ct: requestAborted);
 
             httpContext.Response.Headers["X-Eval-Consumes-Budget"] = "true";
@@ -1350,6 +1357,9 @@ endpoints.MapGet("/api/dashboard/semantic-routes", (IOptionsMonitor<RouterOption
                 return Results.BadRequest(new { error = string.Join("; ", validation.Failures) });
             }
 
+            // 组合诊断（只提示不阻断）：校验器管单值合法性，这里补充开关互斥/依赖缺失/静默失效组合。
+            var diagnostics = RoutingConfigDiagnostics.Analyze(candidate);
+
             if (!TryPersistRoutingDocuments((IConfigurationRoot)config, store, req.ExpectedVersion, "admin", root =>
             {
                 var optiRouter = (root["OptiRouter"] as JsonObject) ?? (JsonObject)(root["OptiRouter"] = new JsonObject());
@@ -1449,7 +1459,8 @@ endpoints.MapGet("/api/dashboard/semantic-routes", (IOptionsMonitor<RouterOption
             return Results.Ok(new
             {
                 message = "System configuration persisted to the config database and hot-applied via reload.",
-                version
+                version,
+                diagnostics
             });
         });
 

@@ -570,7 +570,7 @@ public partial class RouterStudio
                 AlertWebhookIntervalSeconds = Dirty(nameof(ConfigForm.AlertWebhookIntervalSeconds), Cfg.AlertWebhookIntervalSeconds)
             };
 
-            var (ok, error, newVersion) = await Api.UpdateSystemConfigAsync(req);
+            var (ok, error, newVersion, diagnostics) = await Api.UpdateSystemConfigAsync(req);
             if (ok)
             {
                 // 先采纳保存响应的新版本：即使随后的重载失败，下一次保存也不会
@@ -584,8 +584,20 @@ public partial class RouterStudio
                 if (_baseline is null)
                     return;
                 ConfigStatusOk = true;
-                ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
-                ToastService.ShowSuccess("配置已热更新并在数据平面实时生效！", "配置已保存");
+                if (diagnostics is { Count: > 0 })
+                {
+                    int warnings = diagnostics.Count(d => d.Severity == "warning");
+                    ConfigStatusMsg = $"✓ 配置已保存并热更新；{diagnostics.Count} 条组合提示（{warnings} 条警告），详见通知。";
+                    ToastService.ShowWarning(
+                        string.Join("\n", diagnostics.Take(3).Select(d => $"[{(d.Severity == "warning" ? "警告" : "提示")}] {d.Message}"))
+                        + (diagnostics.Count > 3 ? $"\n…共 {diagnostics.Count} 条" : ""),
+                        "配置组合诊断");
+                }
+                else
+                {
+                    ConfigStatusMsg = "✓ 配置已热更新并在数据平面实时生效！";
+                    ToastService.ShowSuccess("配置已热更新并在数据平面实时生效！", "配置已保存");
+                }
                 await LoadMetrics();
                 await LoadConfigChanges();
             }
