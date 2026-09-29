@@ -17,13 +17,13 @@ public class ContextualBanditTests
         var x = ContextualBanditFeatureBuilder.Build("code-complex", ModelTier.Strong);
 
         Assert.Equal(ContextualBanditFeatureBuilder.Dimension, x.Length);
-        Assert.Equal(24, x.Length);
+        Assert.Equal(32, x.Length);
         // code-complex 是信号列表第 2 位（index 1）。
         Assert.Equal(1.0, x[1]);
         // Strong 是 tier 列表第 1 位（8 个信号之后的 index 8）。
         Assert.Equal(1.0, x[8]);
         // bias 恒 1（最后一维）。
-        Assert.Equal(1.0, x[23]);
+        Assert.Equal(1.0, x[31]);
         // 其余位为 0。
         Assert.Equal(0.0, x[0]);
         Assert.Equal(0.0, x[2]);
@@ -37,7 +37,7 @@ public class ContextualBanditTests
         // 未知信号 → 信号位全零；Cheap 是 tier 第 3 位（index 10）；bias=1（最后一维）。
         Assert.Equal(0.0, x[0]);
         Assert.Equal(1.0, x[10]);
-        Assert.Equal(1.0, x[23]);
+        Assert.Equal(1.0, x[31]);
     }
 
     [Fact]
@@ -45,7 +45,7 @@ public class ContextualBanditTests
     {
         var x = ContextualBanditFeatureBuilder.Build(null, null);
 
-        Assert.Equal(1.0, x[23]);
+        Assert.Equal(1.0, x[31]);
         for (int i = 0; i < 23; i++)
             Assert.Equal(0.0, x[i]);
     }
@@ -295,7 +295,7 @@ public class ContextualBanditTests
         return (context, initial);
     }
 
-    // ---- 新增特征测试（24 维扩展）----
+    // ---- 新增特征测试（32 维扩展）----
 
     [Fact]
     public void FeatureBuilder_SemanticHash_Deterministic()
@@ -534,5 +534,83 @@ public class ContextualBanditTests
         Assert.Equal(feature1.Length, feature2.Length);
         for (int i = 0; i < feature1.Length; i++)
             Assert.Equal(feature1[i], feature2[i], precision: 10);
+    }
+
+    // ---- 语义词袋特征（32 维扩展第二批）----
+
+    /// <summary>词袋切片起始：8 信号 + 3 tier + 3 请求 + 4 路由哈希 + 4（语言/输出/工具/交互）= 23，占 8 维，bias 在 31。</summary>
+    private const int BagStart = 8 + 3 + 3 + 4 + 1 + 1 + 1 + 2;
+
+    [Fact]
+    public void FeatureBuilder_SemanticText_ProducesDeterministicNormalizedBag()
+    {
+        var a = ContextualBanditFeatureBuilder.Build("simple-qa", ModelTier.Medium, semanticText: "解释什么是多态 inheritance");
+        var b = ContextualBanditFeatureBuilder.Build("simple-qa", ModelTier.Medium, semanticText: "解释什么是多态 inheritance");
+
+        // 同文本 → 同词袋（跨进程确定性的 FNV-1a，禁用随机化 GetHashCode 的同一理由）。
+        for (int i = BagStart; i < BagStart + 8; i++)
+            Assert.Equal(a[i], b[i], precision: 12);
+
+        // L1 归一化：桶和 = 1（token 数 > 0 时）。
+        double sum = 0;
+        for (int i = BagStart; i < BagStart + 8; i++)
+            sum += a[i];
+        Assert.Equal(1.0, sum, precision: 12);
+
+        // 内容确实分布到了多个桶（单桶退化意味着哈希失效）。
+        int nonZero = 0;
+        for (int i = BagStart; i < BagStart + 8; i++)
+            if (a[i] > 0) nonZero++;
+        Assert.True(nonZero >= 2, $"expected tokens spread across buckets, got {nonZero}");
+    }
+
+    [Fact]
+    public void FeatureBuilder_NoSemanticText_LeavesBagZero()
+    {
+        var x = ContextualBanditFeatureBuilder.Build("simple-qa", ModelTier.Medium);
+        for (int i = BagStart; i < BagStart + 8; i++)
+            Assert.Equal(0.0, x[i]);
+    }
+
+    [Fact]
+    public void FeatureBuilder_DifferentTexts_ProduceDifferentBags()
+    {
+        var a = ContextualBanditFeatureBuilder.Build(null, null, semanticText: "编写快排算法 quicksort");
+        var b = ContextualBanditFeatureBuilder.Build(null, null, semanticText: "翻译这段话成英语 translate");
+        bool differs = false;
+        for (int i = BagStart; i < BagStart + 8; i++)
+            if (Math.Abs(a[i] - b[i]) > 1e-12) { differs = true; break; }
+        Assert.True(differs, "different texts should land in different buckets");
+    }
+
+    [Fact]
+    public void FeatureBuilder_BuildDecision_UsesDecisionSemanticFeatureText()
+    {
+        var decision = new RouterDecision
+        {
+            Candidates = Array.Empty<ModelEndpointOptions>(),
+            Reason = "test",
+            SemanticFeatureText = "解释什么是多态"
+        };
+        var fromDecision = ContextualBanditFeatureBuilder.Build(decision);
+        var explicitText = ContextualBanditFeatureBuilder.Build(
+            decision.ClassificationSignal,
+            decision.ClassificationTargetTier,
+            decision.EstimatedInputTokens,
+            decision.RequestIsStreaming,
+            decision.RequestMessageCount,
+            decision.CjkRatio,
+            decision.MaxTokens,
+            decision.HasTools,
+            decision.SemanticFeatureText);
+
+        for (int i = 0; i < fromDecision.Length; i++)
+            Assert.Equal(explicitText[i], fromDecision[i], precision: 12);
+
+        // 决策携带文本时词袋非全零。
+        double sum = 0;
+        for (int i = BagStart; i < BagStart + 8; i++)
+            sum += fromDecision[i];
+        Assert.Equal(1.0, sum, precision: 12);
     }
 }

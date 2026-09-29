@@ -20,8 +20,14 @@ public static class ContextualBanditFeatureBuilder
         ModelTier.Strong, ModelTier.Medium, ModelTier.Cheap
     };
 
-    /// <summary>特征维度 = 8 信号 + 3 tier + 3 请求特征 + 4 语义路由哈希 + 1 语言 + 1 输出预算 + 1 工具调用 + 2 交互 + bias。</summary>
-    public const int Dimension = 8 + 3 + 3 + 4 + 1 + 1 + 1 + 2 + 1;
+    /// <summary>特征维度 = 8 信号 + 3 tier + 3 请求特征 + 4 语义路由哈希 + 1 语言 + 1 输出预算 + 1 工具调用 + 2 交互 + 8 语义词袋 + bias。</summary>
+    public const int Dimension = 8 + 3 + 3 + 4 + 1 + 1 + 1 + 2 + SemanticBagDims + 1;
+
+    /// <summary>语义词袋桶数：定长保证持久化权重维度语义跨版本稳定；碰撞由桶粒度吸收。</summary>
+    private const int SemanticBagDims = 8;
+
+    /// <summary>词袋 token 上限：截断超长 prompt 的特征计算成本（L1 归一化使截断只影响精度不影响量纲）。</summary>
+    private const int MaxSemanticTokens = 256;
 
     /// <summary>
     /// 从分类信号 + 目标 tier 构造 one-hot 特征向量。
@@ -35,6 +41,7 @@ public static class ContextualBanditFeatureBuilder
     /// <param name="cjkRatio">CJK 字符占比 [0,1]；默认 0。</param>
     /// <param name="maxTokens">最大生成 token 数；用于输出预算特征。</param>
     /// <param name="hasTools">请求是否携带工具调用；默认 false。</param>
+    /// <param name="semanticText">最后一条 user 消息文本（改写后上游视角）；null/空 → 词袋位全零。</param>
     /// <returns>长度 = <see cref="Dimension"/> 的特征向量。</returns>
     public static double[] Build(
         string? signal,
@@ -44,7 +51,8 @@ public static class ContextualBanditFeatureBuilder
         int messageCount = 0,
         double cjkRatio = 0,
         int maxTokens = 0,
-        bool hasTools = false)
+        bool hasTools = false,
+        string? semanticText = null)
     {
         var x = new double[Dimension];
         x[Dimension - 1] = 1.0;  // bias
@@ -98,6 +106,27 @@ public static class ContextualBanditFeatureBuilder
         x[newFeatureStart + 7] = isCodeSignal && isStreaming ? 1.0 : 0.0;
         x[newFeatureStart + 8] = isCodeSignal ? inputTokenBucket : 0.0;
 
+        // 语义词袋 8 维：user 文本 token（词/CJK bigram，与评测口径共享 TextTokenizer）按 FNV-1a
+        // 哈希入桶累加，再按 token 数 L1 归一化——长度只影响精度不影响量纲。定长 + 跨进程确定性
+        // 哈希（禁用 string.GetHashCode 的同一理由）保证持久化权重的维度语义不漂移；
+        // 桶粒度是有意简化，可接受主题词碰撞（intentional-simple）。
+        int bagStart = newFeatureStart + 9;
+        if (!string.IsNullOrWhiteSpace(semanticText))
+        {
+            int tokenCount = 0;
+            foreach (string token in TextTokenizer.Tokenize(semanticText))
+            {
+                x[bagStart + (Fnv1aHash(token) % SemanticBagDims)] += 1.0;
+                tokenCount++;
+                if (tokenCount >= MaxSemanticTokens) break;
+            }
+            if (tokenCount > 0)
+            {
+                for (int i = 0; i < SemanticBagDims; i++)
+                    x[bagStart + i] /= tokenCount;
+            }
+        }
+
         if (targetTier is { } tier)
         {
             int idx = IndexOf(Tiers, tier);
@@ -107,7 +136,7 @@ public static class ContextualBanditFeatureBuilder
         return x;
     }
 
-    /// <summary>从完整路由决策构造与决策时一致的学习特征。</summary>
+    /// <summary>从完整路由决策构造与决策时一致的学习特征（含语义词袋）。</summary>
     public static double[] Build(RouterDecision decision) => Build(
         decision.ClassificationSignal,
         decision.ClassificationTargetTier,
@@ -116,7 +145,8 @@ public static class ContextualBanditFeatureBuilder
         decision.RequestMessageCount,
         decision.CjkRatio,
         decision.MaxTokens,
-        decision.HasTools);
+        decision.HasTools,
+        decision.SemanticFeatureText);
 
     private static int IndexOf(IReadOnlyList<string> list, string value)
     {

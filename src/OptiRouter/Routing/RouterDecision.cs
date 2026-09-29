@@ -89,7 +89,14 @@ public sealed record RouterDecision
     /// 请求是否携带工具调用。由 <c>RouterEngine</c> 填充。
     /// </summary>
     public bool HasTools { get; init; }
-    
+
+    /// <summary>
+    /// 最后一条 user 消息文本（PII 脱敏/压缩改写后的上游视角），供上下文老虎机构造
+    /// 定长哈希词袋语义特征（<see cref="ContextualBanditFeatureBuilder"/>）。null = 无 user 文本。
+    /// 决策时计算一次，学习/打分端复用同一决策保证特征一致。
+    /// </summary>
+    public string? SemanticFeatureText { get; init; }
+
     /// <summary>
     /// 本次路由请求选定的预设模式：Cost (省钱) / Balanced (平衡) / Intelligence (质量)。
     /// null = 默认或未指定模式。

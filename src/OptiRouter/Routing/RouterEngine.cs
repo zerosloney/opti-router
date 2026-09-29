@@ -77,6 +77,7 @@ public sealed class RouterEngine
         double cjkRatio = CalculateCjkRatio(request);
         int maxTokens = request.MaxTokens ?? 0;
         bool hasTools = HasTools(request);
+        string? semanticFeatureText = GetLastUserText(request);
 
         var decision = new RouterDecision
         {
@@ -87,7 +88,8 @@ public sealed class RouterEngine
             RequestMessageCount = request.Messages?.Count ?? 0,
             CjkRatio = cjkRatio,
             MaxTokens = maxTokens,
-            HasTools = hasTools
+            HasTools = hasTools,
+            SemanticFeatureText = semanticFeatureText
         };
 
         // 4. 按预编译分组依赖序应用策略（Filter→Classify→Order→Constraint），消除动态分配。
@@ -231,6 +233,24 @@ public sealed class RouterEngine
         // if (c >= 0x30A0 && c <= 0x30FF) return true; // 片假名
 
         return false;
+    }
+
+    /// <summary>
+    /// 提取最后一条 user 消息文本（与 ProxyOrchestrator.GetLastUserPrompt 同语义；引擎内自持避免反向依赖端点层）。
+    /// </summary>
+    private static string? GetLastUserText(ChatRequest request)
+    {
+        if (request.Messages is null) return null;
+
+        for (int i = request.Messages.Count - 1; i >= 0; i--)
+        {
+            if (string.Equals(request.Messages[i].Role, "user", StringComparison.OrdinalIgnoreCase))
+            {
+                string text = request.Messages[i].GetText();
+                return string.IsNullOrWhiteSpace(text) ? null : text;
+            }
+        }
+        return null;
     }
 
     /// <summary>

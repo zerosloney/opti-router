@@ -51,6 +51,19 @@ public sealed record CategoryEvalSummary(
     decimal TotalCost);
 
 /// <summary>
+/// 评测质量评分器：给定用例（含参考答案）与模型实际回答，输出 [0,1] 质量分。
+/// 实现允许抛异常——运行器按单例失败计 0 分（QualityMetric 标 ":error"），不中断整批。
+/// 内置实现见 Endpoints.EvalQualityScorers（judge / 向量余弦）；不传评分器时运行器回退 token-jaccard。
+/// </summary>
+public interface IEvalQualityScorer
+{
+    /// <summary>评分器标识，写入 EvalTestResult.QualityMetric（如 "llm-judge:gpt-4o" / "embedding-cosine"）。</summary>
+    string Name { get; }
+
+    Task<double> ScoreAsync(EvalTestCase testCase, string actualAnswer, CancellationToken ct);
+}
+
+/// <summary>
 /// 批次离线评测总结报告。
 /// </summary>
 public sealed class BatchEvalReport
@@ -112,12 +125,14 @@ public static class OfflineEvalRunner
         IReadOnlyList<EvalTestCase> dataset,
         Func<ChatRequest, CancellationToken, Task<RawChatResponse>> modelRunner,
         double similarityThreshold = 0.6,
+        IEvalQualityScorer? qualityScorer = null,
         CancellationToken ct = default)
         => await RunBatchEvalAsync(
             batchId,
             dataset,
             async (request, token) => new EvalRunOutput(await modelRunner(request, token).ConfigureAwait(false)),
             similarityThreshold,
+            qualityScorer,
             ct).ConfigureAwait(false);
 
     /// <summary>执行评测并接收真实的模型、成本与路由类别元数据。</summary>
@@ -126,6 +141,7 @@ public static class OfflineEvalRunner
         IReadOnlyList<EvalTestCase> dataset,
         Func<ChatRequest, CancellationToken, Task<EvalRunOutput>> modelRunner,
         double similarityThreshold = 0.6,
+        IEvalQualityScorer? qualityScorer = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
@@ -155,8 +171,30 @@ public static class OfflineEvalRunner
                 sw.Stop();
 
                 string actualAnswer = ResponseConfidenceChecker.ExtractAssistantText(response);
-                double similarity = CalculateSimilarity(actualAnswer, testCase.ExpectedAnswer);
-                bool qualityPassed = similarity >= similarityThreshold;
+                // 质量分主链：传入评分器（judge/向量）时以它为准并标注口径；未传回退 token-jaccard。
+                // 评分器单例失败按 0 分计（阈值语义下未通过），不中断整批评测。
+                double qualityScore = CalculateSimilarity(actualAnswer, testCase.ExpectedAnswer);
+                string qualityMetric = "token-jaccard";
+                if (qualityScorer is not null)
+                {
+                    try
+                    {
+                        qualityScore = Math.Clamp(
+                            await qualityScorer.ScoreAsync(testCase, actualAnswer, ct).ConfigureAwait(false),
+                            0.0, 1.0);
+                        qualityMetric = qualityScorer.Name;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception)
+                    {
+                        qualityScore = 0.0;
+                        qualityMetric = qualityScorer.Name + ":error";
+                    }
+                }
+                bool qualityPassed = qualityScore >= similarityThreshold;
                 bool latencyPassed = sw.ElapsedMilliseconds <= testCase.MaxLatencyThresholdMs;
                 bool passed = qualityPassed && latencyPassed;
 
@@ -173,7 +211,7 @@ public static class OfflineEvalRunner
                 results.Add(new EvalTestResult(
                     testCase,
                     actualAnswer,
-                    similarity,
+                    qualityScore,
                     passed,
                     sw.ElapsedMilliseconds,
                     pTokens,
@@ -182,6 +220,7 @@ public static class OfflineEvalRunner
                 {
                     QualityPassed = qualityPassed,
                     LatencyPassed = latencyPassed,
+                    QualityMetric = qualityMetric,
                     SelectedModel = output.SelectedModel ?? ExtractModelName(response.Body),
                     Cost = output.Cost,
                     Category = output.RoutedCategory ?? testCase.Category
@@ -311,14 +350,15 @@ public static class OfflineEvalRunner
 
     /// <summary>
     /// 计算两个文本间的词重叠 Jaccard 相似度（0.0 至 1.0）。
+    /// 传入评分器（judge/向量）时仅作回退口径，不再决定质量门。
     /// </summary>
     public static double CalculateSimilarity(string textA, string textB)
     {
         if (string.IsNullOrWhiteSpace(textA) || string.IsNullOrWhiteSpace(textB))
             return string.Equals(textA?.Trim(), textB?.Trim(), StringComparison.OrdinalIgnoreCase) ? 1.0 : 0.0;
 
-        var wordsA = new HashSet<string>(Tokenize(textA), StringComparer.OrdinalIgnoreCase);
-        var wordsB = new HashSet<string>(Tokenize(textB), StringComparer.OrdinalIgnoreCase);
+        var wordsA = new HashSet<string>(TextTokenizer.Tokenize(textA), StringComparer.OrdinalIgnoreCase);
+        var wordsB = new HashSet<string>(TextTokenizer.Tokenize(textB), StringComparer.OrdinalIgnoreCase);
 
         if (wordsA.Count == 0 && wordsB.Count == 0) return 1.0;
         if (wordsA.Count == 0 || wordsB.Count == 0) return 0.0;
@@ -328,38 +368,4 @@ public static class OfflineEvalRunner
 
         return union > 0 ? (double)intersection / union : 0.0;
     }
-
-    private static IEnumerable<string> Tokenize(string text)
-    {
-        var tokens = new List<string>();
-        // 按原有分隔符切段，再对每段内的 CJK 连续游程做字符 bigram：
-        // 中文无词边界，整段单 token 会使任意两句相似度≈0，CJK 评测全部误判失败。
-        foreach (var seg in text.Split(new[] { ' ', '\t', '\r', '\n', ',', '.', '，', '。', '！', '？', ':', '：', '\'', '"', '-' },
-            StringSplitOptions.RemoveEmptyEntries))
-        {
-            int i = 0;
-            while (i < seg.Length)
-            {
-                bool cjk = IsCjk(seg[i]);
-                int start = i;
-                while (i < seg.Length && IsCjk(seg[i]) == cjk) i++;
-                int len = i - start;
-                if (cjk && len >= 2)
-                {
-                    for (int k = 0; k < len - 1; k++)
-                        tokens.Add(seg.Substring(start + k, 2));
-                }
-                else
-                {
-                    tokens.Add(seg.Substring(start, len));
-                }
-            }
-        }
-        return tokens;
-    }
-
-    private static bool IsCjk(char ch) =>
-        (ch >= 0x4E00 && ch <= 0x9FFF) ||  // CJK 统一表意文字
-        (ch >= 0x3040 && ch <= 0x30FF) ||  // 平假名/片假名
-        (ch >= 0xAC00 && ch <= 0xD7AF);    // 韩文音节
 }
