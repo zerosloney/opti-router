@@ -1,0 +1,339 @@
+# Changelog
+
+由 `scripts/gen-changelog.sh` 从 git 提交历史机械生成——本仓库提交信息遵循
+conventional commits，并在单行内写明根因、影响面与验证方式，故不另维护手写条目。
+发版流程：打 `vX.Y.Z` tag（MinVer 自动派生构建版本）。
+
+
+## 2026-09
+
+- **[重构]** 流式路径结算统一接入结算组件（生命周期切片⑤）——首行前失败五类记账复用 SettleCandidateFailure（新增 streamed 参数令审计 isStreaming=true，异常→类别映射与透传/全局超时终止控制流留在调用方），成功结算提取 SettleStreamSuccess（usage 精确/输入估算两口径成本、熔断成功、Thompson 含 TTFT、会话/提示缓存亲和、regenerate、审计），judge 采样与非流式同构留在调用方派发；终态矩阵（成功/首行前五类失败/中途故障/客户端取消/断开）收敛为结算 partial 单一修改点；语义对齐一处：429 纯配额不再记 regenerate 负反馈（与该方法「quota 状态与模型质量无关」文档化哲学一致，采用流式路径原语义，串行路径对齐）；Race/Fusion 并行多候选语义保持独立不强行套模板；新增 2 个流式 pre-failure 回归（429 不熔断探槽零泄漏审计 quota-exhausted、503 计入熔断审计 upstream-status-503），全量 1519 项测试通过
+- **[文档]** 文档可信度修复——HybridSpeculativeOrchestrator（端云投机解码）标注规划中尚未实现，注明现存的「渐进式投机流」是文档级 Anchor 推流编排非 token 级投机解码；删与代码默认值矛盾的重复 EnableOnnxEmbedding 配置行（OnnxModelPath 代码默认 null）；ProxyApiKey 残留清理——配置表删行、curl/docker 示例改租户 Client Key 写法并补 Keys 页创建说明；新建 appsettings.example.json 脱敏配置模板（AdminApiKey/env: 语法模型端点/Budget/balanced 预设，置于 src/OptiRouter 与实际配置同目录，csproj 排除不进 publish 产物）；README_EN 同步全部修复
+- **[工程]** 忽略 .database-explorer 本地会话产物（connections.json 含数据库凭证，不进仓库）
+- **[新增]** 模型端点 ExtraBody 附加参数注入——可为单个模型端点配置发往上游请求体的顶层键值（同名覆盖客户端原值，模型级策略优先于客户端），OpenAI 协议非流式与两条流式路径统一经 ApplyExtraBody 合并，未配置零改动零开销；典型场景 deepseek-v4.1-flash 以非标准 delta.reasoning 输出思考致 Cline 长时间无 content 判 Invalid response，注入 reasoning.enabled=false 让上游直出 content（4 个新测试覆盖合并/同名覆盖/流式注入/未配置零改动）
+- **[修复]** 路由引擎熔断参数布局对齐——5 组「标签+输入」各包成原子 label 对改纵向字段列表，输入框同宽右对齐；原 config-row flex-wrap 折行会把标签与输入框拆到两行、末位输入框独占整行拉伸；顺带 label 关联 input（点击文字聚焦、读屏播报字段名）
+- **[新增]** 请求内容日志模块完善——新增上游状态码/输入参数快照列（MariaDb/Sqlite/Postgres 增量迁移），摘要出口单点密钥兜底脱敏（AuditContentSanitizer，独立于 PII 开关），凭证无候选逃逸补结算（修复前审计零记录），Postgres 审计异步化（镜像 MariaDb 队列+批量事务+5 批失败丢弃），Serilog JSON 结构化输出开关 OptiRouter:LogJsonFormat
+- **[修复]** 并行路径熔断分类对齐串行——Race/Fusion panel/analyst/outer/流式对 400 类请求语义拒绝不再计入熔断（判定收敛到 UpstreamFailureClassifier 单源），校验阶段拒绝不计预估费用
+- **[修复]** 流式合规 Redact 暂存尾部时序——补发提到 [DONE] 前（融合路径此前完全不 flush），未命中块采用 emit 文本（前缀泄漏+重复）
+- **[修复]** toast aria-live 区域常驻 DOM——live region 先于消息挂载读屏才能可靠播报首条通知；ErrorBoundary 返回链接改用已定义的 --primary（原 --accent 未定义回退继承色）
+- **[重构]** 实时请求流表格单源化——新增 LiveRequestTable 组件，总览与请求追踪共用同一 10 列标记，消除两份逐字拷贝的漂移风险
+- **[重构]** 管理台 emoji 图标统一为 AppIcon——新增 history 图标，修正 spin-icon 类名使拉取加载动画生效，拉取弹窗 pill 改用 preset-pill-grid 与预设卡片网格脱钩，内联 mono 字体收编 token（顺带修正「本地/私有私有化」笔误）
+- **[修复]** 生态页假状态标签真实化——Mesh 统计读 MeshStats 真实计数（收/发/订阅频道），移除假工具播种与 Mesh Synchronized/Leader/Active 装饰徽章，Schema 有效性与压缩开关按数据渲染，特性清单改文档式 capability-list
+- **[修复]** 设计系统层修复——未定义变量与 preset-grid 双定义冲突消除，遮蔽密钥改虚线样式，补齐焦点环/color-scheme/reduced-motion，死 CSS 与 JetBrains Mono 硬编码清理，分流母题落地登录页
+- **[修复]** 融合流式 anchor 回答提取 delta 纯文本——原始 SSE JSON 行污染 analyst 多模型对比输入（secondary 本就是 ExtractAssistantText 纯文本）
+- **[修复]** 流式管道错误正文读取超时释放 response——异常逃逸路径无 finally 收尾，已建连连接泄漏且重试可反复触发
+- **[修复]** 非流式转换剥离 stream_options——fusion panel 复用客户端流式请求体，严格网关对 stream=false+stream_options 直接 400（kimi 实测）
+- **[修复]** 失败结算调用点置位 outcomeReported——finally 兜底不再偷走在途探槽
+- **[修复]** Gemini 流终止判定支持官方 finishReason 格式——streamGenerateContent 无 done 哨兵，此前官方端点每条流都被判协议违约断流
+- **[修复]** P2-4 管理台旧 Cookie——电路内捕获滑动续期票据，服务端调用与浏览器续期同步
+- **[重构]** 三协议客户端资源所有权共享——流式建连管道单源化（ModelClientRequestPipeline）
+- **[重构]** DashboardHandler 六组端点方法移入 Helpers 分部类——主文件 36 行收口
+- **[重构]** DashboardHandler 端点 lambda 方法化——六组端点注册收敛为私有方法
+- **[测试]** RouterStudio 快照与源码断言适配 code-behind 拆分
+- **[重构]** RouterStudio 与 Models 大页组件化——@code 逻辑拆入 code-behind 分部类
+- **[测试]** 源码文本断言适配 DashboardHandler 分部类拆分
+- **[重构]** DashboardHandler 拆分第一步——私有辅助成员（755 行）拆入分部类
+- **[重构]** ApiService 失败语义固定 + 共同逻辑抽取——GetSafeAsync 统一只读 GET 的 fail-soft 语义
+- **[重构]** 组合根拆分完成——Program.cs 1157→531 行，六个模块文件
+- **[重构]** 组合根拆分第四步——上游适配/状态存储/链路追踪模块移入 Composition
+- **[重构]** 组合根拆分第三步——配置存储与租户/学习状态支撑模块移入 Composition
+- **[重构]** 组合根拆分第二步——安全模块（Cookie 认证/登录限流/全局 RateLimiter）移入 Composition
+- **[重构]** #4 组合根拆分第一步——路由决策与执行引擎注册移入 Composition 模块
+- **[重构]** #4 模块化切片 C——结算组件拆为 ProxyOrchestrator.Settlement 分部类
+- **[测试]** #4 模块化切片 B——测试宿主持久状态隔离基线收敛
+- **[重构]** #4 模块化切片 A——配置文档版本哈希单源化
+- **[重构]** #3 切片④——RequestSnapshot 不可变快照收敛结算方法参数束
+- **[重构]** #3 切片③——流式异常终态结算收敛为 SettleStreamAbnormalEnd
+- **[重构]** #3 切片②——非流式候选成功结算收敛为 SettleCandidateSuccess
+- **[重构]** #3 结算组件第一步——非流式候选失败结算收敛为 SettleCandidateFailure
+- **[其他]** #2 AuthorizeRequest 热路径测量先行——双后端基准 harness + 结果与重构触发阈值
+- **[修复]** 首启迁移日志按实际配置库打印——不再硬编码 data/optirouter-config.db 文案
+- **[测试]** MariaDB 门控用例缺库时计 Skipped——消灭静默早退伪装的 Passed
+- **[修复]** P2-6 MCP 超时确定性 transport 测试 + 超时窗加固 + CI 专用临时 MariaDB
+- **[修复]** P2-1 Anthropic/Gemini 流式生命周期对齐 OpenAI 客户端——异常 EOF/流内 error 不再被吞
+- **[重构]** P2-5 并发注册表租约化——引用/获取/可淘汰判定绑进同一生命周期
+- **[修复]** P2-2 多模态末条 user 消息保守禁用语义缓存——同文字不同图片不再错答
+- **[修复]** P2-3 日消费增量携带业务发生日期——跨午夜 flush 不再挪账
+- **[修复]** 竞速任务在调度前被取消时 TCE 逃逸为 500——Canceled 态任务按未发请求结算
+- **[修复]** P1-6 流式外部取消不再污染上游熔断且已知 usage 一次性结算
+- **[修复]** P1-5 缓存刷新失败视同 DB 不可达降级——不再先于准入降级抛出异常
+- **[修复]** P1-4 MariaDB 路由/预算配置保存改为跨实例原子 CAS——消灭乐观锁后写覆盖先写
+- **[修复]** P1-3 租户密钥先持久化成功再发布缓存——Create/Update/Delete 故障时不再产生内存与磁盘劈裂
+- **[修复]** P1-2 替代执行模式成功出口统一过输出审核——Fusion/Fusion-lite/Cascade 不再绕过 Block 策略
+- **[文档]** document architecture risks and phased refactoring validation
+- **[修复]** preserve hard exclusions during cascade verification and upgrade
+- **[重构]** isolate request authentication and share identity parsing
+- **[修复]** 内置 catalog 端点大扫除——死端点实测逐一验证修复
+- **[新增]** MCP Server 端点/流式融合 Quorum-Grace/Token 压缩引擎/内置 catalog 四件套 + 合入前安全与协议修复
+- **[测试]** temp 目录 teardown 清理改 best-effort——CI #145 在 Linux 首次真实跑 Test 即抖红：TenantKeyFixture.Dispose 的 Directory.Delete(recursive) 在 overlayfs /tmp 上间发 'Directory not empty'（该测试 8/19 引入、挡板前 Linux 跑过约 20 次均绿，属间歇性 FS 竞态非回归），GUID 命名 temp 目录的清理失败不应抖红已通过的测试；按 ConfigApiExpansionTests/DashboardFeatureTests/ModelsConfigHandlerTests 三个兄弟 fixture 的既有 try/catch 约定补齐，ClientKeyServiceTests.TempFixture 同模式一并加固
+- **[测试]** 计时抖动治理——审计落库等待从固定 sleep(200/300ms) 换轮询 WaitUntilAsync（慢 CI runner 上不够导致 #97/#101 间发红）；hedge 竞速余量 500ms→2s（主路完成→取消路径在并行测试负载下卡 500ms 会误启动 hedged，#102 抖），主慢路径 1s→3s 保持 > hedge 延迟的序关系，通过路径 hedged 不启动无额外耗时
+- **[修复]** CVE 审计步骤 flag 不存在导致 44 连败——--fail-on-vulnerabilities 是 .NET 8 SDK 未实现的参数，dotnet list package 报 Unrecognized argument 退出 1，Build/Test/Docker 自 8/23（9ca6423 引入）起从未执行；改 grep 匹配 has no vulnerable packages 做门禁。顺带修 7510717 引入的红测试 Analyze_Rescue_LinkedFailAndSuccess_CountsOncePerRequest（合入时 CI 已被审计挡板挡住、回归从未被验证）：断言对齐实现语义——req-1/req-2 都有失败行+最终成功行各救回一次 RescuedRequests=2，FailedRequests=req-1失败+req-2失败+无id失败行=3
+- **[修复]** 全局failover预算只覆盖候选+首行阶段——FailoverGlobalTimeoutSeconds 30s 曾贯穿流式body/Fusion panel整个生命周期，超时在产出中途引爆掐断长回答（audit 实锤：timeout 行 latency 精确≈29.95s 且全是 fusion secondary/analyst 角色，同请求主模型行正常完成）；流式两路径统一在首个产出后 disarm（fusion 首 chunk 后、普通候选首行后 CancelAfter(InfiniteTimeSpan)），body 阶段兜底交模型级空闲超时+客户端断开；FusionRouterPanelTimeoutSeconds 默认0不可裸换 token，故不动 FusionRouter；补端到端回归测试（1s 预算跨线推进，修复前红修复后绿）
+- **[修复]** 熔断参数行溢出治理——Hedge 延迟入列后 5 组标签(flex-shrink:0 约470px)超出三列窄卡(~342px)宽度，config-row nowrap 导致 Hedge 输入框挤出卡片；该行加 flex-wrap 折行自适应，宽窗单行、窄卡自动换行，不影响其他 12 处正常 config-row
+- **[修复]** 请求页KPI卡改兜底救援口径——级联触发率分母是全量行且流量98%流式被闸门外跳过，永远显示0.0%无信息量；主值改Failover救援次数（同request_id失败行+最终成功行，按请求去重），失败请求总数含无id失败行；级联分母改合格人群（非流式+Cheap+成功行）并下发EligibleRequests；副标题级联/Fusion仅发生时显示
+
+## 2026-08
+
+- **[新增]** 流式首行竞速(Hedge)结局监控指标
+- **[新增]** 流式首行竞速(Hedge)接线 + 管理台开关
+- **[修复]** 综合成功率改请求级口径——SuccessRatePct 行级把级联/fusion/judge 中间失败行算进分母，健康一天（请求级 99.8%）也会挂'需排查'；新增 RequestSuccessRatePct（按 request_id 去重，同请求任一行成功即成功），卡片主值/阈值/稳定性指数改用请求级，行级降为副标题参考；稳定性档位补 90 以下'严重'
+- **[修复]** Fusion 计数按 request_id 去重——一次融合请求产生 secondary/analyst 多行，旧口径逐行累加把 'Fusion N 次' 夸大约 4 倍（49 行 ≈ 12 次请求）；无 request_id 旧记录按行回退；卡片副标题写明级联率口径'仅非流式 Cheap 档'
+- **[修复]** 流中途 ModelClientException 归类上游故障——断流 502 检测/in-band error 抛出后被 ClassifyMidStreamError 落 INTERNAL_ERROR 兜底桶，客户端只见 'An unexpected internal error occurred'（15:59 实案）；三端点（OpenAI/Anthropic/Gemini）中途 catch 外发真实原因与可重试信号（UPSTREAM_ERROR/api_error+msg/UNAVAILABLE），未预见异常仍走不透出细节的内部错误桶
+- **[修复]** Blazor 电路后台节流断连治理——Hub ClientTimeoutInterval 30s→90s，容下 Chrome/Edge 后台标签页 JS 定时器 1 次/分钟节流周期（客户端 ping 实际 ~60s），服务端不再误判客户端死亡掐断电路；管理台切回标签页不再必现'正在重试连接'
+- **[新增]** 打分基准按任务类型分档（编码类要求可运行/不改语义/API 真实，事实类禁编造引用数据）+ 幻觉硬扣分（明显编造 API/虚构引用/答非所问 score ≤ 0.3）；编造判定限定 judge 确定范围防知识截止误杀
+- **[工程]** tools/ 生产库诊断工具加入 gitignore（连真实 DB 含取 key 模式，不进仓库）
+- **[新增]** judge 并发上限 4 路+数据主权过滤（外部 judge 模型不参评）；SessionLatencyTracker 过期 session 每分钟清扫+逃生窗口动态扩容+亲和方法验延迟；管理台模型列表排序选择器与 ApiKey 显隐切换
+- **[修复]** 断头流三收口——上游无 [DONE] 断流抛 502 走失败路径（此前静默当成功，审计 OK/熔断无感，客户端收断头流报 'Stream ended without finish_reason'，req=f26bc1f8 实证）；端点出口 [DONE] 前合成 finish_reason stop chunk 兜底（聚合网关从不发终结 chunk，AI SDK 判整响应失败）；融合 anchor 中途故障补发 error 事件+[DONE]（此前静默终止无法区分部分成功）。
+- **[修复]** 流内 error 事件检测——200 响应携带 {"error":{...}} 时抛 ModelClientException 走失败路径，修复审计假成功/熔断无感/failover 失灵（hy3 队列 79s 后吐 'An internal error occurred' 被当内容中继的实锤案例）；Raw/typed 流式与非流式四处收口，code 归一 [400,599]，error:null 不误伤
+- **[修复]** 探活改流式+默认10s窗口——commandcode.ai 网关 GLM-5.3-Flash 非流式补全挂死（实测60s+无响应头、流式正常），非流式探活必超时；探活消费流式 delta 到 [DONE] 判成功（SSE 注释行已由解析器过滤），手动测试端点外层硬上限比探活窗口多 5s 防 OCE 逃逸
+- **[修复]** 审计 errorMessage 带上游响应体首行——SafeMessage 丢弃 ModelClientException.ResponseBody 导致 4xx/429 无现场（Kimi 400 排查只能猜）；单行化+300字符截断防 HTML 大页，quota-exhausted 同样附 body 以区分上游 429 与本地窗口
+- **[新增]** LLM-as-judge 采样质量打分回灌奖励——旁路后台评审，score∈[0,1] 经 RecordQualityOutcome 同灌 Thompson/LinUCB；流式/非流式双路径接入，judge 调用计费留痕（fusionRole=judge），自评守卫+截断限成本+违约不罚被评模型；管理台/路由页新增开关、采样率与评审模型下拉（PUT 全链热生效）
+- **[修复]** 修正 Fusion 融合开关过时文案——流式渐进融合已支持（Anchor 先行推流+后台面板+结尾补丁）
+- **[修复]** 供应商墓碑库——删除模型后历史用量归组不丢供应商
+- **[新增]** 真实请求成败驱动模型页连通状态——探活关闭后的留痕闭环
+- **[修复]** 删除模型联动清理 FallbackChain 悬空引用——堵住重启崩溃循环
+- **[新增]** /v1/models 暴露三模式预设虚拟模型 auto:cost/balanced/intel
+- **[新增]** 三模式路由预设 + 同档级联全链路闭环
+- **[新增]** 三道延迟防线——长 prompt/历史 p95/session 内慢响应自动降级
+- **[修复]** 显式 pin 模型全部失败时释放固定交还降级——修复 all model candidates failed
+- **[新增]** 连通状态留痕——手动/后台探活结果进程内统一记录，页面刷新不丢
+- **[修复]** Thompson 延迟目标校准至真实量级；探活 429 退避与可配置间隔；断路器 override 路由名解码
+- **[其他]** 优化中文字体栈为系统原生字体并统一 CSS 变量
+- **[修复]** 套餐型网关（TokenHub Token Plan）模型列表挂站点根——base 含路径时追加根路径 /v1/models 终选回退，全候选 404 提示手动配置模型 ID
+- **[修复]** base url 含非 /v1 版本段（如 /plan/v3）时 /models 探测 404 自动回退 base+/models；候选构建收敛共享 helper
+- **[新增]** discover 弹窗来源预览重构为 URL 行+meta 网格带图标标签，Provider 空串回退；select 箭头 SVG 收敛共享变量，删除零引用 badge 样式
+- **[新增]** token 估算校准诊断端点与 RouterStudio 展示；discover 凭据零回传
+- **[新增]** 审计落库结构化分类信号；修复校准估算器 EMA 平方根收敛缺陷；开发库隔离
+- **[修复]** BFCache 恢复整页刷新与静态资源破缓存，补 stepper 键盘可达
+- **[新增]** beautify upstream model discovery modal and overhaul requests audit analytics layout
+- **[修复]** 模型页从上游拉取按钮修正未定义样式类，弹窗步骤指示器升级
+- **[新增]** 优化模型拉取弹窗样式并支持新增/编辑时直接拉取上游模型
+- **[新增]** 审计分析增加供应商/模型 token 用量聚合，新增上游模型拉取
+- **[修复]** /v1/models 暴露上下文窗口字段，避免第三方 agent 默认 256K
+- **[工程]** gitignore 忽略 reports/ 本地报告目录
+- **[新增]** 移除全局 ProxyApiKey；AdminApiKey 迁移数据库层（哈希存储）
+- **[修复]** 管理台 a11y 基线补齐——骨架屏表头 scope 与模态对话框语义
+- **[修复]** 响应缓存字节预算 + 存储降级事件接入告警历史
+- **[测试]** 集成测试宿主禁用后台 HostedService——消除探针/预热对共享状态的中途干扰
+- **[修复]** 租户级预算同源 TOCTOU 防护——ClientKeyService in-flight 预留
+- **[修复]** in-flight 预算预留——堵住流式请求计费前集体越线的 TOCTOU 窗口
+- **[文档]** 新增项目级 AGENTS.md——沉淀 nssm 服务化部署、发版流程与已知坑
+- **[修复]** 会话保活与重连终态自动恢复——修复面板常开超 8h 掉登录、横幅卡死
+- **[修复]** 熔断打开期探活失败不再续期冷却——修复高延迟模型熔断后无法自愈
+- **[新增]** 全面重构前端 UI 审美与视觉体验 (P1-P3阶段及ROI看板/健康检查优化)
+- **[新增]** 引入 Serilog 滚动文件日志——替换无轮转的自研 Provider
+- **[修复]** 会话粘性重启回载——修复部署后 harness 会话缓存命中率骤降
+- **[新增]** 模型列表新增复制功能——同供应商多模型免重复填写
+- **[新增]** 探活改为身份核对模式——问"你是什么模型"并回答回显管理台
+- **[修复]** 探活不再设置 max_tokens 上限——reasoning 模型小额度必 500
+- **[修复]** 费用趋势图竞态——数据就绪后的重渲染不再绘制，需点击才显示
+- **[修复]** 响应缓存卡片按实际开关显示文案 + 分离式本地启动脚本
+- **[修复]** 趋势图双缺陷——元组序列化输出空对象 + 当日实时花费不进图
+- **[修复]** 删除误导性 MinuteBucket 死字段 + Redis 网格 handler 异常可观测
+- **[新增]** 流式工具调用双向翻译补全 + 未映射代理路径 401 修正
+- **[修复]** 管理 API Bearer 爆破防护 + 安全响应头基线 + README 同步
+- **[新增]** 流式超时改空闲制——长生成流不再被 TimeoutSeconds 总时长腰斩
+- **[修复]** 成本账本运行期连接故障永久降级内存——僵尸连接自愈
+- **[修复]** 代理链路第二轮评审修复——预算拒绝审计 + 原生协议重试 + 竞态收敛
+- **[修复]** 全链路代码评审修复——配置热重载防清空 + 审计保留 0 可持久化 + 限流硬容量
+- **[修复]** allow 0 retention and default to permanent retention
+- **[修复]** decouple model probe interval from shared config
+- **[修复]** reduce auto-refresh from 15s to 60s to avoid TPM throttling
+- **[新增]** reduce auto-refresh interval from 2s/5s to 15s across dashboard
+- **[新增]** preset layout redesign + prior hardening changes
+- **[修复]** P0-P2 全链路加固——压缩器保字段/审计可观测/估算校准/探活门控/4xx降级/会话派生
+- **[工程]** StoreProvider 默认 Auto 化收尾——文档/开发配置/UI 文案同步移除显式指定
+- **[重构]** 存储连接单一化——Budget 回退全局键，本地开发接入 MariaDB
+- **[工程]** 存储配置与文档同步 MariaDB 化
+- **[新增]** SQLite 迁移 MariaDB——双后端存储 + 租户 Key 全局管控 + 审计分析
+- **[新增]** add static Weight field for load-balance policy
+- **[新增]** 弹窗暴露上游模型 Id，支持同供应商多账号同模型
+- **[修复]** config-item 内 textarea 纵向堆叠，修复 Analyst 提示词项撑开布局
+- **[新增]** 管理台功能扩展——告警历史/Webhook 配置/配置审计/审计导出/租户用量/模型 Tags/评测持久化/学习重置/Fusion 编排面板
+- **[重构]** 模型弹窗部署类型下拉化 + 侧栏主题钮/账号区布局重排
+- **[新增]** Models 页改版——紧凑表格 + 弹窗编辑 + ApiKey 按需显示
+- **[修复]** round-3 audit fixes and full code-review remediation
+- **[修复]** round-2 audit fixes (A1-A3, B1, F1, C1/C2) and minor sweep
+- **[新增]** SQLite config store, console redesign, and full-stack audit fixes (C1, M2-M9)
+- **[修复]** address minor findings from full code review
+- **[修复]** address 6 major findings from full code review
+- **[修复]** Gemini route must accept display ids containing slashes
+- **[新增]** align downstream protocols with upstream (Anthropic/Gemini entries)
+- **[新增]** env: write-back protection and code-level Routing:Preset
+- **[文档]** add paste-ready Routing presets (cost-first/balanced/quality-first)
+- **[新增]** wire ByzantineConsensusEngine as consensus shortcut
+- **[重构]** remove unwired CrossProviderSpeculation and MultiAgentDag engines
+- **[文档]** align README claims with implementation status
+- **[新增]** metrics auth, env-var API keys, audit content opt-out
+- **[修复]** resolve CS0121/CS4012 compile failures and pin SDK
+- **[修复]** close moderation DI registration lambda
+- **[新增]** add native Anthropic and Gemini protocol clients
+- **[新增]** add content moderation on request input and model output
+- **[修复]** restore alert webhook registration lost in commit split
+- **[性能]** add centroid-bucket ANN index for semantic cache lookup
+- **[新增]** expose OpenAPI contract under admin-protected /dashboard/swagger
+- **[新增]** push alert and recovery events to configurable webhook
+- **[新增]** add tenant usage and quota query endpoints with CSV export
+- **[新增]** wire tool execution config and DI registration
+- **[新增]** add tool executor and agentic replay loop
+- **[新增]** add Redis-backed distributed state mesh with in-memory fallback
+- **[修复]** bound KV-cache prefix trie memory with TTL pruning
+- **[修复]** keep semantic cache keys consistent under PII anonymization
+- **[修复]** preserve multimodal messages during prompt pruning
+- **[修复]** make adaptive limiter enforce dynamic concurrency limit
+- **[新增]** implement prompt compression, OTel metrics, provider sandbox, and benchmark dashboard
+- **[性能]** add high-concurrency stress benchmark engine and zero-allocation streaming/routing hotpath optimizations
+- **[新增]** implement Model Context Protocol integration with tool complexity routing, JSON argument auto-sanitizer, and tool registry
+- **[新增]** implement Distributed State Mesh for cluster-wide synchronisation of KV-cache, Kalman latency, and cost ledger
+- **[新增]** implement Direction 2 RAG-aware context density analyzer and dynamic tier routing policy
+- **[新增]** integrate unified local vector embedding engine into semantic cache and byzantine consensus
+- **[新增]** implement Phase 3 elevated routing (Byzantine Fault-Tolerant Multi-Model Consensus & Predictive Proactive Resilience Router)
+- **[新增]** implement Phase 2 elevated routing (Multi-Agent DAG Topology & Cross-Provider Speculative Decoding Engine)
+- **[新增]** implement Phase 1 elevated routing (KV-Cache Radix Trie Locality & Reasoning Effort Budget Controller)
+- **[新增]** integrate streaming compliance filter, kalman load balance, and pareto frontier regulator
+- **[修复]** close audit findings on options staleness and id addressing
+- **[新增]** expand rule-classifier coverage and raise context default to 200k
+- **[修复]** correct hot-reload visibility and display-name addressing
+- **[修复]** repair build and tests broken by d68bd0f and adapt to model validation
+- **[新增]** auto virtual model, explicit model pinning, and provider/id addressing
+- **[新增]** close admin API/frontend gaps and modernize UI
+- **[修复]** display request content and resolve RoutedTier deserialization failure
+- **[新增]** store and display request content in audit log
+- **[新增]** audit reward/exploration logging, latency reward normalization, bandit feature expansion
+- **[修复]** align bypass-path feedback and cache with served answer
+- **[新增]** add quality signals, regenerate feedback, cost normalization
+- **[新增]** add explicit per-model fallback chain
+- **[新增]** add cost-aware reward to bandit/thompson
+- **[新增]** add non-streaming response cache
+- **[新增]** add stream TTFT timeout and fusion hedging
+- **[修复]** harden admin console login security
+- **[重构]** trim redundant fusion-path work and fix stale comment
+- **[修复]** plug streaming-fusion probe leaks and orphaned secondary tasks
+- **[重构]** tighten forwarding-path size guard and trim redundant work
+- **[修复]** break Fusion-lite infinite loop on probe shortfall
+- **[修复]** gate streaming-fusion probes and account anchor cost
+- **[修复]** preserve multimodal content during PII anonymization
+- **[性能]** debounce tenant cost persistence off the request path
+- **[修复]** improve adaptive model selection
+- **[修复]** make issued tenant API key copyable
+- **[新增]** rebuild admin console with nav pages and login auth
+- **[新增]** close quality feedback loop into learning state
+- **[修复]** harden learning-state persistence against races and IO errors
+- **[新增]** implement Thompson/Bandit state persistence with SQLite
+- **[修复]** remove pre-push hook that deployed before push completed
+- **[修复]** require clean working tree before deploy
+- **[修复]** return snapshot copy from GetAllKeys to protect key cache
+- **[工程]** force LF for shell scripts to keep bash hooks portable
+- **[新增]** add pre-push hook for local CI/CD
+- **[修复]** use Get-Service for post-deploy verification
+- **[工程]** add one-command deploy.ps1 for nssm service
+- **[新增]** add multi-window statistics (input/output tokens, cache hit rate, error rate)
+- **[修复]** resolve review findings and optimize client key caching and persistence safety
+- **[工程]** remove trellis agent skills
+- **[工程]** archive 08-12-review-remediation
+- **[文档]** record review remediation contracts
+- **[修复]** close deep review findings
+- **[修复]** 24h code review follow-ups (16 fixes: PII, bandit, keys, trace-id) (#15)
+- **[新增]** complete UI matrix with audit debugger drawer, hot policy config studio, model probing, circuit overrides, and client quota studio
+- **[重构]** extract PolicyHelper.Append to deduplicate Reason+ReasonEvents boilerplate
+- **[重构]** extract shared Percentile helper from duplicated audit store math
+- **[重构]** mechanical smell cleanup - dead ternary, ModelTier index, GaussJordan naming
+- **[文档]** close 24h-review gaps in routing spec and appsettings example
+- **[修复]** enforce EnableContextualBandit x EnableThompsonSampling startup mutex
+- **[其他]** delete .claude/
+- **[工程]** ignore .cbx/ tool directory
+- **[工程]** archive 08-10-fusion-router-algo-research
+- **[工程]** archive 08-10-fusion-p1p3
+- **[工程]** archive 08-11-single-model-routing-implement
+- **[工程]** archive 08-11-single-model-routing-research
+- **[新增]** single-model routing research + audit tooling
+- **[工程]** record journal
+- **[新增]** implement single-model routing P1+P2+P3
+- **[工程]** record journal
+- **[新增]** implement P1-P3 improvements from research report
+- **[新增]** add fusion-router audit analysis tooling and research report
+- **[工程]** archive 08-10-audit-data-generator
+- **[工程]** record journal
+- **[新增]** add synthetic audit data generator to close tuning loop
+- **[工程]** archive 08-10-race-cancelled-reward-config
+- **[工程]** record journal
+- **[新增]** make race-cancelled reward a runtime config
+- **[工程]** archive 08-10-race-vs-real-failure
+- **[工程]** record journal
+- **[新增]** distinguish race-cancelled from hard failure in Thompson
+- **[工程]** archive 08-10-rule-classifier
+- **[工程]** archive 08-10-latency-aware
+- **[工程]** archive 08-10-thompson-routing
+- **[工程]** archive 08-10-capability-scoring
+- **[工程]** archive 08-10-single-model-routing
+- **[新增]** strengthen single-model intelligent selection
+- **[工程]** record journal
+- **[文档]** capture code-intent sub-classification gotchas
+- **[修复]** scope code-intent detection to instruction text, drop explain-as-simple
+- **[工程]** archive 08-10-decision-quality
+- **[工程]** record journal
+- **[新增]** sub-classify code intent by complexity in rule classifier
+- **[新增]** add per-panel timeout to FusionRouter (#14)
+- **[新增]** signal-aware session affinity to prevent bypass pollution
+- **[修复]** improve failover fallback order and prevent rule-classifier empty candidates
+- **[重构]** unify streaming/non-streaming 429 handling
+- **[修复]** Fusion fallback excludes just-failed models
+- **[工程]** record journal
+- **[工程]** archive 08-09-routing-foundation
+- **[新增]** add routing foundation controls
+- **[工程]** seed routing-foundation MVP task
+- **[文档]** capture SSE error contract + orchestrator split
+- **[其他]** Refactor/proxy orchestrator sse (#13)
+- **[文档]** populate full Trellis project spec
+- **[工程]** archive 00-bootstrap-guidelines
+- **[修复]** close review regressions
+- **[修复]** update .NET version in README from 10 to 8
+- **[新增]** add Docker, CI pipeline, Prometheus metrics, unify net8.0 (#11)
+- **[测试]** make failure-rate assertion culture-invariant
+- **[新增]** add Docker, CI pipeline, Prometheus metrics, unify net8.0
+- **[修复]** distinct reason for semantic match with zero tier candidates (#10)
+- **[其他]** Merge pull request #9 from zerosloney/fix/review-batch3-aggregation
+- **[修复]** TF-IDF CJK bigram-only to normalize token count vs Latin
+- **[修复]** aggregate failure stats + audit retention service
+- **[修复]** batch 2 review - routing robustness + test determinism + cleanup (#8)
+- **[修复]** batch 1 review quick-wins (UI + dead code + test) (#7)
+- **[其他]** Merge pull request #6 from zerosloney/fix/review-ui-and-routing
+- **[修复]** Thompson sampling, SQL false-positive, fusion feedback
+- **[修复]** unblock Blazor Server dashboard/models after rewrite
+- **[工程]** remove old vanilla HTML/JS web UI files
+- **[新增]** rewrite web UI from vanilla HTML/JS to Blazor Server
+- **[重构]** extract dashboard.html and models.html from embedded C# strings
+- **[重构]** move capability fallback to model, remove optional tsStore, simplify score calc
+- **[重构]** split ReorderByLatency, extract ConcatMessages, replace magic strings
+- **[工程]** record journal
+- **[新增]** implement multi-dimensional capability routing & adaptive Thompson Sampling MAB
+- **[其他]** Merge pull request #5 from zerosloney/fix/alert-ruleclassifier
+- **[修复]** align AlertEngine failure-rate numerator/denominator + preserve CapabilityFilter in RuleClassifier
+- **[修复]** harden cascade, cost ledger, admin auth, file locking (#4)
+- **[修复]** harden routing/config/concurrency across 24h audit
+- **[其他]** Merge pull request #3 from zerosloney/feat/dashboard-tags-tests
+- **[新增]** dashboard latency/tags + Tags soft validation + test coverage
+- **[其他]** Merge pull request #2 from zerosloney/fix/fusion-cost-accounting
+- **[修复]** account estimated cost for cancelled/failed parallel attempts
+- **[其他]** Merge pull request #1 from zerosloney/feat/routing-intelligence
+- **[新增]** latency-aware + capability filter + parallel first-attempt
+- **[修复]** close cascade cost/data loop
+- **[新增]** cascade upgrade + quality observability + repo hygiene
+- **[新增]** improve model selection accuracy and flexibility
+- **[新增]** split dashboard and model config into separate pages
+- **[修复]** remove accidentally committed .agents/.trellis/AGENTS.md from repository
+- **[其他]** stash changes for pre-existing failure verification
+- **[文档]** remove outdated project analysis report
+- **[修复]** harden legacy StreamAsync + isolate M2 concurrency test
+- **[修复]** security/robustness hardening across P0-P3 review
+- **[新增]** hot-reload Models endpoint config via OnChange
+- **[文档]** add project analysis report
+- **[新增]** real BPE token counting + three-state circuit breaker
+- **[新增]** persist cost ledger to SQLite, add session eviction
+- **[新增]** transparent JSON/SSE passthrough + X-Session-Id session budget
+- **[新增]** protect proxy traffic
+- **[修复]** validate and classify requests
+- **[修复]** retry across model tiers
+- **[修复]** preserve upstream base path
+- **[修复]** break through 3 documented limitations
+- **[工程]** rename solution and namespaces ModelRouter to OptiRouter
