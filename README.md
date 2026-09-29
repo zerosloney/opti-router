@@ -475,6 +475,7 @@ docker run -d --name optirouter \
 
 ## 运维备忘
 
+- **发版**：`powershell -ExecutionPolicy Bypass -File scripts\release.ps1`——配置预检（src vs publish 差异即中止，防旧版回写生产配置）→ 停服 → publish → 启服 → `/health` 验证；构建版本由 MinVer 从 `v*` git tag 自动派生（发版 = 打 tag）。
 - **日志**：Serilog 滚动文件 `logs/service-yyyyMMdd.log`——按天分文件、单文件 50MB 上限、自动保留最近 14 个（约 700MB 封顶后淘汰最旧），无需人工清理。启动早期的控制台输出（Serilog 初始化前）重定向在 `logs/boot.log`（`start-local.cmd`）。
 - **配置库备份**：配置库（MariaDB `optirouter_*` 表 / SQLite `data/optirouter-config.db`）是路由、预算、模型与租户 Key 的唯一权威，建议纳入例行备份：
   - MariaDB：`mysqldump -h127.0.0.1 -uroot -p test optirouter_app_config optirouter_client_keys > optirouter-config-backup.sql`

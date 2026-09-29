@@ -6,6 +6,11 @@
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
+# 容器内无 .git（.dockerignore 排除），MinVer 无法从 git tag 派生版本——
+# 以 MinVerVersionOverride 显式注入；需要真实版本时用
+# docker build --build-arg VERSION=1.2.3 . 覆盖（与 git tag 保持一致）。
+ARG VERSION=0.0.0-docker
+
 # 先拷 csproj 单独 restore，利用 Docker 层缓存（依赖未变时跳过还原）。
 COPY OptiRouter.sln ./
 COPY src/OptiRouter/OptiRouter.csproj ./src/OptiRouter/
@@ -15,7 +20,7 @@ RUN dotnet restore OptiRouter.sln
 # 拷源码并发布 Release。--no-restore 跳过（已还原）。
 COPY src/ ./src/
 COPY tests/ ./tests/
-RUN dotnet publish src/OptiRouter/OptiRouter.csproj -c Release -o /app/publish /p:UseAppHost=false --no-restore
+RUN dotnet publish src/OptiRouter/OptiRouter.csproj -c Release -o /app/publish /p:UseAppHost=false /p:MinVerVersionOverride=${VERSION} --no-restore
 
 # ---- 运行阶段 ----
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime

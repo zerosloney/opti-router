@@ -27,8 +27,13 @@ D:/nssm/nssm.exe start OptiRouter
 # 验证：curl http://localhost:5080/login → 200；tail publish/logs/service-*.log 看 "Application started"
 ```
 
+- **首选：`powershell -ExecutionPolicy Bypass -File scripts\release.ps1`**——上述序列的固化版：
+  配置预检（src vs publish 有差异即中止，防旧版回写生产配置）→ 停服 → publish（失败自动拉起服务）
+  → 启服 → /health 验证（超时打印最新日志尾部）。`-Force` 带差异继续，`-SkipService` 跳过服务管理。
 - publish 会用 src 的 `appsettings*.json` 覆盖 publish 同名文件：发版前先 diff 两边，
-  确认生产配置（MariaDB 连接串等）不会被旧版回写。
+  确认生产配置（MariaDB 连接串等）不会被旧版回写（脚本预检已内置该检查）。
+- 版本由 MinVer 从 `v*` git tag 自动派生（发版 = commit 后打 tag）；容器构建无 .git，
+  用 `--build-arg VERSION=x.y.z` 经 MinVerVersionOverride 注入。
 
 ### 已知坑
 
