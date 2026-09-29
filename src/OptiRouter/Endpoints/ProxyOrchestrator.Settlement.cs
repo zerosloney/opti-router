@@ -8,8 +8,8 @@ namespace OptiRouter.Endpoints;
 
 /// <summary>
 /// 请求生命周期结算组件（#4 模块化：从 ProxyOrchestrator 拆出的分部类）。
-/// 候选失败（五类）、成功、流式异常终态（故障/取消/断开）、最终输出审核出口
-/// 与单轮结算快照在此一处定义——终态矩阵的单一修改点。
+/// 候选失败（五类，串行与流式共用）、非流式成功、流式成功、流式异常终态（故障/取消/断开）、
+/// 最终输出审核出口与单轮结算快照在此一处定义——终态矩阵的单一修改点。
 /// </summary>
 public sealed partial class ProxyOrchestrator
 {
@@ -124,11 +124,51 @@ public sealed partial class ProxyOrchestrator
     }
 
     /// <summary>
+    /// 生命周期收敛（切片⑤）：流式候选成功结算统一出口——成本（usage 精确/输入估算两口径）、
+    /// 熔断成功、Thompson（含 TTFT）、会话/提示缓存亲和、regenerate 反馈、审计
+    /// （isStreaming=true，无 usage 时按输入估算并标 IsEstimated）。judge 质量采样
+    /// 与非流式路径同构，留在调用方结算之后派发。返回结算成本供完成日志使用。
+    /// </summary>
+    private decimal SettleStreamSuccess(
+        in RequestSnapshot snapshot,
+        ModelEndpointOptions candidate,
+        RouterDecision decision,
+        ChatRequest request,
+        ChatUsage? finalUsage,
+        RawStreamLine firstLine,
+        long elapsedMs,
+        int halfOpenRequiredSuccesses,
+        System.Diagnostics.Stopwatch attemptSw)
+    {
+        decimal cost = finalUsage is not null
+            ? CostCalculator.Compute(finalUsage, candidate)
+            : OutcomeRecorder.EstimateInputCost(candidate, decision.EstimatedInputTokens);
+        bool isEstimated = finalUsage is null;
+        if (!isEstimated || cost > 0m)
+            _recorder.RecordCost(cost, snapshot.SessionId);
+        _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
+        double reward = _recorder.RecordThompsonOutcome(candidate.Name, elapsedMs, decision, cost,
+            actualTier: candidate.Tier, completionTokens: finalUsage?.CompletionTokens ?? 0,
+            timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
+        _recorder.RecordAffinity(snapshot.SessionId, candidate.Name, AffinitySignal.Strong, elapsedMs);
+        _recorder.RecordPromptCacheAffinity(request, candidate.Name);
+        _regenerateTracker.Record(snapshot.FeedbackKey, candidate.Name, success: true);
+        attemptSw.Stop();
+        _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage, cost,
+            attemptSw.ElapsedMilliseconds, snapshot.SessionId, decision.Reason, true, null, true, snapshot.RoutedTier,
+            isEstimated: isEstimated,
+            timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
+            reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal, request: snapshot.Request);
+        return cost;
+    }
+
+    /// <summary>
     /// 生命周期收敛（结算组件种子）：串行/降级路径的候选失败结算统一出口——Thompson 惩罚、
     /// regenerate 负反馈、审计、熔断/探槽处理按失败类别在一处表达，控制流
     /// （换下一候选/透传原始状态码/全局超时终止）留在调用方。修复前五类失败的记账
     /// 分散在五个近乎复制的 catch 块，新增失败类别时极易漏记某一维度。
-    /// 参数束是后续 RequestSnapshot 提取的雏形（收敛后归并为快照对象）。
+    /// <paramref name="streamed"/> 供流式首行前失败复用同一出口（审计 isStreaming=true），
+    /// 分类映射与控制流差异由流式调用方完成。
     /// 返回 (上次失败状态码, 上次失败信息, 是否触发熔断)。
     /// </summary>
     private (int StatusCode, string ErrorMessage, bool Tripped) SettleCandidateFailure(
@@ -140,7 +180,8 @@ public sealed partial class ProxyOrchestrator
         in RequestSnapshot snapshot,
         Exception exception,
         bool globalTimeout,
-        bool hasOtherCandidates)
+        bool hasOtherCandidates,
+        bool streamed = false)
     {
         int statusCode;
         string errorMessage;
@@ -200,13 +241,17 @@ public sealed partial class ProxyOrchestrator
             _healthTracker.ReleaseProbe(candidate.Name);
         }
 
-        // 429 视为纯配额：不入断路器，也不给 Thompson 负反馈（quota 状态与模型质量无关）。
+        // 429 视为纯配额：不入断路器、不给 Thompson 负反馈、不记 regenerate 负反馈
+        // （quota 状态与模型质量无关；流式路径此前即不记，串行路径对齐到同一语义）。
         double? reward = kind == CandidateFailureKind.QuotaLimited
             ? null
             : _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-        _regenerateTracker.Record(snapshot.FeedbackKey, candidate.Name, success: false);
+        if (kind != CandidateFailureKind.QuotaLimited)
+        {
+            _regenerateTracker.Record(snapshot.FeedbackKey, candidate.Name, success: false);
+        }
         _recorder.RecordAudit(null, candidate.Name, estimatedTokens, null, 0m, elapsedMs, snapshot.SessionId,
-            decision.Reason, false, auditFailure, false, snapshot.RoutedTier,
+            decision.Reason, false, auditFailure, streamed, snapshot.RoutedTier,
             quotaLimited: kind == CandidateFailureKind.QuotaLimited,
             reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel,
             requestContent: snapshot.RequestContent, classificationSignal: decision.ClassificationSignal,

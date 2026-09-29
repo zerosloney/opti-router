@@ -1043,56 +1043,24 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                     if (preStreamFailure is not null)
                     {
                         attemptSw.Stop();
-                        bool quotaLimited = preStreamFailure is ModelClientException
-                        { StatusCode: System.Net.HttpStatusCode.TooManyRequests };
-                        // 请求语义类拒绝（400/422/413...）：与配额/可重试并列的第三类——
-                        // 不熔断（模型对其他请求仍可用），但进审计与 bandit；无候选可降级时透传。
-                        bool requestRejection = !quotaLimited
-                            && preStreamFailure is ModelClientException rejectionEx
-                            && IsRequestRejection(rejectionEx);
-                        bool tripped = false;
-                        double? preStreamReward = null;
-                        if (quotaLimited)
-                        {
-                            var quotaError = (ModelClientException)preStreamFailure;
-                            _recorder.RecordQuota(candidate.Name, quotaError.Metadata, rateLimited: true);
-                            _healthTracker.ReleaseProbe(candidate.Name);
-                        }
-                        else if (requestRejection)
-                        {
-                            preStreamReward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-                            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                            _healthTracker.ReleaseProbe(candidate.Name);
-                        }
-                        else
-                        {
-                            tripped = _healthTracker.RecordFailure(candidate.Name, threshold, cooldown);
-                            preStreamReward = _recorder.RecordThompsonOutcome(candidate.Name, null, decision);
-                            _regenerateTracker.Record(feedbackKey, candidate.Name, success: false);
-                        }
-                        probeResolved = true;
+                        // 首行前失败与串行路径共用同一结算出口（SettleCandidateFailure 五类记账，
+                        // 审计 isStreaming=true）；异常→类别映射与透传/全局超时终止等控制流留在本调用方。
+                        bool hasOtherCandidate = HasOtherCandidate(decision, candidate.Name, failedInThisRequest);
                         bool isGlobalTimeout = globalCts is { IsCancellationRequested: true } && !ct.IsCancellationRequested;
-                        int? preStreamStatusCode = preStreamFailure switch
+                        CandidateFailureKind failureKind = preStreamFailure switch
                         {
-                            ModelClientException mce => (int)mce.StatusCode,
-                            HttpRequestException => 503,
-                            OperationCanceledException => 408,
-                            _ => null
+                            ModelClientException { StatusCode: System.Net.HttpStatusCode.TooManyRequests } =>
+                                CandidateFailureKind.QuotaLimited,
+                            ModelClientException rejection when IsRequestRejection(rejection) =>
+                                CandidateFailureKind.RequestRejection,
+                            ModelClientException => CandidateFailureKind.UpstreamStatus,
+                            HttpRequestException => CandidateFailureKind.NetworkError,
+                            _ => CandidateFailureKind.InternalTimeout,
                         };
-                        string failure = quotaLimited
-                            ? "quota-exhausted"
-                            : preStreamFailure is ModelClientException modelFailure
-                            ? $"upstream-status-{(int)modelFailure.StatusCode}"
-                            : isGlobalTimeout
-                            ? "global-failover-timeout"
-                            : preStreamFailure.Message;
-                        _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, null, 0m,
-                            attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, false, failure, true, routedTier,
-                            quotaLimited: quotaLimited,
-                            reward: preStreamReward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal,
-                            upstreamStatusCode: preStreamStatusCode, request: request);
-                        _logger.LogWarning("Streaming model {Name} failed pre-stream ({Failure}), trying next{Tripped}",
-                            candidate.Name, failure, tripped ? " (circuit tripped)" : "");
+                        _ = SettleCandidateFailure(failureKind, candidate, decision, decision.EstimatedInputTokens,
+                            attemptSw.ElapsedMilliseconds, in snapshot, preStreamFailure,
+                            globalTimeout: isGlobalTimeout, hasOtherCandidates: hasOtherCandidate, streamed: true);
+                        probeResolved = true;
 
                         if (isGlobalTimeout)
                         {
@@ -1105,16 +1073,15 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                             }
                             throw new AllCandidatesFailedException(attemptedModels, lastModelName, lastStatusCode, lastErrorMessage, $"Global failover timeout ({options.Routing.FailoverGlobalTimeoutSeconds}s) exceeded.");
                         }
-                        if (requestRejection && !HasOtherCandidate(decision, candidate.Name, failedInThisRequest))
+                        if (failureKind == CandidateFailureKind.RequestRejection && !hasOtherCandidate)
                         {
                             // 无候选可降级：透传原始 4xx 给客户端（端点包装为 UPSTREAM_REJECTION）。
                             throw preStreamFailure;
                         }
-                        bool credentialNoFallback = !requestRejection
+                        if (failureKind == CandidateFailureKind.UpstreamStatus
                             && preStreamFailure is ModelClientException credentialEx
                             && IsCredentialError(credentialEx)
-                            && !HasOtherCandidate(decision, candidate.Name, failedInThisRequest);
-                        if (credentialNoFallback)
+                            && !hasOtherCandidate)
                         {
                             // 凭证错误且无候选可降级：结算已完成，透传原始状态码（同非流式路径语义）。
                             throw preStreamFailure;
@@ -1218,31 +1185,16 @@ public sealed partial class ProxyOrchestrator : IAsyncDisposable, IDisposable
                         await enumerator.DisposeAsync().ConfigureAwait(false);
                     }
 
-                    // 流正常结束，记账 + 标记健康。没有 usage 时按输入 token 估算，
-                    // 避免成功请求被记为零成本，并在审计中保留预估标记。
-                    decimal cost = finalUsage is not null
-                        ? CostCalculator.Compute(finalUsage, candidate)
-                        : OutcomeRecorder.EstimateInputCost(candidate, decision.EstimatedInputTokens);
-                    bool isEstimated = finalUsage is null;
-                    if (!isEstimated || cost > 0m)
-                        _recorder.RecordCost(cost, sessionId);
-                    _healthTracker.RecordSuccess(candidate.Name, halfOpenRequiredSuccesses);
+                    // 流正常结束：成功结算统一出口（成本 usage 精确/输入估算两口径、熔断成功、
+                    // Thompson 含 TTFT、亲和、regenerate 反馈、审计 isStreaming=true）。
+                    // 没有 usage 时按输入 token 估算，避免成功请求被记为零成本。
+                    decimal cost = SettleStreamSuccess(in snapshot, candidate, decision, request, finalUsage,
+                        firstLine, attemptSw.ElapsedMilliseconds, halfOpenRequiredSuccesses, attemptSw);
+                    probeResolved = true;
                     // 流式质量采样：累积全文非空才派发（与融合 patch chunk 一样，judge 只看正文）。
+                    // 与非流式路径同构：judge 在结算之后、由调用方派发。
                     if (_qualityJudge is not null && judgeTextSb.Length > 0)
                         _qualityJudge.TryJudge(request, judgeTextSb.ToString(), candidate.Name, decision, routedTier, sessionId);
-                    double reward = _recorder.RecordThompsonOutcome(candidate.Name, attemptSw.ElapsedMilliseconds, decision, cost,
-                        actualTier: candidate.Tier, completionTokens: finalUsage?.CompletionTokens ?? 0, timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs);
-                    _recorder.RecordAffinity(sessionId, candidate.Name, AffinitySignal.Strong, attemptSw.ElapsedMilliseconds);
-                    _recorder.RecordPromptCacheAffinity(request, candidate.Name);
-                    _regenerateTracker.Record(feedbackKey, candidate.Name, success: true);
-                    probeResolved = true;
-                    attemptSw.Stop();
-                    _recorder.RecordAudit(null, candidate.Name, decision.EstimatedInputTokens, finalUsage,
-                        cost,
-                        attemptSw.ElapsedMilliseconds, sessionId, decision.Reason, true, null, true, routedTier,
-                        isEstimated: isEstimated,
-                        timeToFirstTokenMs: firstLine.Metadata?.TimeToFirstTokenMs,
-                        reward: reward, epsilonPromotedModel: decision.EpsilonPromotedModel, requestContent: requestContent, classificationSignal: decision.ClassificationSignal, request: request);
                     _logger.LogInformation("Streaming request completed: model={Model}, cost={Cost}",
                         candidate.Name, cost.ToString("F6"));
                     yield break;

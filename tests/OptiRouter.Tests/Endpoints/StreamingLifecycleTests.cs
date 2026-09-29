@@ -172,6 +172,66 @@ public sealed class StreamingLifecycleTests
             a => a.Model == ModelName && a.ErrorMessage == "stream-faulted");
     }
 
+    /// <summary>首行前即抛出给定异常的流回调（模拟首行前上游失败，StreamRawAsync 调用时同步抛出）。</summary>
+    private static Func<ChatRequest, CancellationToken, IAsyncEnumerable<RawStreamLine>> ThrowingStream(Exception error)
+        => (_, _) => throw error;
+
+    /// <summary>首行前配额拒绝（429）：不熔断、探槽释放、审计记 quota-exhausted 且 isStreaming=true
+    /// （流式首行前失败与串行路径共用 SettleCandidateFailure 后的统一语义）。</summary>
+    [Fact]
+    public async Task Streaming_PreStreamQuota_NoCircuitFailure_RecordsQuotaAudit()
+    {
+        using var factory = CreateFactory(ThrowingStream(new ModelClientException(
+            System.Net.HttpStatusCode.TooManyRequests, "rate limited", "quota exhausted")));
+        var orchestrator = factory.Services.GetRequiredService<ProxyOrchestrator>();
+        var request = new ChatRequest { Model = ModelName, Messages = [ChatMessage.FromText("user", "Hi")] };
+
+        var enumerator = orchestrator.StreamAsync(request, CancellationToken.None).GetAsyncEnumerator();
+        await Assert.ThrowsAsync<AllCandidatesFailedException>(
+            async () => await enumerator.MoveNextAsync().AsTask());
+        await enumerator.DisposeAsync();
+
+        // 429 是纯配额：不入断路器，探槽无泄漏。
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        if (circuits.TryGetValue(ModelName, out var circuit))
+        {
+            Assert.Equal(CircuitState.Closed, circuit.State);
+            Assert.Equal(0, circuit.FailureCount);
+            Assert.Equal(0, circuit.ActiveProbes);
+        }
+
+        var row = await WaitForAuditAsync(factory.Services.GetRequiredService<IRequestAuditStore>(),
+            a => a.Model == ModelName && a.ErrorMessage == "quota-exhausted");
+        Assert.True(row.IsStreaming);
+        Assert.True(row.QuotaLimited);
+        Assert.False(row.Success);
+    }
+
+    /// <summary>首行前上游状态错误（503）：计入熔断、审计记 upstream-status-503 且 isStreaming=true。</summary>
+    [Fact]
+    public async Task Streaming_PreStreamUpstreamError_CountsCircuitFailure()
+    {
+        using var factory = CreateFactory(ThrowingStream(new ModelClientException(
+            System.Net.HttpStatusCode.ServiceUnavailable, "upstream down")));
+        var orchestrator = factory.Services.GetRequiredService<ProxyOrchestrator>();
+        var request = new ChatRequest { Model = ModelName, Messages = [ChatMessage.FromText("user", "Hi")] };
+
+        var enumerator = orchestrator.StreamAsync(request, CancellationToken.None).GetAsyncEnumerator();
+        await Assert.ThrowsAsync<AllCandidatesFailedException>(
+            async () => await enumerator.MoveNextAsync().AsTask());
+        await enumerator.DisposeAsync();
+
+        var circuits = factory.Services.GetRequiredService<ModelHealthTracker>().GetCircuitsSnapshot();
+        var circuit = Assert.Single(circuits, c => c.Key == ModelName).Value;
+        Assert.Equal(1, circuit.FailureCount);
+        Assert.Equal(0, circuit.ActiveProbes);
+
+        var row = await WaitForAuditAsync(factory.Services.GetRequiredService<IRequestAuditStore>(),
+            a => a.Model == ModelName && a.ErrorMessage == "upstream-status-503");
+        Assert.True(row.IsStreaming);
+        Assert.False(row.QuotaLimited);
+    }
+
     /// <summary>审计为后台批量落库，轮询 GetRecent 直到目标行可见（上限 10s）。</summary>
     private static async Task<RequestAuditRecord> WaitForAuditAsync(
         IRequestAuditStore store, Func<RequestAuditRecord, bool> predicate)
