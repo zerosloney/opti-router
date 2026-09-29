@@ -1,6 +1,6 @@
 # OptiRouter
 
-A multi-model intelligent routing HTTP proxy built with .NET 8. Features an OpenAI-compatible API, automatic model selection, token & cost optimization, data compliance barriers, distributed W3C DAG tracing, and hybrid local-cloud speculative decoding orchestration.
+A multi-model intelligent routing HTTP proxy built with .NET 8. Features an OpenAI-compatible API, automatic model selection, token & cost optimization, data compliance barriers, distributed W3C DAG tracing, and progressive speculative streaming orchestration.
 
 ## Architecture
 
@@ -48,10 +48,10 @@ A multi-model intelligent routing HTTP proxy built with .NET 8. Features an Open
 - 🔍 **P2 Observability & Multi-Turn Persona Defense**:
   - **W3C Distributed Tracing**: Full `traceparent` parsing and ActivitySource mapping with DAG cost attribution trees across Panel, Analyst, and Outer models.
   - **Persona Alignment (`PersonaDriftGuard`)**: Injects static persona anchor instructions combined with Session Affinity locking to prevent persona drift across multi-turn agent conversations.
-- 🧪 **P3 Prompt Versioning & Speculative Decoding**:
+- 🧪 **P3 Prompt Versioning & Speculative Decoding (Planned)**:
   - **Prompt Template Manager (`PromptTemplateManager`)**: Version control and variable rendering for Analyst/Outer prompts. (Planned, not yet implemented)
   - **Golden Dataset Regression Suite (`OfflineEvalRunner`)**: Automated evaluation suite computing Jaccard token similarity, accuracy rates, latency, and token consumption reports.
-  - **Hybrid Speculative Orchestration (`HybridSpeculativeOrchestrator`)**: Local 1B/3B draft models generate preliminary outlines rapidly before passing context to cloud verifier models.
+  - **Hybrid Speculative Orchestration (`HybridSpeculativeOrchestrator`)**: Local 1B/3B draft models generate preliminary outlines rapidly before passing context to cloud verifier models. (Planned, not yet implemented; the shipped "Progressive Speculative Streaming" is document-level anchor streaming, not token-level speculative decoding)
 - 🏎️ **Zero-Blocking High Performance Architecture**:
   - **ConcurrentQueue Async Batch Persister**: 1-microsecond enqueue time for audit logs, processed asynchronously in SQLite batch transactions without blocking the data plane.
   - **Non-blocking Sweeper**: `Monitor.TryEnter` prevents concurrency sweeper locks from delaying HTTP request execution.
@@ -215,7 +215,7 @@ Non-streaming:
 
 ```bash
 curl -X POST http://localhost:5000/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-api-key" \
+  -H "Authorization: Bearer your-client-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "auto",
@@ -228,7 +228,7 @@ Streaming (Supports Progressive Speculative Streaming):
 
 ```bash
 curl -X POST http://localhost:5000/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-api-key" \
+  -H "Authorization: Bearer your-client-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "auto",
@@ -246,7 +246,7 @@ Besides the OpenAI format, Anthropic and Gemini native protocols are also accept
 ```bash
 # Anthropic Messages API (auth: Authorization: Bearer or x-api-key)
 curl -X POST http://localhost:5000/v1/messages \
-  -H "x-api-key: your-proxy-api-key" \
+  -H "x-api-key: your-client-key" \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
   -d '{
@@ -257,7 +257,7 @@ curl -X POST http://localhost:5000/v1/messages \
 
 # Gemini generateContent (auth: Authorization: Bearer, x-goog-api-key, or ?key=)
 curl -X POST "http://localhost:5000/v1beta/models/auto:generateContent" \
-  -H "x-goog-api-key: your-proxy-api-key" \
+  -H "x-goog-api-key: your-client-key" \
   -H "Content-Type: application/json" \
   -d '{
     "contents": [{"role": "user", "parts": [{"text": "Explain polymorphism"}]}]

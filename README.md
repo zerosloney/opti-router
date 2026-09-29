@@ -52,7 +52,7 @@
 - 🧪 **P3 提示词版本化与端云投机解码**：
   - **提示词版本管理 (`PromptTemplateManager`)**：Analyst / Outer 系统提示词模版版本控制与变量动态插值。（规划中，尚未实现）
   - **Golden Dataset 离线回归评测 (`OfflineEvalRunner`)**：自动化 Golden Question 题库 Jaccard 词重叠相似度、准确率、延迟与 Token 消耗回归报告。
-  - **端云混合投机解码 (`HybridSpeculativeOrchestrator`)**：本地 1B/3B 端侧模型极速生成 Draft 草稿，云端强模型（Verifier）二次校验修补，兼顾高智力与低开支。
+  - **端云混合投机解码 (`HybridSpeculativeOrchestrator`)**：本地 1B/3B 端侧模型极速生成 Draft 草稿，云端强模型（Verifier）二次校验修补，兼顾高智力与低开支。（规划中，尚未实现；现存的「渐进式投机流」是文档级 Anchor 推流编排，非 token 级投机解码）
 - 🏎️ **0-阻塞高性能架构**：
   - **ConcurrentQueue 异步批处理落盘**：请求完成 1 微秒入列，后台批量事务落库（SQLite/MariaDB），主数据平面 0 I/O 阻塞。
   - **Monitor.TryEnter 非阻塞限流 Sweeper**：并发清理锁 0 阻断 HTTP 请求管道。
@@ -115,7 +115,6 @@ curl http://localhost:5000/health
 
 | 字段 | 含义 | 默认 |
 |------|------|------|
-| `ProxyApiKey` | 调用 `/v1/*` 与 `/dashboard`、`/api/dashboard/*` 时使用的 Bearer API Key；为空时拒绝访问 | 空 |
 | `RequestsPerMinute` | 每个分区（IP > Auth）的固定窗口每分钟请求上限 | `60` |
 | `MaxConcurrentRequestsPerPartition` | 每个分区同时进行的最大请求数，超出返回 429 | `100` |
 
@@ -218,9 +217,6 @@ curl http://localhost:5000/health
 | `FusionRouterTemperature` | 融合路由 panel/analyst 采样温度，范围 `[0, 2]` | `0.0` |
 | `FusionRouterPanelTemperature` | panel 专用采样温度；`null`=沿用 `FusionRouterTemperature` | `null` |
 | `FusionRouterMinComplexity` | 融合路由最低复杂度门控（`Unknown`/`Simple`/`Standard`/`Complex`） | `Unknown` |
-| `EnableOnnxEmbedding` | 启用本地 ONNX Transformer 轻量级 Embedding 深度语义向量路由引擎 | `false` |
-| `OnnxModelPath` | ONNX 模型文件绝对路径或相对路径（如 `"data/all-MiniLM-L6-v2.onnx"`） | `"data/all-MiniLM-L6-v2.onnx"` |
-| `OnnxExecutionProvider` | ONNX 执行提供者，可选 `"CPU"` 或 `"CUDA"` | `"CPU"` |
 | `EnableOtlpTracing` | 启用原生 OpenTelemetry OTLP Exporter 导出 ActivitySource DAG 链路追踪 | `false` |
 | `OtlpEndpoint` | OTLP Exporter 接收端点（如 `"http://localhost:4317"`） | `"http://localhost:4317"` |
 | `OtlpProtocol` | OTLP 传输协议：可选 `"grpc"` 或 `"http/protobuf"` | `"grpc"` |
@@ -365,7 +361,7 @@ Blazor Server 管理台（`/overview` `/requests` `/models` `/router` `/keys` `/
 
 ```bash
 curl -X POST http://localhost:5000/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-api-key" \
+  -H "Authorization: Bearer your-client-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "auto",
@@ -378,7 +374,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 ```bash
 curl -X POST http://localhost:5000/v1/chat/completions \
-  -H "Authorization: Bearer your-proxy-api-key" \
+  -H "Authorization: Bearer your-client-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "auto",
@@ -396,7 +392,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 ```bash
 # Anthropic Messages API（鉴权：Authorization: Bearer 或 x-api-key）
 curl -X POST http://localhost:5000/v1/messages \
-  -H "x-api-key: your-proxy-api-key" \
+  -H "x-api-key: your-client-key" \
   -H "anthropic-version: 2023-06-01" \
   -H "Content-Type: application/json" \
   -d '{
@@ -407,7 +403,7 @@ curl -X POST http://localhost:5000/v1/messages \
 
 # Gemini generateContent（鉴权：Authorization: Bearer、x-goog-api-key 或 ?key=）
 curl -X POST "http://localhost:5000/v1beta/models/auto:generateContent" \
-  -H "x-goog-api-key: your-proxy-api-key" \
+  -H "x-goog-api-key: your-client-key" \
   -H "Content-Type: application/json" \
   -d '{
     "contents": [{"role": "user", "parts": [{"text": "解释什么是多态"}]}]
@@ -463,7 +459,6 @@ docker build -t optirouter .
 # 首启 DB 为空时按 appsettings/环境变量播种一次）
 docker run -d --name optirouter \
   -p 5000:5000 \
-  -e OptiRouter__ProxyApiKey="your-proxy-api-key" \
   -e OptiRouter__AdminApiKey="your-admin-api-key" \
   -e OptiRouter__ConfigDbConnectionString="Server=mariadb;Port=3306;Database=optirouter;User ID=optirouter;Password=..." \
   optirouter
@@ -471,8 +466,12 @@ docker run -d --name optirouter \
 # 或最小化运行（不配 DB 时回退 SQLite 文件，挂载 /app/data 卷持久化）
 # docker run -d --name optirouter -p 5000:5000 \
 #   -v optirouter-data:/app/data \
-#   -e OptiRouter__ProxyApiKey="..." -e OptiRouter__AdminApiKey="..." optirouter
+#   -e OptiRouter__AdminApiKey="your-admin-api-key" optirouter
+# 启动后用 AdminApiKey 登录管理台，在 Keys 页创建租户 Client Key（持久化于
+# data/client-keys.json 或配置库），/v1/* 请求以该 key 作为 Bearer 调用。
 ```
+
+> 说明：全局 `ProxyApiKey` 已移除，`/v1/*` 鉴权一律使用管理台 Keys 页创建的租户 Client Key。
 
 ## 运维备忘
 

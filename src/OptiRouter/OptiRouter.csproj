@@ -40,5 +40,10 @@
     <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- 配置模板仅供开发者复制，不随构建拷贝到输出/publish 目录。 -->
+    <None Update="appsettings.example.json" CopyToOutputDirectory="Never" />
+  </ItemGroup>
+
 
 </Project>
