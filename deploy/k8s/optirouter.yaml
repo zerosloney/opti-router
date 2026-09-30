@@ -1,0 +1,68 @@
+# OptiRouter 多实例最小清单。多副本前必读 deploy/k8s/README.md 的存储矩阵前提。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: optirouter
+  labels:
+    app: optirouter
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: optirouter
+  template:
+    metadata:
+      labels:
+        app: optirouter
+    spec:
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: optirouter
+          # 按实际 registry 替换；本地构建：docker build --build-arg VERSION=x.y.z -t optirouter:x.y.z .
+          image: optirouter:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+              name: http
+          env:
+            - name: ASPNETCORE_URLS
+              value: http://+:5000
+            - name: OptiRouter__ConfigDbConnectionString
+              valueFrom:
+                secretKeyRef:
+                  name: optirouter-config
+                  key: connection-string
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: optirouter
+  labels:
+    app: optirouter
+spec:
+  type: ClusterIP
+  selector:
+    app: optirouter
+  ports:
+    - port: 80
+      targetPort: http
+      name: http

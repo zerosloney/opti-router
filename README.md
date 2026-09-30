@@ -49,10 +49,9 @@
 - 🔍 **P2 分布式 DAG 链路追踪与 Persona 锁**：
   - **W3C 规范链路追踪**：支持 `traceparent` 解析与 ActivitySource 映射，多模型 Panel/Analyst/Outer 结构化 DAG 树成本分拆归因。
   - **人设一致性防护 (`PersonaDriftGuard`)**：自动植入静态人设锚点提示词，配合 Session 粘性锁防止多轮 Agent 对话 Persona 漂移。
-- 🧪 **P3 提示词版本化与端云投机解码**：
-  - **提示词版本管理 (`PromptTemplateManager`)**：Analyst / Outer 系统提示词模版版本控制与变量动态插值。（规划中，尚未实现）
-  - **Golden Dataset 离线回归评测 (`OfflineEvalRunner`)**：自动化 Golden Question 题库 Jaccard 词重叠相似度、准确率、延迟与 Token 消耗回归报告。
-  - **端云混合投机解码 (`HybridSpeculativeOrchestrator`)**：本地 1B/3B 端侧模型极速生成 Draft 草稿，云端强模型（Verifier）二次校验修补，兼顾高智力与低开支。（规划中，尚未实现；现存的「渐进式投机流」是文档级 Anchor 推流编排，非 token 级投机解码）
+- 🧪 **P3 离线评测与回归**：
+  - **Golden Dataset 离线回归评测 (`OfflineEvalRunner`)**：Golden Question 题库回归报告——质量分（judge → 向量余弦 → Jaccard 兜底三级口径）、准确率、延迟与 Token 消耗，评测批次持久化并支持 A/B 对比。
+  - 规划中的能力（提示词版本管理、端云 token 级投机解码、管理 SSO 等）见 [ROADMAP.md](ROADMAP.md)。
 - 🏎️ **0-阻塞高性能架构**：
   - **ConcurrentQueue 异步批处理落盘**：请求完成 1 微秒入列，后台批量事务落库（SQLite/MariaDB），主数据平面 0 I/O 阻塞。
   - **Monitor.TryEnter 非阻塞限流 Sweeper**：并发清理锁 0 阻断 HTTP 请求管道。
@@ -109,125 +108,30 @@ curl http://localhost:5000/health
 
 ## 配置说明
 
-`appsettings.json` 中 `OptiRouter` 节点各字段含义：
+`appsettings.json` 中 `OptiRouter` 节点。**90% 场景只需下面几个字段**——约 80 个配置项的完整参考已移至 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)，字段语义以 `RoutingOptions.cs` 代码注释为准。
 
-### 入站安全
+### 核心配置（90% 场景只需这一节）
 
-| 字段 | 含义 | 默认 |
-|------|------|------|
-| `RequestsPerMinute` | 每个分区（IP > Auth）的固定窗口每分钟请求上限 | `60` |
-| `MaxConcurrentRequestsPerPartition` | 每个分区同时进行的最大请求数，超出返回 429 | `100` |
+| 字段 | 含义 |
+|------|------|
+| `ConfigDbConnectionString` | 配置库连接串（未配置回退 SQLite）——路由/预算/模型/租户 Key/审计/学习状态的唯一权威存储；配一处即全量切换（多实例见 Budget StoreProvider） |
+| `Models` | 上游模型端点列表（字段见 docs/CONFIGURATION.md「Models[]」）；`ApiKey` 支持 `env:VAR_NAME` 语法从环境变量加载 |
+| `Routing:Preset` | 预设名 `cost-first` / `balanced` / `quality-first`（见下文「推荐配置预设」）：仅填充未显式配置的项 |
+| `Budget:DailyBudgetUsd` | 日预算（美元），耗尽按 `EnforceOnExhausted` 降级/拒绝 |
+| `Routing:EnableFailover` | 候选链顺序重试（默认 `true`，一般无需调整） |
+| `Routing:EnableFusionRouter` | 融合路由质量模式（默认 `false`，开启前读预设说明并承担 N+2 成本） |
+| `Budget:StoreProvider` | 多实例部署时改 `Postgres`/`Redis`/`MariaDb` 共享账本（默认 `Auto`） |
+| `Routing:MetricsApiKey` | `/metrics` 端点 Bearer 鉴权（公网部署建议配置） |
 
-> **分区 Key 优先级**：客户端 IP（启用 `TrustProxyHeaders` 时依次使用 `CF-Connecting-IP`、`X-Forwarded-For` 首段，否则使用 `RemoteIpAddress`）> Bearer Token（SHA256 哈希前 16 hex）。仅当无法取得 IP 时按认证标识分区；`X-Session-Id` 不参与限流分区。
-
-### Models[]（模型端点列表）
-
-| 字段 | 含义 | 示例 |
-|------|------|------|
-| `Name` | 模型标识 | `gpt-4o` |
-| `BaseUrl` | 上游 API 基地址 | `https://api.openai.com/v1` |
-| `ApiKey` | 鉴权密钥。支持 `env:VAR_NAME` 语法从环境变量加载（变量缺失时该模型 key 为空并告警）。模型配置权威存储为配置库（SQLite 或 MariaDB，见部署配置）；通过 Dashboard 保存模型配置会写入配置库并热生效 | `sk-...` |
-| `Tier` | 能力分档：`Strong` / `Medium` / `Cheap` | `Strong` |
-| `MaxContextTokens` | 最大上下文长度 | `128000` |
-| `InputPricePerMillion` | 输入价格（美元/百万 token） | `2.5` |
-| `CachedInputPricePerMillion` | 缓存命中输入价格（美元/百万 token）；省略/null 时回退普通输入价格 | `1.25` |
-| `CacheWriteInputPricePerMillion` | 缓存写入输入价格（美元/百万 token）；省略/null 时回退普通输入价格 | `3.0` |
-| `OutputPricePerMillion` | 输出价格（美元/百万 token） | `10.0` |
-| `Provider` | 可选 provider 标识（自由字符串），仅用于 Fusion 软多样性；空表示未知 | `openai` |
-| `Family` | 可选模型家族标识（自由字符串），仅用于 Fusion 软多样性；空表示未知 | `gpt-4o` |
-| `TimeoutSeconds` | 单次调用超时秒数。非流式=总时长上限；流式=响应头阶段总时长上限 + 相邻 chunk 空闲上限（持续推进的流不设总时长上限，不会被中途切断） | `120` |
-| `MaxRetries` | 失败后最大重试次数 | `0` |
-| `Enabled` | 是否启用该模型 | `true` |
-| `IsLocalOrPrivate` | 标识该端点是否为本地/私有化节点（用于数据不出域隔离） | `false` |
-| `Tags` | 能力标签，配合 `EnableCapabilityFilter` 使用。约定值：`vision`（图片输入）、`tool-use`（函数调用）、`json-mode`（`response_format: json_object`） | `["vision", "tool-use"]` |
-
-### Budget（预算控制）
-
-| 字段 | 含义 | 示例 |
-|------|------|------|
-| `DailyBudgetUsd` | 日预算（美元） | `10.0` |
-| `SessionBudgetUsd` | 会话预算（美元），null 表示不限 | `null` |
-| `EnforceOnExhausted` | 耗尽行为：`Degrade` 降级 / `Reject` 拒绝 | `Degrade` |
-| `StoreProvider` | 持久化存储提供者，默认 `Auto`：配置了全局 `OptiRouter:ConfigDbConnectionString` 即用 MariaDb，否则回退 SQLite——只配连接串一处即全量切换；显式指定 `Sqlite` / `MariaDb` / `Postgres` / `Redis` / `InMemory` 可覆盖，服务器型 DB 供多实例共享全局账本 | `Auto` |
-| `MariaDbConnectionString` | 可选覆盖，缺省回退全局 `OptiRouter:ConfigDbConnectionString`（同一数据库只配一处连接）；两者皆空且 `StoreProvider=MariaDb` 时启动校验失败 | *回退全局* |
-| `UsePersistentStore` | 是否持久化成本账本（跨重启保留）；服务器型提供者（MariaDb/Postgres/Redis）忽略此开关 | `true` |
-| `StorePath` | SQLite 账本文件路径，仅 `StoreProvider=Sqlite` 且 `UsePersistentStore=true` 时生效 | `data/optirouter-budget.db` |
-| `SessionEvictionHours` | 会话账户淘汰年龄（小时）；超过此时间无活动的会话自动清理，防止内存泄漏 | `24` |
-
-### Routing（路由策略）
+### 安全相关默认值（公网部署前必读）
 
 | 字段 | 含义 | 默认 |
 |------|------|------|
-| `EnableRuleClassifier` | 按请求特征推断 Tier | `true` |
-| `EnableTokenEstimator` | 估算 token 并过滤上下文不足的模型 | `true` |
-| `EnableBudgetGuard` | 预算耗尽时执行降级/拒绝 | `true` |
-| `EnableFailover` | 候选链顺序尝试，主模型失败自动切下一个 | `true` |
-| `EnablePiiAnonymization` | 是否启用 PII 敏感数据脱敏与反向还原（手机/邮箱/身份证/卡号/IP）。**默认关闭，隐私敏感部署建议启用** | `false` |
-| `EnableDataSovereignty` | 是否启用数据不出域隔离屏障（强制仅路由至本地/私有节点）。**默认关闭，合规部署建议启用** | `false` |
-| `EnableJsonAstAutoRepair` | 是否启用 JSON AST 自动化修补服务（剥离代码围栏、修复逗号、截断补全） | `true` |
-| `EnableDistributedTracing` | 是否启用 W3C 分布式链路追踪（生成 TraceId/SpanId，映射 ActivitySource） | `true` |
-| `EnablePersonaDriftProtection` | 是否启用多轮对话人设一致性防护（静态人设锚点提示词）。**默认关闭** | `false` |
-| `LongInputThresholdTokens` | 超长输入阈值，超过则过滤短上下文模型 | `32000` |
-| `DefaultTier` | 规则分类未命中时的默认分档 | `Medium` |
-| `TokenEstimation` | token 估算模式：`Tiktoken` 真实 BPE 精确计数 / `Bucket` 分桶粗估 | `Tiktoken` |
-| `TiktokenEncoding` | Tiktoken 编码名（仅 `TokenEstimation=Tiktoken` 时生效） | `o200k_base` |
-| `FailoverFailureThreshold` | 触发跨请求熔断的连续失败次数 | `3` |
-| `FailoverCooldownSeconds` | 熔断冷却秒数，到期进入半开探测 | `60` |
-| `FailoverGlobalTimeoutSeconds` | Failover 过程全局总超时秒数（`0` 表示不限制；超过此时间终止候选重试） | `0` |
-| `FailoverHalfOpenMaxProbes` | 半开态允许的最大并发探测请求数 | `1` |
-| `FailoverHalfOpenRequiredSuccesses` | 半开态连续探测成功多少次后才闭合熔断（防单次偶然成功导致抖动） | `1` |
-| `EnableHealthProbe` | 是否启用后台主动健康探活（定时对所有启用模型探测，结果上报断路器） | `true` |
-| `HealthProbeIntervalSeconds` | 后台探活间隔秒数 | `60` |
-| `EnableSemanticRouter` | 是否启用向量空间语义路由 | `true` |
-| `SemanticRouterMode` | `Hybrid`（TF-IDF 高置信短路 + 第二阶段）/ `TfIdf` / `Dense` | `Hybrid` |
-| `EnableOnnxEmbedding` | 是否启用本地 ONNX 轻量级向量模型（如 bge-small-zh / all-MiniLM-L6-v2）进行深层隐式语义路由 | `false` |
-| `OnnxModelPath` | 本地 ONNX 模型文件路径（如 `models/bge-small-zh.onnx`） | `null` |
-| `OnnxExecutionProvider` | ONNX 执行提供者：`CPU` 或 `CUDA` | `CPU` |
-| `HybridHighConfidenceThreshold` | Hybrid 模式下 TF-IDF 高置信短路阈值；低于阈值交给第二阶段判定 | `0.45` |
-| `SemanticSimilarityThreshold` | 语义匹配余弦相似度阈值 `[0.0, 1.0]`，低于此值不命中 | `0.25` |
-| `SemanticRoutes` | 语义路由规则列表，每条含 `Name`/`TargetTier`/`Phrases` | `[]` |
-| `EnableSessionAffinity` | 显式 `X-Session-Id` 会话粘性 | `false` |
-| `SessionAffinityTtlSeconds` | 会话粘性 TTL（秒） | `600` |
-| `EnablePromptCacheAffinity` | 稳定前缀缓存粘性：仅保存 SHA-256 指纹，软提升上次成功模型 | `false` |
-| `PromptCacheAffinityTtlSeconds` | 稳定前缀指纹粘性 TTL（秒，必须 > 0） | `600` |
-| `EnableQuotaAwareRouting` | 读取进程内上游配额快照，软降级低余量并在已知 reset 窗口内排除耗尽模型 | `false` |
-| `MaxResponseStreamBytes` | 流式响应累计字节硬上限，防 OOM/恶意无限流 | `20971520`(20MB) |
-| `EnableCascadeUpgrade` | Cheap→Strong 级联自校验（采样，低置信升级重答） | `false` |
-| `CascadeUpgradeSampleRate` | 级联采样率 `[0.0, 1.0]`，0=关闭，1=全量 | `0.1` |
-| `CascadeUpgradeVerifierModel` | 级联校验模型名（他评，消除"模型自评"自利偏差）；留空=自评，建议填 Strong 模型 | `null` |
-| `EnableRegenerateFeedback` | regenerate 负反馈：同一规范化请求窗口内重发且上次成功 → 惩罚上次命中模型（零额外调用的质量信号；定时任务固定 prompt 场景会误判，需关闭） | `false` |
-| `RegeneratePenaltyReward` | regenerate 注入的低 reward `[0.0, 1.0]`，低于慢成功地板 0.3 | `0.1` |
-| `RegenerateFeedbackWindowSeconds` | regenerate 判定窗口（秒），超过窗口的同键重发视为独立请求 | `600` |
-| `ExplorationEpsilon` | ε 探索保底 `[0.0, 1.0]`：段内重排后以概率 ε 把随机尾部模型提到段首，修低流量"尾部锁死"；自用建议 0.05 | `0.0` |
-| `EnableLatencyAware` | 同 tier 段按历史延迟重排（快模型优先），后台聚合零 I/O | `false` |
-| `LatencyMinSamples` | 延迟排序生效所需最小样本数，低于此值不参与排序 | `10` |
-| `LatencyStatsWindowMinutes` | 延迟聚合统计窗口（分钟），窗口越长越平滑但响应慢 | `60` |
-| `EnableCapabilityFilter` | 按请求能力需求（vision/tool-use/json-mode）排除 Tags 不含的模型 | `false` |
-| `EnableFusionMode` | 并行首试：非流式首轮并行前 N 候选取最快成功，取消其余 | `false` |
-| `FusionMaxParallel` | 并行首试首轮并发数，范围 `[2, 5]` | `2` |
-| `EnableFusionRouter` | **融合路由**（OpenRouter Fusion 式）：非流式/流式首轮并行 panel → analyst 结构化分析 → outer 写最终答案。质量技术，成本 N+2 调用（N=panel 数）。**默认关闭，需显式启用并承担成本** | `false` |
-| `FusionRouterPanelSize` | 融合路由 panel 并行模型数，范围 `[2, 5]` | `3` |
-| `EnableDynamicFusionPanelSize` | 按 typed request complexity 在最小/最大范围内动态选 panel 数；不解析 reason 文本 | `false` |
-| `FusionRouterMinPanelSize` | 动态 Fusion panel 最小数，范围 `[2, 5]` 且不得大于 `FusionRouterPanelSize` | `2` |
-| `EnableFusionDiversity` | 软优先不同 `Provider`/`Family`，元数据不足时按原候选顺序补齐 | `false` |
-| `FusionRouterAnalystModel` | 融合路由 analyst 模型名（留空=主候选）；只产结构化 JSON | `null` |
-| `FusionRouterAnalystPrompt` | 融合路由 analyst 专用 JSON 分析提示词（留空=内置提示词） | `null` |
-| `FusionRouterOuterModel` | 融合路由 outer 模型名（留空=主候选）；读分析写最终答案 | `null` |
-| `FusionRouterMaxOutputTokens` | 融合路由 outer 答案最大输出 token 数 | `16000` |
-| `FusionRouterTemperature` | 融合路由 panel/analyst 采样温度，范围 `[0, 2]` | `0.0` |
-| `FusionRouterPanelTemperature` | panel 专用采样温度；`null`=沿用 `FusionRouterTemperature` | `null` |
-| `FusionRouterMinComplexity` | 融合路由最低复杂度门控（`Unknown`/`Simple`/`Standard`/`Complex`） | `Unknown` |
-| `EnableOtlpTracing` | 启用原生 OpenTelemetry OTLP Exporter 导出 ActivitySource DAG 链路追踪 | `false` |
-| `OtlpEndpoint` | OTLP Exporter 接收端点（如 `"http://localhost:4317"`） | `"http://localhost:4317"` |
-| `OtlpProtocol` | OTLP 传输协议：可选 `"grpc"` 或 `"http/protobuf"` | `"grpc"` |
-| `OtlpServiceName` | OpenTelemetry 导出的服务名称 | `"OptiRouter"` |
-| `EnableMetrics` | 启用 Prometheus `/metrics` 端点（无鉴权，仅聚合数+模型名） | `true` |
-| `MetricsEndpointPath` | 指标端点路径 | `/metrics` |
-| `MetricsApiKey` | `/metrics` 端点鉴权密钥（Bearer Token）。非空时要求 `Authorization: Bearer <key>`；null 保持无鉴权 | `null` |
-| `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（默认关闭；管理员可显式设为 `true` 以 opt-in。升级注意：该默认值由早前版本的 `true` 改为 `false`，依赖请求内容留存的部署需显式开启） | `false` |
-| `AuditRetentionHours` | 审计记录保留小时数。`0` = 永久保留（默认，后台不淘汰）；正数按窗口周期淘汰过期记录，防止审计表无界增长 | `0` |
-| `StreamFirstTokenTimeoutMs` | 流式首 token（TTFB）超时毫秒数。`0` 表示不限制，仅依赖客户端层超时兜底 | `0` |
-| `StreamHedgeDelayMs` | 流式首行竞速（Hedge）延迟毫秒数。`>0` 且存在下一候选时，主候选开始拉流后延迟此时长启动下一候选竞速首行，谁先出首行由谁服务（落败方取消并按慢首行记失败；已生成部分可能仍被上游计费）。`0` = 禁用。竞速结局经 `optirouter_stream_hedge_races_total{result,loser_reason}` 暴露（result=primary_won/secondary_won/both_failed） | `0` |
+| `AuditStoreRequestContent` | 审计库与 Dashboard 是否留存请求内容明文（opt-in；升级注意：默认值由早前版本的 `true` 改为 `false`，依赖留存的部署需显式开启） | `false` |
+| `EnablePiiAnonymization` | PII 脱敏/还原（隐私敏感部署建议启用） | `false` |
+| `EnableDataSovereignty` | 数据不出域屏障（合规部署建议启用） | `false` |
+| `MetricsApiKey` | `/metrics` 端点鉴权（公网裸露聚合指标仍是侦察面） | `null` |
+
 
 ### 推荐配置预设 (Presets)
 
@@ -354,6 +258,7 @@ Blazor Server 管理台（`/overview` `/requests` `/models` `/router` `/keys` `/
 | 评测批次持久化 | Golden Dataset 评测报告落配置库（保留最近 10 批），重启不丢失，A/B 对比跨重启可用 |
 | 学习状态管理 | Thompson / Contextual Bandit 状态可一键重置为初始先验（含持久化回落，需确认）或导出 CSV |
 | Fusion 编排参数 | 面板规模（数量/动态/最小/多样性）、Analyst/Outer 模型下拉、采样与预算（最大输出/温度/Panel 超时）、Analyst 提示词、竞速参数（并发数/Hedge 延迟）全部可在路由页编辑并热生效 |
+| 管理台角色（最小 RBAC） | 三角色 `admin`/`operator`/`viewer`：viewer 只读全部管理查询（上游密钥明文查看除外，仅 admin），operator 另可执行沙箱/评测/配置写/学习重置/熔断覆写，admin 独占租户 Key、模型配置与管理身份管理。主密钥恒为 admin；附加身份经 `POST /api/dashboard/identities` 签发（明文仅返回一次，库内只存 SHA256 哈希），撤销立即失效。详见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)「管理台角色」 |
 
 ## curl 示例
 
@@ -472,6 +377,10 @@ docker run -d --name optirouter \
 ```
 
 > 说明：全局 `ProxyApiKey` 已移除，`/v1/*` 鉴权一律使用管理台 Keys 页创建的租户 Client Key。
+
+### 多实例 / Kubernetes
+
+最小清单（无状态 Deployment + `/health` 探针）与多副本存储矩阵前提见 [deploy/k8s/](deploy/k8s/)：replicas > 1 必须使用服务器型存储后端（配置库 MariaDB；账本/断路器 `Postgres`/`Redis`/`MariaDb`），进程内存状态（响应缓存/健康统计/亲和）跨 Pod 不同步。
 
 ## 运维备忘
 
