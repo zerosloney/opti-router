@@ -72,7 +72,22 @@ jobs:
         env:
           OPTIROUTER_MARIADB_TEST: "Server=127.0.0.1;Port=3306;Database=optirouter_ci;User ID=root;Password=ci-root-pass;Connection Timeout=15;Default Command Timeout=30"
         # coverlet（已在测试项目引用）收集 XPlat 覆盖率，结果在 TestResults/*/coverage.cobertura.xml。
-        run: dotnet test OptiRouter.sln -c Release --no-build --verbosity minimal --collect:"XPlat Code Coverage"
+        # runsettings 指定 cobertura 格式；门禁由下一步显式解析执法（collector 自带 Threshold
+        # 在 collect 路径下不改变退出码，实测确认）。
+        run: dotnet test OptiRouter.sln -c Release --no-build --verbosity minimal --settings tests/coverlet.runsettings --collect:"XPlat Code Coverage"
+
+      - name: Coverage gate (line/total >= 67%)
+        # 实测基线 68.84%（2026-09-30），0.67 留平台波动余量；基线提升后同步上调
+        # tests/coverlet.runsettings 注释与本步骤阈值。
+        run: |
+          set -euo pipefail
+          coverage_file=$(find "$GITHUB_WORKSPACE" -name coverage.cobertura.xml | head -1)
+          rate=$(grep -o 'line-rate="[0-9.]*"' "$coverage_file" | head -1 | grep -o '[0-9.]*')
+          echo "line coverage: $rate"
+          if ! awk -v r="$rate" 'BEGIN{exit !(r >= 0.67)}'; then
+            echo "::error::Line coverage $rate is below the 0.67 gate (see tests/coverlet.runsettings)"
+            exit 1
+          fi
 
       - name: Upload coverage
         if: always()

@@ -349,6 +349,8 @@ curl -H "Authorization: Bearer <AdminApiKey>" \
 
 报告结构：`summary`（总量/成功率/成本/Token/延迟分位）、`byModel`、`byTier`（含成本份额）、`cascade`（触发率 + 升级来源分布）、`fusion`、`byReason`（Top 20）、`dailyTrend`。
 
+**策略横评**：`scripts/strategy-bakeoff.ps1` 用审计时间窗总账 + 评测跑批，横向对比"cheap-only / 全池 / 融合"等策略组合的成本与质量——方法论、口径与报告模板见 [docs/strategy-bakeoff.md](docs/strategy-bakeoff.md)。
+
 ## 部署
 
 ### Docker（推荐容器化部署）

@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!-- 覆盖率收集格式定义：CI dotnet test 以 settings 参数引用，产出 cobertura 供
+     "Coverage gate" 步骤解析执法（collector 自带 Threshold 在 collect 路径下不改变
+     退出码，故门禁由 CI 步骤显式断言 line-rate ≥ 0.67）。实测基线：Windows 本机
+     Release 全量 68.84% 行覆盖（2026-09-30），0.67 留平台波动余量；基线提升后同步上调。 -->
+<RunSettings>
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat code coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>
