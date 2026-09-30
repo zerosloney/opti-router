@@ -96,6 +96,15 @@ public static class ModelsConfigHandler
                     .FirstOrDefault(m => string.Equals(m.Name, req.ApiKeySourceModel, StringComparison.Ordinal))?.ApiKey;
             }
 
+            // 协议可选，缺省 OpenAI；显式提供但无法识别时 400——错误协议会让模型在 chat 面
+            // 404/路由面失联，静默回退 OpenAI 比报错更难排查。
+            ProviderProtocol protocol = ProviderProtocol.OpenAI;
+            if (!string.IsNullOrWhiteSpace(req.Protocol)
+                && !Enum.TryParse(req.Protocol, ignoreCase: true, out protocol))
+            {
+                return Results.BadRequest(new { error = $"Unknown protocol '{req.Protocol}'. Valid values: OpenAI, Anthropic, Gemini, SystemOne." });
+            }
+
             var model = new ModelEndpointOptions
             {
                 Name = req.Name?.Trim() ?? string.Empty,
@@ -104,6 +113,7 @@ public static class ModelsConfigHandler
                 ApiKey = apiKey,
                 Provider = req.Provider?.Trim() ?? string.Empty,
                 Family = req.Family?.Trim() ?? string.Empty,
+                Protocol = protocol,
                 Tier = Enum.TryParse<ModelTier>(req.Tier, ignoreCase: true, out var tier) ? tier : ModelTier.Medium,
                 MaxContextTokens = (req.MaxContextTokens is > 0) ? req.MaxContextTokens.Value : 200_000,
                 InputPricePerMillion = Math.Max(0m, req.InputPricePerMillion ?? 0m),
@@ -138,7 +148,7 @@ public static class ModelsConfigHandler
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
-            return Results.Created($"/api/models/{model.Name}", new { message = $"Model '{model.Name}' created", model = new { model.Name, model.Id, model.BaseUrl, model.Tier, model.Enabled } });
+            return Results.Created($"/api/models/{model.Name}", new { message = $"Model '{model.Name}' created", model = new { model.Name, model.Id, model.BaseUrl, Protocol = model.Protocol.ToString(), model.Tier, model.Enabled } });
         });
 
         // 5. PUT update single model (持久化到文件 + 热重载)
@@ -391,6 +401,13 @@ public static class ModelsConfigHandler
         if (req.BaseUrl is not null && !string.IsNullOrWhiteSpace(req.BaseUrl)) model.BaseUrl = req.BaseUrl.TrimEnd('/');
         if (req.Id is not null) model.Id = req.Id.Trim(); // 空字符串表示清除（回退 Name 作上游 id）
         if (req.ApiKey is not null) model.ApiKey = req.ApiKey; // 空字符串表示清除
+        // 协议：null/空白 = 不改；非空白且无法识别时 400（同 create 的严格口径）。
+        if (!string.IsNullOrWhiteSpace(req.Protocol))
+        {
+            if (!Enum.TryParse<ProviderProtocol>(req.Protocol, ignoreCase: true, out var protocol))
+                return Results.BadRequest(new { error = $"Unknown protocol '{req.Protocol}'. Valid values: OpenAI, Anthropic, Gemini, SystemOne." });
+            model.Protocol = protocol;
+        }
         if (req.Tier is not null && Enum.TryParse<ModelTier>(req.Tier, ignoreCase: true, out var tier)) model.Tier = tier;
         if (req.MaxContextTokens is > 0) model.MaxContextTokens = req.MaxContextTokens.Value;
         if (req.TimeoutSeconds is > 0) model.TimeoutSeconds = req.TimeoutSeconds.Value;
@@ -425,7 +442,7 @@ public static class ModelsConfigHandler
         {
             return Results.BadRequest(new { error = ex.Message });
         }
-        return Results.Ok(new { message = $"Model '{name}' updated", model = new { model.Name, model.Id, model.BaseUrl, model.Tier, model.MaxContextTokens, model.TimeoutSeconds, model.MaxRetries, model.Enabled, model.InputPricePerMillion, model.OutputPricePerMillion, HasApiKey = !string.IsNullOrEmpty(model.ApiKey) } });
+        return Results.Ok(new { message = $"Model '{name}' updated", model = new { model.Name, model.Id, model.BaseUrl, Protocol = model.Protocol.ToString(), model.Tier, model.MaxContextTokens, model.TimeoutSeconds, model.MaxRetries, model.Enabled, model.InputPricePerMillion, model.OutputPricePerMillion, HasApiKey = !string.IsNullOrEmpty(model.ApiKey) } });
     }
 
     private static IResult DeleteModel(string name, ModelsConfigService cfg)
@@ -528,7 +545,8 @@ public static class ModelsConfigHandler
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null,
         List<string>? Tags = null,
-        double? Weight = null);
+        double? Weight = null,
+        string? Protocol = null);
 
     private record CreateModelRequest(
         string? Name,
@@ -549,7 +567,8 @@ public static class ModelsConfigHandler
         decimal? CacheWriteInputPricePerMillion = null,
         bool? IsLocalOrPrivate = null,
         double Weight = 1.0,
-        string? ApiKeySourceModel = null);
+        string? ApiKeySourceModel = null,
+        string? Protocol = null);
 }
 
 /// <summary>上游 provider 模型拉取请求。ApiKey 可空，开源自托管多不要求鉴权；ModelName 指定时自动复用已配置模型的凭据与端点。</summary>

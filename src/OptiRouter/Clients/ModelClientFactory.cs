@@ -49,11 +49,13 @@ public sealed class ModelClientFactory
         ConfigureAuthentication(endpoint, httpClient.DefaultRequestHeaders);
 
         // 按端点协议选择客户端：原生协议（Anthropic/Gemini）在客户端内部完成双向翻译，
-        // 下游始终收到 OpenAI 契约响应。
+        // 下游始终收到 OpenAI 契约响应；SystemOne 为决策协议，chat 方法不可用（仅探活），
+        // 实际流量由 /v1/systemone 透传端点直连。
         return endpoint.Protocol switch
         {
             ProviderProtocol.Anthropic => new AnthropicModelClient(endpoint, httpClient, _logger),
             ProviderProtocol.Gemini => new GeminiModelClient(endpoint, httpClient, _logger),
+            ProviderProtocol.SystemOne => new SystemOneModelClient(endpoint, httpClient),
             _ => new OpenAICompatibleModelClient(endpoint, httpClient, _logger)
         };
     }

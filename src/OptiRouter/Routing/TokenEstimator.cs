@@ -41,22 +41,51 @@ public static class TokenEstimator
             if (string.IsNullOrEmpty(text)) continue;
             messageCount++;
 
-            foreach (var rune in text.EnumerateRunes())
-            {
-                int code = rune.Value;
-                if (IsCjk(code)) cjkChars++;
-                else if (code < 0x80) asciiChars++;
-                else otherChars++;
-            }
+            var (cjk, ascii, other) = CountBuckets(text);
+            cjkChars += cjk;
+            asciiChars += ascii;
+            otherChars += other;
         }
 
         if (messageCount == 0) return 0;
 
+        return SumContentTokens(cjkChars, asciiChars, otherChars) + messageCount * TokensPerMessage;
+    }
+
+    /// <summary>
+    /// 估算任意文本的输入 token 数（与 <see cref="Estimate"/> 同分桶系数，不含消息级固定开销）。
+    /// 供非 chat 形态的计费估算复用（如 SystemOne 决策请求体）。
+    /// </summary>
+    public static int EstimateText(string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return 0;
+        var (cjk, ascii, other) = CountBuckets(text);
+        return SumContentTokens(cjk, ascii, other);
+    }
+
+    private static int SumContentTokens(int cjkChars, int asciiChars, int otherChars)
+    {
         double contentTokens = cjkChars / CharsPerTokenCjk
             + asciiChars / CharsPerTokenAscii
             + otherChars / CharsPerTokenOther;
+        return (int)Math.Ceiling(contentTokens);
+    }
 
-        return (int)Math.Ceiling(contentTokens) + messageCount * TokensPerMessage;
+    private static (int Cjk, int Ascii, int Other) CountBuckets(string text)
+    {
+        int cjkChars = 0;
+        int asciiChars = 0;
+        int otherChars = 0;
+
+        foreach (var rune in text.EnumerateRunes())
+        {
+            int code = rune.Value;
+            if (IsCjk(code)) cjkChars++;
+            else if (code < 0x80) asciiChars++;
+            else otherChars++;
+        }
+
+        return (cjkChars, asciiChars, otherChars);
     }
 
     /// <summary>

@@ -67,7 +67,14 @@ public enum ProviderProtocol
     Anthropic = 1,
 
     /// <summary>Google Gemini generateContent API。</summary>
-    Gemini = 2
+    Gemini = 2,
+
+    /// <summary>
+    /// 云知声 SystemOne 决策协议（u2-decision，POST /v1/systemone）。
+    /// 非 chat 协议：不经 chat 路由候选池与 OpenAI 翻译管线，
+    /// 由 <c>POST /v1/systemone</c> 原生透传端点直接服务。
+    /// </summary>
+    SystemOne = 3
 }
 
 /// <summary>

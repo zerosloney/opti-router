@@ -296,7 +296,9 @@ public static class ChatCompletionsEndpoint
             return true;
         }
 
-        var enabled = options.Models.Where(m => m.Enabled).ToList();
+        // SystemOne 决策协议端点不经 chat 契约服务（/v1/chat/completions、/v1/messages、/v1beta），
+        // 从"已知模型"中排除：显式点名时按 404 model_not_found 拒绝，而非落进编排器后 503。
+        var enabled = options.Models.Where(m => m.Enabled && m.Protocol != ProviderProtocol.SystemOne).ToList();
         return ModelDisplayIds.Resolve(enabled, model ?? string.Empty).Count > 0;
     }
 

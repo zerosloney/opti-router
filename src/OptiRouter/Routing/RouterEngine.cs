@@ -50,7 +50,11 @@ public sealed class RouterEngine
         for (int i = 0; i < options.Models.Count; i++)
         {
             var m = options.Models[i];
-            if (m.Enabled) allModels.Add(m);
+            if (!m.Enabled) continue;
+            // SystemOne 决策协议端点不是 chat 候选：chat 流量走 /v1/systemone 原生入口，
+            // 混入候选池会被 OpenAI 兼容兜底客户端打出无意义请求。
+            if (m.Protocol == ProviderProtocol.SystemOne) continue;
+            allModels.Add(m);
         }
 
         var context = new RouterContext

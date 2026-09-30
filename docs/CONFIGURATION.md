@@ -27,6 +27,7 @@
 |------|------|------|
 | `Name` | 模型标识 | `gpt-4o` |
 | `BaseUrl` | 上游 API 基地址 | `https://api.openai.com/v1` |
+| `Protocol` | 上游协议：`OpenAI`（默认）/ `Anthropic` / `Gemini` / `SystemOne`。SystemOne 为云知声决策协议（非 chat），仅由 `/v1/systemone` 原生透传端点服务，对 chat 路由与 chat 入口完全不可见，见下方说明 | `OpenAI` |
 | `ApiKey` | 鉴权密钥。支持 `env:VAR_NAME` 语法从环境变量加载（变量缺失时该模型 key 为空并告警）。模型配置权威存储为配置库（SQLite 或 MariaDB，见部署配置）；通过 Dashboard 保存模型配置会写入配置库并热生效 | `sk-...` |
 | `Tier` | 能力分档：`Strong` / `Medium` / `Cheap` | `Strong` |
 | `MaxContextTokens` | 最大上下文长度 | `128000` |
@@ -41,6 +42,31 @@
 | `Enabled` | 是否启用该模型 | `true` |
 | `IsLocalOrPrivate` | 标识该端点是否为本地/私有化节点（用于数据不出域隔离） | `false` |
 | `Tags` | 能力标签，配合 `EnableCapabilityFilter` 使用。约定值：`vision`（图片输入）、`tool-use`（函数调用）、`json-mode`（`response_format: json_object`） | `["vision", "tool-use"]` |
+
+### SystemOne 决策协议（Protocol=SystemOne，非 chat）
+
+云知声 SystemOne（u2-decision）不是 chat 协议：请求为 `state + questions`（choice/noul/score 三类问题），响应为带概率分布的 `answers`，无流式、无 token usage。网关以**原生透传**方式接入，不经 chat 翻译管线：
+
+- **调用方式**：`POST /v1/systemone`，租户 ClientKey 鉴权（同 `/v1` 代理面），请求体即 SystemOne 原生 JSON。网关校验 `state`/`questions` 必填后，把 `Authorization` 换成该端点配置的 ApiKey 直连上游 `{BaseUrl}/v1/systemone`（BaseUrl 以 `/v1` 结尾时不再重复拼接），请求/响应体保真转发，上游非 2xx 状态码与错误体原样返回。
+- **模型寻址**：请求体 `model` 字段按路由名/显示 ID/裸上游 Id 解析到 Protocol=SystemOne 的端点并强制覆写为 `UpstreamModelId`；缺省时仅一条 SystemOne 端点则自动命中，多条则必须显式指定。
+- **chat 面隔离**：SystemOne 端点被路由候选池与 chat 入口（`/v1/chat/completions`、`/v1/messages`、`/v1beta`）排除——显式点名按 404 `model_not_found` 拒绝，auto 路由永不选中。
+- **计费口径**：上游不回传 token usage，按请求体 token 粗估（与 chat 同分桶系数）× `InputPricePerMillion` 入账，审计标记 `isEstimated`。
+- **探活**：管理台"测试连通性"与后台探活对该协议走同域 OpenAI 兼容 `GET /v1/models`，不消耗决策调用。
+
+配置示例（管理 API 或 appsettings 播种）：
+
+```bash
+curl -X POST http://localhost:5000/api/models \
+  -H "Authorization: Bearer $ADMIN_KEY" -H "Content-Type: application/json" \
+  -d '{
+    "name": "u2-decision",
+    "baseUrl": "https://maas-api.unisound.com",
+    "protocol": "SystemOne",
+    "apiKey": "env:UNISOUND_API_KEY",
+    "tier": "Medium",
+    "inputPricePerMillion": 0
+  }'
+```
 
 ## Budget（预算控制）
 

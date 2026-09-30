@@ -317,6 +317,25 @@ curl -X POST "http://localhost:5000/v1beta/models/auto:generateContent" \
 
 流式分别走 `"stream": true`（Anthropic 事件序列）与 `:streamGenerateContent?alt=sse`（Gemini SSE 块）。`auto` 语义与模型校验同 OpenAI 入口一致；文本、system、工具调用（tool_use/tool_result 与 functionCall/functionResponse）双向翻译。
 
+另支持云知声 **SystemOne 决策协议**（u2-decision，非 chat 协议）原生透传——请求为 `state + questions`（choice/noul/score），响应为带概率分布的 `answers`，网关校验必填字段后换上游密钥直连，请求/响应体保真：
+
+```bash
+# SystemOne 决策协议（鉴权：Authorization: Bearer，model 指向 Protocol=SystemOne 的端点）
+curl -X POST http://localhost:5000/v1/systemone \
+  -H "Authorization: Bearer your-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "u2-decision",
+    "state": "待决策的业务上下文（工单文本/对话/结构化对象）",
+    "questions": {
+      "route": {"type": "choice", "options": ["billing", "tech", "other"]},
+      "confidence": {"type": "score"}
+    }
+  }'
+```
+
+SystemOne 端点不进 chat 路由候选池，chat 入口显式点名按 404 拒绝；计费按请求体 token 粗估 × 输入单价（上游无 usage 回传）。配置方法见 `docs/CONFIGURATION.md` 的 SystemOne 小节。
+
 ## 测试
 
 ### 单元测试与集成测试

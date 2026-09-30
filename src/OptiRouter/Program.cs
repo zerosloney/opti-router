@@ -375,6 +375,10 @@ app.MapChatCompletions();
 app.MapAnthropicMessages();
 app.MapGeminiGenerateContent();
 
+// SystemOne 决策协议原生透传端点（u2-decision）：非 chat 协议，不经翻译管线，
+// 租户 ClientKey 鉴权后换上游密钥直连，请求/响应体保真。
+app.MapSystemOne();
+
 // OpenAI 兼容模型发现端点（GET /v1/models），受 /v1/* 鉴权与限流保护。
 app.MapModelsEndpoint();
 

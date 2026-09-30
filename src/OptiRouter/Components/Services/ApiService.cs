@@ -884,7 +884,8 @@ public class ApiService
         bool? IsLocalOrPrivate = null,
         string? Id = null,
         double Weight = 1.0,
-        string? ApiKeySourceModel = null);
+        string? ApiKeySourceModel = null,
+        string? Protocol = null);
 
     /// <summary>上游模型拉取响应（与 ModelsConfigHandler.DiscoveredModel 同结构）。</summary>
     public record DiscoveredModel(string Id, string? Name, string? OwnedBy, System.Text.Json.JsonElement? Raw);
@@ -906,7 +907,8 @@ public class ApiService
         bool? IsLocalOrPrivate = null,
         List<string>? Tags = null,
         string? Id = null,
-        double? Weight = null);
+        double? Weight = null,
+        string? Protocol = null);
 
     public record ModelTestResultDto(
         bool Success,
