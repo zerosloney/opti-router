@@ -201,10 +201,50 @@ public sealed class ClientKeyServiceTests
     }
 
     /// <summary>
-    /// P1-3 回归：持久化失败时密钥修改不得生效。注入方式：以 FileShare.None 独占打开
-    /// client-keys.json，使 PersistKeys 的 File.Replace 抛 IOException（覆盖"写临时文件成功、
-    /// 替换失败"的真实故障形态）。修复前：缓存先改后持久化，异常后内存对象已被改写——
-    /// 禁用失败却鉴权 Disabled、删除失败却 Invalid；修复后失败前后鉴权口径与磁盘一致。
+    /// 跨平台注入持久化失败，覆盖"写临时文件成功、原子替换失败"的真实故障形态。
+    /// 两个平台的文件语义不同，注入机制按平台分派（服务行为断言完全一致）：
+    /// <list type="bullet">
+    /// <item>Windows：以 FileShare.None 独占锁目标文件——File.Replace 对被锁目标抛 IOException；</item>
+    /// <item>POSIX：把密钥文件暂时替换为同名目录——rename(file→目录) 返回 EISDIR 抛 IOException。
+    /// 锁文件在此无效：POSIX 的 rename 不受打开句柄约束（Linux CI 连续红灯的根因）。</item>
+    /// </list>
+    /// </summary>
+    private static IDisposable InjectPersistFailure(TempFixture fixture)
+        => OperatingSystem.IsWindows()
+            ? new WindowsExclusiveFileLock(fixture.Path)
+            : new PosixDirectorySwap(fixture.Path);
+
+    private sealed class WindowsExclusiveFileLock(string path) : IDisposable
+    {
+        private readonly FileStream _lock = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        public void Dispose() => _lock.Dispose();
+    }
+
+    private sealed class PosixDirectorySwap : IDisposable
+    {
+        private readonly string _backupPath;
+        private readonly string _path;
+
+        public PosixDirectorySwap(string keyFilePath)
+        {
+            _path = keyFilePath;
+            _backupPath = keyFilePath + ".persist-fail-backup";
+            File.Move(_path, _backupPath);
+            Directory.CreateDirectory(_path);
+        }
+
+        public void Dispose()
+        {
+            Directory.Delete(_path);
+            File.Move(_backupPath, _path);
+        }
+    }
+
+    /// <summary>
+    /// P1-3 回归：持久化失败时密钥修改不得生效。注入方式见 <see cref="InjectPersistFailure"/>。
+    /// 修复前：缓存先改后持久化，异常后内存对象已被改写——禁用失败却鉴权 Disabled、
+    /// 删除失败却 Invalid；修复后失败前后鉴权口径与磁盘一致。
     /// </summary>
     [Fact]
     public void UpdateKey_PersistFails_CacheKeepsOldEnabledState()
@@ -214,7 +254,7 @@ public sealed class ClientKeyServiceTests
         var (plaintext, info) = service.CreateKey("tenant-a");
         Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
 
-        using (File.Open(fixture.Path, FileMode.Open, FileAccess.Read, FileShare.None))
+        using (InjectPersistFailure(fixture))
         {
             Assert.ThrowsAny<IOException>(() => service.UpdateKey(info.KeyId, enabled: false, dailyBudgetUsd: null, maxQps: null));
         }
@@ -237,7 +277,7 @@ public sealed class ClientKeyServiceTests
         var service = CreateService(fixture.Path);
         var (plaintext, info) = service.CreateKey("tenant-a");
 
-        using (File.Open(fixture.Path, FileMode.Open, FileAccess.Read, FileShare.None))
+        using (InjectPersistFailure(fixture))
         {
             Assert.ThrowsAny<IOException>(() => service.DeleteKey(info.KeyId));
         }
@@ -259,7 +299,7 @@ public sealed class ClientKeyServiceTests
         var service = CreateService(fixture.Path);
         var (plaintextA, _) = service.CreateKey("tenant-a");
 
-        using (File.Open(fixture.Path, FileMode.Open, FileAccess.Read, FileShare.None))
+        using (InjectPersistFailure(fixture))
         {
             Assert.ThrowsAny<IOException>(() => service.CreateKey("tenant-b"));
         }
