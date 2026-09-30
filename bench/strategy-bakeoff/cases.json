@@ -1,0 +1,62 @@
+[
+  {
+    "id": "tc-01",
+    "question": "用一段话解释 C# 中 async/await 的执行模型，说明线程切换发生在哪里。",
+    "expectedAnswer": "async/await 基于状态机：await 处编译为状态机挂起点，方法立即返回 Task；被等待的异步操作完成后由_continuation 回调在捕获的同步上下文或线程池上恢复执行，不阻塞线程。",
+    "category": "coding"
+  },
+  {
+    "id": "tc-02",
+    "question": "写一个 Python 函数实现快速排序，附一行复杂度说明。",
+    "expectedAnswer": "def quicksort(arr): if len(arr) <= 1: return arr; pivot = arr[len(arr)//2]; left = [x for x in arr if x < pivot]; mid = [x for x in arr if x == pivot]; right = [x for x in arr if x > pivot]; return quicksort(left) + mid + quicksort(right)。平均时间复杂度 O(n log n)，最坏 O(n²)。",
+    "category": "coding"
+  },
+  {
+    "id": "tc-03",
+    "question": "计算定积分 ∫₀^π sin(x) dx 并给出过程。",
+    "expectedAnswer": "sin(x) 的原函数是 -cos(x)，∫₀^π sin(x)dx = [-cos(x)]₀^π = -cos(π) + cos(0) = 1 + 1 = 2。",
+    "category": "math"
+  },
+  {
+    "id": "tc-04",
+    "question": "把这句话翻译成英文：数据主权要求用户数据不出域。",
+    "expectedAnswer": "Data sovereignty requires that user data does not leave the domain.",
+    "category": "translation"
+  },
+  {
+    "id": "tc-05",
+    "question": "从这句话提取人名和公司名并按 JSON 格式输出：张伟上周告诉李娜，他已加入字节跳动的推荐算法团队。",
+    "expectedAnswer": "人名：张伟、李娜；公司：字节跳动。JSON: {\"people\": [\"张伟\", \"李娜\"], \"company\": \"字节跳动\"}",
+    "category": "extraction"
+  },
+  {
+    "id": "tc-06",
+    "question": "解释熔断器模式中半开状态的语义，以及为什么需要最小探测成功次数。",
+    "expectedAnswer": "半开态：熔断冷却结束后允许有限探测请求通过，连续成功达到阈值才闭合熔断。需要最小成功次数是因为单次偶然成功可能来自缓存或低负载瞬时窗口，不设阈值会导致熔断抖动（反复开闭）。",
+    "category": "reasoning"
+  },
+  {
+    "id": "tc-07",
+    "question": "一个批量摘要任务每天处理 50 万条 2K token 的文本，预算敏感但对质量不敏感，你会选什么档位的模型？为什么？",
+    "expectedAnswer": "选 Cheap 档位。批量任务对单条质量不敏感、总量大，成本是主要约束；摘要属于低复杂度任务，Cheap 模型足够。10 亿 token 级的日用量下，Strong 与 Cheap 的价差会被放大数倍，而质量差异对摘要任务影响有限。",
+    "category": "reasoning"
+  },
+  {
+    "id": "tc-08",
+    "question": "解释 Thompson 采样和 ε-greedy 在探索-利用平衡上的核心区别。",
+    "expectedAnswer": "ε-greedy 以固定概率 ε 完全随机探索、其余时间贪心利用当前最优，探索与利用是硬切换；Thompson 采样从每个臂的后验分布（如 Beta(α,β)）采样后选最大者，探索强度随不确定性（样本量）自适应衰减，不确定性高的臂自然获得更多尝试，无需手工调 ε。",
+    "category": "reasoning"
+  },
+  {
+    "id": "tc-09",
+    "question": "写一个 SQL：查询 orders 表中 2024 年消费总额最高的前 5 名用户（字段 user_id, amount, created_at）。",
+    "expectedAnswer": "SELECT user_id, SUM(amount) AS total FROM orders WHERE created_at >= '2024-01-01' AND created_at < '2025-01-01' GROUP BY user_id ORDER BY total DESC LIMIT 5;",
+    "category": "coding"
+  },
+  {
+    "id": "tc-10",
+    "question": "用一句话说明 LLM 网关中预算预留（reservation）与结算（settlement）分离的目的。",
+    "expectedAnswer": "预留发生在请求执行前按估算占额度，结算在完成后按真实 usage 校正，两者分离防止并发请求超卖预算（预留保证上限），同时避免估算误差造成长期偏差（结算保证精确）。",
+    "category": "reasoning"
+  }
+]
