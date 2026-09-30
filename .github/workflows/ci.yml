@@ -79,10 +79,12 @@ jobs:
       - name: Coverage gate (line/total >= 67%)
         # 实测基线 68.84%（2026-09-30），0.67 留平台波动余量；基线提升后同步上调
         # tests/coverlet.runsettings 注释与本步骤阈值。
+        # 注意 pipefail：find 用 -print -quit 自终止、grep 用 -m1 限一次匹配，
+        # 不用 head 截断（head 提前关管道会触发 SIGPIPE 使步骤失败）。
         run: |
           set -euo pipefail
-          coverage_file=$(find "$GITHUB_WORKSPACE" -name coverage.cobertura.xml | head -1)
-          rate=$(grep -o 'line-rate="[0-9.]*"' "$coverage_file" | head -1 | grep -o '[0-9.]*')
+          coverage_file=$(find "$GITHUB_WORKSPACE" -name coverage.cobertura.xml -print -quit)
+          rate=$(grep -m1 -o 'line-rate="[0-9.]*"' "$coverage_file" | grep -o '[0-9.]*')
           echo "line coverage: $rate"
           if ! awk -v r="$rate" 'BEGIN{exit !(r >= 0.67)}'; then
             echo "::error::Line coverage $rate is below the 0.67 gate (see tests/coverlet.runsettings)"
