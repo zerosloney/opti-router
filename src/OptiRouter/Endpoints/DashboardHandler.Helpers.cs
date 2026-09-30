@@ -1057,7 +1057,11 @@ endpoints.MapPost("/api/dashboard/sandbox/route", (RouterEngine engine, IOptions
                 $"eval-batch-{DateTime.UtcNow:yyyyMMdd-HHmmss}",
                 dataset,
                 // SendAsync 带可选 sessionId 参数，方法组无法直接转换为二元委托，显式适配。
-                (request, token) => orchestrator.SendAsync(request, token),
+                // 经 EvalOutputFactory 回查模型定价填成本/选中模型——此前走裸 EvalRunOutput
+                // 适配器只填 Response，评测报告成本恒为 0，横评与 A/B 对比的成本维度失真。
+                async (request, token) => EvalOutputFactory.FromRawResponse(
+                    await orchestrator.SendAsync(request, token).ConfigureAwait(false),
+                    optionsMonitor.CurrentValue.Models),
                 qualityScorer: scorer,
                 ct: requestAborted);
 

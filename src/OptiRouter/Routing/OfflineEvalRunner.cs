@@ -332,7 +332,7 @@ public static class OfflineEvalRunner
         };
     }
 
-    private static string? ExtractModelName(string body)
+    internal static string? ExtractModelName(string body)
     {
         try
         {
