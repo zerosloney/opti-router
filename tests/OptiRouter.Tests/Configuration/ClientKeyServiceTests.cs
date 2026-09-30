@@ -201,18 +201,29 @@ public sealed class ClientKeyServiceTests
     }
 
     /// <summary>
-    /// 跨平台注入持久化失败，覆盖"写临时文件成功、原子替换失败"的真实故障形态。
-    /// 两个平台的文件语义不同，注入机制按平台分派（服务行为断言完全一致）：
+    /// 跨平台注入持久化失败，故障点统一收敛在 PersistKeys 的"临时文件写入"阶段（最确定的一步）：
     /// <list type="bullet">
-    /// <item>Windows：以 FileShare.None 独占锁目标文件——File.Replace 对被锁目标抛 IOException；</item>
-    /// <item>POSIX：把密钥文件暂时替换为同名目录——rename(file→目录) 返回 EISDIR 抛 IOException。
-    /// 锁文件在此无效：POSIX 的 rename 不受打开句柄约束（Linux CI 连续红灯的根因）。</item>
+    /// <item>Windows：以 FileShare.None 独占锁目标文件——PersistKeys 的 File.Replace 对被锁目标抛 IOException；</item>
+    /// <item>POSIX：把密钥文件所在目录临时置为只读（摘除写权限）——临时文件 CreateNew 抛
+    /// UnauthorizedAccessException。不走"替换目标文件"一步：rename(file→目录) 的 .NET Unix 语义
+    /// 有歧义（首版 CI 实测 CreateKey 路径抛、Delete/Update 路径不抛，疑似 RENAME_EXCHANGE 使
+    /// 替换成功），只读目录在写阶段必然失败，与后续分支无关。</item>
     /// </list>
+    /// 断言用 <see cref="AssertPersistThrows"/>（IOException 或 UnauthorizedAccessException 皆计为
+    /// 持久化失败），三个用例的故障后断言与恢复重试语义不变。
     /// </summary>
     private static IDisposable InjectPersistFailure(TempFixture fixture)
         => OperatingSystem.IsWindows()
             ? new WindowsExclusiveFileLock(fixture.Path)
-            : new PosixDirectorySwap(fixture.Path);
+            : new PosixReadOnlyDirectory(fixture.Path);
+
+    /// <summary>PersistKeys 同步传播持久化失败：Windows 注入呈 IOException，POSIX 只读目录呈 UnauthorizedAccessException。</summary>
+    private static void AssertPersistThrows(Action persistOperation)
+    {
+        var ex = Record.Exception(persistOperation);
+        Assert.True(ex is IOException or UnauthorizedAccessException,
+            $"Expected IOException (Windows) or UnauthorizedAccessException (POSIX read-only dir); got: {ex?.GetType().Name ?? "null"}");
+    }
 
     private sealed class WindowsExclusiveFileLock(string path) : IDisposable
     {
@@ -221,23 +232,29 @@ public sealed class ClientKeyServiceTests
         public void Dispose() => _lock.Dispose();
     }
 
-    private sealed class PosixDirectorySwap : IDisposable
+    private sealed class PosixReadOnlyDirectory : IDisposable
     {
-        private readonly string _backupPath;
-        private readonly string _path;
+        private readonly string _directory;
+        private readonly bool _permissionsApplied;
+        private UnixFileMode _original;
 
-        public PosixDirectorySwap(string keyFilePath)
+        public PosixReadOnlyDirectory(string keyFilePath)
         {
-            _path = keyFilePath;
-            _backupPath = keyFilePath + ".persist-fail-backup";
-            File.Move(_path, _backupPath);
-            Directory.CreateDirectory(_path);
+            _directory = Path.GetDirectoryName(keyFilePath)!;
+            // 守卫用 CA1416 分析器认可的 OperatingSystem 方法（效果同 ClientKeyService 的 RuntimeInformation 口径）
+            if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            {
+                _original = File.GetUnixFileMode(_directory);
+                File.SetUnixFileMode(_directory,
+                    _original & ~UnixFileMode.UserWrite & ~UnixFileMode.GroupWrite & ~UnixFileMode.OtherWrite);
+                _permissionsApplied = true;
+            }
         }
 
         public void Dispose()
         {
-            Directory.Delete(_path);
-            File.Move(_backupPath, _path);
+            if (_permissionsApplied && (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS()))
+                File.SetUnixFileMode(_directory, _original);
         }
     }
 
@@ -256,7 +273,7 @@ public sealed class ClientKeyServiceTests
 
         using (InjectPersistFailure(fixture))
         {
-            Assert.ThrowsAny<IOException>(() => service.UpdateKey(info.KeyId, enabled: false, dailyBudgetUsd: null, maxQps: null));
+            AssertPersistThrows(() => service.UpdateKey(info.KeyId, enabled: false, dailyBudgetUsd: null, maxQps: null));
         }
 
         // 失败后：本进程缓存与磁盘持久状态都必须仍是启用。
@@ -279,7 +296,7 @@ public sealed class ClientKeyServiceTests
 
         using (InjectPersistFailure(fixture))
         {
-            Assert.ThrowsAny<IOException>(() => service.DeleteKey(info.KeyId));
+            AssertPersistThrows(() => service.DeleteKey(info.KeyId));
         }
 
         Assert.Equal(ClientKeyAuthorizationStatus.Authorized, service.AuthorizeRequest(plaintext).Status);
@@ -301,7 +318,7 @@ public sealed class ClientKeyServiceTests
 
         using (InjectPersistFailure(fixture))
         {
-            Assert.ThrowsAny<IOException>(() => service.CreateKey("tenant-b"));
+            AssertPersistThrows(() => service.CreateKey("tenant-b"));
         }
 
         Assert.Single(service.GetAllKeys());
