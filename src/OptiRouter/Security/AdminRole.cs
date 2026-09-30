@@ -63,10 +63,15 @@ public static class AdminOperations
         bool isRead = httpMethod is "GET" or "HEAD";
         if (isRead)
         {
-            // 例外：上游密钥明文查看仅 admin（ModelsConfigHandler.cs:169-172 的两条 reveal 路由
+            // 例外 1：上游密钥明文查看仅 admin（ModelsConfigHandler.cs 的两条 reveal 路由
             // /api/models/apikey?name= 与 /api/models/{name}/apikey 返回同一明文，按同一规则拦截）。
             if (path.StartsWith("/api/models", StringComparison.Ordinal)
                 && path.EndsWith("/apikey", StringComparison.Ordinal))
+                return false;
+
+            // 例外 2：管理身份列表仅 admin——viewer/operator 可读全管理面，但管理账号的
+            // 存在与角色构成不对下位角色暴露（已决策口径，见 docs/CONFIGURATION.md 管理台角色）。
+            if (path.StartsWith("/api/dashboard/identities", StringComparison.Ordinal))
                 return false;
 
             // viewer+ 只读：GET/HEAD 的管理查询放行（/api/dashboard/*、/api/models/*）。

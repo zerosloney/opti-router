@@ -258,7 +258,7 @@ Blazor Server 管理台（`/overview` `/requests` `/models` `/router` `/keys` `/
 | 评测批次持久化 | Golden Dataset 评测报告落配置库（保留最近 10 批），重启不丢失，A/B 对比跨重启可用 |
 | 学习状态管理 | Thompson / Contextual Bandit 状态可一键重置为初始先验（含持久化回落，需确认）或导出 CSV |
 | Fusion 编排参数 | 面板规模（数量/动态/最小/多样性）、Analyst/Outer 模型下拉、采样与预算（最大输出/温度/Panel 超时）、Analyst 提示词、竞速参数（并发数/Hedge 延迟）全部可在路由页编辑并热生效 |
-| 管理台角色（最小 RBAC） | 三角色 `admin`/`operator`/`viewer`：viewer 只读全部管理查询（上游密钥明文查看除外，仅 admin），operator 另可执行沙箱/评测/配置写/学习重置/熔断覆写，admin 独占租户 Key、模型配置与管理身份管理。主密钥恒为 admin；附加身份经 `POST /api/dashboard/identities` 签发（明文仅返回一次，库内只存 SHA256 哈希），撤销立即失效。详见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)「管理台角色」 |
+| 管理台角色（最小 RBAC） | 三角色 `admin`/`operator`/`viewer`：viewer 只读全部管理查询（上游密钥明文查看与管理身份列表除外，仅 admin），operator 另可执行沙箱/评测/配置写/学习重置/熔断覆写，admin 独占租户 Key、模型配置与管理身份管理。主密钥恒为 admin；附加身份经 `POST /api/dashboard/identities` 签发（明文仅返回一次，库内只存 SHA256 哈希），撤销立即失效。详见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)「管理台角色」 |
 
 ## curl 示例
 

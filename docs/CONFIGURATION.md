@@ -194,8 +194,10 @@
 
 | 角色 | 能力 |
 |------|------|
-| `viewer` | 全部管理 API 只读（指标/审计/分析/评测历史/状态/配置读取）；**例外**：上游密钥明文查看（`/api/models/*/apikey`）仅 admin |
+| `viewer` | 全部管理 API 只读（指标/审计/分析/评测历史/状态/配置读取）；**例外（仅 admin）**：上游密钥明文查看（`/api/models/*/apikey`）、管理身份列表（`/api/dashboard/identities`） |
 | `operator` | viewer 之外另可：沙箱试路由、评测运行/对比、学习状态重置、熔断手工覆写、模型连通性测试/发现、PUT 路由配置与语义路由 |
 | `admin` | 全部能力：租户 Key 管理、模型配置写、管理身份签发/撤销，及一切未显式归入 operator 的写操作（安全默认） |
 
-主密钥（`AdminApiKey` 种子/登录）恒为 admin。附加身份经 `POST /api/dashboard/identities` 签发（`{name, role}`，明文密钥仅返回一次，库内只存 SHA256 哈希与前缀），`DELETE /api/dashboard/identities/{id}` 撤销后密钥立即失效。执法单点在中间件：管理 API 认证成功后按 `AdminOperations.Can` 矩阵判定，越权返回裸 403；新增写端点若未显式归入 operator 白名单，默认仅 admin 可用（见 [AdminRole.cs](../src/OptiRouter/Security/AdminRole.cs) 注释）。
+主密钥（`AdminApiKey` 种子/登录）恒为 admin。附加身份经 `POST /api/dashboard/identities` 签发（`{name, role}`，明文密钥仅返回一次，库内只存 SHA256 哈希与前缀），`DELETE /api/dashboard/identities/{id}` 撤销后密钥立即失效；身份列表查询同样仅 admin。执法单点在中间件：管理 API 认证成功后按 `AdminOperations.Can` 矩阵判定，越权返回裸 403；新增写端点若未显式归入 operator 白名单，默认仅 admin 可用（见 [AdminRole.cs](../src/OptiRouter/Security/AdminRole.cs) 注释）。
+
+已决策口径（2026-09-30）：① 明文密钥查看按「`/api/models` 下以 `/apikey` 结尾」宽收口，别名路由同拦；② 管理身份列表对 viewer/operator 均不可见（管理账号构成不对下位角色暴露）；③ 执法只在 API 层，页面级不做角色拦截（导航按角色隐藏，直接访问页面不越权、写操作 403），属有意取舍。

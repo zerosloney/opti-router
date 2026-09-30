@@ -240,11 +240,11 @@ public sealed class AdminRbacIntegrationTests
         Assert.DoesNotContain("keyHash", listBody);
         Assert.Contains("ops1", listBody);
 
-        // viewer：列表读放行（矩阵读规则），写 403。
+        // viewer：列表读 403（矩阵读规则的 admin 例外：管理身份列表不对下位角色暴露），写 403。
         using var viewerClient = CreateClient(factory, viewerKey);
         using (var viewerList = await viewerClient.GetAsync("/api/dashboard/identities"))
         {
-            Assert.Equal(HttpStatusCode.OK, viewerList.StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, viewerList.StatusCode);
         }
         using (var viewerCreate = await SendAsync(viewerClient, HttpMethod.Post, "/api/dashboard/identities",
             new { name = "x", role = "viewer" }))

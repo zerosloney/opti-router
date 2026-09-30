@@ -83,7 +83,9 @@ public sealed class AdminOperationsTests
     [InlineData(AdminRole.Operator)]
     public void Can_KeyManagement_AdminOnly(AdminRole role)
     {
-        // 密钥与身份管理写操作不在 operator 白名单（默认规则 admin-only）。
+        // 密钥与身份管理不对下位角色开放（默认规则 admin-only）：写操作不在 operator 白名单，
+        // 身份列表 GET 也在读规则的 admin 例外内——管理账号的存在与角色构成不对 viewer/operator 暴露。
+        Assert.False(AdminOperations.Can(role, "GET", "/api/dashboard/identities"));
         Assert.False(AdminOperations.Can(role, "POST", "/api/dashboard/keys"));
         Assert.False(AdminOperations.Can(role, "PUT", "/api/dashboard/keys/kid-1"));
         Assert.False(AdminOperations.Can(role, "DELETE", "/api/dashboard/keys/kid-1"));

@@ -1578,7 +1578,8 @@ endpoints.MapGet("/api/dashboard/keys", (ClientKeyService keySvc) =>
 
     /// <summary>
     /// 附加管理身份 API（最小 RBAC）：签发/列出/撤销低权限管理密钥。仅 admin 可用
-    /// （AdminOperations 矩阵：/api/dashboard/identities 非 GET 不在 operator 白名单，默认规则 admin-only）。
+    /// （AdminOperations 矩阵：identities 全部操作 admin-only——写操作走默认规则，
+    /// GET 列表在读规则的 admin 例外内，管理账号构成不对 viewer/operator 暴露）。
     /// 列表响应只含 keyPrefix 指纹，绝不返回 KeyHash；明文密钥仅签发响应携带一次。
     /// </summary>
     private static void MapAdminIdentityEndpoints(IEndpointRouteBuilder endpoints)
