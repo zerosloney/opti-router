@@ -6,6 +6,7 @@ using OptiRouter.Clients;
 using OptiRouter.Configuration;
 using OptiRouter.Health;
 using OptiRouter.Routing;
+using OptiRouter.Security;
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -135,6 +136,7 @@ public static partial class DashboardHandler
     public record CircuitOverrideRequest(string TargetState);
     public record CreateClientKeyRequest(string TenantName, decimal? DailyBudgetUsd, int? MaxQps);
     public record UpdateClientKeyRequest(bool? Enabled, decimal? DailyBudgetUsd, int? MaxQps);
+    public record CreateAdminIdentityRequest(string Name, string Role);
 
     /// <summary>
     /// 系统配置更新请求。全部字段可空：null = 不修改。属性式（非位置 record）以便 40+ 字段可维护。
@@ -1569,4 +1571,47 @@ endpoints.MapGet("/api/dashboard/keys", (ClientKeyService keySvc) =>
         // negotiate 被 302 到 /login，重连横幅永久卡死）。前端 blazor.js 每 30 分钟
         // 带 Cookie 请求本端点触发续期。鉴权由管理端中间件按 /api/dashboard 前缀统一执行。
         endpoints.MapGet("/api/dashboard/session/ping", () => Results.NoContent());    }
+
+    /// <summary>
+    /// 附加管理身份 API（最小 RBAC）：签发/列出/撤销低权限管理密钥。仅 admin 可用
+    /// （AdminOperations 矩阵：/api/dashboard/identities 非 GET 不在 operator 白名单，默认规则 admin-only）。
+    /// 列表响应只含 keyPrefix 指纹，绝不返回 KeyHash；明文密钥仅签发响应携带一次。
+    /// </summary>
+    private static void MapAdminIdentityEndpoints(IEndpointRouteBuilder endpoints)
+    {
+        endpoints.MapGet("/api/dashboard/identities", (AdminKeyStore adminKeys) =>
+        {
+            var dtos = adminKeys.ListIdentities().Select(i => new
+            {
+                i.Id, i.Name, i.Role, i.KeyPrefix, i.CreatedAtUtc
+            });
+            return Results.Ok(dtos);
+        });
+
+        endpoints.MapPost("/api/dashboard/identities", (AdminKeyStore adminKeys, CreateAdminIdentityRequest req) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.Name))
+                return Results.BadRequest(new { error = "Name is required." });
+            if (!AdminRoles.TryParse(req.Role, out _))
+                return Results.BadRequest(new { error = "Role must be one of: admin, operator, viewer." });
+
+            var identity = adminKeys.AddIdentity(req.Name, req.Role, out var plaintextKey);
+            return Results.Created($"/api/dashboard/identities/{identity.Id}", new
+            {
+                identity.Id,
+                identity.Name,
+                identity.Role,
+                identity.KeyPrefix,
+                identity.CreatedAtUtc,
+                key = plaintextKey // 明文仅此一次可见：响应关闭后无法再取回（服务端只存哈希）
+            });
+        });
+
+        endpoints.MapDelete("/api/dashboard/identities/{id}", (string id, AdminKeyStore adminKeys) =>
+        {
+            bool ok = adminKeys.RemoveIdentity(id);
+            if (!ok) return Results.NotFound(new { error = $"Admin identity '{id}' not found." });
+            return Results.Ok(new { message = $"Admin identity '{id}' deleted successfully." });
+        });
+    }
 }

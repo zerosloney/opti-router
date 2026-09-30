@@ -40,7 +40,9 @@ public class LoginModel : PageModel
         }
 
         // 管理密钥存配置库（SHA256 哈希，AdminKeyStore 统一校验），appsettings 仅首启种子源。
-        if (string.IsNullOrWhiteSpace(AdminKey) || !_adminKeyStore.IsValid(AdminKey))
+        // TryResolveRole 覆盖主键（admin）与附加身份密钥（其存储角色）——/login 与 Bearer 鉴权同一仲裁口径。
+        if (string.IsNullOrWhiteSpace(AdminKey)
+            || !_adminKeyStore.TryResolveRole(AdminKey, out var adminRole))
         {
             _rateLimiter.RecordFailure(clientIp);
             ErrorMessage = "密钥不正确，请重试";
@@ -49,7 +51,12 @@ public class LoginModel : PageModel
 
         _rateLimiter.Reset(clientIp);
 
-        var claims = new[] { new Claim(ClaimTypes.Name, "admin") };
+        // 角色 claim 用小写字符串（admin/operator/viewer），与中间件解析口径一致（见 AdminRoles）。
+        var claims = new[]
+        {
+            new Claim(ClaimTypes.Name, "admin"),
+            new Claim(ClaimTypes.Role, OptiRouter.Security.AdminRoles.ToValue(adminRole))
+        };
         var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
         await HttpContext.SignInAsync(
             CookieAuthenticationDefaults.AuthenticationScheme,

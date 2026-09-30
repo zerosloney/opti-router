@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using OptiRouter.Configuration;
 using OptiRouter.Endpoints;
 
@@ -63,8 +64,22 @@ internal sealed class RequestAuthenticationMiddleware(RequestDelegate next)
                 }
             }
 
-            bool bearerAuthenticated = presentedToken is not null && adminKeyStore.IsValid(presentedToken);
-            if (!sessionAuthenticated && !bearerAuthenticated)
+            AdminRole role;
+            if (sessionAuthenticated)
+            {
+                // Cookie 分支：角色取自登录时写入的 ClaimTypes.Role（小写口径，见 AdminRoles）。
+                // claim 缺失（本功能上线前的历史 Cookie）默认 Admin 向后兼容——历史会话均为主键登录。
+                role = AdminRoles.TryParse(
+                    context.User.FindFirstValue(ClaimTypes.Role), out var parsedRole)
+                    ? parsedRole
+                    : AdminRole.Admin;
+            }
+            else if (adminKeyStore.TryResolveRole(presentedToken, out var bearerRole))
+            {
+                // Bearer 分支：主键 → admin；附加身份密钥 → 其存储角色。
+                role = bearerRole;
+            }
+            else
             {
                 if (presentedToken is not null)
                     loginRateLimiter!.RecordFailure(throttleKey!);
@@ -74,6 +89,16 @@ internal sealed class RequestAuthenticationMiddleware(RequestDelegate next)
                     return;
                 }
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+
+            // 最小 RBAC 执法：仅管理 API（/api/dashboard、/api/models）做角色矩阵判断，
+            // 管理页面请求与 /mcp 维持现状不执法。矩阵安全默认见 AdminOperations。
+            if (context.Request.Path.StartsWithSegments("/api")
+                && !AdminOperations.Can(role, context.Request.Method, context.Request.Path.Value!))
+            {
+                // 裸 403：与上方 401 同风格，不带 body（避免向无权方泄露矩阵细节）。
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
                 return;
             }
         }

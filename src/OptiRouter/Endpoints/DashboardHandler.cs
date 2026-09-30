@@ -32,5 +32,6 @@ public static partial class DashboardHandler
         MapRoutingStateEndpoints(endpoints);
         MapConfigEndpoints(endpoints);
         MapTenantKeyEndpoints(endpoints);
+        MapAdminIdentityEndpoints(endpoints);
     }
 }

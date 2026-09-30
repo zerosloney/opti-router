@@ -19,6 +19,8 @@
             </button>
         </div>
         <nav class="side-nav-links">
+            @* 最小 RBAC 导航可见性：Overview/Requests 全角色可见；Models/Keys 需 operator+；
+               其余页面维持 admin。仅控制入口可见性，真正的执法单点在 AdminOperations（API 层 403）。 *@
             <NavLink href="/overview" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
                 <span class="nav-icon"><AppIcon Name="overview" Size="18" /></span>
                 <span class="nav-text">总览</span>
@@ -29,26 +31,30 @@
                 <span class="nav-text">请求追踪</span>
                 <span class="nav-en">Requests</span>
             </NavLink>
-            <NavLink href="/models" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon"><AppIcon Name="models" Size="18" /></span>
-                <span class="nav-text">模型配置</span>
-                <span class="nav-en">Models</span>
-            </NavLink>
-            <NavLink href="/router" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon"><AppIcon Name="router" Size="18" /></span>
-                <span class="nav-text">路由引擎</span>
-                <span class="nav-en">Router</span>
-            </NavLink>
-            <NavLink href="/keys" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon"><AppIcon Name="keys" Size="18" /></span>
-                <span class="nav-text">租户配额</span>
-                <span class="nav-en">Keys</span>
-            </NavLink>
-            <NavLink href="/benchmarks" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
-                <span class="nav-icon"><AppIcon Name="benchmarks" Size="18" /></span>
-                <span class="nav-text">压测 &amp; 生态</span>
-                <span class="nav-en">Benchmarks</span>
-            </NavLink>
+            <AuthorizeView Roles="admin,operator">
+                <NavLink href="/models" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                    <span class="nav-icon"><AppIcon Name="models" Size="18" /></span>
+                    <span class="nav-text">模型配置</span>
+                    <span class="nav-en">Models</span>
+                </NavLink>
+                <NavLink href="/keys" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                    <span class="nav-icon"><AppIcon Name="keys" Size="18" /></span>
+                    <span class="nav-text">租户配额</span>
+                    <span class="nav-en">Keys</span>
+                </NavLink>
+            </AuthorizeView>
+            <AuthorizeView Roles="admin">
+                <NavLink href="/router" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                    <span class="nav-icon"><AppIcon Name="router" Size="18" /></span>
+                    <span class="nav-text">路由引擎</span>
+                    <span class="nav-en">Router</span>
+                </NavLink>
+                <NavLink href="/benchmarks" class="side-nav-link" ActiveClass="side-nav-link-active" Match="NavLinkMatch.Prefix">
+                    <span class="nav-icon"><AppIcon Name="benchmarks" Size="18" /></span>
+                    <span class="nav-text">压测 &amp; 生态</span>
+                    <span class="nav-en">Benchmarks</span>
+                </NavLink>
+            </AuthorizeView>
         </nav>
         <div class="side-nav-footer">
             <div class="side-nav-user" title="已通过管理员身份认证">

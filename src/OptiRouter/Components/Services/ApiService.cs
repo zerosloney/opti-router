@@ -116,9 +116,12 @@ public class ApiService
     /// <summary>
     /// 从非 2xx 响应提取后端可读错误（Dashboard/Models API 的 {"error":"..."} 信封）；
     /// 解析失败回退状态码文本。变更类方法经此把后端校验错误带回 UI 展示。
+    /// 403 由管理端中间件裸返回（无 body，最小 RBAC 角色拦截），单点翻译为明确提示。
     /// </summary>
     private static async Task<string> ReadErrorAsync(HttpResponseMessage resp)
     {
+        if (resp.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            return "权限不足：当前角色无权执行此操作";
         try
         {
             string body = await resp.Content.ReadAsStringAsync();
