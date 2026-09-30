@@ -10,7 +10,7 @@
 | 边界 | 主要组件 | 职责与依赖 |
 | --- | --- | --- |
 | 组合根 | [Program.cs](../src/OptiRouter/Program.cs)（531 行）+ [Composition/](../src/OptiRouter/Composition/) 六模块 | 注册路由/存储/安全/上游/可观测/管理台服务；组合根只做配置与组装，不含业务逻辑 |
-| 入口安全 | [Security/](../src/OptiRouter/Security/)、[ClientKeyService](../src/OptiRouter/Configuration/ClientKeyService.cs)、AdminKeyStore | 管理 Cookie/Bearer 与租户 ClientKey 分离；代理准入、QPS/日预算、IP 分区；管理端路径前缀集中在 `RequestPathPolicy.AdminPathPrefixes` |
+| 入口安全 | [Security/](../src/OptiRouter/Security/)、[ClientKeyService](../src/OptiRouter/Configuration/ClientKeyService.cs)、AdminKeyStore | 管理 Cookie/Bearer 与租户 ClientKey 分离；代理准入、QPS/日预算、IP 分区；管理面最小 RBAC（admin/operator/viewer，执法单点 `AdminOperations.Can`，附加身份存配置库 admin-identities scope）；管理端路径前缀集中在 `RequestPathPolicy.AdminPathPrefixes` |
 | 协议端点 | `ChatCompletionsEndpoint`、`AnthropicMessagesEndpoint`、`GeminiGenerateContentEndpoint` | 各协议 HTTP/JSON 校验与 `ChatRequest` 双向翻译；三入口共用同一路由、预算、熔断、审计 |
 | 请求执行 | [ProxyOrchestrator](../src/OptiRouter/Endpoints/ProxyOrchestrator.cs) + [Settlement partial](../src/OptiRouter/Endpoints/ProxyOrchestrator.Settlement.cs)、`RaceOrchestrator`、`FusionRouter`、`CascadeUpgradeHandler`、`StreamingHedgeOrchestrator` | 缓存、预处理、预算预留、候选尝试、五类执行模式的流式/非流式生命周期 |
 | 路由决策 | [RouterEngine](../src/OptiRouter/Routing/RouterEngine.cs) + `IRouterPolicy` 策略族（Routing/ 90+ 文件） | Filter→Classify→Order→Constraint 四阶段管道产出候选链与硬排除 |
