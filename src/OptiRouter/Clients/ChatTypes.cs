@@ -86,8 +86,16 @@ public sealed record ChatMessage
         };
 
     /// <summary>
+    /// Responses 内容块类型别名：input_text / output_text 在 chat 契约中对应 text。
+    /// </summary>
+    internal static bool IsResponsesTextAliasType(JsonElement typeEl)
+        => typeEl.ValueEquals("input_text") || typeEl.ValueEquals("output_text");
+
+    /// <summary>
     /// 抽取 content 的文本部分用于路由判定与 token 估算。
-    /// 纯文本直接返回；多模态数组拼接所有 type=="text" 的 text 字段；其他情况返回空串。
+    /// 纯文本直接返回；多模态数组拼接所有 type=="text" / "input_text" / "output_text"
+    /// 的 text 字段（OpenAI Responses 内容块使用 input_text/output_text 类型）；
+    /// 其他情况返回空串。
     /// </summary>
     public string GetText()
     {
@@ -106,7 +114,7 @@ public sealed record ChatMessage
                 if (item.ValueKind == JsonValueKind.Object
                     && item.TryGetProperty("type", out var typeEl)
                     && typeEl.ValueKind == JsonValueKind.String
-                    && typeEl.ValueEquals("text")
+                    && (typeEl.ValueEquals("text") || IsResponsesTextAliasType(typeEl))
                     && item.TryGetProperty("text", out var textEl)
                     && textEl.ValueKind == JsonValueKind.String)
                 {

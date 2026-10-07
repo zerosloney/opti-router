@@ -195,9 +195,7 @@ public static class SystemOneEndpoint
 
             // 计费：SystemOne 响应无 token usage，按请求体 token 粗估 × 输入单价入账（按次语义的天花板：
             // 上游实际按 state+questions 计费，粗估系数与 chat 分桶一致，误差可接受）。
-            string? sessionId = httpContext.Request.Headers.TryGetValue("X-Session-Id", out var sid) && !string.IsNullOrWhiteSpace(sid)
-                ? sid.ToString()
-                : null;
+            string? sessionId = ChatCompletionsEndpoint.ResolveSessionId(httpContext);
             int estimatedTokens = TokenEstimator.EstimateText(forwardedBody);
             decimal cost = estimatedTokens * endpoint.InputPricePerMillion / 1_000_000m;
             recorder.RecordCost(cost, sessionId);

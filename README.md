@@ -292,7 +292,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 ### 多协议入口（协议对齐）
 
-除 OpenAI 格式外，也接受 Anthropic 与 Gemini 原生协议，三种入口共用同一套路由、预算、熔断与审计：
+除 OpenAI 格式外，也接受 Anthropic、Gemini 与 OpenAI Responses 原生协议，所有入口共用同一套路由、预算、熔断与审计：
 
 ```bash
 # Anthropic Messages API（鉴权：Authorization: Bearer 或 x-api-key）
@@ -313,9 +313,21 @@ curl -X POST "http://localhost:5000/v1beta/models/auto:generateContent" \
   -d '{
     "contents": [{"role": "user", "parts": [{"text": "解释什么是多态"}]}]
   }'
+
+# OpenAI Responses API（鉴权：Authorization: Bearer 或 x-api-key）
+curl -X POST http://localhost:5000/v1/responses \
+  -H "Authorization: Bearer your-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "input": "解释什么是多态",
+    "instructions": "你是一个简洁的助手"
+  }'
 ```
 
-流式分别走 `"stream": true`（Anthropic 事件序列）与 `:streamGenerateContent?alt=sse`（Gemini SSE 块）。`auto` 语义与模型校验同 OpenAI 入口一致；文本、system、工具调用（tool_use/tool_result 与 functionCall/functionResponse）双向翻译。
+流式分别走 `"stream": true`（Anthropic 事件序列）、`:streamGenerateContent?alt=sse`（Gemini SSE 块）与请求体 `"stream": true`（Responses 事件序列，每帧 `event:`/`data:` 双行：文本走 `response.created` → `output_item.added` → `content_part.added` → `output_text.delta` → `output_text.done` → `output_item.done`，工具调用走 `output_item.added` → `function_call_arguments.delta` → `function_call_arguments.done` → `output_item.done`，收尾 `response.completed`）。`auto` 语义与模型校验同 OpenAI 入口一致；文本、system、工具调用（tool_use/tool_result、functionCall/functionResponse 与 Responses 的 `function_call`/`function_call_output`）双向翻译，入站内容块 `input_text`/`input_image` 归一化为 chat 契约的 `text`/`image_url`。
+
+Responses 入口的边界：`truncation`/`safety_identifier`/`reasoning` 上游 chat 契约无对应物，静默忽略；`store`/`previous_response_id`/`metadata`/`include`/`text`/`parallel_tool_calls` 只透传（`tools`/`tool_choice` 参与工具翻译），网关本身不存储响应历史；流式工具调用按 chat 的 `delta.tool_calls[].index` 分片缓冲重组，call_id 到达即开项并补齐已缓冲的参数分片，全程未到才在收尾合成开项。
 
 另支持云知声 **SystemOne 决策协议**（u2-decision，非 chat 协议）原生透传——请求为 `state + questions`（choice/noul/score），响应为带概率分布的 `answers`，网关校验必填字段后换上游密钥直连，请求/响应体保真：
 

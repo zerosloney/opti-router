@@ -3,15 +3,15 @@
 本文是**活文档**：描述当前代码的组件地图、数据流与不变量，供新成员与 agent 快速建立全局认知。
 历史评审结论（问题清单、修复验收）见 [architecture-review.md](architecture-review.md)；部署与发版操作见仓库根 `AGENTS.md`。
 
-单进程 .NET 8 双职责：`/v1`、`/v1/messages`、`/v1beta` 三协议 LLM 路由代理 + Blazor Server 管理台（`/dashboard` 等页面）。构建版本由 MinVer 从 `v*` git tag 自动派生。
+单进程 .NET 8 双职责：`/v1`、`/v1/messages`、`/v1beta` 多协议 LLM 路由代理（chat / Responses / Anthropic / Gemini 四个下游入口）+ Blazor Server 管理台（`/dashboard` 等页面）。构建版本由 MinVer 从 `v*` git tag 自动派生。
 
 ## 组件地图
 
 | 边界 | 主要组件 | 职责与依赖 |
 | --- | --- | --- |
-| 组合根 | [Program.cs](../src/OptiRouter/Program.cs)（531 行）+ [Composition/](../src/OptiRouter/Composition/) 六模块 | 注册路由/存储/安全/上游/可观测/管理台服务；组合根只做配置与组装，不含业务逻辑 |
+| 组合根 | [Program.cs](../src/OptiRouter/Program.cs)（552 行）+ [Composition/](../src/OptiRouter/Composition/) 六模块 | 注册路由/存储/安全/上游/可观测/管理台服务；组合根只做配置与组装，不含业务逻辑 |
 | 入口安全 | [Security/](../src/OptiRouter/Security/)、[ClientKeyService](../src/OptiRouter/Configuration/ClientKeyService.cs)、AdminKeyStore | 管理 Cookie/Bearer 与租户 ClientKey 分离；代理准入、QPS/日预算、IP 分区；管理面最小 RBAC（admin/operator/viewer，执法单点 `AdminOperations.Can`，附加身份存配置库 admin-identities scope）；管理端路径前缀集中在 `RequestPathPolicy.AdminPathPrefixes` |
-| 协议端点 | `ChatCompletionsEndpoint`、`AnthropicMessagesEndpoint`、`GeminiGenerateContentEndpoint` | 各协议 HTTP/JSON 校验与 `ChatRequest` 双向翻译；三入口共用同一路由、预算、熔断、审计 |
+| 协议端点 | `ChatCompletionsEndpoint`、`ResponsesEndpoint`、`AnthropicMessagesEndpoint`、`GeminiGenerateContentEndpoint` + `ProtocolStreamPipeline` | 各协议 HTTP/JSON 校验与 `ChatRequest` 双向翻译；翻译型入口的流式外壳（首帧探活/空流收尾/帧写出/枚举器释放）单源，错误帧词汇与故障口径留在各端点；各入口共用同一路由、预算、熔断、审计 |
 | 请求执行 | [ProxyOrchestrator](../src/OptiRouter/Endpoints/ProxyOrchestrator.cs) + [Settlement partial](../src/OptiRouter/Endpoints/ProxyOrchestrator.Settlement.cs)、`RaceOrchestrator`、`FusionRouter`、`CascadeUpgradeHandler`、`StreamingHedgeOrchestrator` | 缓存、预处理、预算预留、候选尝试、五类执行模式的流式/非流式生命周期 |
 | 路由决策 | [RouterEngine](../src/OptiRouter/Routing/RouterEngine.cs) + `IRouterPolicy` 策略族（Routing/ 90+ 文件） | Filter→Classify→Order→Constraint 四阶段管道产出候选链与硬排除 |
 | 上游适配 | [ModelClientProvider](../src/OptiRouter/Endpoints/ModelClientProvider.cs)、三协议 Client + [Protocols/](../src/OptiRouter/Clients/Protocols/) Translators | 客户端构造/缓存、HTTP/SSE、超时与重试、usage 提取；热更新后旧客户端延迟释放 |

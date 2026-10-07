@@ -55,9 +55,7 @@ public static class ChatCompletionsEndpoint
                 return modelProblem;
             }
 
-            string? sessionId = httpContext.Request.Headers.TryGetValue("X-Session-Id", out var sid) && !string.IsNullOrWhiteSpace(sid)
-                ? sid.ToString()
-                : null;
+            string? sessionId = ResolveSessionId(httpContext);
 
             if (request.Stream)
             {
@@ -190,7 +188,7 @@ public static class ChatCompletionsEndpoint
             {
                 string? requestId = httpContext.Items.TryGetValue("RequestId", out var rid) ? rid?.ToString() : null;
                 // 日预算在 UTC 午夜重置，Retry-After 设为到午夜的剩余秒数（1~86400）。
-                int retryAfterSeconds = Math.Max(1, (int)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalSeconds);
+                int retryAfterSeconds = ProtocolErrorHelper.SecondsUntilUtcMidnight();
                 httpContext.Response.Headers["Retry-After"] = retryAfterSeconds.ToString();
                 var details = new Dictionary<string, object?>
                 {
@@ -221,7 +219,7 @@ public static class ChatCompletionsEndpoint
             catch (AllCandidatesFailedException ex)
             {
                 string? requestId = httpContext.Items.TryGetValue("RequestId", out var rid) ? rid?.ToString() : null;
-                string message = $"All model candidates failed. Attempted: {string.Join(", ", ex.AttemptedModels)}. Last failure: Model '{ex.LastModelName}' returned status {ex.LastStatusCode}.";
+                string message = "All model candidates failed. " + ProtocolErrorHelper.AllCandidatesFailedSummary(ex);
                 var details = new Dictionary<string, object?>
                 {
                     ["attemptedModels"] = ex.AttemptedModels
@@ -286,8 +284,16 @@ public static class ChatCompletionsEndpoint
     }
 
     /// <summary>
+    /// 各协议入口共用：从 <c>X-Session-Id</c> 头取会话标识（缺失/空白 → null，会话预算与粘性路由不生效）。
+    /// </summary>
+    internal static string? ResolveSessionId(HttpContext httpContext)
+        => httpContext.Request.Headers.TryGetValue("X-Session-Id", out var sid) && !string.IsNullOrWhiteSpace(sid)
+            ? sid.ToString()
+            : null;
+
+    /// <summary>
     /// 模型引用是否可解析：auto 语义（空/auto）、路由名、显示 ID 或裸上游 Id。
-    /// 各协议入口（OpenAI/Anthropic/Gemini）共享同一判定，仅错误信封不同。
+    /// 各协议入口（OpenAI chat / Responses / Anthropic / Gemini）共享同一判定，仅错误信封不同。
     /// </summary>
     internal static bool IsKnownModel(string? model, OptiRouter.Configuration.RouterOptions options)
     {
@@ -296,7 +302,7 @@ public static class ChatCompletionsEndpoint
             return true;
         }
 
-        // SystemOne 决策协议端点不经 chat 契约服务（/v1/chat/completions、/v1/messages、/v1beta），
+        // SystemOne 决策协议端点不经 chat 契约服务（/v1/chat/completions、/v1/responses、/v1/messages、/v1beta），
         // 从"已知模型"中排除：显式点名时按 404 model_not_found 拒绝，而非落进编排器后 503。
         var enabled = options.Models.Where(m => m.Enabled && m.Protocol != ProviderProtocol.SystemOne).ToList();
         return ModelDisplayIds.Resolve(enabled, model ?? string.Empty).Count > 0;

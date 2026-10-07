@@ -24,6 +24,14 @@ internal static class ProtocolErrorHelper
             .LogError(ex, "Unhandled exception in {Protocol} request {Path}", protocol, context.Request.Path);
     }
 
+    /// <summary>日预算在 UTC 午夜重置，返回到午夜的剩余秒数（≥1），供各入口 Retry-After 头使用。</summary>
+    internal static int SecondsUntilUtcMidnight()
+        => Math.Max(1, (int)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalSeconds);
+
+    /// <summary>AllCandidatesFailedException 的共用摘要文案，各协议按自己的词汇与 details 包裹。</summary>
+    internal static string AllCandidatesFailedSummary(AllCandidatesFailedException ex)
+        => $"Attempted: {string.Join(", ", ex.AttemptedModels)}. Last failure: Model '{ex.LastModelName}' returned status {ex.LastStatusCode}.";
+
     internal static object CreateOpenAiErrorPayload(
         string message,
         string code,

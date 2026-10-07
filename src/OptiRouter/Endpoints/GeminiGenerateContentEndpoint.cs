@@ -85,9 +85,7 @@ public static class GeminiGenerateContentEndpoint
                 $"The model '{model}' does not exist or is not enabled. Use 'auto' for smart routing, or GET /v1/models for available model ids.");
         }
 
-        string? sessionId = httpContext.Request.Headers.TryGetValue("X-Session-Id", out var sid) && !string.IsNullOrWhiteSpace(sid)
-            ? sid.ToString()
-            : null;
+        string? sessionId = ChatCompletionsEndpoint.ResolveSessionId(httpContext);
 
         if (stream)
         {
@@ -103,8 +101,7 @@ public static class GeminiGenerateContentEndpoint
         catch (BudgetExhaustedException)
         {
             // 日预算在 UTC 午夜重置，Retry-After 设为到午夜的剩余秒数。
-            int retryAfterSeconds = Math.Max(1, (int)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalSeconds);
-            httpContext.Response.Headers["Retry-After"] = retryAfterSeconds.ToString();
+            httpContext.Response.Headers["Retry-After"] = ProtocolErrorHelper.SecondsUntilUtcMidnight().ToString();
             return GeminiError(StatusCodes.Status429TooManyRequests, "RESOURCE_EXHAUSTED", "budget exhausted");
         }
         catch (OptiRouter.Compliance.ComplianceViolationException ex)
@@ -114,7 +111,7 @@ public static class GeminiGenerateContentEndpoint
         catch (AllCandidatesFailedException ex)
         {
             return GeminiError(StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE",
-                $"Attempted: {string.Join(", ", ex.AttemptedModels)}. Last failure: Model '{ex.LastModelName}' returned status {ex.LastStatusCode}.");
+                ProtocolErrorHelper.AllCandidatesFailedSummary(ex));
         }
         catch (ModelClientException ex)
         {
@@ -129,144 +126,53 @@ public static class GeminiGenerateContentEndpoint
         }
     }
 
-    private static async Task<IResult> StreamAsync(ProxyOrchestrator orchestrator, ChatRequest request, string? sessionId,
+    /// <summary>
+    /// 流式路径外壳在 <see cref="ProtocolStreamPipeline"/>，这里只留 Gemini 词汇：
+    /// data 行 → SSE 块，异常 → 带 Google status/code 的错误块。
+    /// </summary>
+    private static Task<IResult> StreamAsync(ProxyOrchestrator orchestrator, ChatRequest request, string? sessionId,
         HttpContext httpContext, CancellationToken ct)
     {
-        IAsyncEnumerator<RawStreamLine>? enumerator = null;
-        try
-        {
-            enumerator = orchestrator.StreamAsync(request, ct, sessionId).GetAsyncEnumerator(ct);
-            if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
-            {
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-                // 空流也输出带 finishReason 的终结块，客户端才能正常收尾
-                var emptyTranslator = new GeminiTranslators.GeminiStreamTranslator(request.Model);
-                string payload = string.Join(string.Empty, emptyTranslator.OnData("[DONE]"));
-                return Results.Stream(
-                    stream => stream.WriteAsync(Encoding.UTF8.GetBytes(payload), ct).AsTask(),
-                    "text/event-stream");
-            }
+        var translator = new GeminiTranslators.GeminiStreamTranslator(request.Model);
+        return ProtocolStreamPipeline.RunAsync(
+            orchestrator,
+            request,
+            sessionId,
+            // 空流也输出带 finishReason 的终结块，客户端才能正常收尾
+            () => string.Concat(new GeminiTranslators.GeminiStreamTranslator(request.Model).OnData("[DONE]")),
+            data => translator.OnData(data),
+            (ex, beforeFirstEvent) => FailureFrame(ex, httpContext, beforeFirstEvent),
+            ct);
+    }
 
-            var translator = new GeminiTranslators.GeminiStreamTranslator(request.Model);
-            var firstLine = enumerator.Current;
-            var streamEnumerator = enumerator;
-            return Results.Stream(async stream =>
-            {
-                try
-                {
-                    foreach (string block in translator.OnData(firstLine.Data))
-                    {
-                        await stream.WriteAsync(Encoding.UTF8.GetBytes(block), ct).ConfigureAwait(false);
-                    }
-                    while (await streamEnumerator.MoveNextAsync().ConfigureAwait(false))
-                    {
-                        foreach (string block in translator.OnData(streamEnumerator.Current.Data))
-                        {
-                            await stream.WriteAsync(Encoding.UTF8.GetBytes(block), ct).ConfigureAwait(false);
-                        }
-                    }
-                }
-                catch (BudgetExhaustedException)
-                {
-                    await WriteStreamErrorAsync(stream, StatusCodes.Status429TooManyRequests, "RESOURCE_EXHAUSTED", "budget exhausted", ct).ConfigureAwait(false);
-                }
-                catch (AllCandidatesFailedException)
-                {
-                    await WriteStreamErrorAsync(stream, StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", "all model candidates failed", ct).ConfigureAwait(false);
-                }
-                catch (OptiRouter.Compliance.ComplianceViolationException ex)
-                {
-                    await WriteStreamErrorAsync(stream, StatusCodes.Status400BadRequest, "INVALID_ARGUMENT", ex.Message, ct).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    // 上游故障（断流 502 检测/流内 error/连接失败）外发真实原因（可重试信号）；
-                    // 其余未预见异常不外发 ex.Message，细节进服务端日志。
-                    if (ex is ModelClientException or HttpRequestException or IOException)
-                    {
-                        await WriteStreamErrorAsync(stream, StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", ex.Message, ct).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
-                        await WriteStreamErrorAsync(stream, StatusCodes.Status500InternalServerError, "INTERNAL",
-                            ProtocolErrorHelper.InternalErrorMessage, ct).ConfigureAwait(false);
-                    }
-                }
-                finally
-                {
-                    await streamEnumerator.DisposeAsync().ConfigureAwait(false);
-                }
-            }, "text/event-stream");
-        }
-        catch (ModelClientException)
+    private static string FailureFrame(Exception ex, HttpContext httpContext, bool beforeFirstEvent)
+    {
+        switch (ex)
         {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", "upstream request rejected before first chunk", ct),
-                "text/event-stream");
-        }
-        catch (BudgetExhaustedException)
-        {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, StatusCodes.Status429TooManyRequests, "RESOURCE_EXHAUSTED", "budget exhausted", ct),
-                "text/event-stream");
-        }
-        catch (AllCandidatesFailedException)
-        {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", "all model candidates failed", ct),
-                "text/event-stream");
-        }
-        catch (OptiRouter.Compliance.ComplianceViolationException ex)
-        {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, StatusCodes.Status400BadRequest, "INVALID_ARGUMENT", ex.Message, ct),
-                "text/event-stream");
-        }
-        catch (Exception ex)
-        {
-            // 流式首 MoveNextAsync 期间的异常兜底：返回 SSE 错误流而非逃逸为框架 500。
-            // 上游故障外发真实原因；取消 → 超时；其余未预见不外发 ex.Message，细节进服务端日志。
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            int code;
-            string status;
-            string message;
-            if (ex is ModelClientException or HttpRequestException or IOException)
-            {
-                code = StatusCodes.Status503ServiceUnavailable;
-                status = "UNAVAILABLE";
-                message = ex.Message;
-            }
-            else if (ex is OperationCanceledException)
-            {
-                code = StatusCodes.Status504GatewayTimeout;
-                status = "DEADLINE_EXCEEDED";
-                message = ex.Message;
-            }
-            else
-            {
-                code = StatusCodes.Status500InternalServerError;
-                status = "INTERNAL";
-                message = ProtocolErrorHelper.InternalErrorMessage;
+            case BudgetExhaustedException:
+                return ErrorFrame(StatusCodes.Status429TooManyRequests, "RESOURCE_EXHAUSTED", "budget exhausted");
+            case AllCandidatesFailedException:
+                return ErrorFrame(StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", "all model candidates failed");
+            case OptiRouter.Compliance.ComplianceViolationException compliance:
+                return ErrorFrame(StatusCodes.Status400BadRequest, "INVALID_ARGUMENT", compliance.Message);
+            // 首帧前被上游拒绝：客户端还没收到任何内容，给固定可重试文案
+            case ModelClientException when beforeFirstEvent:
+                return ErrorFrame(StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", "upstream request rejected before first chunk");
+            // 上游故障（断流 502 检测/流内 error/连接失败）外发真实原因（可重试信号）
+            case var e when ProtocolStreamPipeline.IsUpstreamStreamFailure(e):
+                return ErrorFrame(StatusCodes.Status503ServiceUnavailable, "UNAVAILABLE", e.Message);
+            // 只有首帧前的取消按超时处理；流内取消落 default（与重构前口径一致）
+            case OperationCanceledException canceled when beforeFirstEvent:
+                return ErrorFrame(StatusCodes.Status504GatewayTimeout, "DEADLINE_EXCEEDED", canceled.Message);
+            default:
+                // 其余未预见异常不外发 ex.Message，细节进服务端日志。
                 ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "gemini.generateContent");
-            }
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, code, status, message, ct),
-                "text/event-stream");
+                return ErrorFrame(StatusCodes.Status500InternalServerError, "INTERNAL", ProtocolErrorHelper.InternalErrorMessage);
         }
     }
 
-    private static Task WriteStreamErrorAsync(Stream stream, int code, string status, string message, CancellationToken ct)
-        => stream.WriteAsync(Encoding.UTF8.GetBytes(GeminiTranslators.GeminiStreamTranslator.OnError(code, status, message)), ct).AsTask();
+    private static string ErrorFrame(int code, string status, string message)
+        => GeminiTranslators.GeminiStreamTranslator.OnError(code, status, message);
 
     private static IResult GeminiError(int code, string status, string message)
         => Results.Json(

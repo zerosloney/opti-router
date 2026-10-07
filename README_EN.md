@@ -241,7 +241,7 @@ curl -X POST http://localhost:5000/v1/chat/completions \
 
 ### Multi-protocol entry points (protocol alignment)
 
-Besides the OpenAI format, Anthropic and Gemini native protocols are also accepted. All three entry points share the same routing, budget, circuit-breaking and audit pipeline:
+Besides the OpenAI format, Anthropic, Gemini and OpenAI Responses native protocols are also accepted. All entry points share the same routing, budget, circuit-breaking and audit pipeline:
 
 ```bash
 # Anthropic Messages API (auth: Authorization: Bearer or x-api-key)
@@ -262,9 +262,21 @@ curl -X POST "http://localhost:5000/v1beta/models/auto:generateContent" \
   -d '{
     "contents": [{"role": "user", "parts": [{"text": "Explain polymorphism"}]}]
   }'
+
+# OpenAI Responses API (auth: Authorization: Bearer or x-api-key)
+curl -X POST http://localhost:5000/v1/responses \
+  -H "Authorization: Bearer your-client-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "auto",
+    "input": "Explain polymorphism",
+    "instructions": "You are a concise assistant"
+  }'
 ```
 
-Streaming uses `"stream": true` (Anthropic event sequence) or `:streamGenerateContent?alt=sse` (Gemini SSE chunks). `auto` semantics and model validation match the OpenAI entry; text, system prompts and tool calls (tool_use/tool_result and functionCall/functionResponse) are translated in both directions.
+Streaming uses `"stream": true` (Anthropic event sequence), `:streamGenerateContent?alt=sse` (Gemini SSE chunks) or a request body `"stream": true` for Responses (each frame a two-line `event:`/`data:` block; text goes through `response.created` → `output_item.added` → `content_part.added` → `output_text.delta` → `output_text.done` → `output_item.done`, tool calls through `output_item.added` → `function_call_arguments.delta` → `function_call_arguments.done` → `output_item.done`, closing with `response.completed`). `auto` semantics and model validation match the OpenAI entry; text, system prompts and tool calls (tool_use/tool_result, functionCall/functionResponse, and Responses `function_call`/`function_call_output`) are translated in both directions, and inbound `input_text`/`input_image` blocks are normalized to the chat contract's `text`/`image_url`.
+
+Limits of the Responses entry: `truncation`/`safety_identifier`/`reasoning` have no counterpart in the upstream chat contract and are silently ignored; `store`/`previous_response_id`/`metadata`/`include`/`text`/`parallel_tool_calls` are only passed through (`tools`/`tool_choice` feed tool translation) — the gateway does not persist response history; streamed tool calls are reassembled from the chat `delta.tool_calls[].index` fragments: an item opens as soon as its call_id arrives with buffered argument fragments flushed at once, and only a call_id that never arrives gets a synthesized item at close.
 
 ## Testing
 

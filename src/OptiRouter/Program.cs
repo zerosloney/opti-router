@@ -375,6 +375,10 @@ app.MapChatCompletions();
 app.MapAnthropicMessages();
 app.MapGeminiGenerateContent();
 
+// OpenAI Responses API 入口：接收 Responses 原生请求，翻译为内部 OpenAI 契约进路由管线，
+// 响应（非流式 JSON / 流式 SSE）再翻译回 Responses 格式。
+app.MapResponses();
+
 // SystemOne 决策协议原生透传端点（u2-decision）：非 chat 协议，不经翻译管线，
 // 租户 ClientKey 鉴权后换上游密钥直连，请求/响应体保真。
 app.MapSystemOne();

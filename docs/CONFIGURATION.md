@@ -49,7 +49,7 @@
 
 - **调用方式**：`POST /v1/systemone`，租户 ClientKey 鉴权（同 `/v1` 代理面），请求体即 SystemOne 原生 JSON。网关校验 `state`/`questions` 必填后，把 `Authorization` 换成该端点配置的 ApiKey 直连上游 `{BaseUrl}/v1/systemone`（BaseUrl 以 `/v1` 结尾时不再重复拼接），请求/响应体保真转发，上游非 2xx 状态码与错误体原样返回。
 - **模型寻址**：请求体 `model` 字段按路由名/显示 ID/裸上游 Id 解析到 Protocol=SystemOne 的端点并强制覆写为 `UpstreamModelId`；缺省时仅一条 SystemOne 端点则自动命中，多条则必须显式指定。
-- **chat 面隔离**：SystemOne 端点被路由候选池与 chat 入口（`/v1/chat/completions`、`/v1/messages`、`/v1beta`）排除——显式点名按 404 `model_not_found` 拒绝，auto 路由永不选中。
+- **chat 面隔离**：SystemOne 端点被路由候选池与 chat 入口（`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、`/v1beta`）排除——显式点名按 404 `model_not_found` 拒绝，auto 路由永不选中。
 - **计费口径**：上游不回传 token usage，按请求体 token 粗估（与 chat 同分桶系数）× `InputPricePerMillion` 入账，审计标记 `isEstimated`。
 - **探活**：管理台"测试连通性"与后台探活对该协议走同域 OpenAI 兼容 `GET /v1/models`，不消耗决策调用。
 

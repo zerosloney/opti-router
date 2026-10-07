@@ -28,7 +28,7 @@ public sealed class ExplicitModelPolicy : IRouterPolicy
     /// <summary>
     /// 判断请求的 model 字段是否表示「交给路由器智能选择」：
     /// 空/空白、<see cref="AutoAlias"/>（忽略大小写）或 <see cref="AutoModePrefix"/> 模式预设
-    /// （auto:cost/balanced/intel）均为是。三协议入口（OpenAI/Anthropic/Gemini）的模型校验
+    /// （auto:cost/balanced/intel）均为是。各协议入口（OpenAI chat / Responses / Anthropic / Gemini）的模型校验
     /// 共用本判定——不识别前缀时 auto:cost 会在入口被 404 model_not_found 拒绝。
     /// </summary>
     public static bool IsAutoRouting(string? requestedModel) =>

@@ -55,9 +55,7 @@ public static class AnthropicMessagesEndpoint
                     $"model: The model '{request.Model}' does not exist or is not enabled. Use 'auto' for smart routing, or GET /v1/models for available model ids.");
             }
 
-            string? sessionId = httpContext.Request.Headers.TryGetValue("X-Session-Id", out var sid) && !string.IsNullOrWhiteSpace(sid)
-                ? sid.ToString()
-                : null;
+            string? sessionId = ChatCompletionsEndpoint.ResolveSessionId(httpContext);
 
             if (request.Stream)
             {
@@ -73,8 +71,7 @@ public static class AnthropicMessagesEndpoint
             catch (BudgetExhaustedException)
             {
                 // 日预算在 UTC 午夜重置，Retry-After 设为到午夜的剩余秒数。
-                int retryAfterSeconds = Math.Max(1, (int)(DateTime.UtcNow.Date.AddDays(1) - DateTime.UtcNow).TotalSeconds);
-                httpContext.Response.Headers["Retry-After"] = retryAfterSeconds.ToString();
+                httpContext.Response.Headers["Retry-After"] = ProtocolErrorHelper.SecondsUntilUtcMidnight().ToString();
                 return AnthropicError(StatusCodes.Status429TooManyRequests, "rate_limit_error", "budget exhausted");
             }
             catch (OptiRouter.Compliance.ComplianceViolationException ex)
@@ -84,7 +81,7 @@ public static class AnthropicMessagesEndpoint
             catch (AllCandidatesFailedException ex)
             {
                 return AnthropicError(StatusCodes.Status503ServiceUnavailable, "api_error",
-                    $"Attempted: {string.Join(", ", ex.AttemptedModels)}. Last failure: Model '{ex.LastModelName}' returned status {ex.LastStatusCode}.");
+                    ProtocolErrorHelper.AllCandidatesFailedSummary(ex));
             }
             catch (ModelClientException ex)
             {
@@ -102,132 +99,48 @@ public static class AnthropicMessagesEndpoint
         return app;
     }
 
-    private static async Task<IResult> StreamAsync(ProxyOrchestrator orchestrator, ChatRequest request, string? sessionId,
+    /// <summary>
+    /// 流式路径外壳在 <see cref="ProtocolStreamPipeline"/>，这里只留 Anthropic 词汇：
+    /// data 行 → 事件帧，异常 → <c>event: error</c> 帧。
+    /// </summary>
+    private static Task<IResult> StreamAsync(ProxyOrchestrator orchestrator, ChatRequest request, string? sessionId,
         HttpContext httpContext, CancellationToken ct)
     {
-        IAsyncEnumerator<RawStreamLine>? enumerator = null;
-        try
-        {
-            enumerator = orchestrator.StreamAsync(request, ct, sessionId).GetAsyncEnumerator(ct);
-            if (!await enumerator.MoveNextAsync().ConfigureAwait(false))
-            {
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-                // 空流也要输出完整 Anthropic 事件序列，客户端才能正常收尾
-                var emptyTranslator = new AnthropicTranslators.AnthropicStreamTranslator(request.Model);
-                string payload = string.Join(string.Empty, emptyTranslator.OnData("[DONE]"));
-                return Results.Stream(
-                    stream => stream.WriteAsync(Encoding.UTF8.GetBytes(payload), ct).AsTask(),
-                    "text/event-stream");
-            }
-
-            var translator = new AnthropicTranslators.AnthropicStreamTranslator(request.Model);
-            var firstLine = enumerator.Current;
-            var streamEnumerator = enumerator;
-            return Results.Stream(async stream =>
-            {
-                try
-                {
-                    foreach (string block in translator.OnData(firstLine.Data))
-                    {
-                        await stream.WriteAsync(Encoding.UTF8.GetBytes(block), ct).ConfigureAwait(false);
-                    }
-                    while (await streamEnumerator.MoveNextAsync().ConfigureAwait(false))
-                    {
-                        foreach (string block in translator.OnData(streamEnumerator.Current.Data))
-                        {
-                            await stream.WriteAsync(Encoding.UTF8.GetBytes(block), ct).ConfigureAwait(false);
-                        }
-                    }
-                }
-                catch (BudgetExhaustedException)
-                {
-                    await WriteStreamErrorAsync(stream, "rate_limit_error", "budget exhausted", ct).ConfigureAwait(false);
-                }
-                catch (AllCandidatesFailedException)
-                {
-                    await WriteStreamErrorAsync(stream, "api_error", "all model candidates failed", ct).ConfigureAwait(false);
-                }
-                catch (OptiRouter.Compliance.ComplianceViolationException ex)
-                {
-                    await WriteStreamErrorAsync(stream, "invalid_request_error", ex.Message, ct).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    // 与 OpenAI 端点同一分类思路：取消/超时 → timeout_error 可重试；上游故障
-                    // （断流 502 检测/流内 error/连接失败）→ api_error 外发真实原因；其余 →
-                    // api_error 兜底桶：不外发 ex.Message，细节进服务端日志。
-                    bool upstreamFault = ex is ModelClientException or HttpRequestException or IOException;
-                    string type = ex is OperationCanceledException ? "timeout_error" : "api_error";
-                    if (type == "api_error" && !upstreamFault)
-                    {
-                        ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "anthropic.messages");
-                        await WriteStreamErrorAsync(stream, type, ProtocolErrorHelper.InternalErrorMessage, ct).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        await WriteStreamErrorAsync(stream, type, ex.Message, ct).ConfigureAwait(false);
-                    }
-                }
-                finally
-                {
-                    await streamEnumerator.DisposeAsync().ConfigureAwait(false);
-                }
-            }, "text/event-stream");
-        }
-        catch (ModelClientException)
-        {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, "api_error", "upstream request rejected before first event", ct),
-                "text/event-stream");
-        }
-        catch (BudgetExhaustedException)
-        {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, "rate_limit_error", "budget exhausted", ct),
-                "text/event-stream");
-        }
-        catch (AllCandidatesFailedException)
-        {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, "api_error", "all model candidates failed", ct),
-                "text/event-stream");
-        }
-        catch (OptiRouter.Compliance.ComplianceViolationException ex)
-        {
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, "invalid_request_error", ex.Message, ct),
-                "text/event-stream");
-        }
-        catch (Exception ex)
-        {
-            // 流式首 MoveNextAsync 期间的未预见异常兜底：返回 SSE 错误流而非逃逸为框架 500。
-            if (enumerator is not null)
-                await enumerator.DisposeAsync().ConfigureAwait(false);
-            string type = ex is OperationCanceledException ? "timeout_error" : "api_error";
-            if (type == "api_error")
-            {
-                // 未预见异常不外发 ex.Message，细节进服务端日志。
-                ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "anthropic.messages");
-                return Results.Stream(
-                    stream => WriteStreamErrorAsync(stream, type, ProtocolErrorHelper.InternalErrorMessage, ct),
-                    "text/event-stream");
-            }
-            return Results.Stream(
-                stream => WriteStreamErrorAsync(stream, type, ex.Message, ct),
-                "text/event-stream");
-        }
+        var translator = new AnthropicTranslators.AnthropicStreamTranslator(request.Model);
+        return ProtocolStreamPipeline.RunAsync(
+            orchestrator,
+            request,
+            sessionId,
+            () => string.Concat(new AnthropicTranslators.AnthropicStreamTranslator(request.Model).OnData("[DONE]")),
+            data => translator.OnData(data),
+            (ex, beforeFirstEvent) => FailureFrame(ex, httpContext, beforeFirstEvent),
+            ct);
     }
 
-    private static Task WriteStreamErrorAsync(Stream stream, string type, string message, CancellationToken ct)
-        => stream.WriteAsync(Encoding.UTF8.GetBytes(AnthropicTranslators.AnthropicStreamTranslator.OnError(type, message)), ct).AsTask();
+    private static string FailureFrame(Exception ex, HttpContext httpContext, bool beforeFirstEvent)
+    {
+        switch (ex)
+        {
+            case BudgetExhaustedException:
+                return AnthropicTranslators.AnthropicStreamTranslator.OnError("rate_limit_error", "budget exhausted");
+            case AllCandidatesFailedException:
+                return AnthropicTranslators.AnthropicStreamTranslator.OnError("api_error", "all model candidates failed");
+            case OptiRouter.Compliance.ComplianceViolationException compliance:
+                return AnthropicTranslators.AnthropicStreamTranslator.OnError("invalid_request_error", compliance.Message);
+            // 首帧前被上游拒绝：客户端还没收到任何内容，给固定可重试文案
+            case ModelClientException when beforeFirstEvent:
+                return AnthropicTranslators.AnthropicStreamTranslator.OnError("api_error", "upstream request rejected before first event");
+            case OperationCanceledException canceled:
+                return AnthropicTranslators.AnthropicStreamTranslator.OnError("timeout_error", canceled.Message);
+            // 流中上游故障（断流 502 检测/流内 error/连接失败）外发真实原因；
+            // 首帧前的 HttpRequestException/IOException 落 default：不外发 ex.Message，细节进服务端日志。
+            case var e when ProtocolStreamPipeline.IsUpstreamStreamFailure(e) && !beforeFirstEvent:
+                return AnthropicTranslators.AnthropicStreamTranslator.OnError("api_error", e.Message);
+            default:
+                ProtocolErrorHelper.LogUnhandledProtocolError(httpContext, ex, "anthropic.messages");
+                return AnthropicTranslators.AnthropicStreamTranslator.OnError("api_error", ProtocolErrorHelper.InternalErrorMessage);
+        }
+    }
 
     private static IResult AnthropicError(int status, string type, string message)
         => Results.Json(

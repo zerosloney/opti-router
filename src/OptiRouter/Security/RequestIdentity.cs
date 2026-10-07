@@ -48,7 +48,7 @@ internal static class RequestIdentity
         }
 
         var path = context.Request.Path;
-        if (path.StartsWithSegments("/v1/messages"))
+        if (path.StartsWithSegments("/v1/messages") || path.StartsWithSegments("/v1/responses"))
             return context.Request.Headers["x-api-key"].FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
         if (path.StartsWithSegments("/v1beta"))
         {
