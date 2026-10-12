@@ -1,31 +1,36 @@
-<Router AppAssembly="@typeof(App).Assembly">
-    <Found Context="routeData">
-        <ErrorBoundary>
-            <ChildContent>
-                <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
-                <FocusOnNavigate RouteData="@routeData" Selector="h1" />
-            </ChildContent>
-            <ErrorContent>
-                <PageTitle>错误 — OptiRouter</PageTitle>
-                <LayoutView Layout="@typeof(MainLayout)">
-                    <div style="padding: 3rem; text-align: center; color: var(--text-secondary);">
-                        <h1 style="font-size: 3rem; margin-bottom: 1rem;">页面渲染异常</h1>
-                        @* 异常详情可能含内部信息（路径/连接串片段），不展示到页面；排查走服务端日志。 *@
-                        <p style="margin-bottom: 1.5rem;">发生未处理的异常，请查看服务端日志。</p>
-                        <p style="margin-bottom: 2rem; color: var(--text-muted); font-size: 0.9rem;">请刷新页面重试，或检查 API 连接是否正常。</p>
-                        <a href="/" style="color: var(--primary); text-decoration: underline;">返回首页</a>
-                    </div>
-                </LayoutView>
-            </ErrorContent>
-        </ErrorBoundary>
-    </Found>
-    <NotFound>
-        <PageTitle>404 — Not Found</PageTitle>
-        <LayoutView Layout="@typeof(MainLayout)">
-            <div style="padding: 4rem; text-align: center; color: var(--text-secondary);">
-                <h1 style="font-size: 4rem; margin-bottom: 1rem;">404</h1>
-                <p>页面不存在</p>
-            </div>
-        </LayoutView>
-    </NotFound>
-</Router>
+@* MainLayout 侧栏用 AuthorizeView Roles 控制 RBAC 导航可见性，需级联 Task<AuthenticationState>。
+   缺少此包裹时 AuthorizeView 渲染期抛 InvalidOperationException（页面套 ErrorBoundary 但错误页
+   本身也走 MainLayout 二次抛异常），表现为整页空白。 *@
+<CascadingAuthenticationState>
+    <Router AppAssembly="@typeof(App).Assembly">
+        <Found Context="routeData">
+            <ErrorBoundary>
+                <ChildContent>
+                    <RouteView RouteData="@routeData" DefaultLayout="@typeof(MainLayout)" />
+                    <FocusOnNavigate RouteData="@routeData" Selector="h1" />
+                </ChildContent>
+                <ErrorContent>
+                    <PageTitle>错误 — OptiRouter</PageTitle>
+                    <LayoutView Layout="@typeof(MainLayout)">
+                        <div style="padding: 3rem; text-align: center; color: var(--text-secondary);">
+                            <h1 style="font-size: 3rem; margin-bottom: 1rem;">页面渲染异常</h1>
+                            @* 异常详情可能含内部信息（路径/连接串片段），不展示到页面；排查走服务端日志。 *@
+                            <p style="margin-bottom: 1.5rem;">发生未处理的异常，请查看服务端日志。</p>
+                            <p style="margin-bottom: 2rem; color: var(--text-muted); font-size: 0.9rem;">请刷新页面重试，或检查 API 连接是否正常。</p>
+                            <a href="/" style="color: var(--primary); text-decoration: underline;">返回首页</a>
+                        </div>
+                    </LayoutView>
+                </ErrorContent>
+            </ErrorBoundary>
+        </Found>
+        <NotFound>
+            <PageTitle>404 — Not Found</PageTitle>
+            <LayoutView Layout="@typeof(MainLayout)">
+                <div style="padding: 4rem; text-align: center; color: var(--text-secondary);">
+                    <h1 style="font-size: 4rem; margin-bottom: 1rem;">404</h1>
+                    <p>页面不存在</p>
+                </div>
+            </LayoutView>
+        </NotFound>
+    </Router>
+</CascadingAuthenticationState>
